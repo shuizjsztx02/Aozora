@@ -34,5 +34,7 @@
  **当前阶段：** 生产化架构重基线。先执行 `docs/APP-CONTEXT.md` 的 M0 决策与文档任务，再进入客户端、服务端、同步和 AI 实施；旧 `docs/milestones/overview.md` 在 T-M0-08 中同步重写。
  
  **上下文加载指令：** 不要预加载所有项目文档。先读本文件和 `docs/APP-CONTEXT.md` 的相关章节，然后仅加载与当前任务相关的文档。修改涉及需求 → 读 `docs/product/`；涉及架构/数据 → 读 `docs/architecture/` 和 `docs/adr/`；涉及 UI → 读 `docs/design/`；涉及工程流程 → 读 `docs/engineering/`。
+
+ **需求变更规范：** 处理任何新增需求、已有需求修改或改版前，先遵循 `docs/engineering/需求变更规范.md`：建立带里程碑编号的需求卡，按变更级别完成影响分析、必要的文档/ADR 更新、兼容与回退设计、回归验证和交付记录。小型单点改动可简化记录，但不得跳过相关验证。
  
  **品牌与命名：** 唯一正式项目名和 App 名为 `Aozora`，Android namespace/applicationId 为 `com.aozora.app`，JS Bridge 为 `AozoraBridge`。`BestBills`、`best-bills`、`青空记账`、`小贝账本`、`小贝记账` 均为废弃历史名称，不得用于新增代码、文档或用户界面；`小贝`仅保留为 AI 伙伴角色名。旧数据键和签名标识仅允许用于迁移兼容。

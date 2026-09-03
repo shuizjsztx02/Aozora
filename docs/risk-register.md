@@ -7,4 +7,4 @@
 | R-PROD-03 | 服务端权威账本和鉴权尚未实现 | 开放 | M2 服务端任务。 |
 | R-PROD-04 | 离线同步与换机恢复尚未实现 | 开放 | M3 同步任务。 |
 | R-PROD-05 | 生产 AI Gateway 与动作校验尚未实现 | 开放 | M4 AI 任务。 |
-| R-PROD-06 | 当前开发环境缺少 JDK 与可执行 Gradle，Android 编译尚未验证 | 开放 | 在 T-M1 前提供受支持的 JDK/Gradle 或 Gradle Wrapper，并执行 Android 编译。 |
+| R-PROD-06 | Android 构建基础环境曾缺少 Wrapper 与可执行工具 | 已缓解 | Gradle 8.9 Wrapper 与 Debug 构建已验证；每位 Android 执行者在任务开始前准备 JDK 17、Android SDK 34 并复验 `./gradlew.bat :app:assembleDebug`。 |
