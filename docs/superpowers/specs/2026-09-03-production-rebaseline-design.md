@@ -35,7 +35,7 @@ This deliberately discards the UI and Android prototype implementation. It preve
 ## Target directory boundary
 
 ```text
-best-bills/
+aozora/
 ├─ app/                 # New minimal Android shell and React client; production implementation evolves here
 ├─ server/              # Empty production API boundary; implementation begins in M2
 ├─ contracts/           # Versioned OpenAPI and JSON Schema source of truth

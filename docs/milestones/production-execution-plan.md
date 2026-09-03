@@ -49,7 +49,7 @@
 | 任务 | 硬依赖 | 交接产物 | 外部前置 |
 |---|---|---|---|
 | T-M2-01 Server、配置与健康检查 | T-M0-07 | NestJS/Fastify 骨架、OpenAPI、镜像 | D-EXEC-01 |
-| T-M2-02 Schema 与迁移 | T-M2-01 | Prisma Schema、只追加迁移、测试库 | D-EXEC-02 |
+| T-M2-02 Schema 与迁移 | T-M2-01 | SQLAlchemy 模型、Alembic 只追加迁移、测试库 | D-EXEC-02 |
 | T-M2-03 认证与会话 | T-M2-02 | 游客/手机绑定、token rotation | D-EXEC-03 |
 | T-M2-04 账本核心 API | T-M2-02、T-M2-03 | 幂等写 API、ownership、version | 无 |
 | T-M2-05 统计与导出 | T-M2-04 | 权威聚合、授权导出 | 无 |

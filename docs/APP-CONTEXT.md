@@ -199,10 +199,10 @@
 
 已确认基础设施为 Linux + Docker + PostgreSQL 18。其余服务端技术按用户默许的推荐方案正式纳入生产基线；没有新的 ADR 时不得偏离：
 
-- Runtime：Node.js 22 LTS + TypeScript
-- Framework：NestJS，HTTP adapter 使用 Fastify
+- Runtime：Python 3.12+
+- Framework：FastAPI
 - Database：PostgreSQL 18
-- ORM / migration：Prisma
+- ORM / migration：SQLAlchemy + Alembic
 - Cache / distributed rate limit：Redis；单实例首发可先不启用业务缓存
 - Object storage：S3 兼容服务，用于票据图片，首发可只保留短期解析文件
 - API documentation：OpenAPI 3.1
@@ -216,13 +216,13 @@
 服务端与基础设施继续放在同一仓库，保证客户端、OpenAPI 和动作协议可以做原子变更与契约测试：
 
 ```text
-best-bills/
+aozora/
 ├─ app/                         # 现有 Android + React 客户端
 │  ├─ src/                     # React 源码
 │  └─ src/main/                # Kotlin、Room、原生资源与 Web 产物
 ├─ server/                      # 新增生产 API
 │  ├─ src/
-│  │  ├─ common/               # 配置、错误、日志、鉴权 guard、请求 ID
+│  │  ├─ common/               # 配置、错误、日志、鉴权依赖、请求 ID
 │  │  ├─ modules/
 │  │  │  ├─ auth/
 │  │  │  ├─ users/
@@ -233,8 +233,9 @@ best-bills/
 │  │  │  ├─ assistant/
 │  │  │  ├─ attachments/
 │  │  │  └─ exports/
-│  │  └─ main.ts
-│  ├─ prisma/                   # schema 与只追加的数据库迁移
+│  │  ├─ models/               # SQLAlchemy 模型
+│  │  ├─ migrations/           # Alembic 迁移脚本
+│  │  └─ main.py
 │  └─ test/                     # integration、contract、fixtures
 ├─ contracts/                   # OpenAPI、ActionProposal、共享 JSON Schema
 ├─ infra/                       # Docker、staging/prod 模板、监控和 runbook
@@ -272,7 +273,7 @@ best-bills/
 | Category | id、ownerId、bookId?、parentId、kind、name、archivedAt、version | 支持系统分类和二级自定义分类，删除为归档 |
 | Account | id、ownerId、name、icon、archivedAt、version | 仅支付渠道标记，不维护真实余额 |
 | Transaction | id、bookId、type、amountCents、categoryId、accountId?、note、bizDate、occurredAt、source、version、deletedAt | 金额为正整数分；收支由 type 表达；软删除 |
-| Budget | id、bookId、month、amountCents、version | `(bookId, month)` 唯一 |
+| Budget | id、bookId、budgetType (monthly|annual)、categoryId?、period、amountCents、version | `(bookId, budgetType, period, categoryId)` 唯一；categoryId 为 null 时代表该周期整体预算；整体预算与分类预算在同一周期内可共存 |
 | Attachment | id、transactionId?、objectKey、mimeType、status、expiresAt? | 私有访问，上传类型和大小受限 |
 | AIConversation | id、userId、bookId、summary、updatedAt | 服务端只保留实现功能所需内容 |
 | AIUsage | userId、provider、model、tokens、cost、requestId | 支持限额、审计和成本分析 |
@@ -320,7 +321,7 @@ best-bills/
 | Categories | `GET/POST /categories`、`PATCH/DELETE /categories/:id` |
 | Accounts | `GET/POST /accounts`、`PATCH/DELETE /accounts/:id` |
 | Transactions | `GET/POST /transactions`、`GET/PATCH/DELETE /transactions/:id`、`POST /transactions/:id/undo` |
-| Budgets | `GET /budgets`、`PUT /budgets/:month` |
+| Budgets | `GET /budgets`、`PUT /budgets/:period`、`PUT /budgets/:period/category/:categoryId` |
 | Statistics | `GET /stats/monthly`、`GET /stats/trends` |
 | Sync | `POST /sync/push`、`GET /sync/pull?cursor=`、`POST /sync/bootstrap` |
 | AI | `POST /ai/interpret`、`POST /ai/report`、`POST /ai/feedback` |
@@ -462,7 +463,7 @@ app/src/
 ### 8.4 预算与统计
 
 **目标：** 让用户不用整理也能理解本月花销。
-**范围：** 月预算、分类占比、每日/月份趋势、环比、最大单笔、连续记账、AI 洞察。
+**范围：** 月/年预算、分类预算、分类占比、每日/月份趋势、环比、最大单笔、连续记账、AI 洞察。
 **验收：** 服务端与客户端同 fixture 输出一致；跨月和时区边界正确；AI 报告中每个数字能映射到聚合数据。
 
 ### 8.5 AI 助手
@@ -597,7 +598,7 @@ app/src/
 
 - **目标：** 实现第 5 节实体、约束和可审计迁移。
 - **依赖：** T-M2-01。
-- **实施：** Prisma schema、唯一约束、外键、软删除、version、迁移命令、seed 仅限开发环境。
+- **实施：** SQLAlchemy 模型、唯一约束、外键、软删除、version、Alembic 迁移命令、seed 仅限开发环境。
 - **验收：** 空库可一键迁移；生产迁移不执行破坏性 reset；金额字段为整数；迁移在 staging 备份副本演练通过。
 
 #### T-M2-03 认证、会话与设备安全
@@ -888,3 +889,4 @@ D-PROD-XX：选择项 / 实际参数
 | 2026-09-03 | Production Baseline 1.0 | 将项目目标从本地 Demo 调整为生产级客户端 + 服务端 + 数据库 + AI 网关架构；建立模块化 Task 与集中决策清单 |
 | 2026-09-03 | Production Baseline 1.1 | 正式项目名统一为 Aozora；废弃历史 App 名称 |
 | 2026-09-03 | Production Baseline 1.2 | Android namespace/applicationId、Kotlin package、Intent action 与 JS Bridge 统一迁移到 `com.aozora.app` / `AozoraBridge`；明确旧 Demo 数据不自动继承 |
+| 2026-09-03 | Production Baseline 1.3 | 服务端技术栈从 Node.js/NestJS/Prisma 切换为 Python/FastAPI/SQLAlchemy+Alembic；项目目录名统一为 `aozora`；Budget 实体扩展为支持年度预算和分类预算 |
