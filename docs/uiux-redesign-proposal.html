@@ -1,0 +1,709 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Aozora · UI/UX V5.2</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Noto+Serif+SC:wght@600;700&display=swap" rel="stylesheet">
+<style>
+/* ============ 文档自身：瓷白纸面，让天空样机自己发光 ============ */
+:root{
+  --bg:#FAFAF8; --surface:#FFFFFF; --ink:#17171A; --ink2:#66666E; --ink3:#9B9BA2;
+  --line:#E8E7E3; --accent:#6D5AE0; --wash:rgba(23,23,26,.045);
+}
+*{margin:0;padding:0;box-sizing:border-box}
+body{background:var(--bg);color:var(--ink);
+  font-family:-apple-system,BlinkMacSystemFont,"Segoe UI","PingFang SC","HarmonyOS Sans SC","Microsoft YaHei",sans-serif;
+  -webkit-font-smoothing:antialiased}
+.wrap{max-width:1160px;margin:0 auto;padding:64px 28px 96px}
+.kicker{font-size:11px;letter-spacing:.24em;color:var(--accent);font-weight:700;text-transform:uppercase}
+h1{font-size:clamp(28px,3.6vw,42px);font-weight:800;letter-spacing:.01em;margin:12px 0 14px}
+h2{font-size:21px;font-weight:750;margin:0 0 14px}
+h3{font-size:15.5px;font-weight:700;margin:26px 0 10px}
+.lede{color:var(--ink2);font-size:16px;line-height:1.85;max-width:68ch}
+.kw{display:flex;gap:10px;flex-wrap:wrap;margin-top:20px}
+.kw span{border:1px solid var(--line);background:var(--surface);padding:7px 15px;font-size:13px;color:var(--ink2)}
+.kw b{color:var(--ink)}
+.sec{margin-top:88px}
+.note{color:var(--ink2);font-size:14.5px;line-height:1.85}
+code{font-family:ui-monospace,"SF Mono",Consolas,monospace;font-size:.92em;background:var(--wash);padding:2px 6px;border-radius:5px}
+.serifdate{font-family:"Noto Serif SC",serif}
+
+table{width:100%;border-collapse:collapse;font-size:14px;background:var(--surface);border:1px solid var(--line)}
+.tblwrap{overflow-x:auto}
+th,td{text-align:left;padding:12px 14px;border-bottom:1px solid var(--line);vertical-align:top;line-height:1.65}
+th{font-size:11.5px;letter-spacing:.1em;color:var(--ink3);text-transform:uppercase;background:#F4F3EF}
+td b{font-weight:700}
+.sw{display:inline-block;width:14px;height:14px;border-radius:4px;vertical-align:-2px;margin-right:7px;border:1px solid rgba(0,0,0,.08)}
+
+.shots{display:flex;gap:30px;flex-wrap:wrap;align-items:flex-start}
+.shot{flex:0 1 auto}
+.cap{font-size:12.5px;color:var(--ink3);margin-top:13px;line-height:1.7;max-width:330px}
+.cap b{color:var(--ink2)}
+
+/* phone frame */
+.phone{width:308px;height:640px;background:#14110C;border-radius:46px;padding:9px;
+  box-shadow:0 22px 52px rgba(20,18,10,.28),0 4px 14px rgba(20,18,10,.16);position:relative;margin:0 auto}
+.phone::after{content:"";position:absolute;top:18px;left:50%;transform:translateX(-50%);
+  width:88px;height:24px;background:#14110C;border-radius:999px;z-index:9}
+.screen{width:100%;height:100%;border-radius:38px;overflow:hidden;position:relative;display:flex;flex-direction:column}
+.statusbar{display:flex;justify-content:space-between;align-items:center;padding:12px 22px 4px;font-size:11.5px;font-weight:700;color:var(--ink);position:relative;z-index:6}
+.sbi{display:inline-flex;gap:5px;align-items:center}
+.sig{display:inline-flex;gap:1.5px;align-items:flex-end}
+.sig i{width:2.5px;background:currentColor;border-radius:1px;display:block}
+.sig i:nth-child(1){height:4px}.sig i:nth-child(2){height:6px}.sig i:nth-child(3){height:8px}.sig i:nth-child(4){height:10px}
+.batt{width:20px;height:10px;border:1.4px solid currentColor;border-radius:3px;position:relative;opacity:.95;display:inline-block}
+.batt::before{content:"";position:absolute;inset:1.5px;right:5px;background:currentColor;border-radius:1px}
+.batt::after{content:"";position:absolute;right:-3.5px;top:2.4px;width:1.8px;height:4px;background:currentColor;border-radius:0 2px 2px 0}
+
+/* ============ 四时天空主题 ============ */
+.screen.mo{color:var(--ink)}
+.t-dawn{
+  --ink:#1E2733;--ink2:#46536B;--ink3:#6E7C90;
+  --line:rgba(30,39,51,.15);--wash:rgba(255,255,255,.45);
+  --accent:#D96F5A;
+  --glass:rgba(255,253,250,.6);
+}
+.t-day{
+  --ink:#122031;--ink2:#3C5069;--ink3:#69809B;
+  --line:rgba(18,32,49,.16);--wash:rgba(255,255,255,.42);
+  --accent:#1D6CB0;
+  --glass:rgba(255,255,255,.52);
+}
+.t-dusk{
+  --ink:#241C36;--ink2:#4E4066;--ink3:#7A6C92;
+  --line:rgba(36,28,54,.17);--wash:rgba(255,255,255,.36);
+  --accent:#D95F3B;
+  --glass:rgba(255,249,242,.52);
+}
+.t-night{
+  --ink:#EFF1F8;--ink2:#B6BCCF;--ink3:#7A83A3;
+  --line:rgba(239,241,248,.14);--wash:rgba(255,255,255,.08);
+  --accent:#E9C56A;
+  --glass:rgba(14,19,40,.55);
+}
+.skysvg{position:absolute;inset:0;width:100%;height:100%;z-index:0;display:block}
+/* 胶片颗粒 */
+.grain{position:absolute;inset:0;z-index:2;pointer-events:none;opacity:.06;
+ background-image:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='140' height='140'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.9' numOctaves='2'/%3E%3CfeColorMatrix type='saturate' values='0'/%3E%3C/filter%3E%3Crect width='140' height='140' filter='url(%23n)'/%3E%3C/svg%3E")}
+
+/* app 组件（结构 = V5，材质随主题） */
+.appc{flex:1;display:flex;flex-direction:column;padding:8px 19px 0;min-height:0;position:relative;z-index:3}
+.top{display:flex;justify-content:space-between;align-items:center;margin:8px 0 2px}
+.top .date{font-size:10.5px;letter-spacing:.2em;color:var(--ink2);font-weight:600}
+.top .hello{font-size:16.5px;font-weight:750;margin-top:3px}
+.tbtns{display:flex;gap:8px}
+.ibtn{width:33px;height:33px;border-radius:50%;display:grid;place-items:center;color:var(--ink2);background:var(--wash);backdrop-filter:blur(10px);-webkit-backdrop-filter:blur(10px)}
+.ibtn.acc{color:var(--accent);background:transparent}
+.li{fill:none;stroke:currentColor;stroke-width:1.8;stroke-linecap:round;stroke-linejoin:round}
+svg.ic{width:18px;height:18px}
+.hero{padding:16px 0 18px}
+.hlabel{font-size:10.5px;letter-spacing:.2em;color:var(--ink2);font-weight:650}
+.amount-hero{font-size:54px;font-weight:800;letter-spacing:-.02em;line-height:1.08;margin-top:7px;font-variant-numeric:tabular-nums;
+ text-shadow:0 1px 16px rgba(255,255,255,.22)}
+.t-night .amount-hero{text-shadow:0 0 22px rgba(150,175,255,.35)}
+.amount-hero small{font-size:.38em;font-weight:700;vertical-align:.62em;margin-right:2px;color:var(--ink2)}
+.hmeta{display:flex;justify-content:space-between;align-items:baseline;margin-top:9px;font-size:12px;color:var(--ink2)}
+.hmeta b{color:var(--ink);font-variant-numeric:tabular-nums}
+.pbar{height:3px;background:rgba(120,130,150,.24);border-radius:99px;margin-top:9px;overflow:hidden}
+.pbar i{display:block;height:100%;border-radius:99px;background:var(--accent)}
+.shead{display:flex;justify-content:space-between;align-items:baseline;padding:13px 0 4px;border-top:1px solid var(--line)}
+.shead .t{font-size:11.5px;font-weight:700;letter-spacing:.08em}
+.shead .m{font-size:11px;color:var(--ink3)}
+.shead .m b{color:var(--ink);font-variant-numeric:tabular-nums}
+.rows{flex:1;overflow:hidden}
+.rowx{display:flex;align-items:center;gap:11px;padding:10px 0;border-bottom:1px solid var(--line)}
+.rowx:last-child{border-bottom:none}
+.rico{width:32px;height:32px;border-radius:11px;background:var(--wash);backdrop-filter:blur(8px);-webkit-backdrop-filter:blur(8px);display:grid;place-items:center;color:var(--ink2);flex:0 0 auto}
+.rico svg.ic{width:16px;height:16px}
+.rt{min-width:0}
+.rt .n{font-size:13.5px;font-weight:650;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.rt .s{font-size:10.5px;color:var(--ink3);margin-top:2px}
+.ra{margin-left:auto;font-size:13.5px;font-weight:700;font-variant-numeric:tabular-nums}
+.navbar{display:flex;justify-content:space-around;align-items:center;padding:8px 6px 18px;position:relative;z-index:6;
+ background:var(--glass);backdrop-filter:blur(22px) saturate(1.3);-webkit-backdrop-filter:blur(22px) saturate(1.3);
+ border-top:1px solid var(--line);margin:auto -19px 0;padding-left:16px;padding-right:16px}
+.nvit{display:flex;flex-direction:column;align-items:center;gap:3px;font-size:9px;width:46px;color:var(--ink3);font-weight:550}
+.nvit.on{color:var(--ink);font-weight:750}
+.nvit .dot{width:3.5px;height:3.5px;border-radius:99px;background:transparent;margin-top:1px}
+.nvit.on .dot{background:var(--accent)}
+.fab{width:44px;height:44px;border-radius:50%;display:grid;place-items:center;margin-top:-16px;
+ background:var(--ink);color:#FDFDFB;box-shadow:0 5px 14px rgba(10,15,30,.28)}
+.t-night .fab{background:#EFF1F8;color:#10173A}
+.fab svg.ic{width:19px;height:19px;stroke-width:2.1}
+
+/* sheet */
+.sheet{position:absolute;left:0;right:0;bottom:0;background:var(--glass);backdrop-filter:blur(26px) saturate(1.35);-webkit-backdrop-filter:blur(26px) saturate(1.35);
+ border-radius:16px 16px 0 0;z-index:8;box-shadow:0 -12px 40px rgba(10,15,35,.18);padding:10px 19px 16px;display:flex;flex-direction:column;border-top:1px solid var(--line)}
+.grab{width:36px;height:4px;border-radius:99px;background:var(--line);margin:2px auto 9px}
+.scrim{position:absolute;inset:0;background:rgba(20,18,44,.32);z-index:7}
+.t-night .scrim{background:rgba(2,4,16,.48)}
+
+/* quickadd 内件 */
+.qa-head{display:flex;justify-content:space-between;align-items:center;margin-bottom:3px}
+.qa-head .t{font-size:14.5px;font-weight:750}
+.qa-amt{display:flex;align-items:baseline;gap:4px;padding:7px 0 11px;border-bottom:1px solid var(--line)}
+.qa-amt .cur{font-size:19px;font-weight:700;color:var(--ink3)}
+.qa-amt .v{font-size:38px;font-weight:800;letter-spacing:-.01em;font-variant-numeric:tabular-nums}
+.qa-grid{display:grid;grid-template-columns:repeat(4,1fr);gap:5px;padding:11px 0 7px}
+.cat{display:flex;flex-direction:column;align-items:center;gap:3px;padding:8px 0 6px;border-radius:12px;color:var(--ink2);font-size:9.5px;border:1.5px solid transparent}
+.cat svg.ic{width:17px;height:17px}
+.cat.sel{border-color:var(--ink);color:var(--ink);background:var(--wash);font-weight:700}
+.keys{display:grid;grid-template-columns:repeat(3,1fr);gap:2px}
+.key{height:34px;display:grid;place-items:center;font-size:16.5px;font-weight:600;font-variant-numeric:tabular-nums;color:var(--ink)}
+.save{margin-top:9px;height:42px;border-radius:12px;background:var(--ink);display:grid;place-items:center;font-size:14px;font-weight:750}
+.t-dawn .save,.t-day .save,.t-dusk .save{color:#FDFDFB}
+.t-night .save{background:#EFF1F8;color:#10173A}
+
+/* ai sheet 内件 */
+.ai-head{display:flex;justify-content:space-between;align-items:center;margin-bottom:6px}
+.ai-head .t{display:flex;align-items:center;gap:7px;font-size:14px;font-weight:750}
+.ai-head .t svg.ic{width:15px;height:15px;color:var(--accent)}
+.bub{max-width:84%;padding:8px 12px;border-radius:14px;font-size:12.5px;line-height:1.6;margin-bottom:9px}
+.bub.u{align-self:flex-end;background:var(--wash);color:var(--ink);border-bottom-right-radius:4px}
+.aicard{background:var(--wash);backdrop-filter:blur(8px);-webkit-backdrop-filter:blur(8px);border:1px solid var(--line);border-radius:13px;padding:10px 12px;font-size:12px;margin-bottom:7px}
+.aicard .ok{display:flex;align-items:center;gap:6px;color:var(--ink2);font-size:11px;margin-bottom:7px}
+.aicard .ok svg.ic{width:12px;height:12px;color:var(--accent)}
+.ai-in{margin-top:auto;display:flex;align-items:center;gap:9px;border:1px solid var(--line);border-radius:12px;padding:8px 12px;color:var(--ink3);font-size:12px}
+.ai-in svg.ic{width:15px;height:15px}
+
+.spec{background:var(--surface);border:1px solid var(--line);padding:16px 18px;font-size:13.5px;line-height:1.8}
+.spec h4{font-size:12px;letter-spacing:.14em;color:var(--ink3);text-transform:uppercase;margin-bottom:8px}
+.spec p b{color:var(--ink)}
+.specgrid{display:grid;grid-template-columns:repeat(auto-fit,minmax(240px,1fr));gap:14px}
+footer{margin-top:88px;border-top:1px solid var(--line);padding-top:24px;color:var(--ink3);font-size:13px;line-height:1.9}
+</style>
+</head>
+<body>
+<svg style="display:none" xmlns="http://www.w3.org/2000/svg" aria-hidden="true">
+<symbol id="i-utensils" viewBox="0 0 24 24"><path d="M3 2v7c0 1.1.9 2 2 2h4a2 2 0 0 0 2-2V2"/><path d="M7 2v20"/><path d="M21 15V2a5 5 0 0 0-5 5v6c0 1.1.9 2 2 2h3Zm0 0v7"/></symbol>
+<symbol id="i-coffee" viewBox="0 0 24 24"><path d="M10 2v2"/><path d="M14 2v2"/><path d="M16 8a1 1 0 0 1 1 1v8a4 4 0 0 1-4 4H7a4 4 0 0 1-4-4V9a1 1 0 0 1 1-1h14a4 4 0 1 1 0 8h-1"/><path d="M6 2v2"/></symbol>
+<symbol id="i-train-front" viewBox="0 0 24 24"><path d="M8 3.1V7a4 4 0 0 0 8 0V3.1"/><path d="m9 15-1-1"/><path d="m15 15 1-1"/><path d="M9 19c-2.8 0-5-2.2-5-5v-4a8 8 0 0 1 16 0v4c0 2.8-2.2 5-5 5Z"/><path d="m8 19-2 3"/><path d="m16 19 2 3"/></symbol>
+<symbol id="i-car-front" viewBox="0 0 24 24"><path d="m21 8-2 2-1.5-3.7A2 2 0 0 0 15.646 5H8.4a2 2 0 0 0-1.903 1.257L5 10 3 8"/><path d="M7 14h.01"/><path d="M17 14h.01"/><rect width="18" height="8" x="3" y="10" rx="2"/><path d="M5 18v2"/><path d="M19 18v2"/></symbol>
+<symbol id="i-clapperboard" viewBox="0 0 24 24"><path d="m12.296 3.464 3.02 3.956"/><path d="M20.2 6 3 11l-.9-2.4c-.3-1.1.3-2.2 1.3-2.5l13.5-4c1.1-.3 2.2.3 2.5 1.3z"/><path d="M3 11h18v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/><path d="m6.18 5.276 3.1 3.899"/></symbol>
+<symbol id="i-shopping-bag" viewBox="0 0 24 24"><path d="M16 10a4 4 0 0 1-8 0"/><path d="M3.103 6.034h17.794"/><path d="M3.4 5.467a2 2 0 0 0-.4 1.2V20a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2V6.667a2 2 0 0 0-.4-1.2l-2-2.667A2 2 0 0 0 17 2H7a2 2 0 0 0-1.6.8z"/></symbol>
+<symbol id="i-house" viewBox="0 0 24 24"><path d="M15 21v-8a1 1 0 0 0-1-1h-4a1 1 0 0 0-1 1v8"/><path d="M3 10a2 2 0 0 1 .709-1.528l7-6a2 2 0 0 1 2.582 0l7 6A2 2 0 0 1 21 10v9a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/></symbol>
+<symbol id="i-list" viewBox="0 0 24 24"><path d="M3 5h.01"/><path d="M3 12h.01"/><path d="M3 19h.01"/><path d="M8 5h13"/><path d="M8 12h13"/><path d="M8 19h13"/></symbol>
+<symbol id="i-chart-pie" viewBox="0 0 24 24"><path d="M21 12c.552 0 1.005-.449.95-.998a10 10 0 0 0-8.953-8.951c-.55-.055-.998.398-.998.95v8a1 1 0 0 0 1 1z"/><path d="M21.21 15.89A10 10 0 1 1 8 2.83"/></symbol>
+<symbol id="i-user" viewBox="0 0 24 24"><path d="M19 21v-2a4 4 0 0 0-4-4H9a4 4 0 0 0-4 4v2"/><circle cx="12" cy="7" r="4"/></symbol>
+<symbol id="i-plus" viewBox="0 0 24 24"><path d="M5 12h14"/><path d="M12 5v14"/></symbol>
+<symbol id="i-sparkles" viewBox="0 0 24 24"><path d="M11.017 2.814a1 1 0 0 1 1.966 0l1.051 5.558a2 2 0 0 0 1.594 1.594l5.558 1.051a1 1 0 0 1 0 1.966l-5.558 1.051a2 2 0 0 0-1.594 1.594l-1.051 5.558a1 1 0 0 1-1.966 0l-1.051-5.558a2 2 0 0 0-1.594-1.594l-5.558-1.051a1 1 0 0 1 0-1.966l5.558-1.051a2 2 0 0 0 1.594-1.594z"/><path d="M20 2v4"/><path d="M22 4h-4"/><circle cx="4" cy="20" r="2"/></symbol>
+<symbol id="i-x" viewBox="0 0 24 24"><path d="M18 6 6 18"/><path d="m6 6 12 12"/></symbol>
+<symbol id="i-check" viewBox="0 0 24 24"><path d="M20 6 9 17l-5-5"/></symbol>
+<symbol id="i-delete" viewBox="0 0 24 24"><path d="M10 5a2 2 0 0 0-1.344.519l-6.328 5.74a1 1 0 0 0 0 1.481l6.328 5.741A2 2 0 0 0 10 19h10a2 2 0 0 0 2-2V7a2 2 0 0 0-2-2z"/><path d="m12 9 6 6"/><path d="m18 9-6 6"/></symbol>
+<symbol id="i-mic" viewBox="0 0 24 24"><path d="M12 19v3"/><path d="M19 10v2a7 7 0 0 1-14 0v-2"/><rect x="9" y="2" width="6" height="13" rx="3"/></symbol>
+<symbol id="i-keyboard" viewBox="0 0 24 24"><path d="M10 8h.01"/><path d="M12 12h.01"/><path d="M14 8h.01"/><path d="M16 12h.01"/><path d="M18 8h.01"/><path d="M6 8h.01"/><path d="M7 16h10"/><path d="M8 12h.01"/><rect width="20" height="16" x="2" y="4" rx="2"/></symbol>
+<symbol id="i-chevron-left" viewBox="0 0 24 24"><path d="m15 18-6-6 6-6"/></symbol>
+<symbol id="i-chevron-right" viewBox="0 0 24 24"><path d="m9 18 6-6-6-6"/></symbol>
+
+<!-- ============ 四时天空场景（分层 SVG：渐变天幕/光源/柔光带/有体积的云/剪影/飞鸟） ============ -->
+<symbol id="sky-dawn" viewBox="0 0 300 640">
+  <defs>
+    <linearGradient id="d-sk" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#9FC3E8"/><stop offset=".42" stop-color="#CFE0EF"/><stop offset=".78" stop-color="#F5E5D2"/><stop offset="1" stop-color="#F9EDDC"/>
+    </linearGradient>
+    <radialGradient id="d-sun" cx=".5" cy=".5" r=".5">
+      <stop offset="0" stop-color="#FFF4D8" stop-opacity=".95"/><stop offset=".45" stop-color="#FFE9C4" stop-opacity=".45"/><stop offset="1" stop-color="#FFE9C4" stop-opacity="0"/>
+    </radialGradient>
+    <linearGradient id="d-ray" x1="1" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#FFF2D2" stop-opacity=".6"/><stop offset="1" stop-color="#FFF2D2" stop-opacity="0"/>
+    </linearGradient>
+    <linearGradient id="d-cl" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#FFFFFF"/><stop offset="1" stop-color="#EBD9D4"/>
+    </linearGradient>
+    <filter id="d-b1" x="-40%" y="-40%" width="180%" height="180%"><feGaussianBlur stdDeviation="2.5"/></filter>
+    <filter id="d-b2" x="-60%" y="-60%" width="220%" height="220%"><feGaussianBlur stdDeviation="9"/></filter>
+  </defs>
+  <rect width="300" height="640" fill="url(#d-sk)"/>
+  <circle cx="272" cy="92" r="150" fill="url(#d-sun)"/>
+  <circle cx="272" cy="92" r="24" fill="#FFFBEC" opacity=".9" filter="url(#d-b1)"/>
+  <g filter="url(#d-b2)">
+    <polygon points="300,30 176,640 236,640 300,110" fill="url(#d-ray)" opacity=".5"/>
+    <polygon points="300,140 96,640 150,640 300,220" fill="url(#d-ray)" opacity=".3"/>
+  </g>
+  <g fill="url(#d-cl)" filter="url(#d-b1)">
+    <ellipse cx="66" cy="556" rx="96" ry="25"/><ellipse cx="152" cy="542" rx="68" ry="21"/>
+    <ellipse cx="222" cy="560" rx="82" ry="23"/><ellipse cx="112" cy="528" rx="44" ry="16"/>
+  </g>
+  <ellipse cx="130" cy="596" rx="190" ry="32" fill="#F2DCCE" opacity=".5" filter="url(#d-b2)"/>
+  <g opacity=".55" filter="url(#d-b1)">
+    <ellipse cx="92" cy="376" rx="50" ry="8" fill="#fff"/><ellipse cx="128" cy="370" rx="28" ry="6" fill="#fff"/>
+  </g>
+  <g stroke="#3E4C5E" stroke-width="1.6" fill="none" stroke-linecap="round" opacity=".7">
+    <path d="M92 296q5-6 10 0M102 296q5-6 10 0"/><path d="M148 320q4-5 8 0M156 320q4-5 8 0"/>
+  </g>
+</symbol>
+
+<symbol id="sky-day" viewBox="0 0 300 640">
+  <defs>
+    <linearGradient id="dy-sk" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#3F8CD3"/><stop offset=".3" stop-color="#63A6DE"/><stop offset=".62" stop-color="#A5D0F1"/><stop offset="1" stop-color="#E4F2FA"/>
+    </linearGradient>
+    <radialGradient id="dy-sun" cx=".5" cy=".5" r=".5">
+      <stop offset="0" stop-color="#FFFFFF" stop-opacity=".9"/><stop offset=".4" stop-color="#F2FAFF" stop-opacity=".4"/><stop offset="1" stop-color="#F2FAFF" stop-opacity="0"/>
+    </radialGradient>
+    <linearGradient id="dy-cl" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#FFFFFF"/><stop offset=".72" stop-color="#F4F9FE"/><stop offset="1" stop-color="#CFE0F0"/>
+    </linearGradient>
+    <filter id="dy-b1" x="-40%" y="-40%" width="180%" height="180%"><feGaussianBlur stdDeviation="2"/></filter>
+    <filter id="dy-b2" x="-60%" y="-60%" width="220%" height="220%"><feGaussianBlur stdDeviation="10"/></filter>
+  </defs>
+  <rect width="300" height="640" fill="url(#dy-sk)"/>
+  <circle cx="52" cy="74" r="120" fill="url(#dy-sun)"/>
+  <g filter="url(#dy-b2)" opacity=".35">
+    <polygon points="-20,180 300,640 220,640 -20,300" fill="#FFFFFF" opacity=".5"/>
+  </g>
+  <!-- 主体积雨云群（右） -->
+  <ellipse cx="205" cy="500" rx="130" ry="46" fill="#FFFFFF" opacity=".5" filter="url(#dy-b2)"/>
+  <g fill="url(#dy-cl)" filter="url(#dy-b1)">
+    <ellipse cx="228" cy="512" rx="82" ry="27"/><ellipse cx="166" cy="494" rx="56" ry="23"/>
+    <ellipse cx="118" cy="514" rx="66" ry="23"/><ellipse cx="256" cy="486" rx="42" ry="19"/>
+    <ellipse cx="198" cy="472" rx="36" ry="17"/><ellipse cx="146" cy="490" rx="40" ry="16"/>
+    <ellipse cx="86" cy="530" rx="46" ry="17"/>
+  </g>
+  <!-- 远处小云（左） -->
+  <g fill="url(#dy-cl)" opacity=".8" filter="url(#dy-b1)">
+    <ellipse cx="58" cy="576" rx="58" ry="15"/><ellipse cx="104" cy="568" rx="36" ry="12"/>
+  </g>
+  <g fill="#FFFFFF" opacity=".45" filter="url(#dy-b1)">
+    <ellipse cx="96" cy="322" rx="44" ry="7"/><ellipse cx="128" cy="316" rx="24" ry="5"/>
+  </g>
+  <g stroke="#2E4A66" stroke-width="1.6" fill="none" stroke-linecap="round" opacity=".65">
+    <path d="M176 258q5-6 10 0M186 258q5-6 10 0"/><path d="M212 276q4-5 8 0M220 276q4-5 8 0"/>
+  </g>
+</symbol>
+
+<symbol id="sky-dusk" viewBox="0 0 300 640">
+  <defs>
+    <linearGradient id="dk-sk" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#8496CC"/><stop offset=".28" stop-color="#AC8FC0"/><stop offset=".56" stop-color="#E29876"/><stop offset=".8" stop-color="#F6C489"/><stop offset="1" stop-color="#FCE2B8"/>
+    </linearGradient>
+    <radialGradient id="dk-sun" cx=".5" cy=".5" r=".5">
+      <stop offset="0" stop-color="#FFE8B8" stop-opacity=".95"/><stop offset=".4" stop-color="#FFD69E" stop-opacity=".5"/><stop offset="1" stop-color="#FFD69E" stop-opacity="0"/>
+    </radialGradient>
+    <linearGradient id="dk-cld" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#C7A3C8"/><stop offset="1" stop-color="#8A6B9E"/>
+    </linearGradient>
+    <linearGradient id="dk-clb" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#FFF3D8"/><stop offset="1" stop-color="#FFC896"/>
+    </linearGradient>
+    <linearGradient id="dk-ray" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#FFDCA8" stop-opacity=".65"/><stop offset="1" stop-color="#FFDCA8" stop-opacity="0"/>
+    </linearGradient>
+    <filter id="dk-b1" x="-40%" y="-40%" width="180%" height="180%"><feGaussianBlur stdDeviation="2.5"/></filter>
+    <filter id="dk-b2" x="-60%" y="-60%" width="220%" height="220%"><feGaussianBlur stdDeviation="10"/></filter>
+  </defs>
+  <rect width="300" height="640" fill="url(#dk-sk)"/>
+  <circle cx="58" cy="452" r="130" fill="url(#dk-sun)"/>
+  <circle cx="58" cy="452" r="20" fill="#FFF4D6" opacity=".95" filter="url(#dk-b1)"/>
+  <g filter="url(#dk-b2)">
+    <polygon points="-10,300 300,640 240,640 -10,380" fill="url(#dk-ray)" opacity=".45"/>
+  </g>
+  <!-- 高处逆光云（紫灰） -->
+  <g fill="url(#dk-cld)" opacity=".5" filter="url(#dk-b1)">
+    <ellipse cx="204" cy="228" rx="72" ry="13"/><ellipse cx="252" cy="216" rx="44" ry="10"/>
+    <ellipse cx="148" cy="248" rx="54" ry="11"/><ellipse cx="86" cy="222" rx="40" ry="9"/>
+  </g>
+  <!-- 落日照亮的云（金橙） -->
+  <g fill="url(#dk-clb)" filter="url(#dk-b1)">
+    <ellipse cx="112" cy="472" rx="82" ry="16"/><ellipse cx="176" cy="488" rx="58" ry="13"/>
+    <ellipse cx="48" cy="490" rx="56" ry="13"/><ellipse cx="140" cy="460" rx="42" ry="11"/>
+  </g>
+  <ellipse cx="120" cy="510" rx="180" ry="26" fill="#FFD9A4" opacity=".4" filter="url(#dk-b2)"/>
+  <!-- 地平线剪影：树、电线杆与电线 -->
+  <g fill="#4A3452" opacity=".55">
+    <rect x="243" y="560" width="3.2" height="80"/>
+    <ellipse cx="36" cy="612" rx="62" ry="24"/><ellipse cx="98" cy="620" rx="52" ry="20"/><ellipse cx="8" cy="626" rx="42" ry="18"/>
+    <rect x="0" y="630" width="300" height="10"/>
+  </g>
+  <g stroke="#4A3452" stroke-width="1.1" fill="none" opacity=".45">
+    <path d="M245 568q-52 12-104 7"/><path d="M245 576q30 8 55 5"/>
+  </g>
+  <g stroke="#3A2C46" stroke-width="1.5" fill="none" stroke-linecap="round" opacity=".7">
+    <path d="M196 300q5-6 10 0M206 300q5-6 10 0"/>
+  </g>
+</symbol>
+
+<symbol id="sky-night" viewBox="0 0 300 640">
+  <defs>
+    <linearGradient id="n-sk" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#04071A"/><stop offset=".45" stop-color="#0B1130"/><stop offset=".8" stop-color="#1A2450"/><stop offset="1" stop-color="#26315E"/>
+    </linearGradient>
+    <radialGradient id="n-moon" cx=".5" cy=".5" r=".5">
+      <stop offset="0" stop-color="#E9EEDC" stop-opacity=".5"/><stop offset=".4" stop-color="#DDE6D8" stop-opacity=".2"/><stop offset="1" stop-color="#DDE6D8" stop-opacity="0"/>
+    </radialGradient>
+    <linearGradient id="n-mw" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#9FB4FF" stop-opacity=".14"/><stop offset="1" stop-color="#9FB4FF" stop-opacity="0"/>
+    </linearGradient>
+    <linearGradient id="n-comet" x1="1" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#EDF3FF" stop-opacity=".95"/><stop offset="1" stop-color="#AFC4FF" stop-opacity="0"/>
+    </linearGradient>
+    <filter id="n-b1" x="-60%" y="-60%" width="220%" height="220%"><feGaussianBlur stdDeviation="1.2"/></filter>
+    <filter id="n-b2" x="-60%" y="-60%" width="220%" height="220%"><feGaussianBlur stdDeviation="9"/></filter>
+  </defs>
+  <rect width="300" height="640" fill="url(#n-sk)"/>
+  <polygon points="-20,40 300,340 300,420 -20,140" fill="url(#n-mw)" filter="url(#n-b2)"/>
+  <!-- 月牙 -->
+  <circle cx="234" cy="98" r="86" fill="url(#n-moon)"/>
+  <circle cx="234" cy="98" r="21" fill="#EFF3DC"/>
+  <circle cx="242" cy="91" r="18.5" fill="#0A102C"/>
+  <!-- 疏星 -->
+  <g fill="#FFFFFF">
+    <circle cx="30" cy="64" r="1.4" opacity=".95"/><circle cx="72" cy="142" r="1" opacity=".6"/>
+    <circle cx="122" cy="42" r="1.2" opacity=".8"/><circle cx="162" cy="112" r=".9" opacity=".55"/>
+    <circle cx="200" cy="182" r="1.1" opacity=".7"/><circle cx="262" cy="204" r=".9" opacity=".5"/>
+    <circle cx="92" cy="232" r="1" opacity=".6"/><circle cx="282" cy="62" r="1.2" opacity=".75"/>
+    <circle cx="42" cy="302" r=".8" opacity=".45"/><circle cx="152" cy="262" r=".9" opacity=".5"/>
+    <circle cx="212" cy="322" r=".8" opacity=".4"/><circle cx="252" cy="282" r="1" opacity=".55"/>
+    <circle cx="20" cy="182" r=".9" opacity=".5"/><circle cx="182" cy="62" r=".8" opacity=".45"/>
+  </g>
+  <g fill="#DCE6FF" opacity=".35" filter="url(#n-b1)">
+    <circle cx="122" cy="152" r="3.4"/><circle cx="60" cy="92" r="2.8"/><circle cx="236" cy="242" r="2.6"/>
+  </g>
+  <circle cx="122" cy="152" r="1.5" fill="#FFFFFF"/><circle cx="60" cy="92" r="1.3" fill="#FFFFFF"/>
+  <!-- 彗尾 -->
+  <polygon points="300,116 188,166 188,170 300,124" fill="url(#n-comet)"/>
+  <circle cx="190" cy="168" r="6.5" fill="#CFE0FF" opacity=".5" filter="url(#n-b1)"/>
+  <circle cx="190" cy="168" r="2.4" fill="#FFFFFF"/>
+  <!-- 低云影 -->
+  <g fill="#2B3768" opacity=".55" filter="url(#n-b1)">
+    <ellipse cx="76" cy="566" rx="92" ry="15"/><ellipse cx="196" cy="588" rx="110" ry="19"/><ellipse cx="266" cy="556" rx="58" ry="12"/>
+  </g>
+  <!-- 城镇与电线杆剪影 -->
+  <g fill="#070C22" opacity=".85">
+    <path d="M0 640v-26h34v-12h22v12h40v-20h26v20h48v-14h30v14h44v-10h26v10h30v26z"/>
+    <rect x="150" y="556" width="3" height="60"/>
+    <rect x="0" y="632" width="300" height="8"/>
+  </g>
+  <g stroke="#070C22" stroke-width="1" fill="none" opacity=".7">
+    <path d="M152 562q-46 10-92 6"/><path d="M152 568q44 9 88 5"/>
+  </g>
+</symbol>
+</svg>
+
+<div class="wrap">
+
+  <div class="kicker">Aozora · UI/UX Proposal V5.2</div>
+  <h1>Aozora — 秩序不变，画布换成天空</h1>
+  <p class="lede">V5 的全部秩序感原样保留：TikTok 七规则的交互骨架、四套组件语法、底部弹层、中央 ＋、单一强调色的纪律。改变的只有一件事——<b>画布不再是纯色，而是一整幅新海诚式的天空场景</b>：有体积的积雨云、斜进画面的柔光带、落日的光晕、飞鸟、电线杆剪影；夜里有月牙、银河淡带与一道彗尾。随手截一张图，就是一张美景；打开 app 记一笔，像在明信片上写了一行字。</p>
+  <div class="kw"><span>继承自 V5 <b>全部交互骨架 ✓</b></span><span>新增 <b>四时天空场景画布</b></span><span>新增 <b>强调色随时辰变化</b></span></div>
+
+  <!-- ============ 为什么 ============ -->
+  <section class="sec">
+    <div class="kicker">Why Sky</div>
+    <h2 style="margin-top:10px">为什么天空适合一部记账 app</h2>
+    <p class="note" style="margin-bottom:16px">新海诚的画面之所以击中人心，不是因为它"好看"，而是因为它把<b>时间</b>画了出来——光的角度、云的厚度、天的颜色，全都在说"此刻只有一次"。记账恰好也是一门关于时间的功课：今天的钱花在哪、这个月还剩多少。两者在"今天"这个词上相遇：</p>
+    <div class="tblwrap"><table>
+      <tr><th style="width:200px">新海诚画面语言</th><th>在 Aozora 中的翻译</th></tr>
+      <tr><td><b>天空即主角</b><br>《天气之子》里天气是角色不是背景</td><td>每片天空是一个<b>分层 SVG 场景</b>（渐变天幕 → 光源 → 柔光带 → 有体积的云 → 地平线剪影 → 飞鸟），占满画布，内容浮在其上</td></tr>
+      <tr><td><b>魔法时刻</b><br>黄昏几分钟内颜色流变</td><td><b>四时主题跟随真实时间自动切换</b>：清晨 5–10、白天 10–17、黄昏 17–19、夜晚 19–5。晚上打开 app，手机里的天和你窗外的是同一片</td></tr>
+      <tr><td><b>光是一等公民</b><br>光束、逆光、镜头光晕</td><td>拂晓/白日有从画外斜进来的柔光带（渐变多边形+厚 blur，不再是硬边色块）；黄昏有落日光晕把云底染成金橙；英雄数字带极轻辉光</td></tr>
+      <tr><td><b>云的体积感</b><br>夏日积雨云压在地平线</td><td>每朵云由 4–7 个椭圆叠出体积，<b>白色受光面 + 灰蓝/紫灰的底面阴影</b>，轻微 blur 融入天色——不是白色贴纸，是有重量的云</td></tr>
+      <tr><td><b>风景的边角</b><br>电线杆、树影、飞鸟</td><td>黄昏与夜晚的地平线有树影/屋顶与电线杆的剪影，电线上还挂着两道弧；白天有远处的小云和一对飞鸟——"有人在生活"的证据</td></tr>
+      <tr><td><b>彗星/流星</b><br>《你的名字》的划痕记忆点</td><td>夜间右上角彗尾（渐变细线+光点头部）与月牙、银河淡带同框——克制到几乎要发现才看得到</td></tr>
+      <tr><td><b>电影字幕卡</b><br>明朝体+大字距的标题字</td><td>日期行用<b>衬线体 + 0.2em 字距</b>（思源宋体）："八月二十六日 · 星期二"。唯一的字体破例，P1 打包子集仅约 20KB</td></tr>
+    </table></div>
+    <p class="note" style="margin-top:14px">情绪价值对目标用户的含义：记账常被做成"管理工具"，冷而正确；天空把它变成<b>"记录今天"</b>——每天的天空都不一样，就像每天的生活。这正好接住产品哲学"别家 app 让你对钱焦虑"：看着傍晚的天空记完账，合上是安心，不是愧疚。</p>
+  </section>
+
+  <!-- ============ 四时令牌 ============ -->
+  <section class="sec">
+    <div class="kicker">Four Skies</div>
+    <h2 style="margin-top:10px">四时令牌系统</h2>
+    <p class="note" style="margin-bottom:14px">仍是 V5 的令牌架构，从双模式扩为四时刻。天空场景是唯一的表现层；文字、弹层、导航的材质全部由令牌驱动，保证任何天空下可读。强调色随时辰变化——进度条的颜色就是此刻天空的颜色。</p>
+    <div class="tblwrap"><table>
+      <tr><th>时辰</th><th>天空场景要素</th><th>强调色</th><th>墨色</th></tr>
+      <tr><td><b>拂晓 Dawn</b><br>5:00–10:00</td><td>薄雾蓝→暖米天幕 · 右上朝阳与光晕 · 两道柔光带 · 低云群（粉灰底面）· 远处薄云 · 一对飞鸟</td><td><span class="sw" style="background:#D96F5A"></span>#D96F5A 曙红</td><td>#1E2733 带蓝的墨</td></tr>
+      <tr><td><b>白日 Day</b><br>10:00–17:00</td><td>饱和晴空蓝→近白 · 左上日光晕 · 右侧大体积积雨云群（灰蓝底面）· 远处小云 · 飞鸟</td><td><span class="sw" style="background:#1D6CB0"></span>#1D6CB0 晴空蓝</td><td>#122031 深海墨</td></tr>
+      <tr><td><b>黄昏 Dusk</b><br>17:00–19:00</td><td>紫→橙→金魔法时刻 · 左侧落日光晕 · 高处紫灰逆光云 + 低处金橙受光云 · 树影与电线杆剪影 · 飞鸟</td><td><span class="sw" style="background:#D95F3B"></span>#D95F3B 暮橙</td><td>#241C36 茄墨</td></tr>
+      <tr><td><b>夜晚 Night</b><br>19:00–5:00</td><td>午夜蓝天幕 · 月牙与光晕 · 疏星与银河淡带 · 彗尾一道 · 低云影 · 屋顶与电线杆剪影</td><td><span class="sw" style="background:#E9C56A"></span>#E9C56A 月金</td><td>#EFF1F8 月白</td></tr>
+    </table></div>
+    <p class="note" style="margin-top:14px"><b>切换逻辑：</b>默认跟随系统时间（分钟级检查）；设置页可固定任一时辰。磨砂玻璃导航与弹层用半透明底色吃到当前天空的颜色，同一套组件在四个时辰下都"长在这片天上"。语义色不动：收入绿 / 预警琥珀 / 超支红，支出永不标红。</p>
+
+    <h3>可读性纪律（美景的前提是看得清）</h3>
+    <div class="tblwrap"><table style="max-width:880px">
+      <tr><th>约束</th><th>数值</th></tr>
+      <tr><td>正文/天空最低对比度</td><td>≥ 4.5:1 —— 文字活动区（上 40% 天幕）的色阶全部按此校准（如白日顶部 #3F8CD3 上 #122031 ≈ 5.9:1，黄昏顶部 #8496CC 上 #241C36 ≈ 6:1）</td></tr>
+      <tr><td>云与剪影的位置</td><td>主体云群只出现在画面下 1/3 与边缘；黄昏高处逆光云 opacity ≤ 0.5 且加厚 blur；剪影只住在导航玻璃之后</td></tr>
+      <tr><td>颗粒层</td><td>全局 opacity ≤ 0.06，静态</td></tr>
+      <tr><td>图表工作色</td><td>沿用已过色觉校验的五色组并直标，不随天空变化——数据的一致性高于氛围</td></tr>
+      <tr><td>性能红线</td><td>天空=静态分层 SVG，一次合成；blur 只在导航/弹层两处；无循环动画默认值。低端机「氛围层」开关可退回纯色渐变（令牌架构保证色彩关系不变）</td></tr>
+    </table></div>
+  </section>
+
+  <!-- ============ 一天四帧 ============ -->
+  <section class="sec">
+    <div class="kicker">One Day · Four Frames</div>
+    <h2 style="margin-top:10px">同一天的四帧——随手截图，就是美景</h2>
+    <p class="note" style="margin:0 0 24px;max-width:72ch">完全相同的标记、相同的数据，只有天空场景在走。这就是"高质量随手截图"的含义：用户什么都不用做，app 自己就是一张明信片。</p>
+    <div class="shots">
+
+      <div class="shot">
+        <div class="phone"><div class="screen mo t-dawn">
+          <svg class="skysvg" viewBox="0 0 300 640" preserveAspectRatio="xMidYMid slice"><use href="#sky-dawn"/></svg>
+          <div class="grain"></div>
+          <div class="statusbar"><span>6:47</span><span class="sbi"><span class="sig"><i></i><i></i><i></i><i></i></span><span class="batt"></span></span></div>
+          <div class="appc">
+            <div class="top">
+              <div><div class="date serifdate">八月二十六日 · 星期二</div><div class="hello">早上好</div></div>
+              <div class="tbtns"><div class="ibtn acc"><svg class="ic li"><use href="#i-sparkles"/></svg></div></div>
+            </div>
+            <div class="hero">
+              <div class="hlabel">今日支出</div>
+              <div class="amount-hero"><small>¥</small>77.50</div>
+              <div class="hmeta"><span>本月 <b>¥1,860</b> · 已用 62%</span><span>预算 ¥3,000</span></div>
+              <div class="pbar"><i style="width:62%"></i></div>
+            </div>
+            <div class="shead"><span class="t">今天</span><span class="m">支出 <b>¥77.50</b> · 4 笔</span></div>
+            <div class="rows">
+              <div class="rowx"><div class="rico"><svg class="ic li"><use href="#i-car-front"/></svg></div><div class="rt"><div class="n">打车</div><div class="s">15:36</div></div><div class="ra">-35.60</div></div>
+              <div class="rowx"><div class="rico"><svg class="ic li"><use href="#i-utensils"/></svg></div><div class="rt"><div class="n">午饭 · 麻辣香锅</div><div class="s">12:24</div></div><div class="ra">-28.00</div></div>
+              <div class="rowx"><div class="rico"><svg class="ic li"><use href="#i-coffee"/></svg></div><div class="rt"><div class="n">生椰拿铁</div><div class="s">09:41</div></div><div class="ra">-9.90</div></div>
+              <div class="rowx"><div class="rico"><svg class="ic li"><use href="#i-train-front"/></svg></div><div class="rt"><div class="n">地铁</div><div class="s">08:12</div></div><div class="ra">-4.00</div></div>
+            </div>
+            <div class="navbar">
+              <div class="nvit on"><svg class="ic li"><use href="#i-house"/></svg>首页<div class="dot"></div></div>
+              <div class="nvit"><svg class="ic li"><use href="#i-list"/></svg>明细<div class="dot"></div></div>
+              <div class="fab"><svg class="ic li"><use href="#i-plus"/></svg></div>
+              <div class="nvit"><svg class="ic li"><use href="#i-chart-pie"/></svg>报表<div class="dot"></div></div>
+              <div class="nvit"><svg class="ic li"><use href="#i-user"/></svg>我的<div class="dot"></div></div>
+            </div>
+          </div>
+        </div></div>
+        <div class="cap"><b>06:47 拂晓</b> — 朝阳还没离开右上的画框，两道柔光带斜进画面，低云的底面被染成粉灰。曙红进度条是全屏唯一的暖色按钮。</div>
+      </div>
+
+      <div class="shot">
+        <div class="phone"><div class="screen mo t-day">
+          <svg class="skysvg" viewBox="0 0 300 640" preserveAspectRatio="xMidYMid slice"><use href="#sky-day"/></svg>
+          <div class="grain"></div>
+          <div class="statusbar"><span>12:24</span><span class="sbi"><span class="sig"><i></i><i></i><i></i><i></i></span><span class="batt"></span></span></div>
+          <div class="appc">
+            <div class="top">
+              <div><div class="date serifdate">八月二十六日 · 星期二</div><div class="hello">中午好</div></div>
+              <div class="tbtns"><div class="ibtn acc"><svg class="ic li"><use href="#i-sparkles"/></svg></div></div>
+            </div>
+            <div class="hero">
+              <div class="hlabel">今日支出</div>
+              <div class="amount-hero"><small>¥</small>77.50</div>
+              <div class="hmeta"><span>本月 <b>¥1,860</b> · 已用 62%</span><span>预算 ¥3,000</span></div>
+              <div class="pbar"><i style="width:62%"></i></div>
+            </div>
+            <div class="shead"><span class="t">今天</span><span class="m">支出 <b>¥77.50</b> · 4 笔</span></div>
+            <div class="rows">
+              <div class="rowx"><div class="rico"><svg class="ic li"><use href="#i-car-front"/></svg></div><div class="rt"><div class="n">打车</div><div class="s">15:36</div></div><div class="ra">-35.60</div></div>
+              <div class="rowx"><div class="rico"><svg class="ic li"><use href="#i-utensils"/></svg></div><div class="rt"><div class="n">午饭 · 麻辣香锅</div><div class="s">刚刚</div></div><div class="ra">-28.00</div></div>
+              <div class="rowx"><div class="rico"><svg class="ic li"><use href="#i-coffee"/></svg></div><div class="rt"><div class="n">生椰拿铁</div><div class="s">09:41</div></div><div class="ra">-9.90</div></div>
+              <div class="rowx"><div class="rico"><svg class="ic li"><use href="#i-train-front"/></svg></div><div class="rt"><div class="n">地铁</div><div class="s">08:12</div></div><div class="ra">-4.00</div></div>
+            </div>
+            <div class="navbar">
+              <div class="nvit on"><svg class="ic li"><use href="#i-house"/></svg>首页<div class="dot"></div></div>
+              <div class="nvit"><svg class="ic li"><use href="#i-list"/></svg>明细<div class="dot"></div></div>
+              <div class="fab"><svg class="ic li"><use href="#i-plus"/></svg></div>
+              <div class="nvit"><svg class="ic li"><use href="#i-chart-pie"/></svg>报表<div class="dot"></div></div>
+              <div class="nvit"><svg class="ic li"><use href="#i-user"/></svg>我的<div class="dot"></div></div>
+            </div>
+          </div>
+        </div></div>
+        <div class="cap"><b>12:24 白日</b> — 饱和的晴空蓝，右侧压着一整群有灰蓝底面的积雨云，远处还有一对飞鸟。最清爽的一帧，商店主截图首选。</div>
+      </div>
+
+      <div class="shot">
+        <div class="phone"><div class="screen mo t-dusk">
+          <svg class="skysvg" viewBox="0 0 300 640" preserveAspectRatio="xMidYMid slice"><use href="#sky-dusk"/></svg>
+          <div class="grain"></div>
+          <div class="statusbar"><span>18:33</span><span class="sbi"><span class="sig"><i></i><i></i><i></i><i></i></span><span class="batt"></span></span></div>
+          <div class="appc">
+            <div class="top">
+              <div><div class="date serifdate">八月二十六日 · 星期二</div><div class="hello">傍晚好</div></div>
+              <div class="tbtns"><div class="ibtn acc"><svg class="ic li"><use href="#i-sparkles"/></svg></div></div>
+            </div>
+            <div class="hero">
+              <div class="hlabel">今日支出</div>
+              <div class="amount-hero"><small>¥</small>77.50</div>
+              <div class="hmeta"><span>本月 <b>¥1,860</b> · 已用 62%</span><span>预算 ¥3,000</span></div>
+              <div class="pbar"><i style="width:62%"></i></div>
+            </div>
+            <div class="shead"><span class="t">今天</span><span class="m">支出 <b>¥77.50</b> · 4 笔</span></div>
+            <div class="rows">
+              <div class="rowx"><div class="rico"><svg class="ic li"><use href="#i-car-front"/></svg></div><div class="rt"><div class="n">打车</div><div class="s">刚回家</div></div><div class="ra">-35.60</div></div>
+              <div class="rowx"><div class="rico"><svg class="ic li"><use href="#i-utensils"/></svg></div><div class="rt"><div class="n">午饭 · 麻辣香锅</div><div class="s">12:24</div></div><div class="ra">-28.00</div></div>
+              <div class="rowx"><div class="rico"><svg class="ic li"><use href="#i-coffee"/></svg></div><div class="rt"><div class="n">生椰拿铁</div><div class="s">09:41</div></div><div class="ra">-9.90</div></div>
+              <div class="rowx"><div class="rico"><svg class="ic li"><use href="#i-train-front"/></svg></div><div class="rt"><div class="n">地铁</div><div class="s">08:12</div></div><div class="ra">-4.00</div></div>
+            </div>
+            <div class="navbar">
+              <div class="nvit on"><svg class="ic li"><use href="#i-house"/></svg>首页<div class="dot"></div></div>
+              <div class="nvit"><svg class="ic li"><use href="#i-list"/></svg>明细<div class="dot"></div></div>
+              <div class="fab"><svg class="ic li"><use href="#i-plus"/></svg></div>
+              <div class="nvit"><svg class="ic li"><use href="#i-chart-pie"/></svg>报表<div class="dot"></div></div>
+              <div class="nvit"><svg class="ic li"><use href="#i-user"/></svg>我的<div class="dot"></div></div>
+            </div>
+          </div>
+        </div></div>
+        <div class="cap"><b>18:33 黄昏</b> — 魔法时刻：高处紫灰的逆光云、被落日染成金橙的低云、树影和电线杆的剪影。记账的人刚到家，一天在这里收口。</div>
+      </div>
+
+      <div class="shot">
+        <div class="phone"><div class="screen mo t-night">
+          <svg class="skysvg" viewBox="0 0 300 640" preserveAspectRatio="xMidYMid slice"><use href="#sky-night"/></svg>
+          <div class="grain"></div>
+          <div class="statusbar"><span>23:05</span><span class="sbi"><span class="sig"><i></i><i></i><i></i><i></i></span><span class="batt"></span></span></div>
+          <div class="appc">
+            <div class="top">
+              <div><div class="date serifdate">八月二十六日 · 星期二</div><div class="hello">晚安前</div></div>
+              <div class="tbtns"><div class="ibtn acc"><svg class="ic li"><use href="#i-sparkles"/></svg></div></div>
+            </div>
+            <div class="hero">
+              <div class="hlabel">今日支出</div>
+              <div class="amount-hero"><small>¥</small>77.50</div>
+              <div class="hmeta"><span>本月 <b>¥1,860</b> · 已用 62%</span><span>预算 ¥3,000</span></div>
+              <div class="pbar"><i style="width:62%"></i></div>
+            </div>
+            <div class="shead"><span class="t">今天</span><span class="m">支出 <b>¥77.50</b> · 4 笔</span></div>
+            <div class="rows">
+              <div class="rowx"><div class="rico"><svg class="ic li"><use href="#i-car-front"/></svg></div><div class="rt"><div class="n">打车</div><div class="s">15:36</div></div><div class="ra">-35.60</div></div>
+              <div class="rowx"><div class="rico"><svg class="ic li"><use href="#i-utensils"/></svg></div><div class="rt"><div class="n">午饭 · 麻辣香锅</div><div class="s">12:24</div></div><div class="ra">-28.00</div></div>
+              <div class="rowx"><div class="rico"><svg class="ic li"><use href="#i-coffee"/></svg></div><div class="rt"><div class="n">生椰拿铁</div><div class="s">09:41</div></div><div class="ra">-9.90</div></div>
+              <div class="rowx"><div class="rico"><svg class="ic li"><use href="#i-train-front"/></svg></div><div class="rt"><div class="n">地铁</div><div class="s">08:12</div></div><div class="ra">-4.00</div></div>
+            </div>
+            <div class="navbar">
+              <div class="nvit on"><svg class="ic li"><use href="#i-house"/></svg>首页<div class="dot"></div></div>
+              <div class="nvit"><svg class="ic li"><use href="#i-list"/></svg>明细<div class="dot"></div></div>
+              <div class="fab"><svg class="ic li"><use href="#i-plus"/></svg></div>
+              <div class="nvit"><svg class="ic li"><use href="#i-chart-pie"/></svg>报表<div class="dot"></div></div>
+              <div class="nvit"><svg class="ic li"><use href="#i-user"/></svg>我的<div class="dot"></div></div>
+            </div>
+          </div>
+        </div></div>
+        <div class="cap"><b>23:05 夜晚</b> — 月牙悬在右上，银河淡带斜过天幕，彗尾刚划过，屋顶剪影下亮着月光金进度条。睡前看一眼账，心安。</div>
+      </div>
+    </div>
+  </section>
+
+  <!-- ============ 弹层在天空上 ============ -->
+  <section class="sec">
+    <div class="kicker">Sheets on the Sky</div>
+    <h2 style="margin-top:10px">弹层：磨砂玻璃，长在天上</h2>
+    <p class="note" style="margin:0 0 24px;max-width:70ch">V5 的弹层体系原样运行，材质换成磨砂玻璃——透过它还能看到身后的天空，上下文保持有了物理形态。下面两帧分别是黄昏时的快速记账、夜晚时的 AI 补账。</p>
+    <div class="shots">
+      <div class="shot">
+        <div class="phone"><div class="screen mo t-dusk">
+          <svg class="skysvg" viewBox="0 0 300 640" preserveAspectRatio="xMidYMid slice"><use href="#sky-dusk"/></svg>
+          <div class="grain"></div>
+          <div class="scrim"></div>
+          <div class="sheet" style="top:104px">
+            <div class="grab"></div>
+            <div class="qa-head"><span class="t">记一笔</span><svg class="ic li" style="color:var(--ink3)"><use href="#i-x"/></svg></div>
+            <div class="qa-amt"><span class="cur">¥</span><span class="v">28.00</span></div>
+            <div class="qa-grid">
+              <div class="cat sel"><svg class="ic li"><use href="#i-utensils"/></svg>餐饮</div>
+              <div class="cat"><svg class="ic li"><use href="#i-train-front"/></svg>交通</div>
+              <div class="cat"><svg class="ic li"><use href="#i-shopping-bag"/></svg>购物</div>
+              <div class="cat"><svg class="ic li"><use href="#i-clapperboard"/></svg>娱乐</div>
+              <div class="cat"><svg class="ic li"><use href="#i-coffee"/></svg>饮品</div>
+              <div class="cat"><svg class="ic li"><use href="#i-house"/></svg>住房</div>
+              <div class="cat"><svg class="ic li"><use href="#i-clapperboard"/></svg>电影</div>
+              <div class="cat"><svg class="ic li"><use href="#i-plus"/></svg>更多</div>
+            </div>
+            <div class="keys">
+              <div class="key">1</div><div class="key">2</div><div class="key">3</div>
+              <div class="key">4</div><div class="key">5</div><div class="key">6</div>
+              <div class="key">7</div><div class="key">8</div><div class="key">9</div>
+              <div class="key">.</div><div class="key">0</div><div class="key"><svg class="ic li"><use href="#i-delete"/></svg></div>
+            </div>
+            <div class="save">保存</div>
+          </div>
+        </div></div>
+        <div class="cap"><b>黄昏 · 快速记账</b> — 磨砂玻璃后面是晚霞和电线杆的剪影。选中态仍是墨描边，纪律没变。</div>
+      </div>
+      <div class="shot">
+        <div class="phone"><div class="screen mo t-night">
+          <svg class="skysvg" viewBox="0 0 300 640" preserveAspectRatio="xMidYMid slice"><use href="#sky-night"/></svg>
+          <div class="grain"></div>
+          <div class="scrim"></div>
+          <div class="sheet" style="height:296px">
+            <div class="grab"></div>
+            <div class="qa-head" style="margin-bottom:2px"><span class="t" style="display:flex;align-items:center;gap:7px"><svg class="ic li" style="width:15px;height:15px;color:var(--accent)"><use href="#i-sparkles"/></svg>小贝 AI</span><svg class="ic li" style="color:var(--ink3)"><use href="#i-x"/></svg></div>
+            <div style="display:flex;flex-direction:column;padding-top:7px">
+              <div class="bub u">昨天电影45 外婆家吃饭58 还有盒马水果23</div>
+              <div class="aicard">
+                <div class="ok"><svg class="ic li"><use href="#i-check"/></svg>听懂了 3 笔，已记入 8月25日 · 共 ¥126.00</div>
+                <div style="display:grid;gap:6px">
+                  <div style="display:flex"><span style="color:var(--ink3);width:50px">娱乐</span><span style="flex:1;font-weight:600">电影</span><b style="font-variant-numeric:tabular-nums">45.00</b></div>
+                  <div style="display:flex"><span style="color:var(--ink3);width:50px">餐饮</span><span style="flex:1;font-weight:600">晚饭 · 外婆家</span><b style="font-variant-numeric:tabular-nums">58.00</b></div>
+                  <div style="display:flex"><span style="color:var(--ink3);width:50px">购物</span><span style="flex:1;font-weight:600">水果 · 盒马</span><b style="font-variant-numeric:tabular-nums">23.00</b></div>
+                </div>
+              </div>
+              <div class="ai-in"><svg class="ic li"><use href="#i-mic"/></svg>说"昨天…"就能补账<svg class="ic li" style="margin-left:auto"><use href="#i-keyboard"/></svg></div>
+            </div>
+          </div>
+        </div></div>
+        <div class="cap"><b>深夜 · AI 补账</b> — 月金色的 ✦ 在夜里最亮。确认前不写库，和 V5 相同。</div>
+      </div>
+    </div>
+  </section>
+
+  <!-- ============ 其余页面 ============ -->
+  <section class="sec">
+    <div class="kicker">Other Screens</div>
+    <h2 style="margin-top:10px">其余页面如何穿上天空</h2>
+    <p class="note" style="margin-bottom:14px">结构与 V5 完全一致，只有画布与玻璃材质随主题：</p>
+    <div class="tblwrap"><table style="max-width:900px">
+      <tr><th style="width:130px">页面</th><th>套用方式</th></tr>
+      <tr><td><b>明细</b></td><td>同一片天空做画布；日分组小节头、发丝线流水不变；月份切换器变磨砂胶囊。往下滑动时天空<b>视差滚动</b>（0.5 倍速）——云在慢慢后退，流水在指尖前进</td></tr>
+      <tr><td><b>报表</b></td><td>总额数字坐在天上；条形直标排行的轨道用半透明白，工作色五色不变；下钻弹层=磨砂玻璃</td></tr>
+      <tr><td><b>我的</b></td><td>「外观」里放四时预览缩略图（四枚小天空圆片）＋"跟随时间/固定"开关＋"氛围层"低耗开关</td></tr>
+      <tr><td><b>超支警示</b></td><td>琥珀警示条仍为行内横幅（非弹窗）。警示只用颜色和文案，不用天气做文章——克制</td></tr>
+    </table></div>
+  </section>
+
+  <!-- ============ 动效 ============ -->
+  <section class="sec">
+    <div class="kicker">Motion</div>
+    <h2 style="margin-top:10px">动效：天空可以动，但默认很慢很轻</h2>
+    <div class="tblwrap"><table style="max-width:840px">
+      <tr><th>场景</th><th>规格</th><th>目的</th></tr>
+      <tr><td>时辰切换瞬间</td><td>两层场景交叉溶解 800ms ease（每天最多 3 次）</td><td>"天黑了"被感知而不被打扰</td></tr>
+      <tr><td>云漂移</td><td><b>默认关闭</b>；开启后整组云 90s 循环平移 6px</td><td>生命感，零功耗焦虑</td></tr>
+      <tr><td>彗尾</td><td>仅在打开首页的前 2 秒淡入一次，之后静止</td><td>发现感属于第一次</td></tr>
+      <tr><td>Sheet / 数字 count-up / 列表 stagger</td><td>沿用 V5 规格（320ms 弹簧 / 500ms / 24ms）</td><td>秩序感不动摇</td></tr>
+    </table></div>
+    <p class="note" style="margin-top:12px">一切遵循 <code>prefers-reduced-motion</code> 与「氛围层」开关：关闭后四时只剩单层渐变，云/星/彗尾/剪影全部移除。</p>
+  </section>
+
+  <!-- ============ 自查 ============ -->
+  <section class="sec">
+    <div class="kicker">Self Audit</div>
+    <h2 style="margin-top:10px">十条清单复查（在 V5 通过的基础上增量）</h2>
+    <div class="tblwrap"><table style="max-width:900px">
+      <tr><th style="width:170px">检查项</th><th>天空版的回答</th></tr>
+      <tr><td>② Hierarchy 第一焦点</td><td>天空再美也是低对比背景；54–58px 数字永远是最响的元素。眯眼看每一帧：先见数字，再见天色</td></tr>
+      <tr><td>④ Information Density</td><td>装饰全部住在背景层，前景信息量与 V5 逐字节相同：1 数字、1 进度、4 行流水</td></tr>
+      <tr><td>⑨ Visual Noise</td><td>新增的表达只有一个通道（天空场景），且自带四条硬约束（对比度/位置/透明度/可关闭）。每个时辰仍然只有一个彩色</td></tr>
+      <tr><td>⑩ States 完整性</td><td>新增状态：低电量/省电模式→自动关氛围层；低端机降级→单层渐变；时辰边界→交叉溶解已覆盖</td></tr>
+    </table></div>
+    <p class="note" style="margin-top:10px">其余六项（Goal / Primary Action / Depth / Context / Thumb Zone / Consistency）与 V5 完全一致，无回归风险。</p>
+  </section>
+
+  <!-- ============ 落地 ============ -->
+  <section class="sec">
+    <div class="kicker">Roadmap Delta</div>
+    <h2 style="margin-top:10px">落地路线（相对 V5 的增量）</h2>
+    <div class="tblwrap"><table style="max-width:960px">
+      <tr><th style="width:110px">阶段</th><th>增量内容</th></tr>
+      <tr><td><b>P0 骨架</b></td><td>V5 P0 全部内容 ＋ <code>SkyCanvas.jsx</code>（四时 SVG 场景组件，即本页四个场景的直接移植）＋ <code>sky.css</code>（四时令牌）＋ 首页挂载（静态版，跟随时间切换）</td></tr>
+      <tr><td><b>P1 完整</b></td><td>设置页外观面板（跟随/固定/氛围开关）；磨砂玻璃 Sheet 材质；衬线日期字体子集（约 20KB woff2）；明细视差滚动</td></tr>
+      <tr><td><b>P2 进阶</b></td><td>彗尾开屏淡入；云漂移可选项；四时商店截图物料（同一界面四张天空＝天然成套主截图）；「今日天空」分享海报（Canvas 把当天场景画进分享图）</td></tr>
+    </table></div>
+    <p class="note" style="margin-top:12px">风险预案：若真机低端 WebView 掉帧，氛围层自动降级为单层渐变（视觉损失可控，令牌架构保证色彩关系不变）。</p>
+  </section>
+
+  <footer>
+    Aozora · V5.2 四时天空设计方案 · 2026-08-26<br>
+    继承 V5「素贝 MONO」全部交互骨架（TikTok 七规则 / 四套组件语法 / 弹层体系 / 中央＋ / AI Sheet）。样机数据与前版一致：今日四笔 ¥77.50；本月 ¥1,860 / 预算 ¥3,000；昨日 ¥126.00。图表工作色保持色觉校验通过的组合并直标。
+  </footer>
+</div>
+</body>
+</html>

@@ -1,0 +1,13 @@
+node_modules/
+dist/
+build/
+.gradle/
+local.properties
+*.keystore
+*.jks
+*.apk
+*.aab
+.env
+.env.*
+!/.env.example
+app/src/main/assets/www/
