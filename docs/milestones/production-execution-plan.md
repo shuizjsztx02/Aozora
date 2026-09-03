@@ -1,6 +1,6 @@
 # Aozora · 生产执行规划
 
-**状态：** T-M0-10 执行中
+**状态：** T-M1-01 可启动（T-M0-10 已完成）
 **用途：** 后续执行 Agent 的唯一任务选择与交接入口。产品、架构与全局验收以 `docs/APP-CONTEXT.md` 为准；本文件只维护顺序、闸门、交接与完成记录。
 
 ## 执行规则
@@ -13,10 +13,10 @@
 
 ## G0：功能开发准入
 
-- T-M0-09、T-M0-10 已完成，任务图不存在未定义依赖。
+- T-M0-08 的文档冲突验收、T-M0-09、T-M0-10 已完成，任务图不存在未定义依赖。
 - R-PROD-01 的历史服务商密钥已由账户所有者在外部控制台撤销或轮换；此前不得分发构建或接入真实 AI。
 - Android 执行环境具备 JDK 17、Android SDK 34，并通过 `./gradlew.bat :app:assembleDebug`。
-- T-M1-01 建立 `lint`、`typecheck`、单元测试与 GitHub Actions 后，后续 M1 任务才可验收。
+- T-M1-01 是建立 `lint`、`typecheck`、单元测试与 GitHub Actions 的启动例外；其完成后，后续 M1 任务才可验收。
 
 ## M0：收口与外部准备
 
@@ -29,16 +29,16 @@
 
 ### T-M0-10 执行治理与长期规划
 
-**依赖：** T-M0-07、T-M0-09。
+**依赖：** T-M0-09。
 **交接产物：** 有效任务图、风险状态、本文档与交接模板。
 **验证：** `rg -n 'T-M1-05|T-M0-10' docs/APP-CONTEXT.md`、`git diff --check`。
-**下一项：** G0 满足后执行 T-M1-01。
+**状态：** 已完成。`T-M0-07` 继续作为 T-M2-01 的独立前置；下一项为 T-M1-01。
 
 ## M1：客户端可靠数据底座
 
 | 任务 | 硬依赖 | 交接产物 | 最低验证 |
 |---|---|---|---|
-| T-M1-01 TypeScript 与测试门禁 | T-M0-08、G0 | TypeScript、Vitest、RTL、GitHub Actions | lint、typecheck、`npm test -- --run` |
+| T-M1-01 TypeScript 与测试门禁 | T-M0-08（G0 启动例外） | TypeScript、Vitest、RTL、GitHub Actions | lint、typecheck、`npm test -- --run` |
 | T-M1-02 金额、日期与领域模型 | T-M1-01 | `MoneyCents`、业务日期、领域聚合器 | 金额边界、跨日跨月、收支用例 |
 | T-M1-05 ActionProposal 契约与校验基础 | T-M1-01、T-M1-02 | JSON Schema、TS 类型、校验器、fixture | 合法与非法提案 fixture |
 | T-M1-03 Room 与版本化 JS Bridge | T-M1-02 | Room repository、pending mutation、桥契约 | 进程重启、原子写入、桥契约测试 |

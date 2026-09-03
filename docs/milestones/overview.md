@@ -1,7 +1,7 @@
 # Aozora · 生产里程碑总览
 
-**当前里程碑：** M0 · 生产化重基线收口
-**当前任务：** [T-M0-10](production-execution-plan.md#t-m0-10-执行治理与长期规划)
+**当前里程碑：** M1 · 客户端可靠数据底座
+**当前任务：** [T-M1-01](production-execution-plan.md#m1客户端可靠数据底座)
 **执行入口：** [生产执行规划](production-execution-plan.md)
 
 | 里程碑 | 目标 | 出口标准 |
@@ -14,4 +14,4 @@
 | M5 | 安全、质量与内测 | 对账门禁、安全、备份和内测出口完成。 |
 | M6 | 生产发布 | 可重复部署、签名发布和上线观察完成。 |
 
-功能代码的下一个候选任务是 T-M1-01；只有满足 [生产执行规划的 G0 闸门](production-execution-plan.md#g0-功能开发准入) 后才可开工。完整依赖、外部待办和验收要求以 `docs/APP-CONTEXT.md` 第 9--10 节及生产执行规划为准。
+T-M0-08、T-M0-09 与 T-M0-10 已完成；T-M1-01 是 [G0 闸门](production-execution-plan.md#g0-功能开发准入) 的启动例外，用于建立 CI，完成后 T-M1-02 起必须满足完整 G0。完整依赖、外部待办和验收要求以 `docs/APP-CONTEXT.md` 第 9--10 节及生产执行规划为准。
