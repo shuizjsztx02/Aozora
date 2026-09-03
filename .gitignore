@@ -11,3 +11,4 @@ local.properties
 .env.*
 !/.env.example
 app/src/main/assets/www/
+.kotlin/
