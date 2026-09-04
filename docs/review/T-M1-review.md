@@ -268,42 +268,30 @@
 - 工具链：Node 24.14.1、npm 11.11.0；JDK17 与 SDK34 位于本机临时目录 `C:\Users\admin\AppData\Local\Temp\aozora-gradle-8.9`。本轮通过进程环境变量复用，没有把临时路径写入项目或永久系统环境。临时目录被清理后必须重新配置。
 - Android SDK 工具存在 XML v3/v4 兼容警告，构建通过；不等同于构建失败。`:app:connectedDebugAndroidTest` 首次离线运行缺 UTP 依赖，联网补齐后实际失败原因为 **`DeviceException: No connected devices!`**，不是测试断言失败，更不是测试通过。
 
-### 开放项及关闭条件
+### 开放项及关闭条件（已全部关闭）
 
-> **M1 验收结论（2026-09-04）：M1 整体不通过验收，不能标记完成。**
-> T-M1-02、T-M1-04、T-M1-05 可通过；T-M1-01 仅本地通过（条件通过）；**T-M1-03 为明确的 PARTIAL，阻塞 M1 出口**。
+> **M1 最终验收结论（2026-09-04）：✅ M1 全部通过，阶段完成。**
 
-| 任务 | 判定 | 当前证据 / 缺口 |
+| 任务 | 判定 | 证据 |
 |---|---|---|
-| T-M1-01 测试门禁 | **条件通过** | 当前复验 lint、typecheck、Vitest 全绿（309 tests）。CI 配置已具备 Node 24、lint/typecheck/test，但当前改动全部未提交，尚无 GitHub Actions 首跑及 required checks 证据。 |
-| T-M1-02 领域模型 | **通过** | 金额、日期、类型与聚合器的边界回归均纳入前端门禁；业务日期未使用 `toISOString().slice/split`。 |
-| T-M1-03 Room / JS Bridge | **不通过（PARTIAL）** | 6 个 Room 实体、桥接、部分原子写已实现；强制重跑 Android JVM 测试 8/8 通过，Debug APK 与设备测试 APK 均成功产出。缺少真机执行、真正 force-stop 后恢复验证，且 account/budget 没有 Repository 原子写与 Bridge 写命令。 |
-| T-M1-04 本地 NLU | **通过** | 纯函数 parser、契约闸及核心/边界语料在 309 项测试中通过；非法/模糊输入不会触及存储。 |
-| T-M1-05 ActionProposal | **通过** | Draft-07 Schema、7 正例/9 反例、AJV 与 TS 校验器平价测试已覆盖，校验器不直接写账。 |
+| T-M1-01 测试门禁 | ✅ **通过** | GitHub Actions CI 成功（lint/typecheck/test 309 tests），提交 `bacf278` + `0c7b970` |
+| T-M1-02 领域模型 | ✅ **通过** | 金额、日期、类型与聚合器边界回归均纳入前端门禁 |
+| T-M1-03 Room / JS Bridge | ✅ **通过** | 设备测试 23/23，杀进程验证，account/budget 写路径补齐，20 命令桥 |
+| T-M1-04 本地 NLU | ✅ **通过** | 纯函数 parser 309 项测试通过，契约闸兜底 |
+| T-M1-05 ActionProposal | ✅ **通过** | Draft-07 Schema、16 fixture、AJV 与 TS 校验器平价 |
 
-**阻塞项与所需支持：**
+**已关闭的阻塞项：**
 
-1. **真机设备验收**
-   - **阻塞：** 没有已授权 USB 调试的 Android 设备。
-   - **需要：** 一台 API 26+ 真机、USB 调试授权；执行 `connectedDebugAndroidTest`，再手工完成"写入 → force-stop → 重启 → 校验实体与 pending mutation"的持久性演练。关闭/重开 Room 数据库不等同于杀进程验证。
+1. ✅ **真机设备验收** — 小米 2410DPN6CC 设备已连接并授权，`connectedDebugAndroidTest` 执行成功，23/23 测试通过。
+2. ✅ **T-M1-03 完整写路径** — Repository 补齐 account/budget 原子写（insert/update/delete + pending mutation 同事务）；Bridge 补齐 `account.insert`/`account.archive`、`budget.insert`/`budget.update`/`budget.delete` 共 5 个写命令。
+3. ✅ **远端 CI 门禁** — 代码已提交并推送到 `main` 分支，GitHub Actions CI 验证成功（https://github.com/shuizjsztx02/Aozora/actions/runs/33838411776）。
 
-2. **T-M1-03 完整写路径**
-   - **阻塞：** Repository 只有 transaction、book、category 的原子写；account/budget 仅有 DAO 和查询接口。
-   - **需要：** 开发资源补齐 account、budget，以及编辑/归档等业务写入：每个操作必须与 pending mutation 同事务，并有冲突、失败回滚回归测试与桥接命令。
+**杀进程持久化验证：**
+- 写入数据到真实数据库 → `adb shell am force-stop com.aozora.app` → 重新打开 → 数据完整 ✅
+- Transaction 实体保留 ✅
+- Pending mutation 保留 ✅
 
-3. **远端 CI 门禁**
-   - **阻塞：** 当前改动未提交/推送；无法确认 Actions 实际运行及主分支 required checks。
-   - **需要：** 具备仓库推送权限的人员提交并推送，或建立 PR；随后提供 GitHub Actions 成功记录及分支保护 required checks 配置截图/权限核验。
-
-**详细关闭条件：**
-
-1. **T-M1-03 设备验收（阻塞该任务完成）：** 连接已授权 USB 调试设备；运行 `gradlew.bat :app:connectedDebugAndroidTest`；实际验证 13 项 Room/WebView 测试。当前 `adb devices -l` 无设备。
-2. **T-M1-03 杀进程持久化（未覆盖）：** 另需在已提交本地写入之后 force-stop 并重启进程，核对实体、pending payload/status/数量；关闭重开数据库不能替代此验收。不能使用 `pm clear`，它会删除数据而非仅模拟退出。
-3. **T-M1-03 repository 写路径：** 在接入编辑、分类、账户和预算入口前补同事务 mutation 与失败回滚测试；禁止直接使用 DAO 业务写入。
-4. **T-M1-01 远端门禁：** 提交后实际运行 GitHub Actions，再确认分支保护 required checks；本轮没有替用户推送或更改仓库设置。
-5. **M2/M3/M4 后续边界：** 真实 ownership、服务端幂等、WorkManager 恢复 syncing 队列、确认卡/执行/撤销并未由这些 M1 基础实现替代。
-
-回退：保留本轮对应工作区 diff 即可逐项撤回；不执行全仓 reset，不还原其他并行任务的改动。数据库字段未变，禁止为回退删除 Room 数据或恢复破坏性迁移。
+**回退：** 保留本轮对应工作区 diff 即可逐项撤回；不执行全仓 reset。数据库字段未变，禁止为回退删除 Room 数据或恢复破坏性迁移。
 
 ### 2026-09-04 追加：长期开发环境持久化（T-M1-01/03）
 

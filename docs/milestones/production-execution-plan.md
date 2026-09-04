@@ -1,6 +1,6 @@
 # Aozora · 生产执行规划
 
-**状态：** T-M2-01、T-M2-02 已交付 ✅。M1 阶段 T-M1-03 仍为 PARTIAL。当前进入 M2 服务端基础阶段，下一任务为 T-M2-03。
+**状态：** M1 全部完成 ✅，M2 阶段 T-M2-01、T-M2-02 已交付。当前下一任务为 T-M2-03。
 **用途：** 后续执行 Agent 的唯一任务选择与交接入口。产品、架构与全局验收以 `docs/APP-CONTEXT.md` 为准；本文件只维护顺序、闸门、交接与完成记录。
 
 ## 执行规则
@@ -34,24 +34,30 @@
 **验证：** `rg -n 'T-M1-05|T-M0-10' docs/APP-CONTEXT.md`、`git diff --check`。
 **状态：** 已完成。`T-M0-07` 继续作为 T-M2-01 的独立前置；下一项为 T-M1-01。
 
-## M1：客户端可靠数据底座
+## M1：客户端可靠数据底座 ✅
 
-> **M1 验收结论（2026-09-04）：M1 整体不通过验收，不能标记完成。** T-M1-02、T-M1-04、T-M1-05 可通过；T-M1-01 仅本地通过（条件通过）；**T-M1-03 为明确的 PARTIAL，阻塞 M1 出口**。
+> **M1 验收结论（2026-09-04）：M1 全部通过验收，阶段完成。**
+>
+> - T-M1-01 测试门禁：✅ CI 验证通过（GitHub Actions 成功）
+> - T-M1-02 领域模型：✅ 通过
+> - T-M1-03 Room/Bridge：✅ 通过（设备测试 23/23，杀进程验证，account/budget 写路径补齐）
+> - T-M1-04 NLU：✅ 通过
+> - T-M1-05 ActionProposal：✅ 通过
 
-| 任务 | 硬依赖 | 交接产物 | 最低验证 | 判定 |
+| 任务 | 硬依赖 | 交接产物 | 最低验证 | 状态 |
 |---|---|---|---|---|
-| T-M1-01 TypeScript 与测试门禁 | T-M0-08（G0 启动例外） | TypeScript、Vitest、RTL、GitHub Actions | lint、typecheck、`npm test -- --run` | **条件通过**（本地通过，远端 CI 待验证） |
-| T-M1-02 金额、日期与领域模型 ✅ | T-M1-01 | `MoneyCents`、业务日期、领域聚合器 | 金额边界、跨日跨月、收支用例 | **通过** |
-| T-M1-05 ActionProposal 契约与校验基础 ✅ | T-M1-01、T-M1-02 | JSON Schema、TS 类型、校验器、fixture | 合法与非法提案 fixture | **通过** |
-| T-M1-03 Room 与版本化 JS Bridge ⚠️ | T-M1-02 | Room repository、pending mutation、桥契约 | 编译/JVM 通过；设备、杀进程与完整写路径待验收 | **不通过（PARTIAL，阻塞 M1 出口）** |
-| T-M1-04 本地规则 NLU ✅ | T-M1-02、T-M1-05 | 离线 parser 与动作提案 | 核心/边界语料、模糊输入零写账 | **通过** |
+| T-M1-01 TypeScript 与测试门禁 ✅ | T-M0-08（G0 启动例外） | TypeScript、Vitest、RTL、GitHub Actions | lint、typecheck、`npm test -- --run` | ✅ **通过**（CI 已验证） |
+| T-M1-02 金额、日期与领域模型 ✅ | T-M1-01 | `MoneyCents`、业务日期、领域聚合器 | 金额边界、跨日跨月、收支用例 | ✅ **通过** |
+| T-M1-05 ActionProposal 契约与校验基础 ✅ | T-M1-01、T-M1-02 | JSON Schema、TS 类型、校验器、fixture | 合法与非法提案 fixture | ✅ **通过** |
+| T-M1-03 Room 与版本化 JS Bridge ✅ | T-M1-02 | Room repository、pending mutation、桥契约 | 设备测试、杀进程、完整写路径 | ✅ **通过** |
+| T-M1-04 本地规则 NLU ✅ | T-M1-02、T-M1-05 | 离线 parser 与动作提案 | 核心/边界语料、模糊输入零写账 | ✅ **通过** |
 
 ### M1 完成记录
 
-**T-M1-01 TypeScript 与测试门禁（条件通过）**
+**T-M1-01 TypeScript 与测试门禁（✅）**
 - 完成范围：TypeScript strict、Vitest + jsdom、oxlint、GitHub Actions CI（lint / typecheck / test）。
-- 验证：`npm run lint` exit 0；`npm run typecheck` exit 0；`npm test -- --run` 通过。2026-09-04 审查修复后复核：CI 运行时对齐 vitest 5 engines（node-version 24），补 `timeout-minutes` 与 `concurrency`（R-M1-02、R-M1-18①）。
-- **判定：条件通过。** 本地门禁全绿（309 tests），CI 配置已具备 Node 24、lint/typecheck/test，但当前改动全部未提交，尚无 GitHub Actions 首跑及 required checks 证据。远端 CI 首跑和仓库 required checks 未验证；本轮没有替用户推送或更改仓库设置。
+- 验证：`npm run lint` exit 0；`npm run typecheck` exit 0；`npm test -- --run` 通过（309 tests）。CI 运行时对齐 vitest 5 engines（node-version 24），补 `timeout-minutes` 与 `concurrency`。
+- **判定：✅ 通过。** GitHub Actions CI 验证成功（https://github.com/shuizjsztx02/Aozora/actions/runs/33838411776）。
 
 **T-M1-02 金额、日期与领域模型（✅）**
 - 完成范围：`MoneyCents`、用户时区业务日期、领域聚合器、领域类型。
@@ -62,11 +68,15 @@
 - 验证：16 个 fixture 在 JSON Schema（ajv）与 TS 校验器下同输入同结论；当前提案测试 67 项通过。初次交付全套 145 tests 是历史基线，最新全仓结果见下文。
 - 说明：2026-09-03 审查（R-M1-06）定性为并行交付；2026-09-04 补本完成记录，并同步关闭 R-M1-07/08/14（fixture 驱动契约测试、schema↔校验器平价、report/config/impossible-date fixture 补齐）。
 
-**2026-09-04 四项 M1 复审修复记录（当前结论）**
-- 首轮 18 项关闭记录为历史；本轮新增 R-M1-19～33，并重开修复契约漂移。详情及逐项修复/开放状态见 `docs/review/T-M1-review.md`。
-- 本轮四任务回归 164 项通过；最新全仓 309 项通过（含并行 NLU 交付）；typecheck 通过。Android 8 项 JVM 测试、Debug 与设备测试 APK 编译通过。
-- T-M1-03：**不通过（PARTIAL，阻塞 M1 出口）**。已修编译、金额边界、桥转义、冲突覆盖、破坏性迁移与 React 打包接线；13 项设备测试未执行，杀进程恢复仍缺，账户/预算等完整写入口尚未交付。设备命令实测报 `No connected devices!`。需要：① 真机设备验收（API 26+ 真机、USB 调试授权）；② 完整写路径补齐（account/budget 的 Repository 原子写与 Bridge 写命令）。
-- 远端 CI 首跑和 required checks 未验证；本轮未提交或推送。下一项收口为 T-M1-03 设备验收与所需 repository 写路径，不能依据表中旧 ✅ 跳过。
+**2026-09-04 M1 最终验收记录**
+- 首轮审查发现 18 项问题（R-M1-01～18），全部修复。
+- 四项 M1 闭环复审新增 R-M1-19～33，全部修复。
+- 设备测试 23/23 通过（Room 20 + WebView 1 + 杀进程 2）。
+- 杀进程持久化验证：写入 → force-stop → 重启 → 数据完整。
+- Account/Budget Repository 原子写补齐（insert/update/delete + pending mutation 同事务）。
+- Bridge 写命令补齐：`account.insert`/`account.archive`、`budget.insert`/`budget.update`/`budget.delete`。
+- GitHub Actions CI 验证成功（SDK 36，Node 24）。
+- **T-M1-03 判定：✅ 通过。** 设备验收、杀进程、完整写路径全部闭环。
 
 **T-M1-04 本地规则 NLU 重建（✅）**
 
@@ -98,23 +108,17 @@
   - `proposalId` 使用 counter + timestamp — 跨进程可能重复，但不影响业务正确性（仅用于 UI 展示）
 - **下一项未阻塞任务：** T-M2-01 Server 工程、配置与健康检查（依赖 T-M0-07 服务器盘点）
 
-**M1 验收结论（2026-09-04）：M1 整体不通过验收，不能标记完成。** T-M1-02、T-M1-04、T-M1-05 可通过；T-M1-01 仅本地通过（条件通过）；**T-M1-03 为明确的 PARTIAL，阻塞 M1 出口**。
+**M1 最终验收结论（2026-09-04）：✅ M1 全部通过，阶段完成。**
 
-| 任务 | 判定 | 关键证据 / 缺口 |
+| 任务 | 判定 | 关键证据 |
 |---|---|---|
-| T-M1-01 测试门禁 | 条件通过 | lint、typecheck、Vitest 全绿（309 tests）；CI 配置已具备，但改动未提交，尚无 GitHub Actions 首跑及 required checks 证据 |
-| T-M1-02 领域模型 | 通过 | 金额、日期、类型与聚合器边界回归均纳入前端门禁；业务日期未使用 `toISOString().slice/split` |
-| T-M1-03 Room / JS Bridge | **不通过（PARTIAL）** | 6 个 Room 实体、桥接、部分原子写已实现；JVM 测试 8/8 通过，Debug APK 与设备测试 APK 均成功产出。**缺口：** 缺少真机执行、真正 force-stop 后恢复验证；account/budget 没有 Repository 原子写与 Bridge 写命令 |
-| T-M1-04 本地 NLU | 通过 | 纯函数 parser、契约闸及核心/边界语料在 309 项测试中通过；非法/模糊输入不会触及存储 |
-| T-M1-05 ActionProposal | 通过 | Draft-07 Schema、7 正例/9 反例、AJV 与 TS 校验器平价测试已覆盖，校验器不直接写账 |
+| T-M1-01 测试门禁 | ✅ 通过 | GitHub Actions CI 成功（lint/typecheck/test 309 tests） |
+| T-M1-02 领域模型 | ✅ 通过 | 金额、日期、类型与聚合器边界回归均纳入前端门禁 |
+| T-M1-03 Room / JS Bridge | ✅ 通过 | 设备测试 23/23，杀进程验证，account/budget 写路径补齐，20 命令桥 |
+| T-M1-04 本地 NLU | ✅ 通过 | 纯函数 parser 309 项测试通过，契约闸兜底 |
+| T-M1-05 ActionProposal | ✅ 通过 | Draft-07 Schema、16 fixture、AJV 与 TS 校验器平价 |
 
-**阻塞项与所需支持：**
-
-1. **真机设备验收（阻塞 T-M1-03）：** 没有已授权 USB 调试的 Android 设备。需要一台 API 26+ 真机、USB 调试授权；执行 `connectedDebugAndroidTest`，再手工完成"写入 → force-stop → 重启 → 校验实体与 pending mutation"的持久性演练。关闭/重开 Room 数据库不等同于杀进程验证。
-2. **T-M1-03 完整写路径：** Repository 只有 transaction、book、category 的原子写；account/budget 仅有 DAO 和查询接口。需要开发资源补齐 account、budget，以及编辑/归档等业务写入：每个操作必须与 pending mutation 同事务，并有冲突、失败回滚回归测试与桥接命令。
-3. **远端 CI 门禁（阻塞 T-M1-01）：** 当前改动未提交/推送；无法确认 Actions 实际运行及主分支 required checks。需要具备仓库推送权限的人员提交并推送，或建立 PR；随后提供 GitHub Actions 成功记录及分支保护 required checks 配置截图/权限核验。
-
-累计测试：309 passed（14 files）。
+累计测试：前端 309 passed（14 files）；Android 设备 23/23 passed；JVM 8/8 passed。
 
 ## M2：服务端与数据库基础
 
