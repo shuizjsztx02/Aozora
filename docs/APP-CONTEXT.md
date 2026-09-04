@@ -114,26 +114,26 @@
 
 | 层 | 当前实现 | 状态 |
 |---|---|---|
-| Android | Kotlin 单 Activity + 受限 WebView，minSdk 26 / targetSdk 34 | `CURRENT`，仅生产基线空壳 |
+| Android | Kotlin 单 Activity + 受限 WebView，minSdk 26 / targetSdk 36 | `CURRENT`，仅生产基线空壳 |
 | Web UI | React 19、Vite 8 最小构建入口 | `CURRENT`，仅生产基线空壳 |
 | 页面、手动记账与统计 | 尚未实现 | `TARGET` |
 | AI、规则 NLU 与动作协议 | 本地 NLU 与 ActionProposal 基础已实现；服务端 AI/执行闭环未接入 | `PARTIAL` |
-| 本地数据与离线队列 | Room 6 表及部分原子写/队列路径已实现，设备可靠性待验收 | `PARTIAL` |
+| 本地数据与离线队列 | Room 6 表、完整原子写 repository 与 pending mutation 队列已实现（account/budget/transaction 写路径闭环），设备可靠性已通过（23/23 含手工 force-stop 协议）；离线同步与备份归 M3/M5 | `PARTIAL` |
 | 原生桥、语音、图片、提醒与小组件 | 版本化 Bridge 与 React 打包接线已实现；其余原生能力待做 | `PARTIAL` |
-| 服务端 | FastAPI 骨架、配置校验、健康检查、OpenAPI 3.1、Dockerfile；11 实体模型 + Alembic 初始迁移 | `CURRENT`，T-M2-01 骨架 + T-M2-02 Schema/迁移完成；业务 API 待实施 |
-| 测试 | 前端 309 项 + Android JVM 8 项 + 服务端 52 项通过；设备测试已编译未执行；远端 CI 首跑未验证 | `PARTIAL` |
+| 服务端 | FastAPI 骨架、配置校验、健康检查、OpenAPI 3.1、Dockerfile；11 实体模型 + Alembic 初始迁移；auth 模块（游客/手机登录、token rotation、logout、频率限制）| `PARTIAL`，T-M2-01/02/03 ✅；业务 API 待实施 |
+| 测试 | 前端 313 + Android JVM 8 + 设备 Room 20 + 服务端 76 项通过；Android 设备 23/23 实测（含手工 force-stop 持久化验证，杀进程与 WebView 测试已 @Ignore 避免自动化假绿/假红）；前端/Android CI 已通过，服务端 CI 门禁尚未建立 | `PARTIAL` |
 | 发布 | 无签名材料和可分发产物 | `TARGET` |
 
 ### 3.2 当前不能视为已交付的能力
 
 - 真实 AI 调用与提案确认/业务执行闭环
-- 安全的登录、鉴权和会话管理
+- 安全的登录、鉴权和会话管理（服务端 auth 模块已实现；SMS 供应商未接入，当前开发模式用固定验证码）
 - 服务端账本业务 API、云端同步与换机恢复（数据库 Schema 和模型已就绪，API 层待 T-M2-04+）
-- 设备持久性实测与后续数据库版本迁移器（整数分/业务日期基础已实现；Alembic 迁移流水线已就绪）
+- 数据库版本迁移器（v1 → v2+ 升级路径未实现；设备持久性已通过 Room 6 表 + force-stop 协议实测；Alembic 服务端迁移流水线已就绪）
 - 可靠自动备份、数据库恢复和账号删除
 - 多账本、二级分类、支付渠道（Schema 已支持，业务 API 待实施）
 - 生产监控、CI/CD、灰度发布和安全审计
-- Android 设备测试执行与服务端自动化测试门禁（服务端 52 项测试本地通过，远端 CI 待验证）
+- 服务端自动化测试门禁（服务端 76 项测试本地通过；前端/Android CI 已通过；服务端 CI 门禁尚未建立）
 
 ---
 
