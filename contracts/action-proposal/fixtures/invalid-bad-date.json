@@ -1,0 +1,16 @@
+{
+  "proposalId": "prop-bad-005",
+  "action": "add_tx",
+  "confidence": 0.9,
+  "requiresConfirmation": false,
+  "transactions": [
+    {
+      "type": "expense",
+      "amountCents": 1000,
+      "bizDate": "2026/09/03",
+      "note": "非法日期格式"
+    }
+  ],
+  "message": "非法日期格式测试",
+  "warnings": []
+}

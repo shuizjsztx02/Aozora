@@ -1,0 +1,103 @@
+"""T-M2-01: Aozora Production API — application entry point."""
+
+from __future__ import annotations
+
+import logging
+import time
+from contextlib import asynccontextmanager
+from typing import AsyncIterator
+
+from fastapi import FastAPI, Request
+from fastapi.middleware.cors import CORSMiddleware
+
+from src.common.config import get_config
+from src.common.errors import register_exception_handlers
+from src.common.health import router as health_router
+from src.common.logging import setup_logging
+from src.common.request_id import RequestIdMiddleware
+
+logger = logging.getLogger(__name__)
+
+
+@asynccontextmanager
+async def lifespan(app: FastAPI) -> AsyncIterator[None]:
+    """Startup / shutdown lifecycle."""
+    cfg = get_config()
+    setup_logging(cfg.log_level)
+    logger.info(
+        "Starting Aozora API",
+        extra={
+            "env": cfg.env,
+            "api_prefix": cfg.api_prefix,
+        },
+    )
+    yield
+    from src.common.database import get_engine
+
+    try:
+        engine = get_engine()
+        await engine.dispose()
+    except Exception:
+        logger.warning("Error disposing engine during shutdown", exc_info=True)
+    logger.info("Shutdown complete")
+
+
+app = FastAPI(
+    title="Aozora API",
+    description="Aozora production ledger API",
+    version="0.1.0",
+    openapi_url="/openapi.json",
+    docs_url="/docs",
+    redoc_url="/redoc",
+    lifespan=lifespan,
+)
+
+# -- Middleware (order matters: outermost first) --------------------------
+
+app.add_middleware(RequestIdMiddleware)
+
+cfg = get_config()
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=cfg.cors_origin_list,
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+# -- Exception handlers ---------------------------------------------------
+
+register_exception_handlers(app)
+
+
+# -- Request logging ------------------------------------------------------
+
+@app.middleware("http")
+async def log_requests(request: Request, call_next):  # noqa: ANN001
+    start = time.perf_counter()
+    response = await call_next(request)
+    duration_ms = round((time.perf_counter() - start) * 1000, 2)
+    logger.info(
+        "%s %s %d",
+        request.method,
+        request.url.path,
+        response.status_code,
+        extra={
+            "request_id": getattr(request.state, "request_id", None),
+            "method": request.method,
+            "path": request.url.path,
+            "status_code": response.status_code,
+            "duration_ms": duration_ms,
+        },
+    )
+    return response
+
+
+# -- Routers --------------------------------------------------------------
+
+app.include_router(health_router)
+
+
+@app.get("/", tags=["meta"])
+async def root() -> dict[str, str]:
+    return {"message": "Aozora API", "docs": "/docs"}

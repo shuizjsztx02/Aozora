@@ -1,0 +1,16 @@
+{
+  "proposalId": "prop-bad-009",
+  "action": "add_tx",
+  "confidence": 0.9,
+  "requiresConfirmation": false,
+  "transactions": [
+    {
+      "type": "expense",
+      "amountCents": 1000,
+      "bizDate": "2026-02-30",
+      "note": "日历非法日期（2 月没有 30 日）"
+    }
+  ],
+  "message": "日历非法日期测试",
+  "warnings": []
+}

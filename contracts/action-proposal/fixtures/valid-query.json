@@ -1,0 +1,8 @@
+{
+  "proposalId": "prop-003",
+  "action": "query",
+  "confidence": 0.9,
+  "requiresConfirmation": false,
+  "message": "本月支出 ¥2,350.00，收入 ¥8,000.00",
+  "warnings": []
+}

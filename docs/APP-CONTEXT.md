@@ -2,7 +2,7 @@
 
 > **文档定位：** 本项目面向人类开发者和 Agent 的长期总纲。任何实现任务开始前，先读根目录 `AGENTS.md`，再读本文件的“当前事实、目标架构、模块边界、任务约束”，最后只加载任务相关的专题文档。
 >
-> **基线版本：** Production Baseline 1.2
+> **基线版本：** Production Baseline 1.3
 > **基线日期：** 2026-09-03
 > **当前阶段：** 从本地 Demo 向可投入生产的完整 Android App 演进
 > **生产决策：** D-PROD-01～D-PROD-11 已于 2026-09-03 全部确认
@@ -117,23 +117,23 @@
 | Android | Kotlin 单 Activity + 受限 WebView，minSdk 26 / targetSdk 34 | `CURRENT`，仅生产基线空壳 |
 | Web UI | React 19、Vite 8 最小构建入口 | `CURRENT`，仅生产基线空壳 |
 | 页面、手动记账与统计 | 尚未实现 | `TARGET` |
-| AI、规则 NLU 与动作协议 | 尚未实现 | `TARGET` |
-| 本地数据与离线队列 | 尚未实现 | `TARGET` |
-| 原生桥、语音、图片、提醒与小组件 | 尚未实现 | `TARGET` |
-| 服务端 | 仓库内不存在服务端工程、API 或数据库迁移 | `TARGET` |
-| 测试 | 仅有 lint 和构建基线；无生产测试门禁 | `PARTIAL` |
+| AI、规则 NLU 与动作协议 | 本地 NLU 与 ActionProposal 基础已实现；服务端 AI/执行闭环未接入 | `PARTIAL` |
+| 本地数据与离线队列 | Room 6 表及部分原子写/队列路径已实现，设备可靠性待验收 | `PARTIAL` |
+| 原生桥、语音、图片、提醒与小组件 | 版本化 Bridge 与 React 打包接线已实现；其余原生能力待做 | `PARTIAL` |
+| 服务端 | FastAPI 骨架、配置校验、健康检查、OpenAPI 3.1、Dockerfile | `CURRENT`，T-M2-01 骨架完成；业务模块待实施 |
+| 测试 | 客户端门禁与 Android JVM/构建已通过；设备测试已编译未执行；远端 CI 首跑和服务端测试待验证 | `PARTIAL` |
 | 发布 | 无签名材料和可分发产物 | `TARGET` |
 
 ### 3.2 当前不能视为已交付的能力
 
-- 真实 AI 调用与受控动作协议
+- 真实 AI 调用与提案确认/业务执行闭环
 - 安全的登录、鉴权和会话管理
 - 服务端账本、云端同步与换机恢复
-- 整数分金额、设备本地业务日期与数据迁移器
+- 设备持久性实测与后续数据库版本迁移器（整数分/业务日期基础已实现）
 - 可靠自动备份、数据库恢复和账号删除
 - 多账本、二级分类、支付渠道
 - 生产监控、CI/CD、灰度发布和安全审计
-- 可通过的自动化测试门禁
+- Android 设备测试执行与服务端自动化测试门禁
 
 ---
 
@@ -551,12 +551,15 @@ app/src/
 - T-M0-07 仅在 T-M2-01 前必须完成；T-M1-01 是建立 CI 的唯一启动任务，T-M1-02 及其后的 M1 任务验收前必须启用该门禁。
 ### M1：客户端可靠数据底座
 
+> **M1 验收结论（2026-09-04）：M1 整体不通过验收，不能标记完成。** T-M1-02、T-M1-04、T-M1-05 可通过；T-M1-01 仅本地通过（条件通过）；**T-M1-03 为明确的 PARTIAL，阻塞 M1 出口**。
+
 #### T-M1-01 前端 TypeScript 与测试门禁
 
 - **目标：** 为财务领域代码建立静态类型和可执行测试基础。
 - **依赖：** T-M0-08。
 - **实施：** 配置 TypeScript、Vitest、React Testing Library；先迁移 domain 和新增模块，不要求一次性迁移全部 UI。
 - **验收：** `npm run lint`、`npm run typecheck`、`npm test -- --run` 全绿；CI 执行同一组命令。
+- **状态：** **条件通过**。交接产物：TypeScript strict、Vitest/RTL、前端与 Android CI 配置；本地门禁已通过（lint、typecheck、Vitest 全绿，309 tests）。远端 CI 首跑/required checks 未验证，当前改动全部未提交，尚无 GitHub Actions 首跑证据。最新证据见 `docs/review/T-M1-review.md`。
 
 #### T-M1-02 金额、日期与领域模型
 
@@ -564,6 +567,7 @@ app/src/
 - **依赖：** T-M1-01。
 - **实施：** 新建 `MoneyCents`、`localBizDate()`、Transaction/Book/Category 类型和纯函数聚合器；替换相关 store 计算。
 - **验收：** 浮点误差、23:59/00:01、跨月、收入/支出用例全绿；业务代码禁止 `toISOString().slice/split` 生成业务日期。
+- **状态：** **通过**。交接产物：money/date/types/aggregator；复审补换算溢出、时区跳日、非法周期和固定种子对账回归。业务日期不使用 `toISOString().slice/split`；真实 store/API/导出的联调属后续任务，当前基线没有 store 可替换。最新验证见 `docs/review/T-M1-review.md`。
 
 #### T-M1-03 Room 数据库与版本化 JS Bridge
 
@@ -571,6 +575,7 @@ app/src/
 - **依赖：** T-M1-02。
 - **实施：** Kotlin Room entities/DAO/repository；JS Bridge 使用 `requestId + callback` 的版本化命令与查询接口；Zustand 只保存 UI 状态。
 - **验收：** 杀进程重启数据完整；写入和 pending mutation 同事务；WebView 清缓存不丢 Room 数据；桥接口有契约测试。
+- **状态：** **不通过（PARTIAL，阻塞 M1 出口）**。6 实体/DAO、部分 Repository 原子写、v1 15 命令桥、TS 客户端、Vite 入 APK 与本地 HTTPS 加载已实现；JVM 测试 8/8 通过，Debug APK 与设备测试 APK 均成功产出。**缺口：** 缺少真机执行、真正 force-stop 后恢复验证；account/budget 没有 Repository 原子写与 Bridge 写命令。`connectedDebugAndroidTest` 实测因无连接设备失败（`DeviceException: No connected devices!`）。详见 `docs/review/T-M1-review.md`。
 
 #### T-M1-04 本地规则 NLU 重建
 
@@ -578,6 +583,7 @@ app/src/
 - **依赖：** T-M1-02、T-M1-05。
 - **实施：** 编写独立纯函数 parser，输出 ActionProposal；覆盖金额、收支、分类和相对日期。
 - **验收：** 新建的核心与边界例进入 Vitest；非法或模糊输入不写账；parser 不依赖页面或存储。
+- **状态：** **通过**。交接产物：`app/src/domain/nlu/`（amount / tx-type / category / date / note / intent / parser 七模块，纯函数，零 IO 依赖）；309 个测试通过（新增 145 个，覆盖金额解析 27、收支检测 21、分类匹配 16、日期解析 23、备注/意图 17、parser 集成 41）；核心语料 14 例全部通过契约闸；幂等性、零异常、非法输入零写账不变量验证通过；lint + typecheck + vitest 全绿。
 
 #### T-M1-05 ActionProposal 契约与校验基础
 
@@ -585,6 +591,7 @@ app/src/
 - **依赖：** T-M1-01、T-M1-02。
 - **实施：** 在 `contracts/` 定义 ActionProposal JSON Schema；新增 TypeScript 类型、确定性校验器与正反例 fixture；禁止校验器或提案直接写账本。
 - **验收：** 合法提案可通过；金额、日期、权限或字段缺失的非法提案被拒绝；本地 NLU 与后续 AI 任务只消费同一契约。
+- **状态：** **通过**。Draft-07 schema、7 valid + 9 invalid fixture、TS 类型/纯校验器；复审补安全整数上限、未知字段/空数组拒绝、完整 date format 和可选可信权限上下文。67 项提案测试通过；执行前必须传授权上下文，真实业务确认与写入归 T-M4-02。详见 `docs/review/T-M1-review.md`。
 ### M2：服务端与数据库基础
 
 #### T-M2-01 Server 工程、配置与健康检查
@@ -593,6 +600,7 @@ app/src/
 - **依赖：** T-M0-07。
 - **实施：** 创建 `server/`、环境配置校验、Dockerfile、health/readiness、OpenAPI、请求 ID、结构化日志。
 - **验收：** 缺少必需环境变量时拒绝启动；health 和 readiness 可区分；镜像不包含密钥；staging 可重复部署。
+- **状态：** ✅ 已完成。FastAPI 骨架（Python 3.12+）、pydantic-settings 配置校验（缺 `DATABASE_URL` 拒绝启动）、`/health` + `/health/ready`（含数据库连通检查）、请求 ID 中间件、结构化 JSON 日志、统一错误处理、OpenAPI 3.1、SQLAlchemy async 引擎、多阶段 Dockerfile（非 root）、docker-compose 本地开发栈；33 项 pytest 全部通过。详细交接记录见 `docs/milestones/production-execution-plan.md`。
 
 #### T-M2-02 数据库 Schema 与迁移流水线
 
@@ -600,6 +608,7 @@ app/src/
 - **依赖：** T-M2-01。
 - **实施：** SQLAlchemy 模型、唯一约束、外键、软删除、version、Alembic 迁移命令、seed 仅限开发环境。
 - **验收：** 空库可一键迁移；生产迁移不执行破坏性 reset；金额字段为整数；迁移在 staging 备份副本演练通过。
+- **状态：** ✅ 已完成。11 核心实体模型（User/DeviceSession/Book/Category/Account/Transaction/Budget/Attachment/AIConversation/AIUsage/SyncChange）全部实现；amount_cents 为 BigInteger + CHECK > 0；可修改实体均带 version 列；books/transactions 支持软删除；Alembic async 配置 + 手写初始迁移（0001_initial）；迁移与 ORM 一致性 7 项验证通过；12 项模型约束测试通过；累计 52 项 pytest 全部通过。详细交接记录见 `docs/milestones/production-execution-plan.md`。
 
 #### T-M2-03 认证、会话与设备安全
 

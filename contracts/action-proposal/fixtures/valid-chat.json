@@ -1,0 +1,8 @@
+{
+  "proposalId": "prop-004",
+  "action": "chat",
+  "confidence": 0.7,
+  "requiresConfirmation": false,
+  "message": "今天过得怎么样？有什么想聊的吗？",
+  "warnings": []
+}

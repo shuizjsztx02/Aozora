@@ -1,0 +1,9 @@
+{
+  "proposalId": "prop-bad-007",
+  "action": "add_tx",
+  "confidence": 0.9,
+  "requiresConfirmation": false,
+  "transactions": [],
+  "message": "add_tx 但 transactions 为空数组",
+  "warnings": []
+}

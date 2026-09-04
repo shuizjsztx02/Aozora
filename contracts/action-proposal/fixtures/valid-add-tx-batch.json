@@ -1,0 +1,31 @@
+{
+  "proposalId": "prop-002",
+  "action": "add_tx_batch",
+  "confidence": 0.88,
+  "requiresConfirmation": true,
+  "transactions": [
+    {
+      "type": "expense",
+      "amountCents": 3500,
+      "categoryId": "cat-food",
+      "bizDate": "2026-09-03",
+      "note": "午餐"
+    },
+    {
+      "type": "expense",
+      "amountCents": 1500,
+      "categoryId": "cat-transport",
+      "bizDate": "2026-09-03",
+      "note": "地铁"
+    },
+    {
+      "type": "income",
+      "amountCents": 500,
+      "categoryId": "cat-refund",
+      "bizDate": "2026-09-03",
+      "note": "退款"
+    }
+  ],
+  "message": "检测到 3 笔交易，请确认",
+  "warnings": ["部分分类为推测"]
+}

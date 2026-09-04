@@ -1,0 +1,35 @@
+# T-M2-01: Local development stack.
+# Usage: docker compose up --build
+
+services:
+  db:
+    image: postgres:18-alpine
+    environment:
+      POSTGRES_USER: aozora
+      POSTGRES_PASSWORD: aozora
+      POSTGRES_DB: aozora
+    ports:
+      - "5432:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U aozora"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+
+  api:
+    build: .
+    ports:
+      - "8000:8000"
+    environment:
+      ENV: development
+      DATABASE_URL: postgresql+asyncpg://aozora:aozora@db:5432/aozora
+      SECRET_KEY: dev-secret-do-not-use-in-production
+      LOG_LEVEL: DEBUG
+    depends_on:
+      db:
+        condition: service_healthy
+
+volumes:
+  pgdata:

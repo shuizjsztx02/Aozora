@@ -1,0 +1,8 @@
+{
+  "proposalId": "prop-007",
+  "action": "config",
+  "confidence": 0.9,
+  "requiresConfirmation": true,
+  "message": "已将默认账本切换为「生活」",
+  "warnings": []
+}

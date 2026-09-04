@@ -1,0 +1,8 @@
+{
+  "proposalId": "prop-bad-006",
+  "action": "add_tx",
+  "confidence": 0.9,
+  "requiresConfirmation": false,
+  "message": "add_tx 但缺少 transactions 字段",
+  "warnings": []
+}

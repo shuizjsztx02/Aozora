@@ -1,0 +1,8 @@
+{
+  "proposalId": "prop-006",
+  "action": "report",
+  "confidence": 0.8,
+  "requiresConfirmation": false,
+  "message": "本月报告已生成",
+  "warnings": []
+}

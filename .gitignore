@@ -10,5 +10,17 @@ local.properties
 .env
 .env.*
 !/.env.example
+!server/.env.example
 app/src/main/assets/www/
 .kotlin/
+
+# Python / Server
+__pycache__/
+*.pyc
+*.egg-info/
+.venv/
+.pytest_cache/
+.mypy_cache/
+.coverage
+htmlcov/
+server/.env

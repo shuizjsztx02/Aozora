@@ -1,0 +1,7 @@
+{
+  "proposalId": "prop-bad-001",
+  "confidence": 0.9,
+  "requiresConfirmation": false,
+  "message": "缺少 action 字段",
+  "warnings": []
+}

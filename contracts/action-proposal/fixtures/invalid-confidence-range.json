@@ -1,0 +1,16 @@
+{
+  "proposalId": "prop-bad-008",
+  "action": "add_tx",
+  "confidence": 1.5,
+  "requiresConfirmation": false,
+  "transactions": [
+    {
+      "type": "expense",
+      "amountCents": 1000,
+      "bizDate": "2026-09-03",
+      "note": "confidence 超出范围"
+    }
+  ],
+  "message": "confidence 超出范围测试",
+  "warnings": []
+}

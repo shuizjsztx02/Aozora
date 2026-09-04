@@ -1,0 +1,8 @@
+{
+  "proposalId": "prop-005",
+  "action": "create_category",
+  "confidence": 0.85,
+  "requiresConfirmation": true,
+  "message": "为你创建了新分类「宠物」",
+  "warnings": []
+}

@@ -1,0 +1,16 @@
+{
+  "proposalId": "prop-bad-003",
+  "action": "add_tx",
+  "confidence": 0.9,
+  "requiresConfirmation": false,
+  "transactions": [
+    {
+      "type": "expense",
+      "amountCents": 12.5,
+      "bizDate": "2026-09-03",
+      "note": "浮点金额"
+    }
+  ],
+  "message": "浮点金额测试",
+  "warnings": []
+}

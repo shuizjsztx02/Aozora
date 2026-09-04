@@ -3,7 +3,11 @@ $root = Split-Path -Parent $PSScriptRoot
 $prohibited = @('*.apk', '*.aab', '*.jks', '*.keystore', 'ai-config.js')
 $matches = foreach ($pattern in $prohibited) {
   Get-ChildItem -LiteralPath $root -Recurse -Force -File -Filter $pattern |
-    Where-Object { $_.FullName -notmatch '\\node_modules\\|\\.git\\' }
+    Where-Object {
+      $_.FullName -notmatch '\\node_modules\\|\\.git\\' -and
+      -not ($_.Extension -in @('.apk', '.aab') -and
+        $_.FullName.StartsWith((Join-Path $root 'app\build\outputs') + '\', [StringComparison]::OrdinalIgnoreCase))
+    }
 }
 
 if ($matches) {
