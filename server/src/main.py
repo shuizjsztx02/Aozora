@@ -21,6 +21,8 @@ from src.modules.categories.routes import router as categories_router
 from src.modules.accounts.routes import router as accounts_router
 from src.modules.transactions.routes import router as transactions_router
 from src.modules.budgets.routes import router as budgets_router
+from src.modules.statistics.routes import router as stats_router
+from src.modules.exports.routes import router as exports_router
 
 logger = logging.getLogger(__name__)
 
@@ -110,6 +112,8 @@ app.include_router(categories_router, prefix=cfg.api_prefix)
 app.include_router(accounts_router, prefix=cfg.api_prefix)
 app.include_router(transactions_router, prefix=cfg.api_prefix)
 app.include_router(budgets_router, prefix=cfg.api_prefix)
+app.include_router(stats_router, prefix=cfg.api_prefix)
+app.include_router(exports_router, prefix=cfg.api_prefix)
 
 
 @app.get("/", tags=["meta"])

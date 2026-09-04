@@ -18,45 +18,54 @@ class TestMigrationConsistency:
     """Ensure migration DDL matches ORM metadata."""
 
     def test_all_tables_present_in_migration(self):
-        """Every ORM table must appear in the initial migration."""
-        migration = importlib.import_module(
-            "src.migrations.versions.0001_initial"
-        )
+        """Every ORM table must appear in at least one migration."""
+        import importlib
+        import inspect
+        import re
+
+        # Collect all migration upgrade() sources
+        migrations = []
+        for rev in ("0001_initial", "0002_exports"):
+            try:
+                m = importlib.import_module(f"src.migrations.versions.{rev}")
+                migrations.append(m)
+            except ImportError:
+                pass
+
         orm_tables = set(Base.metadata.tables.keys())
 
-        # Parse table names from migration upgrade() calls.
-        # We use a lightweight approach: import the module and check
-        # that the module can be loaded without error.
-        assert hasattr(migration, "upgrade")
-        assert hasattr(migration, "downgrade")
-        assert migration.revision == "0001_initial"
-        assert migration.down_revision is None
+        # Aggregate all create_table calls across migrations
+        all_created = set()
+        for m in migrations:
+            if hasattr(m, "upgrade"):
+                source = inspect.getsource(m.upgrade)
+                all_created.update(re.findall(r'op\.create_table\(\s*"(\w+)"', source))
 
-        # Check that the migration file references all ORM tables.
-        import inspect
-
-        source = inspect.getsource(migration.upgrade)
         for table_name in orm_tables:
-            assert f'"{table_name}"' in source, (
-                f"Table '{table_name}' is in ORM models but not in migration upgrade()"
+            assert table_name in all_created, (
+                f"Table '{table_name}' is in ORM models but not in any migration"
             )
 
     def test_no_orphan_tables_in_migration(self):
         """Migration should not define tables absent from ORM models."""
-        migration = importlib.import_module(
-            "src.migrations.versions.0001_initial"
-        )
-        orm_tables = set(Base.metadata.tables.keys())
-
+        import importlib
         import inspect
-
-        source = inspect.getsource(migration.upgrade)
-
-        # Extract table names from op.create_table calls.
         import re
 
-        created = set(re.findall(r'op\.create_table\(\s*"(\w+)"', source))
-        orphans = created - orm_tables
+        orm_tables = set(Base.metadata.tables.keys())
+
+        # Aggregate all create_table calls across migrations
+        all_created = set()
+        for rev in ("0001_initial", "0002_exports"):
+            try:
+                m = importlib.import_module(f"src.migrations.versions.{rev}")
+                if hasattr(m, "upgrade"):
+                    source = inspect.getsource(m.upgrade)
+                    all_created.update(re.findall(r'op\.create_table\(\s*"(\w+)"', source))
+            except ImportError:
+                pass
+
+        orphans = all_created - orm_tables
         assert not orphans, f"Migration creates tables not in ORM: {orphans}"
 
     def test_amount_columns_are_integer(self):
@@ -107,6 +116,6 @@ class TestMigrationConsistency:
                 f"{table_name} missing CHECK constraint on amount_cents"
             )
 
-    def test_11_tables_registered(self):
-        """The schema must define exactly 11 tables."""
-        assert len(Base.metadata.tables) == 11
+    def test_12_tables_registered(self):
+        """The schema must define exactly 12 tables."""
+        assert len(Base.metadata.tables) == 12

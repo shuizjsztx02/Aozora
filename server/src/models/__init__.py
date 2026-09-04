@@ -11,6 +11,7 @@ from src.models.budget import Budget
 from src.models.attachment import Attachment
 from src.models.ai import AIConversation, AIUsage
 from src.models.sync import SyncChange
+from src.models.export import Export
 
 __all__ = [
     "Base",
@@ -28,4 +29,5 @@ __all__ = [
     "AIConversation",
     "AIUsage",
     "SyncChange",
+    "Export",
 ]

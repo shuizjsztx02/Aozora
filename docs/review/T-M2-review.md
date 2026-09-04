@@ -279,3 +279,127 @@
 工程基础扎实：异步 SQLAlchemy + Alembic 配置正确；模型约束覆盖 CHECK、UNIQUE、FK；JWT + refresh token 哈希存储方向正确；`get_current_user` 每次都查 DB 检查 status 比典型 JWT 实现更安全；76 个测试覆盖了主要路径。
 
 但 **上线阻塞项集中在"生产配置守卫"这一类**：`api_prefix` 配置存在但未接线、`SECRET_KEY` / `dev_auth_code` 默认值在 production 允许伪造、频率限制在多 worker 失效 — 这些在 dev 测试里完全不会暴露，却在生产部署时一击致命。R-M2-01/02/03 是 T-M2-03 宣布完成前必须补的守卫。R-M2-33（代码未入库）则是治理层面的硬伤，应立即修复。
+
+---
+
+## 2026-09-04 复验（第一轮修复后）
+
+### 复验范围与方法
+
+- **基线：** 提交 `0a40ca3`（feat: T-M2-03 认证会话 + T-M2-04 账本核心 API）与 `9c797c0`（docs 同步）。
+- **方法：** 逐项对照修复声称复核代码；门禁重跑；实测探针验证路由、配置守卫、JWT 白名单、反向代理头。
+- **修复声称：** 24 项（P1×5 + P2×12 + P3×7），全部声称已关闭。
+
+### 门禁与探针结果
+
+| 检查 | 结果 |
+|---|---|
+| `pytest tests/ -q --ignore=tests/test_stats_exports.py` | ✅ **106 passed in 4.06s**（与声称一致） |
+| `pytest tests/test_stats_exports.py -q` | ❌ **8 failed / 8 passed in 5.22s**（新发现问题，见下文） |
+| `API_PREFIX="/api/v1"` 探针：`GET /api/v1/health` | ✅ 200 |
+| `API_PREFIX="/api/v1"` 探针：`GET /health` | ✅ 404 |
+| `API_PREFIX="/api/v1"` 探针：`POST /api/v1/auth/guest` | ✅ 路由命中（500 是 SQLite 无表所致，与路由无关） |
+| production 配置守卫（SECRET_KEY 默认） | ✅ 抛 ValidationError |
+| production 配置守卫（dev_auth_code 非空） | ✅ 抛 ValidationError |
+| production 配置守卫（CORS *） | ✅ 抛 ValidationError |
+| jwt_algorithm 白名单（"none"） | ✅ 抛 ValidationError |
+| X-Forwarded-For 解析 | ✅ 独立桶 |
+| TTL 0 / 负值 | ✅ 抛 ValidationError |
+
+### 已关闭项复核（逐项确认）
+
+#### 🔴 P1（5/5 确认关闭）
+
+| ID | 修复证据 |
+|---|---|
+| R-M2-01 | `main.py:108-116` 所有 `include_router(...)` 统一使用 `prefix=cfg.api_prefix`，含 health、auth、books、categories、accounts、transactions、budgets、statistics、exports 九路由。探针验证 `/api/v1/health` 返回 200、`/health` 返回 404 ✅ |
+| R-M2-02 | `config.py:101-118` `model_validator(mode="after")` 在 `env="production"` 且 `secret_key == _DEV_SECRET_KEY` 时抛 `ValueError`。单元测试 `TestProductionGuards.test_secret_key_default_rejected_in_production` 覆盖 ✅ |
+| R-M2-03 | `config.py:110-113` 同一 validator 在 production 下 `dev_auth_code` 非空时抛错。单元测试 `test_dev_auth_code_rejected_in_production` 覆盖 ✅ |
+| R-M2-04 | `dependencies.py:33-72` 增加 `_MAX_ENTRIES=10000`、`_last_cleanup`、`_cleanup_expired()`。60 秒周期清理过期键，超过上限时按时间戳丢弃最旧条目。`check_auth_rate_limit` 改为同步函数 ✅ |
+| R-M2-33 | T-M2-03 全部代码已 commit（`0a40ca3`），含 `server/src/modules/auth/` 与 `server/tests/test_auth.py` ✅ |
+
+#### 🟡 P2（12/12 确认关闭）
+
+| ID | 修复证据 |
+|---|---|
+| R-M2-05 | `config.py:46` `jwt_algorithm: Literal["HS256", "RS256", "ES256"]`，实测拒绝 `"none"`，单元测试 `test_jwt_algorithm_whitelist` 覆盖 ✅ |
+| R-M2-06 | `models/user.py:65` `Index("ix_device_sessions_refresh_token_hash", "refresh_token_hash")`；`0001_initial.py:48` 同步新增 `sa.Index(...)` ✅ |
+| R-M2-07 | `auth/schemas.py:29-34` `GuestRequest._check_timezone` 用 `zoneinfo.available_timezones()` 校验；`_VALID_TIMEZONES` 模块级缓存 ✅ |
+| R-M2-08 | `auth/schemas.py:17, 26, 40, 45` `DEVICE_ID_MAX_LENGTH = 128`，`GuestRequest/PhoneLoginRequest/RefreshRequest` 三 schema 统一 `Field(max_length=DEVICE_ID_MAX_LENGTH)` ✅ |
+| R-M2-09 | `config.py:114-117` production validator 拒绝 `cors_origins.strip() == "*"`，单元测试覆盖 ✅ |
+| R-M2-10 | `docker-compose.yml:39-46` api 增加 healthcheck：`python -c "import urllib.request; urllib.request.urlopen('http://localhost:8000/api/v1/health/ready')"`，10s 间隔，3s 超时，5 次重试，10s 启动期 ✅ |
+| R-M2-11 | `auth/service.py:147-162` 改为 `select → count → delete(DeviceSession).where(...)` 单条 DELETE。仍 SELECT 一次以返回 count，可接受 ✅ |
+| R-M2-13 | `auth/service.py:168-219` `_create_session` 包 `try/except IntegrityError`，冲突时 rollback + 重新 delete + 重新生成 token + 重试一次 ✅ |
+| R-M2-14 | `models/budget.py:22` `class Budget(Base, AuditMixin, VersionedMixin)`；`0001_initial.py:127-128` 同步新增 `created_at` / `updated_at` 列 ✅ |
+| R-M2-15 | `auth/service.py:108-112` 过期 session 不再 `delete + flush`，直接 raise；注释明确说明"indexed lookup 便宜，下次命中同分支" ✅ |
+| R-M2-17 | `config.py:52, 57` `Field(default=15, gt=0)` / `Field(default=30, gt=0)`；单元测试 `test_ttl_must_be_positive` 覆盖 0 与 -1 ✅ |
+| R-M2-18 | `dependencies.py:42-55` `_get_client_ip` 优先读 `x-forwarded-for`（取第一段）、次 `x-real-ip`、再 `request.client.host`。单元测试 `test_rate_limit_uses_x_forwarded_for` 覆盖 ✅ |
+| R-M2-19 | `models/user.py:23-27` 文档注释说明 phone 校验在 Pydantic schema 层（`pattern=^\d{11}$`），DB 层未加 CHECK 以避免 SQLite 测试不兼容 PostgreSQL regex ✅ |
+
+#### 🟢 P3（7/7 确认关闭）
+
+| ID | 修复证据 |
+|---|---|
+| R-M2-20 | `pyproject.toml:29` 改 `httpx2` → `httpx>=0.27,<1`，注释说明 ✅ |
+| R-M2-21 | `auth/schemas.py:70` 移除未使用的 `DeviceSessionResponse`，注释说明 ✅ |
+| R-M2-22 | `tests/test_auth.py:395` `TestClient(app)` 不再传 `raise_server_exceptions=False`，服务端异常可正常冒泡 ✅ |
+| R-M2-23 | `tests/test_auth.py:364` `auth_client` 改为 `@pytest_asyncio.fixture() async def`，不再 `asyncio.run()` ✅ |
+| R-M2-26 | `dependencies.py:75` `def check_auth_rate_limit(...)` 改为同步函数（无 async） ✅ |
+| R-M2-28 | `alembic.ini:4-8` 注释说明 `sqlalchemy.url` 留空由 `env.py` 覆盖的设计意图 ✅ |
+| R-M2-29 | `docker-compose.yml:31` `SECRET_KEY: ${SECRET_KEY:-dev-secret-do-not-use-in-production}` 改用 env 变量展开 + dev 默认，注释说明 ✅ |
+
+#### 未关闭项（保持文档化）
+
+| ID | 状态 |
+|---|---|
+| R-M2-12 | 已知限制 — access_token 15 分钟 TTL 内仍可重试，缓解：`get_current_user` 每次查 DB 校验 status ✅ 已文档化 |
+| R-M2-16 | PG `Identity(always=True)` vs SQLite 测试后端差异 ✅ 已文档化 |
+| R-M2-24/25/30/32/34/35/36/37 | 风格/挂账项 ✅ 保持挂账 |
+
+### 复验期间新发现问题
+
+#### 🔴 R-M2-38 `exports/service.py` 把 String 列当 enum 访问（T-M2-05 阻塞）
+
+- **文件：** `server/src/modules/exports/service.py:91, 99, 115, 117`
+- **问题：** `tx.type.value` / `tx.source.value` 假定 SQLAlchemy 返回 enum 实例，但 `Transaction.type` / `Transaction.source` 是 `String(10)` / `String(20)` 列（非 `sqlalchemy.Enum`），运行时返回的是纯字符串 `"expense"` / `"income"` / `"manual"` 等。字符串没有 `.value` 属性，调用即 `AttributeError`。
+- **实测证据：** `pytest tests/test_stats_exports.py -q` → 8 failed。其中 7 个 `TestExportsAPI` 用例全部失败，堆栈定位到 `tx.type.value`。
+- **影响：** T-M2-05 的导出功能在生产环境同样会失败（PostgreSQL 也是 varchar 返回字符串），不仅 SQLite 测试问题。
+- **修复方向：** 直接 `tx.type` / `tx.source`（已是字符串），或统一加 helper 兼容两种情况。同文件 4 处都需修正。
+- **旁证：** `statistics/service.py:122` 用 `row.type == TxType.EXPENSE`，因 `TxType(str, enum.Enum)` 继承自 str 所以字符串比较能成功——这是正确用法。`transactions/service.py` 不读 enum 字段。`exports/service.py` 是仓库里**唯一**用 `.value` 访问这些列的地方。
+
+#### 🟡 R-M2-39 `TestTrendStats::test_trend_fills_empty_months` 失败（T-M2-05）
+
+- **文件：** `server/tests/test_stats_exports.py`（`TestTrendStats` 类）
+- **问题：** 趋势统计测试中，跨月空档填充逻辑未按预期工作，与 R-M2-38 不同源（不同错误类型，未深入定位）。
+- **影响：** T-M2-05 趋势统计功能存在边界缺陷。
+- **修复方向：** 单独定位；可能与趋势区间生成或零值填充逻辑有关。
+
+#### 🟡 R-M2-40 T-M2-05 代码未入库（同 R-M2-33 失效模式）
+
+- **文件：** `server/src/models/export.py`、`server/src/migrations/versions/0002_exports.py`、`server/src/modules/exports/`、`server/src/modules/statistics/`、`server/tests/test_stats_exports.py` 全部 untracked；`server/src/main.py`、`server/src/models/__init__.py`、`server/tests/test_migrations.py` 已修改但未暂存。
+- **影响：** 与 R-M2-33 同模式的治理问题 — 文档状态（production-execution-plan.md 已推进到 T-M2-05）与仓库实际不符；代码有丢失风险。
+- **修复方向：** 在宣布 T-M2-05 完成前先 `git add && git commit`；或把文档状态回退到 `PARTIAL`。
+
+#### 🟢 R-M2-41 `test_stats_exports.py` 的 `auth_client` fixture 退回 `asyncio.run()` 模式
+
+- **文件：** `server/tests/test_stats_exports.py:32-33`
+- **问题：** `asyncio.run(_create_tables(engine))` 在同步 fixture 里创建新事件循环。R-M2-23 已在 `test_auth.py` 修复过同款问题（改用 `@pytest_asyncio.fixture() async def`），但新写的 `test_stats_exports.py` 又回到旧模式。
+- **修复方向：** 改为 `@pytest_asyncio.fixture() async def auth_client`，用 `async with engine.begin() as conn: await conn.run_sync(Base.metadata.create_all)` 替代。
+
+### 复验结论
+
+**T-M2-01/02/03/04 的修复质量：优秀。** 第一轮审查发现的 5 项 P1、12 项 P2、7 项 P3 全部按声称修复，代码与测试证据齐全，production 守卫覆盖了三种关键失效模式（SECRET_KEY / dev_auth_code / CORS wildcard），反向代理头解析、速率限制清理、JWT 算法白名单等也都有配套单元测试。
+
+**新增问题集中在 T-M2-05（统计与导出）**：
+- **R-M2-38 是功能级 bug**，不是测试问题 — 导出端点在生产环境也会 500，因为 `tx.type.value` 在任何后端都拿不到 enum。
+- R-M2-39 是趋势统计的边界缺陷。
+- R-M2-40 是治理问题（代码未入库）。
+- R-M2-41 是测试风格回退。
+
+**建议处理顺序：**
+1. **R-M2-38**（P1）：修 `exports/service.py` 4 处 `.value` 访问，直接改用字符串或加 helper；附导出端点的回归测试。
+2. **R-M2-40**（P2）：T-M2-05 代码 git add 入库。
+3. **R-M2-39**（P2）：定位趋势统计空档填充逻辑。
+4. **R-M2-41**（P3）：改 async fixture。
+
+**门禁目标：** 修复后 `pytest tests/ -q` 应恢复 114 passed（当前 106 + T-M2-05 的 8 passed）+ 新增 T-M2-05 修复后的 8 个用例。

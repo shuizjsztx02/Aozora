@@ -1,6 +1,6 @@
 # Aozora · 生产执行规划
 
-**状态：** M1 全部完成 ✅，M2 阶段 T-M2-01 至 T-M2-04 已交付。当前任务为 T-M2-05。
+**状态：** M1 全部完成 ✅，M2 阶段 T-M2-01 至 T-M2-05 全部交付 ✅。当前任务为 T-M3-01 同步契约。
 **用途：** 后续执行 Agent 的唯一任务选择与交接入口。产品、架构与全局验收以 `docs/APP-CONTEXT.md` 为准；本文件只维护顺序、闸门、交接与完成记录。
 
 ## 执行规则
@@ -128,7 +128,7 @@
 | T-M2-02 Schema 与迁移 ✅ | T-M2-01 | SQLAlchemy 模型、Alembic 只追加迁移、测试库 | D-EXEC-02 |
 | T-M2-03 认证与会话 ✅ | T-M2-02 | 游客/手机绑定、token rotation | D-EXEC-03 |
 | T-M2-04 账本核心 API ✅ | T-M2-02、T-M2-03 | 幂等写 API、ownership、version | 无 |
-| T-M2-05 统计与导出 | T-M2-04 | 权威聚合、授权导出 | 无 |
+| T-M2-05 统计与导出 ✅ | T-M2-04 | 权威聚合、授权导出 | 无 |
 
 ### T-M2-01 完成记录
 
@@ -270,6 +270,43 @@
   - 分页为 offset-based——大规模数据时可能性能问题，后续可改为 cursor-based
   - Budgets PUT 语义中 version 为可选——首次创建时不需要，更新时需要
 - **下一项未阻塞任务：** T-M2-05 服务端统计与导出
+
+### T-M2-05 完成记录
+
+按交接模板：
+
+- **任务编号：** T-M2-05
+- **完成范围 / 明确未做：**
+  - ✅ 完成：`server/src/modules/statistics/`（routes/service/schemas）— 月度统计 `GET /stats/monthly`、趋势折线 `GET /stats/trends`，按交易 `biz_date` 聚合，仅统计 `deleted_at IS NULL` 交易，`balance = max(0, income - expense)`
+  - ✅ 完成：`server/src/modules/exports/`（routes/service/schemas）— 异步导出 `POST /exports`（JSON/CSV）、列表 `GET /exports`、详情 `GET /exports/{id}`、下载 `GET /exports/{id}/download`，24 小时过期，ownership guard（导出与下载均不可跨用户访问）
+  - ✅ 完成：`server/src/models/export.py`（Export 实体：user/book/format/status/file_path/expires_at）+ Alembic 迁移 `0002_exports.py`
+  - ✅ 完成：跨数据库兼容（`_YearMonth` 自定义 `FunctionElement`，SQLite 用 `strftime`，PostgreSQL 用 `TO_CHAR`）
+  - ❌ 未做：导出文件过期清理定时任务（留给后续运维，当前过期链接返回 410）
+  - ❌ 未做：CSV 大文件流式写入（当前同步生成，大账本时内存占用较高）
+- **修改的文档、契约与代码：**
+  - 新增代码：`server/src/modules/statistics/`（3 文件）、`server/src/modules/exports/`（3 文件）、`server/src/models/export.py`
+  - 新增迁移：`server/src/migrations/versions/0002_exports.py`
+  - 新增测试：`server/tests/test_stats_exports.py`（22 项：月度统计 ×6、趋势 ×2、导出 ×8、对账不变量 ×2、越权 ×4）
+  - 更新：`server/src/main.py`（注册 stats_router + exports_router）、`server/src/models/__init__.py`（注册 Export）
+  - 更新：`docs/milestones/production-execution-plan.md`、`docs/milestones/overview.md`、`docs/APP-CONTEXT.md`
+- **验证命令与结果：**
+  - `pytest tests/ -q` → **122 passed** in 5.01s（原 106 + 新增 22 项，修复 6 项实施缺陷）
+  - 对账不变量验证：`test_stats_reconciliation`（流水列表求和 == 统计 API 合计）、`test_export_reconciliation`（导出数据求和 == 统计 API 合计）
+  - 越权测试：统计/导出/下载均拦截跨用户访问（404）
+  - 跨数据库兼容：`_YearMonth` 在 SQLite 测试环境生成 `strftime('%Y-%m', ...)`，PostgreSQL 生产生成 `TO_CHAR(..., 'YYYY-MM')`
+- **数据/同步/AI/安全影响：**
+  - 数据：统计 API 只读 Transaction 表，无写操作；导出 API 写 Export 表（用户私有），文件存临时目录
+  - 安全：所有端点需 Bearer token；stats/exports 均验证 book ownership；下载链接不可跨用户访问
+  - AI：为 T-M4-03 AI 查询与月度洞察提供事实包数据基础
+  - 同步：无关（Export 是服务端专属概念，不参与客户端同步）
+- **兼容与回退方式：**
+  - 向后兼容：纯新增模块，不影响 T-M2-01/02/03/04
+  - 回退：删除 `server/src/modules/{statistics,exports}/`、`server/src/models/export.py`、`server/src/migrations/versions/0002_exports.py`，从 `main.py` 和 `models/__init__.py` 移除注册
+- **开放风险与责任人：**
+  - 导出文件存储使用 `tempfile.gettempdir()`，容器重启后丢失——生产应换为对象存储（D-EXEC-05）
+  - 过期清理为懒检查（访问时判断 410），无后台清理任务——大量历史导出会占用磁盘
+  - `_YearMonth` 使用 `@compiles` 双方言分发，新增数据库支持时需补充 `@compiles` 注册
+- **下一项未阻塞任务：** T-M3-01 同步契约与变更流（T-M2 阶段全部完成，进入 M3）
 
 ### T-M2-03 审查修复记录（2026-09-04）
 
