@@ -28,9 +28,14 @@ export const BridgeCommands = {
 
   // Account
   ACCOUNT_LIST: 'account.list',
+  ACCOUNT_INSERT: 'account.insert',
+  ACCOUNT_ARCHIVE: 'account.archive',
 
   // Budget
   BUDGET_LIST: 'budget.list',
+  BUDGET_INSERT: 'budget.insert',
+  BUDGET_UPDATE: 'budget.update',
+  BUDGET_DELETE: 'budget.delete',
 
   // Pending Mutations
   PM_LIST: 'pendingMutation.list',

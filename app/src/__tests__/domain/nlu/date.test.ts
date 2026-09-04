@@ -161,3 +161,33 @@ describe('extractDate — 幂等性', () => {
     }
   })
 })
+
+// ─── R-M1-35 回归：使用 ctx.now 而非宿主墙钟 ───
+
+describe('extractDate — ctx.now 注入（R-M1-35 回归）', () => {
+  it('12月25日 在 ctx.now=12月 时视为当年（非去年）', () => {
+    // ctx 固定在 2026-12-15，月份=12；12 不大于 12 → 当年
+    const decCtx = Date.UTC(2026, 11, 15, 4, 0, 0) // 2026-12-15T12:00+08
+    const result = extractDate('12月25日', decCtx, TZ)
+    expect(result).not.toBeNull()
+    expect(result!.bizDate).toBe('2026-12-25')
+  })
+
+  it('1月15日 在 ctx.now=2月 时视为当年', () => {
+    // ctx 固定在 2026-02-10，月份=2；1 不大于 2 → 当年
+    const febCtx = Date.UTC(2026, 1, 10, 4, 0, 0) // 2026-02-10T12:00+08
+    const result = extractDate('1月15日', febCtx, TZ)
+    expect(result).not.toBeNull()
+    expect(result!.bizDate).toBe('2026-01-15')
+  })
+
+  it('不同 ctx.now 产生不同结果（非宿主时钟）', () => {
+    // 同一输入 "6月1日"，在不同 ctx.now 下年份不同
+    const marCtx = Date.UTC(2026, 2, 15, 4, 0, 0) // 2026-03-15 (month=3, 6>3 → 上年)
+    const julCtx = Date.UTC(2026, 6, 15, 4, 0, 0) // 2026-07-15 (month=7, 6<7 → 当年)
+    const a = extractDate('6月1日', marCtx, TZ)
+    const b = extractDate('6月1日', julCtx, TZ)
+    expect(a!.bizDate).toBe('2025-06-01')
+    expect(b!.bizDate).toBe('2026-06-01')
+  })
+})

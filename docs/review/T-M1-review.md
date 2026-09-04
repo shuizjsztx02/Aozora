@@ -566,3 +566,46 @@ APP-CONTEXT 中 T-M1-04 状态目前写"已完成"——**建议在宣布完成�
 2. **R-M1-50 / R-M1-49**（P2/P3）：为 R-M1-35、R-M1-37（含 R-M1-48 修复后）、R-M1-43 补回归用例；
 3. **R-M1-51**（P3）：记录备查，非阻塞；
 4. 完成 1、2 后可将 T-M1-04 升级为 ✅ 完全成立，并同步关闭 R-M1-47 / R-M1-48。
+
+---
+
+## 2026-09-04 第四轮：R-M1-48 / R-M1-49 / R-M1-50 修复
+
+### 基线与方法
+
+- **基线：** `3dd410b`（上轮增量后的 HEAD）
+- **方法：** 修复 R-M1-48 / R-M1-49 / R-M1-50，补回归用例，重跑全部门禁，时区交叉验证，推送 CI。
+
+### 修复内容
+
+| ID | 修改 | 实证 |
+|---|---|---|
+| R-M1-48 | `amount.ts` `extractAmount`：在 `tryChineseUnits` 返回 null 后，检测文本是否含 `元/块/角/毛`；若有则不再降级到 `tryDecimal`/`tryInteger`，直接返回 null。`extractAllAmounts`：被拒绝的 Chinese units 匹配记录其 range，阻止后续 decimal/integer 模式提取片段（避免误拦其他位置的合法整数）。 | 探针：`extractAmount('5元35角')` → null、`extractAmount('早餐 5元35角')` → null、`extractAmount('10块99毛')` → null；`extractAllAmounts('午餐 35 还有地铁 5元')` → 仍正确提取 2 笔（不被误拦）。 |
+| R-M1-49 | `amount.ts` `extractAllAmounts`：Chinese units 分支增加 `jiao >= 10 → continue` 拒绝（与 `extractAmount` 一致），移除 `.slice(0,1)` 静默截断。 | 探针：`extractAllAmounts('早餐 5元35角')` → `[]`（不再截断为 5.3 元）；`extractAllAmounts('早餐 5元3角 咖啡 12块5')` → 2 笔正确。 |
+| R-M1-50 | 补回归用例 +14：`amount.test.ts`（R-M1-37/48：角位 >= 10 拒绝 3 例 + 合法元角 1 例 + extractAllAmounts 2 例）、`date.test.ts`（R-M1-35：ctx.now 注入 3 例）、`parser.test.ts`（R-M1-35：默认日期使用 ctx.now 2 例）、`native-bridge.test.ts`（R-M1-43：5 个新写命令各 1 例）。同时补齐 `bridge-types.ts` `BridgeCommands` 中缺失的 5 个新命令。 | 327 tests pass（较上轮 +14），覆盖全部三项遗漏。 |
+
+### 门禁结果
+
+| 门禁 | 结果 |
+|---|---|
+| `npm run lint` | ✅ exit 0 |
+| `npm run typecheck` | ✅ exit 0 |
+| `npm test -- --run` | ✅ 14 文件 / **327 tests passed**（+14 vs 上轮） |
+| `TZ=Pacific/Apia` 下 date + parser 测试 | ✅ 69 tests passed |
+
+### 任务级结论（本轮后）
+
+| 任务 | 结论 |
+|---|---|
+| T-M1-01 | ✅ 保持 |
+| T-M1-02 | ✅ 保持（327 tests 全绿） |
+| T-M1-03 | ✅ 保持 |
+| T-M1-04 | ✅ **完全成立**：R-M1-34/35/36/37（含 R-M1-48 残留闭合）修复均成立；R-M1-35/37/43 回归用例已补齐（R-M1-50 关闭） |
+| T-M1-05 | ✅ 保持 |
+
+### 关闭项
+
+- ✅ R-M1-47（验收状态失真）：R-M1-48 闭合后，所有 NLU 缺陷修复完成
+- ✅ R-M1-48（tryInteger 兜底）
+- ✅ R-M1-49（extractAllAmounts 截断不一致）
+- ✅ R-M1-50（硬约束"每次修复附回归用例"补齐）

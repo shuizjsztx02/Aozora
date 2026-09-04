@@ -139,6 +139,31 @@ describe('parseInput — 查询意图', () => {
   })
 })
 
+// ─── R-M1-35 回归：parser 使用 ctx.now 而非宿主墙钟 ───
+
+describe('parseInput — 默认日期使用 ctx.now（R-M1-35 回归）', () => {
+  it('ctx.now=2026-01-15 时，"午餐 35" 的 bizDate 为 2026-01-15', () => {
+    const janCtx: ParseContext = {
+      now: Date.UTC(2026, 0, 15, 4, 0, 0), // 2026-01-15T12:00+08
+      timezone: TZ,
+      categories,
+      accounts,
+    }
+    const p = assertValidProposal('午餐 35', janCtx)
+    expect(p.action).toBe('add_tx')
+    expect(p.transactions![0].bizDate).toBe('2026-01-15')
+  })
+
+  it('不同 ctx.now 产生不同 bizDate（不依赖宿主时钟）', () => {
+    const ctx1: ParseContext = { ...makeCtx(), now: Date.UTC(2026, 0, 10, 4, 0, 0) } // 2026-01-10
+    const ctx2: ParseContext = { ...makeCtx(), now: Date.UTC(2026, 5, 20, 4, 0, 0) } // 2026-06-20
+    const p1 = parseInput('午餐 35', ctx1)
+    const p2 = parseInput('午餐 35', ctx2)
+    expect(p1.transactions![0].bizDate).toBe('2026-01-10')
+    expect(p2.transactions![0].bizDate).toBe('2026-06-20')
+  })
+})
+
 // ─── 契约闸不变量 ───
 
 describe('parseInput — 契约闸不变量', () => {

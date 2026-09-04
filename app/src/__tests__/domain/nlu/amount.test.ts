@@ -136,6 +136,21 @@ describe('extractAmount — 拒绝非法输入', () => {
     expect(extractAmount('-50')).toBeNull()
     expect(extractAmount('¥-12.5')).toBeNull()
   })
+
+  // R-M1-37 / R-M1-48 回归：角位 >= 10 的非法金额完全拒绝
+  it('角位 >= 10 拒绝（R-M1-37 / R-M1-48）', () => {
+    // tryChineseUnits 拒绝后，tryInteger/tryDecimal 不能把片段捡回来
+    expect(extractAmount('5元35角')).toBeNull()
+    expect(extractAmount('早餐 5元35角')).toBeNull()
+    expect(extractAmount('10块99毛')).toBeNull()
+  })
+
+  it('合法元角仍正常识别', () => {
+    // 确认修复不影响合法输入
+    const result = extractAmount('早餐 5元3角')
+    expect(result).not.toBeNull()
+    expect(Money.formatYuan(result!.amount)).toBe('5.30')
+  })
 })
 
 // ─── 位置信息 ───
@@ -182,6 +197,20 @@ describe('extractAllAmounts — 多笔金额', () => {
   it('空输入', () => {
     expect(extractAllAmounts('')).toEqual([])
     expect(extractAllAmounts('没有金额')).toEqual([])
+  })
+
+  // R-M1-49 回归：extractAllAmounts 与 extractAmount 行为一致，角位 >= 10 拒绝
+  it('角位 >= 10 跳过（R-M1-49）', () => {
+    // "5元35角" 是非法金额，不应被截断为 5.3 元
+    const results = extractAllAmounts('早餐 5元35角')
+    expect(results).toEqual([])
+  })
+
+  it('合法元角正常提取', () => {
+    const results = extractAllAmounts('早餐 5元3角 咖啡 12块5')
+    expect(results).toHaveLength(2)
+    expect(Money.formatYuan(results[0].amount)).toBe('5.30')
+    expect(Money.formatYuan(results[1].amount)).toBe('12.50')
   })
 })
 

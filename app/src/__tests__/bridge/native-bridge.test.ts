@@ -47,14 +47,19 @@ describe('Bridge types — 命令完整性', () => {
     'book.insert',
     'category.list',
     'account.list',
+    'account.insert',
+    'account.archive',
     'budget.list',
+    'budget.insert',
+    'budget.update',
+    'budget.delete',
     'pendingMutation.list',
     'pendingMutation.markSyncing',
     'pendingMutation.markFailed',
     'pendingMutation.remove',
   ]
 
-  it('BridgeCommands 包含所有 15 个命令', () => {
+  it('BridgeCommands 包含所有 20 个命令（含 R-M1-43 补齐的 5 个写命令）', () => {
     const actualCommands = Object.values(BridgeCommands)
     expect(actualCommands).toHaveLength(expectedCommands.length)
     for (const cmd of expectedCommands) {
@@ -273,5 +278,73 @@ describe('NativeBridge — 响应解析', () => {
 
     win.__aozoraBridgeRespond(JSON.stringify({ requestId: 'unknown-id', success: true, data: [] }))
     expect(bridge.pendingCount()).toBe(1) // 不匹配，仍然 pending
+  })
+})
+
+// ─── R-M1-43 回归：Account / Budget 写命令 ───
+
+describe('NativeBridge — R-M1-43 写命令回归', () => {
+  let bridge: NativeBridge
+  let mockNative: ReturnType<typeof installMockBridge>
+  let capturedCommand = ''
+  let capturedPayload = ''
+
+  beforeEach(() => {
+    bridge = new NativeBridge()
+    mockNative = installMockBridge()
+    mockNative.call.mockImplementation((_v: number, _requestId: string, cmd: string, payload: string) => {
+      capturedCommand = cmd
+      capturedPayload = payload
+      setTimeout(() => simulateResponse(_requestId, { id: 'test-id' }), 0)
+    })
+  })
+
+  it('insertAccount → account.insert', async () => {
+    await bridge.insertAccount(
+      { id: 'acc-1', ownerId: 'u1', name: '现金', version: 1 },
+      'mut-1'
+    )
+    expect(capturedCommand).toBe('account.insert')
+    const payload = JSON.parse(capturedPayload)
+    expect(payload.account.id).toBe('acc-1')
+    expect(payload.account.name).toBe('现金')
+    expect(payload.mutationId).toBe('mut-1')
+  })
+
+  it('archiveAccount → account.archive', async () => {
+    await bridge.archiveAccount('acc-1', 'mut-2')
+    expect(capturedCommand).toBe('account.archive')
+    const payload = JSON.parse(capturedPayload)
+    expect(payload.id).toBe('acc-1')
+    expect(payload.mutationId).toBe('mut-2')
+  })
+
+  it('insertBudget → budget.insert', async () => {
+    await bridge.insertBudget(
+      { id: 'bgt-1', bookId: 'book-1', budgetType: 'monthly', categoryId: null, period: '2026-09', amountCents: 300000, version: 1 },
+      'mut-3'
+    )
+    expect(capturedCommand).toBe('budget.insert')
+    const payload = JSON.parse(capturedPayload)
+    expect(payload.budget.id).toBe('bgt-1')
+    expect(payload.budget.amountCents).toBe(300000)
+    expect(payload.mutationId).toBe('mut-3')
+  })
+
+  it('updateBudget → budget.update', async () => {
+    await bridge.updateBudget({ id: 'bgt-1', amountCents: 500000, version: 2 }, 'mut-4')
+    expect(capturedCommand).toBe('budget.update')
+    const payload = JSON.parse(capturedPayload)
+    expect(payload.budget.amountCents).toBe(500000)
+    expect(payload.budget.version).toBe(2)
+    expect(payload.mutationId).toBe('mut-4')
+  })
+
+  it('deleteBudget → budget.delete', async () => {
+    await bridge.deleteBudget('bgt-1', 'mut-5')
+    expect(capturedCommand).toBe('budget.delete')
+    const payload = JSON.parse(capturedPayload)
+    expect(payload.id).toBe('bgt-1')
+    expect(payload.mutationId).toBe('mut-5')
   })
 })

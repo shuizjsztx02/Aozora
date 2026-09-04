@@ -52,6 +52,14 @@ export function extractAmount(text: string): AmountMatch | null {
   const chineseResult = tryChineseUnits(trimmed)
   if (chineseResult) return chineseResult
 
+  // R-M1-48: If text contains Chinese currency units but tryChineseUnits rejected
+  // (e.g. "5元35角" with jiao >= 10), don't fall through to tryDecimal/tryInteger.
+  // This prevents silent degradation where fragments of malformed expressions
+  // get picked up as valid amounts.
+  if (/(?:元|块|角|毛)/.test(trimmed)) {
+    return null
+  }
+
   const decimalResult = tryDecimal(trimmed)
   if (decimalResult) return decimalResult
 
@@ -200,7 +208,13 @@ export function extractAllAmounts(text: string): AmountMatch[] {
       if (isChineseUnits) {
         const yuanStr = match[1].replace(/[,，]/g, '')
         const jiaoStr = match[2]
-        amountStr = jiaoStr && jiaoStr !== '0' ? `${yuanStr}.${jiaoStr.padEnd(1, '0').slice(0, 1)}` : yuanStr
+        // R-M1-49: 与 extractAmount 一致，角位 >= 10 拒绝而非截断
+        if (jiaoStr && parseInt(jiaoStr, 10) >= 10) {
+          // R-M1-48: 记录被拒绝的范围，阻止后续 decimal/integer 模式提取片段
+          ranges.push([start, end])
+          continue
+        }
+        amountStr = jiaoStr && jiaoStr !== '0' ? `${yuanStr}.${jiaoStr.padEnd(1, '0')}` : yuanStr
       } else {
         amountStr = match[1].replace(/[,，]/g, '')
       }
