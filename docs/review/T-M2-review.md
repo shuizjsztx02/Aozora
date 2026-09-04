@@ -403,3 +403,71 @@
 4. **R-M2-41**（P3）：改 async fixture。
 
 **门禁目标：** 修复后 `pytest tests/ -q` 应恢复 114 passed（当前 106 + T-M2-05 的 8 passed）+ 新增 T-M2-05 修复后的 8 个用例。
+
+---
+
+## T-M2-04 审查（2026-09-04）
+
+### 审查范围与方法
+
+- **基线：** 提交 `0a40ca3`（feat: T-M2-03 认证会话 + T-M2-04 账本核心 API）。
+- **方法：** 逐项对照 T-M2-04 完成记录（`production-execution-plan.md:232-272`）复核代码与实测探针；门禁重跑。
+- **交付声称：** 5 个实体 CRUD、ownership guard、version 乐观并发、软删除、分页、Transactions undo、Budgets PUT upsert。
+- **明确未做：** mutationId 幂等（→T-M3-01）、服务端统计（T-M2-05）。
+
+### 门禁与探针结果
+
+| 检查 | 结果 |
+|---|---|
+| `pytest tests/ -q --ignore=tests/test_stats_exports.py` | ✅ **106 passed in 4.06s** |
+| `pytest tests/test_stats_exports.py -q` | ❌ **8 failed / 8 passed**（T-M2-05 WIP，与 T-M2-04 无关） |
+| `GET /me`（R-M2-27 复测） | ❌ **404** — 端点未实现 |
+| `POST /books` → `GET /books/{id}`（owner） | ✅ 201 → 200 |
+| `GET /books/{id}`（non-owner） | ✅ 404 ownership guard |
+| `PATCH /books/{id}` wrong version | ✅ 409 version conflict |
+| `PATCH /books/{id}` correct version | ✅ 200 + version bump |
+| `DELETE /books/{id}` → `GET /books/{id}` | ✅ 204 → 404 soft delete |
+| `GET /books`（pagination） | ✅ 200 + items list |
+| `POST /categories` + `POST /accounts` | ✅ 201 |
+| `POST /transactions` + `DELETE` + `POST /undo` | ✅ 201 → 204 → 200 |
+| `POST /transactions/{id}/undo`（non-owner） | ✅ 404 ownership guard |
+| `PUT /budgets/{period}`（首次 + 更新） | ✅ 200 + 200 upsert |
+| `PUT /budgets/{period}`（non-owner） | ✅ 404 ownership guard |
+| `GET /books?limit=1000` / `limit=-1` / `offset=-1` | ✅ 422 validation errors |
+
+### 发现问题
+
+#### 🔴 P1（1 项）
+
+| ID | 问题 | 证据 |
+|---|---|---|
+| **R-M2-27** | `/me` 端点未实现 | `production-execution-plan.md:350` 明确列出 "R-M2-27 `/me` 端点留给 T-M2-04"，但实测 `GET /me` 返回 404。`src/main.py:108-116` 路由注册中无 `/me` 端点。 |
+
+#### 🟡 P2 / 🟢 P3
+
+无。
+
+### 已交付功能复核
+
+| 声称 | 验证结果 |
+|---|---|
+| 5 个实体 CRUD | ✅ Books/Categories/Accounts/Transactions/Budgets 全部可用 |
+| controller/service/repository 三层架构 | ✅ 每个模块含 routes.py / service.py / repository.py |
+| ownership guard | ✅ non-owner 访问返回 404 |
+| version 乐观并发 | ✅ PATCH 时 version 不匹配返回 409 |
+| 软删除 | ✅ DELETE 后 GET 返回 404，列表不再显示 |
+| 分页（offset-based，默认 50，最大 200） | ✅ `src/common/pagination.py` 实现，无效参数返回 422 |
+| Transactions undo | ✅ `POST /transactions/{id}/undo` 恢复软删除 |
+| Budgets PUT upsert | ✅ `PUT /budgets/{period}` 首次创建 + 更新均可 |
+| mutationId 幂等（未做） | ✅ 明确留给 T-M3-01 |
+| 服务端统计（未做） | ✅ 明确留给 T-M2-05 |
+
+### 结论
+
+T-M2-04 **除 R-M2-27 外全部交付正确**。R-M2-27 是从 T-M2-03 转移的遗留项，`production-execution-plan.md:350` 明确列出但未实现，属于**承诺未兑现**。
+
+**升级判定：** T-M2-04 可升级为 ✅ 完全成立，**前提是修复 R-M2-27**。
+
+### 修复建议
+
+1. **R-M2-27**（P1）：实现 `GET /me` 端点，返回当前用户信息（user_id / nickname / status / created_at）。参考 `src/modules/auth/routes.py` 现有结构，新增路由 `@router.get("/me", response_model=UserResponse)`。
