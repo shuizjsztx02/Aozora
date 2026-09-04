@@ -8,6 +8,7 @@ import com.aozora.app.MainActivity
 import org.json.JSONObject
 import org.json.JSONTokener
 import org.junit.Assert.*
+import org.junit.Ignore
 import org.junit.Test
 import org.junit.runner.RunWith
 import java.util.concurrent.CountDownLatch
@@ -17,11 +18,18 @@ import java.util.concurrent.atomic.AtomicReference
 /**
  * 真正执行打包后的模块脚本和 Kotlin → JavaScript 回调；必须在设备上运行。
  *
- * R-M1-45 注意：WebView 测试在某些设备上可能不稳定（USB 安装弹窗超时等）。
- * 建议单独运行而非在 CI 中全量跑：
+ * R-M1-45 注意：WebView 测试在全量 connectedDebugAndroidTest 中不稳定（曾挂起 407s 后 instrumentation 崩溃），
+ * 小米设备 USB 安装弹窗超时也会中断安装。本类已标记 @Ignore，不进入全量自动化套件。
+ * 如需单独验证，临时移除 @Ignore 后运行：
  *   adb shell am instrument -w -e class com.aozora.app.bridge.WebViewBridgeTest ...
+ * 设备测试进 CI 前须补 JUnit 全局 timeout/重试护栏。
  */
 @RunWith(AndroidJUnit4::class)
+@Ignore(
+    "R-M1-45: 全量 connectedDebugAndroidTest 中不稳定（曾挂起 407s 致 instrumentation 崩溃），" +
+        "单独跑 5.5s 通过。移出全量套件避免假红/中断；需验证时临时移除 @Ignore 单独运行。" +
+        "设备测试进 CI 前须补全局 timeout/重试。"
+)
 class WebViewBridgeTest {
     private fun evaluate(scenario: ActivityScenario<MainActivity>, script: String): String {
         val done = CountDownLatch(1)

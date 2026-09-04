@@ -6,6 +6,7 @@ import androidx.test.platform.app.InstrumentationRegistry
 import com.aozora.app.db.entity.TransactionEntity
 import kotlinx.coroutines.runBlocking
 import org.junit.Assert.*
+import org.junit.Ignore
 import org.junit.Test
 import org.junit.runner.RunWith
 
@@ -21,9 +22,15 @@ import org.junit.runner.RunWith
  * 2. 手动执行 `adb shell am force-stop com.aozora.app`
  * 3. 运行 step2_verifyDataAfterKill
  *
- * 建议：将此测试拆出自动化套件或标记为 @Ignore，避免 CI 假绿。
+ * 本类已标记 @Ignore（R-M1-44），不进入自动化套件，避免假绿。
  */
 @RunWith(AndroidJUnit4::class)
+@Ignore(
+    "R-M1-44: connectedDebugAndroidTest 会把 step1/step2 背靠背执行且中间无 force-stop，" +
+        "自动化只能证明写读一致、不能证明杀进程持久化，留着会产生假绿。" +
+        "真正的杀进程验证走手工三步协议（写入 → am force-stop → 冷启动校验），结果已记录于 T-M1-review。" +
+        "设备测试进 CI 前需以独立 runner/手工门禁替代本类。"
+)
 class KillProcessPersistenceTest {
 
     private fun getAppContext(): Context =
