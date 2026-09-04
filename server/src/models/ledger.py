@@ -98,9 +98,11 @@ class Category(Base, AuditMixin, VersionedMixin):
         DateTime(timezone=True), nullable=True,
     )
 
+    # R-M2-25: prefer direct class reference over string ``remote_side``.
+    # ``parent_id`` disambiguates the self-referential FK.
     book: Mapped[Book | None] = relationship(back_populates="categories")
     parent: Mapped[Category | None] = relationship(
-        remote_side="Category.id", backref="children",
+        "Category", remote_side="Category.id", backref="children",
     )
 
 

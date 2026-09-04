@@ -28,6 +28,7 @@ class TestReadiness:
                 database_url="postgresql+asyncpg://bad:bad@127.0.0.1:1/none",
                 secret_key="test",
                 env="test",
+                api_prefix="",
             )
         )
         # Reset the engine so it picks up the new config

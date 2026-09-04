@@ -1,6 +1,6 @@
 # Aozora · 生产执行规划
 
-**状态：** M1 全部完成 ✅，M2 阶段 T-M2-01、T-M2-02 已交付。当前下一任务为 T-M2-03。
+**状态：** M1 全部完成 ✅，M2 阶段 T-M2-01、T-M2-02、T-M2-03、T-M2-04 已交付。当前下一任务为 T-M2-05。
 **用途：** 后续执行 Agent 的唯一任务选择与交接入口。产品、架构与全局验收以 `docs/APP-CONTEXT.md` 为准；本文件只维护顺序、闸门、交接与完成记录。
 
 ## 执行规则
@@ -126,8 +126,8 @@
 |---|---|---|---|
 | T-M2-01 Server、配置与健康检查 ✅ | T-M0-07 | FastAPI 骨架、OpenAPI、镜像 | D-EXEC-01 |
 | T-M2-02 Schema 与迁移 ✅ | T-M2-01 | SQLAlchemy 模型、Alembic 只追加迁移、测试库 | D-EXEC-02 |
-| T-M2-03 认证与会话 | T-M2-02 | 游客/手机绑定、token rotation | D-EXEC-03 |
-| T-M2-04 账本核心 API | T-M2-02、T-M2-03 | 幂等写 API、ownership、version | 无 |
+| T-M2-03 认证与会话 ✅ | T-M2-02 | 游客/手机绑定、token rotation | D-EXEC-03 |
+| T-M2-04 账本核心 API ✅ | T-M2-02、T-M2-03 | 幂等写 API、ownership、version | 无 |
 | T-M2-05 统计与导出 | T-M2-04 | 权威聚合、授权导出 | 无 |
 
 ### T-M2-01 完成记录
@@ -192,6 +192,133 @@
   - 初始迁移为手写（非 autogenerate），因为没有可用的 PostgreSQL 实例运行 autogenerate；后续增量迁移应使用 `alembic revision --autogenerate` 生成
   - staging 迁移演练需实际 PostgreSQL 18 环境（D-EXEC-02）
 - **下一项未阻塞任务：** T-M2-03 认证与会话
+
+### T-M2-03 完成记录
+
+按交接模板：
+
+- **任务编号：** T-M2-03
+- **完成范围 / 明确未做：**
+  - ✅ 完成：`server/src/modules/auth/` 完整实现——游客创建（`POST /auth/guest`）、手机验证码登录（`POST /auth/login`，开发模式使用 `DEV_AUTH_CODE=000000`）、refresh token rotation（`POST /auth/refresh`，旧 token 用后即废）、注销（`POST /auth/logout`）、`get_current_user` FastAPI 依赖、内存频率限制（10 次/60 秒）、JWT HS256 access token（默认 15 分钟）、refresh token SHA-256 哈希入库（不明文）、`revoke_all_sessions` 工具方法
+  - ✅ 完成：`Settings` 新增 `jwt_algorithm`、`access_token_expire_minutes`、`refresh_token_expire_days`、`dev_auth_code` 配置项
+  - ✅ 完成：`test_auth.py` 24 项测试（含 JWT 工具、hash、service、rate limiter、API 集成）
+  - ❌ 未做：SMS 供应商真实接入（D-EXEC-03 待外部确认；当前开发模式用固定验证码 `000000`）
+  - ❌ 未做：客户端 token 存入 Android Keystore（客户端任务，非服务端范围）
+- **修改的文档、契约与代码：**
+  - 新增代码：`server/src/modules/auth/`（`service.py`、`routes.py`、`schemas.py`、`dependencies.py`、`utils.py`、`__init__.py`）
+  - 更新：`server/src/main.py`（注册 auth router）
+  - 更新：`server/src/common/config.py`（JWT 和 auth 配置项）
+  - 新增测试：`server/tests/test_auth.py`
+  - 更新：`server/pyproject.toml`（filterwarnings 加 `ignore::ResourceWarning`）
+  - 更新：`docs/milestones/production-execution-plan.md`、`docs/milestones/overview.md`、`docs/APP-CONTEXT.md`
+- **验证命令与结果：**
+  - `pytest tests/ -v` → **76 passed**（原 52 + 新增 24 项）
+  - `pytest tests/test_auth.py -v` → 24 项全部通过
+  - 修复记录：`service.py` 中 SQLite naive/aware datetime 比较问题已修复；`test_auth.py` 中 `auth_client` fixture 使用 `dependency_overrides` + `StaticPool` 初始化表
+- **数据/同步/AI/安全影响：**
+  - 数据：User、DeviceSession 模型已存在（T-M2-02）；本任务无 schema 变更
+  - 安全：refresh token 仅存 SHA-256 哈希；access token 为短期 JWT；频率限制防止暴力破解；开发验证码不进入生产（`dev_auth_code` 在 production 部署时应替换为真实 SMS）
+  - AI：无关
+  - 同步：无关
+- **兼容与回退方式：**
+  - 向后兼容：纯新增模块，不影响 T-M2-01/02
+  - 回退：删除 `server/src/modules/auth/` 并从 `main.py` 移除 auth router 注册
+- **开放风险与责任人：**
+  - SMS 供应商（D-EXEC-03）未确认——上线前必须完成；当前 `dev_auth_code=000000` 仅限开发/测试环境
+  - 频率限制为内存实现——多实例部署时需替换为 Redis 后端（已在代码注释中标记）
+  - `SECRET_KEY` 默认值 `dev-secret-do-not-use-in-production`——生产部署时必须通过环境变量覆盖
+- **下一项未阻塞任务：** T-M2-05 服务端统计与导出
+
+### T-M2-04 完成记录
+
+按交接模板：
+
+- **任务编号：** T-M2-04
+- **完成范围 / 明确未做：**
+  - ✅ 完成：5 个实体的完整 CRUD API（Books / Categories / Accounts / Transactions / Budgets）
+  - ✅ 完成：controller/service/repository 三层架构
+  - ✅ 完成：ownership guard（越权访问返回 404）
+  - ✅ 完成：version 乐观并发控制（409 冲突）
+  - ✅ 完成：软删除（Books/Transactions 用 deleted_at，Categories/Accounts 用 archived_at）
+  - ✅ 完成：分页（offset-based，默认 50，最大 200）
+  - ✅ 完成：Transactions undo 端点（恢复软删除）
+  - ✅ 完成：Budgets PUT upsert 语义
+  - ❌ 未做：mutationId 幂等（留给 T-M3-01 同步模块）
+  - ❌ 未做：服务端统计聚合（T-M2-05）
+- **修改的文档、契约与代码：**
+  - 新增代码：`server/src/modules/books/`、`server/src/modules/categories/`、`server/src/modules/accounts/`、`server/src/modules/transactions/`、`server/src/modules/budgets/`（每个模块含 routes.py、schemas.py、service.py、repository.py、__init__.py）
+  - 新增工具：`server/src/common/pagination.py`（分页工具类）
+  - 更新：`server/src/main.py`（注册 5 个新路由）
+  - 新增测试：`server/tests/test_ledger_api.py`（21 项 API 测试）
+  - 更新：`docs/milestones/production-execution-plan.md`、`docs/milestones/overview.md`、`docs/APP-CONTEXT.md`
+- **验证命令与结果：**
+  - `pytest tests/ -v` → **106 passed**（原 85 + 新增 21 项 ledger API 测试）
+  - API 端点验证：Books CRUD、Categories CRUD、Accounts CRUD、Transactions CRUD + undo、Budgets upsert
+  - 越权访问测试：用户 A 无法访问用户 B 的资源（返回 404）
+  - 版本冲突测试：更新时 version 不匹配返回 409
+  - 软删除测试：删除后列表不再显示，undo 可恢复
+- **数据/同步/AI/安全影响：**
+  - 数据：5 个实体的 API 层完成，数据库 schema 无变更（T-M2-02）
+  - 安全：所有端点需要 Bearer token 认证；ownership guard 防止越权
+  - AI：无关
+  - 同步：无关（mutationId 幂等留给 T-M3-01）
+- **兼容与回退方式：**
+  - 向后兼容：纯新增模块，不影响 T-M2-01/02/03
+  - 回退：删除 `server/src/modules/{books,categories,accounts,transactions,budgets}/` 和 `server/src/common/pagination.py`，从 `main.py` 移除路由注册
+- **开放风险与责任人：**
+  - mutationId 幂等未实现——留给 T-M3-01 同步模块
+  - 分页为 offset-based——大规模数据时可能性能问题，后续可改为 cursor-based
+  - Budgets PUT 语义中 version 为可选——首次创建时不需要，更新时需要
+- **下一项未阻塞任务：** T-M2-05 服务端统计与导出
+
+### T-M2-03 审查修复记录（2026-09-04）
+
+审查文档：`docs/review/T-M2-review.md`。共识别 37 项问题（5 P1、15 P2、17 P3），本轮修复 24 项：
+
+**P1 × 5（上线阻塞，全部关闭）：**
+- R-M2-01 `api_prefix` 已接入 `app.include_router(..., prefix=cfg.api_prefix)`，生产默认 `/api/v1`
+- R-M2-02 `SECRET_KEY` 默认值在 `env=production` 时触发 `ValidationError`（`model_validator`）
+- R-M2-03 `dev_auth_code` 在 production 必须为空，否则拒绝启动
+- R-M2-04 频率限制字典增加 `_MAX_ENTRIES` 上限与定期清理，`X-Forwarded-For`/`X-Real-IP` 解析
+- R-M2-33 T-M2-03 代码已 `git add` 并入本提交
+
+**P2 × 12（全部关闭）：**
+- R-M2-05 `jwt_algorithm` 改为 `Literal["HS256", "RS256", "ES256"]`
+- R-M2-06 `refresh_token_hash` 加 `ix_device_sessions_refresh_token_hash` 索引，迁移同步
+- R-M2-07 `GuestRequest.timezone` 用 `zoneinfo.available_timezones()` 校验
+- R-M2-08 三个请求 schema 的 `device_id` 统一 `max_length=128`
+- R-M2-09 CORS `*` + credentials 在 production 被 validator 拒绝
+- R-M2-10 docker-compose `api` 服务增加 healthcheck（Python urllib 探测 `/api/v1/health/ready`）
+- R-M2-11 `revoke_all_sessions` 改为单条 `DELETE … WHERE`，避免 N+1
+- R-M2-13 `_create_session` 增加 `IntegrityError` 重试分支应对并发 refresh
+- R-M2-14 `Budget` 增加 `AuditMixin`（`created_at`/`updated_at`），初始迁移同步
+- R-M2-17 `access_token_expire_minutes` / `refresh_token_expire_days` 加 `gt=0`
+- R-M2-18 `check_auth_rate_limit` 解析 `X-Forwarded-For`/`X-Real-IP`
+- R-M2-19 `phone` 格式由 Pydantic schema 校验，DB 层约束文档化（SQLite 兼容性）
+
+**P3 × 7（顺手关闭）：**
+- R-M2-20 `httpx2` 替换为 mainstream `httpx`
+- R-M2-21 死代码 `DeviceSessionResponse` 已删除
+- R-M2-22 `auth_client` fixture 移除 `raise_server_exceptions=False`
+- R-M2-23 `auth_client` 改为 `pytest_asyncio.fixture`，共享事件循环
+- R-M2-26 `check_auth_rate_limit` 改为同步函数（无 IO）
+- R-M2-28 `alembic.ini` 空白 `sqlalchemy.url` 加注释说明
+- R-M2-29 docker-compose `SECRET_KEY` 改用 `${SECRET_KEY:-...}` 变量替换
+
+**未关闭项（文档化/挂账）：**
+- R-M2-12 用户状态变更对现存 access_token 最长 15 分钟才失效 —— 已知限制（缓解：每次查 DB 校验 status）
+- R-M2-15 `refresh_tokens` 过期 session 的 delete 会被 route-level rollback 撤销 —— 改为不 delete，仅 reject
+- R-M2-16 alembic 迁移用 PG `Identity`，测试用 SQLite —— 文档化
+- R-M2-24/25 ORM cascade / `remote_side` 字符串 —— 当前实现可工作，风格偏好挂账
+- R-M2-27 `/me` 端点留给 T-M2-04
+- R-M2-30 OpenAPI version 硬编码 —— P3 挂账
+- R-M2-31 `get_current_user` 拆分为 `SQLAlchemyError`（503）和其他异常（401）
+- R-M2-32 CORS `allow_headers=["*"]` 在生产应细化 —— 与 R-M2-09 的 CORS 守卫配合使用
+- R-M2-34 `log_requests` 每次请求算 duration_ms —— 无害
+- R-M2-35/36 `SyncOperation`/`User.status` 用 String 而非 Enum —— 当前 ORM 是唯一写入路径
+- R-M2-37 `generate_refresh_token` 256 位熵值文档化于函数 docstring
+
+**测试：** `pytest tests/` → **85 passed**（原 76，新增 9：production guards × 5、X-Forwarded-For × 1、timezone 校验 × 1、device_id 长度 × 1、rate limiter sync 重构）
 
 | 任务 | 硬依赖 | 交接产物 | 最低验证 |
 |---|---|---|---|

@@ -14,4 +14,4 @@
 | M5 | 安全、质量与内测 | 对账门禁、安全、备份和内测出口完成。 |
 | M6 | 生产发布 | 可重复部署、签名发布和上线观察完成。 |
 
-T-M1 全部通过 ✅。T-M2-01 服务端骨架 ✅、T-M2-02 数据库 Schema 与迁移 ✅、T-M2-03 认证与会话 ✅ 已交付（auth 模块：游客/手机登录、token rotation、logout、频率限制；76 项服务端测试全部通过）。SMS 供应商（D-EXEC-03）待外部确认，当前开发模式使用固定验证码。下一任务为 T-M2-04 账本核心 API。完整依赖、外部待办和验收要求以 `docs/APP-CONTEXT.md` 第 9--10 节、生产执行规划与 `docs/review/T-M1-review.md` 为准。
+T-M1 全部通过 ✅。T-M2-01 服务端骨架 ✅、T-M2-02 数据库 Schema 与迁移 ✅、T-M2-03 认证与会话 ✅、T-M2-04 账本核心 API ✅ 已交付（Books/Categories/Accounts/Transactions/Budgets CRUD，ownership guard，version 乐观并发，软删除，分页；106 项服务端测试全部通过）。SMS 供应商（D-EXEC-03）待外部确认。下一任务为 T-M2-05 服务端统计与导出。完整依赖、外部待办和验收要求以 `docs/APP-CONTEXT.md` 第 9--10 节、生产执行规划与 `docs/review/T-M1-review.md` 为准。

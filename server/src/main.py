@@ -15,6 +15,12 @@ from src.common.errors import register_exception_handlers
 from src.common.health import router as health_router
 from src.common.logging import setup_logging
 from src.common.request_id import RequestIdMiddleware
+from src.modules.auth.routes import router as auth_router
+from src.modules.books.routes import router as books_router
+from src.modules.categories.routes import router as categories_router
+from src.modules.accounts.routes import router as accounts_router
+from src.modules.transactions.routes import router as transactions_router
+from src.modules.budgets.routes import router as budgets_router
 
 logger = logging.getLogger(__name__)
 
@@ -94,8 +100,16 @@ async def log_requests(request: Request, call_next):  # noqa: ANN001
 
 
 # -- Routers --------------------------------------------------------------
+# Apply the configured api_prefix so reverse proxies can strip it cleanly
+# and future v2 routes can coexist.
 
-app.include_router(health_router)
+app.include_router(health_router, prefix=cfg.api_prefix)
+app.include_router(auth_router, prefix=cfg.api_prefix)
+app.include_router(books_router, prefix=cfg.api_prefix)
+app.include_router(categories_router, prefix=cfg.api_prefix)
+app.include_router(accounts_router, prefix=cfg.api_prefix)
+app.include_router(transactions_router, prefix=cfg.api_prefix)
+app.include_router(budgets_router, prefix=cfg.api_prefix)
 
 
 @app.get("/", tags=["meta"])

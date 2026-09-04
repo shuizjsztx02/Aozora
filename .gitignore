@@ -24,3 +24,6 @@ __pycache__/
 .coverage
 htmlcov/
 server/.env
+
+# Claude Code local state
+.claude/

@@ -43,6 +43,9 @@ def upgrade() -> None:
         sa.Column("created_at", sa.DateTime(timezone=True), server_default=sa.func.now(), nullable=False),
         sa.Column("updated_at", sa.DateTime(timezone=True), server_default=sa.func.now(), nullable=False),
         sa.UniqueConstraint("user_id", "device_id", name="uq_device_sessions_user_device"),
+        # R-M2-06: lookups by refresh_token_hash happen on every refresh /
+        # logout; without an index this is a full-table scan.
+        sa.Index("ix_device_sessions_refresh_token_hash", "refresh_token_hash"),
     )
 
     # ── books ──────────────────────────────────────────────────────────
@@ -120,6 +123,9 @@ def upgrade() -> None:
         sa.Column("period", sa.String(10), nullable=False),
         sa.Column("amount_cents", sa.BigInteger, nullable=False),
         sa.Column("version", sa.BigInteger, nullable=False, server_default="1"),
+        # R-M2-14: created_at/updated_at for audit parity with other entities.
+        sa.Column("created_at", sa.DateTime(timezone=True), server_default=sa.func.now(), nullable=False),
+        sa.Column("updated_at", sa.DateTime(timezone=True), server_default=sa.func.now(), nullable=False),
         sa.UniqueConstraint("book_id", "budget_type", "period", "category_id", name="uq_budgets_period_category"),
         sa.CheckConstraint("amount_cents > 0", name="ck_budgets_amount_positive"),
     )

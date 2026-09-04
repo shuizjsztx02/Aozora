@@ -2,11 +2,21 @@
 
 from __future__ import annotations
 
+import os
+
 import pytest
-from fastapi.testclient import TestClient
+from starlette.testclient import TestClient
 
 from src.common.config import Settings, reset_config, set_config
 from src.common.database import reset_engine
+
+# R-M2-01: set API_PREFIX before ``src.main`` is imported so routers
+# register at natural paths (``/health``, ``/auth/guest``, …). Without
+# this, main.py's module-level ``cfg = get_config()`` would bake in the
+# production default ``/api/v1`` and all tests would have to use that
+# prefix. Tests that specifically verify the default can monkeypatch
+# this env var away.
+os.environ.setdefault("API_PREFIX", "")
 
 
 @pytest.fixture(autouse=True)
@@ -16,6 +26,7 @@ def _test_config():
         database_url="sqlite+aiosqlite:///:memory:",
         secret_key="test-secret",
         env="test",
+        api_prefix=os.environ.get("API_PREFIX", ""),
     )
     set_config(settings)
     yield

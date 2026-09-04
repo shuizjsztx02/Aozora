@@ -9,7 +9,7 @@ from sqlalchemy import BigInteger, CheckConstraint, ForeignKey, String, UniqueCo
 from sqlalchemy.dialects.postgresql import UUID
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
-from src.models.base import Base, VersionedMixin
+from src.models.base import AuditMixin, Base, VersionedMixin
 
 
 class BudgetType(str, enum.Enum):
@@ -17,7 +17,9 @@ class BudgetType(str, enum.Enum):
     ANNUAL = "annual"
 
 
-class Budget(Base, VersionedMixin):
+# R-M2-14: Budget is the only value-bearing entity that lacked AuditMixin;
+# add created_at/updated_at for audit parity with the rest of the schema.
+class Budget(Base, AuditMixin, VersionedMixin):
     __tablename__ = "budgets"
     __table_args__ = (
         UniqueConstraint(

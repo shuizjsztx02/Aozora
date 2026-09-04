@@ -25,11 +25,25 @@ services:
     environment:
       ENV: development
       DATABASE_URL: postgresql+asyncpg://aozora:aozora@db:5432/aozora
-      SECRET_KEY: dev-secret-do-not-use-in-production
+      # R-M2-29: reference the env file rather than hard-coding a secret
+      # in compose. The value below is the dev-only default; production
+      # must set a unique, unpredictable SECRET_KEY via env file.
+      SECRET_KEY: ${SECRET_KEY:-dev-secret-do-not-use-in-production}
       LOG_LEVEL: DEBUG
     depends_on:
       db:
         condition: service_healthy
+    # R-M2-10: healthcheck so orchestrators / reverse proxies can detect
+    # when the api is ready to receive traffic. Uses Python's urllib since
+    # the slim image doesn't ship curl.
+    healthcheck:
+      test:
+        - "CMD-SHELL"
+        - "python -c \"import urllib.request; urllib.request.urlopen('http://localhost:8000/api/v1/health/ready')\" || exit 1"
+      interval: 10s
+      timeout: 3s
+      retries: 5
+      start_period: 10s
 
 volumes:
   pgdata:

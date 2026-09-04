@@ -2,8 +2,13 @@
 
 from __future__ import annotations
 
-from pydantic import AliasChoices, Field
+from typing import Literal
+
+from pydantic import AliasChoices, Field, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
+
+# Default value for ``secret_key`` — must be overridden in production.
+_DEV_SECRET_KEY = "dev-secret-do-not-use-in-production"
 
 
 class Settings(BaseSettings):
@@ -33,8 +38,30 @@ class Settings(BaseSettings):
 
     # --- security ---
     secret_key: str = Field(
-        default="dev-secret-do-not-use-in-production",
+        default=_DEV_SECRET_KEY,
         validation_alias=AliasChoices("SECRET_KEY", "secret_key"),
+    )
+
+    # --- jwt ---
+    jwt_algorithm: Literal["HS256", "RS256", "ES256"] = Field(
+        default="HS256",
+        validation_alias=AliasChoices("JWT_ALGORITHM", "jwt_algorithm"),
+    )
+    access_token_expire_minutes: int = Field(
+        default=15,
+        gt=0,
+        validation_alias=AliasChoices("ACCESS_TOKEN_EXPIRE_MINUTES", "access_token_expire_minutes"),
+    )
+    refresh_token_expire_days: int = Field(
+        default=30,
+        gt=0,
+        validation_alias=AliasChoices("REFRESH_TOKEN_EXPIRE_DAYS", "refresh_token_expire_days"),
+    )
+
+    # --- auth ---
+    dev_auth_code: str = Field(
+        default="000000",
+        validation_alias=AliasChoices("DEV_AUTH_CODE", "dev_auth_code"),
     )
 
     # --- redis (optional for first release) ---
@@ -70,6 +97,25 @@ class Settings(BaseSettings):
         if self.cors_origins.strip() == "*":
             return ["*"]
         return [o.strip() for o in self.cors_origins.split(",") if o.strip()]
+
+    @model_validator(mode="after")
+    def _check_production_safety(self) -> "Settings":
+        """Block obviously-insecure defaults when running in production."""
+        if self.env != "production":
+            return self
+        if self.secret_key == _DEV_SECRET_KEY:
+            raise ValueError(
+                "SECRET_KEY must be set to a unique, unpredictable value in production"
+            )
+        if self.dev_auth_code:
+            raise ValueError(
+                "DEV_AUTH_CODE must be empty in production; SMS provider not yet integrated"
+            )
+        if self.cors_origins.strip() == "*":
+            raise ValueError(
+                "CORS_ORIGINS must be an explicit allow-list in production"
+            )
+        return self
 
 
 # ---------------------------------------------------------------------------

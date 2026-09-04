@@ -33,7 +33,11 @@ class TestDefaults:
         s = Settings(database_url="sqlite+aiosqlite:///test.db")
         assert s.env == "development"
 
-    def test_default_api_prefix(self):
+    def test_default_api_prefix(self, monkeypatch):
+        # The autouse conftest sets API_PREFIX="" so routers register at
+        # natural paths in tests; clear it here to verify the Settings
+        # default (``/api/v1``) is still applied when no env override exists.
+        monkeypatch.delenv("API_PREFIX", raising=False)
         s = Settings(database_url="sqlite+aiosqlite:///test.db")
         assert s.api_prefix == "/api/v1"
 
@@ -56,7 +60,14 @@ class TestDefaults:
 
 class TestProperties:
     def test_is_production_true(self):
-        s = Settings(database_url="x", env="production")
+        # Production config must also pass the safety guards (R-M2-02/03/09).
+        s = Settings(
+            database_url="x",
+            env="production",
+            secret_key="super-secret-key-that-is-not-default",
+            dev_auth_code="",
+            cors_origins="https://aozora.example",
+        )
         assert s.is_production is True
 
     def test_is_production_false(self):

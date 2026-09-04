@@ -27,6 +27,9 @@ class TestOpenAPI:
         assert resp.status_code == 200
 
     def test_health_in_openapi(self, client):
+        # R-M2-01: in tests API_PREFIX is empty (see conftest.py) so
+        # health endpoints register at their natural paths; production
+        # would see them under /api/v1.
         spec = client.get("/openapi.json").json()
         assert "/health" in spec["paths"]
         assert "/health/ready" in spec["paths"]

@@ -6,7 +6,7 @@ import enum
 import uuid
 from datetime import datetime
 
-from sqlalchemy import BigInteger, DateTime, ForeignKey, String, UniqueConstraint
+from sqlalchemy import BigInteger, DateTime, ForeignKey, Index, String, UniqueConstraint
 from sqlalchemy.dialects.postgresql import UUID
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
@@ -18,6 +18,13 @@ class UserStatus(str, enum.Enum):
     ACTIVE = "active"
     DEACTIVATED = "deactivated"
     DELETED = "deleted"
+
+
+# R-M2-19: phone format is enforced at the Pydantic schema layer
+# (PhoneLoginRequest: pattern ``^\d{11}$``). A DB-level CHECK constraint
+# would need PostgreSQL-specific regex syntax (``~``), which breaks the
+# SQLite test backend. Since the ORM is the only write path, schema-layer
+# validation is sufficient.
 
 
 class User(Base, AuditMixin):
@@ -53,6 +60,9 @@ class DeviceSession(Base, AuditMixin):
     __tablename__ = "device_sessions"
     __table_args__ = (
         UniqueConstraint("user_id", "device_id", name="uq_device_sessions_user_device"),
+        # R-M2-06: every refresh / logout looks up by token hash; without an
+        # index this is a full-table scan.
+        Index("ix_device_sessions_refresh_token_hash", "refresh_token_hash"),
     )
 
     id: Mapped[uuid.UUID] = mapped_column(

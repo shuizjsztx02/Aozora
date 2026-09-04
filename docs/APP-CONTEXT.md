@@ -120,8 +120,8 @@
 | AI、规则 NLU 与动作协议 | 本地 NLU 与 ActionProposal 基础已实现；服务端 AI/执行闭环未接入 | `PARTIAL` |
 | 本地数据与离线队列 | Room 6 表、完整原子写 repository 与 pending mutation 队列已实现（account/budget/transaction 写路径闭环），设备可靠性已通过（23/23 含手工 force-stop 协议）；离线同步与备份归 M3/M5 | `PARTIAL` |
 | 原生桥、语音、图片、提醒与小组件 | 版本化 Bridge 与 React 打包接线已实现；其余原生能力待做 | `PARTIAL` |
-| 服务端 | FastAPI 骨架、配置校验、健康检查、OpenAPI 3.1、Dockerfile；11 实体模型 + Alembic 初始迁移；auth 模块（游客/手机登录、token rotation、logout、频率限制）| `PARTIAL`，T-M2-01/02/03 ✅；业务 API 待实施 |
-| 测试 | 前端 313 + Android JVM 8 + 设备 Room 20 + 服务端 76 项通过；Android 设备 23/23 实测（含手工 force-stop 持久化验证，杀进程与 WebView 测试已 @Ignore 避免自动化假绿/假红）；前端/Android CI 已通过，服务端 CI 门禁尚未建立 | `PARTIAL` |
+| 服务端 | FastAPI 骨架、配置校验、健康检查、OpenAPI 3.1、Dockerfile；11 实体模型 + Alembic 初始迁移；auth 模块；账本核心 API（Books/Categories/Accounts/Transactions/Budgets CRUD）| `PARTIAL`，T-M2-01/02/03/04 ✅；统计导出待实施 |
+| 测试 | 前端 313 + Android JVM 8 + 设备 Room 20 + 服务端 106 项通过；Android 设备 23/23 实测（含手工 force-stop 持久化验证，杀进程与 WebView 测试已 @Ignore 避免自动化假绿/假红）；前端/Android CI 已通过，服务端 CI 门禁尚未建立 | `PARTIAL` |
 | 发布 | 无签名材料和可分发产物 | `TARGET` |
 
 ### 3.2 当前不能视为已交付的能力
@@ -133,7 +133,7 @@
 - 可靠自动备份、数据库恢复和账号删除
 - 多账本、二级分类、支付渠道（Schema 已支持，业务 API 待实施）
 - 生产监控、CI/CD、灰度发布和安全审计
-- 服务端自动化测试门禁（服务端 76 项测试本地通过；前端/Android CI 已通过；服务端 CI 门禁尚未建立）
+- 服务端自动化测试门禁（服务端 106 项测试本地通过；前端/Android CI 已通过；服务端 CI 门禁尚未建立）
 
 ---
 
