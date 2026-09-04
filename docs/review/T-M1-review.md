@@ -1,8 +1,8 @@
 # T-M1 代码审查记录
 
 - **审查日期：** 2026-09-03 ~ 2026-09-04
-- **审查范围：** T-M1-01、T-M1-02、T-M1-03、T-M1-04、T-M1-05。前半保留首次审查历史，当前结论见各次闭环复审。
-- **审查方式：** 首次只读审查；2026-09-04 按用户授权复审、针对性修复并实际执行验证；2026-09-04 末段对 T-M1-04 NLU 重建做新一轮只读评审。
+- **审查范围：** T-M1-01、T-M1-02、T-M1-03、T-M1-04、T-M1-05。前半保留首次审查历史，当前结论见各次闭环复审与文末全量复验。
+- **审查方式：** 首次只读审查；2026-09-04 按用户授权复审、针对性修复并实际执行验证；2026-09-04 对 T-M1-04 NLU 重建做只读评审（R-M1-34~41）；2026-09-04 午间基于已提交代码（`b695126`）做 T-M1 全量复验（只读 + 真机实测）；2026-09-04 晚间对增量修复（`18afadd` + `95cde86`）做第三轮复测与审查。
 - **基线提交：** `81ff723`（审查时全部变更均为未提交的工作区状态）
 - **复验与修复：** 首轮记录曾称 18 项全部关闭；本轮重开 R-M1-07 对应契约问题并新增 R-M1-19～33。T-M1-03 仍未通过设备验收，不能整体标记完成。
 
@@ -435,3 +435,134 @@
 
 APP-CONTEXT 中 T-M1-04 状态目前写"已完成"——**建议在宣布完成前修复 R-M1-34 与 R-M1-35**，或至少把状态改为 `PARTIAL`。
 
+---
+
+## 2026-09-04 T-M1 全量复验（第二轮，基于已提交代码）
+
+### 基线与方法
+
+- **基线：** `b695126`（`docs: update M1 status to completed after CI verification`），前置 `0c7b970`（CI SDK 36）、`bacf278`（M1 + M2-01 骨架）。工作区除 `AGENTS.md`（用户自行编辑，非评审范围）外干净。
+- **方法：** 只读复验 + 全部门禁重跑 + 真机实测。真机：小米 2410DPN6CC（Android 16），本轮首次全程可用（此前所有轮次均无设备）。
+- **结论摘要：** M1 工程基础扎实，历史修复全部保持；**但本轮评审的 R-M1-34~37 在提交代码中原样存在、未修复，而所有状态文档已将 T-M1-04 与 M1 整体标记为 ✅——状态失真，见 R-M1-47。**
+
+### 门禁与真机实测结果
+
+| 门禁 / 验证 | 结果 |
+|---|---|
+| `npm run lint` | ✅ exit 0 |
+| `npm run typecheck` | ✅ exit 0 |
+| `npm test -- --run` | ✅ 14 文件 / 309 tests |
+| GitHub Actions CI（run `33838411776`，SDK 36 提交） | ✅ success（`gh run list` 实查） |
+| 真机设备测试 | ✅ **23/23 复现**：Room 20 + 杀进程 2（`am instrument` 分包）+ WebView 1（单独跑 5.5s 通过） |
+| **真实杀进程协议**（写入 → `adb shell am force-stop com.aozora.app` → 冷启动校验实体与 pending mutation） | ✅ **本轮亲手执行并通过**（此前仅文档声称） |
+| `tools/validate-baseline.ps1` | ⚠️ 本机失败：硬依赖 `rg` 未安装（见 R-M1-46）；CI Ubuntu 预装不受影响 |
+
+### 历史修复复核（R-M1-01…33）
+
+全部抽查项在当前提交代码中**保持修复状态，无一项回归**：`bizDateOfMonth` 往返校验、`localBizDate` 形状断言 + 实例缓存、CI Node 24 + `timeout-minutes`/`concurrency`、`string | null` 类型、schema `allOf`/`if/then` + 安全整数上限 + date format、16 fixture 直接导入 + ajv 平价、`ProposalValidationContext`、`fromString` 拒绝 `"12."`、`TransactionType` 去重、tsconfig 无 references、vitest 无 globals、`App.test.tsx` 直接断言、balance 截断口径已写入 `data-model.md`。
+
+### 任务级判定（本轮复验）
+
+| 任务 | 判定 | 依据 |
+|---|---|---|
+| T-M1-01 | ✅ 成立 | CI 真实跑绿；瑕疵见 R-M1-46 |
+| T-M1-02 | ✅ 成立 | 修复保持，309 测试含全部回归 |
+| T-M1-03 | ✅ **成立（本轮实测背书）** | 23/23 设备测试 + 真 force-stop 协议复现；Repository 5 个 account/budget 写函数存在且 10 处 `withTransaction`，有设备测试覆盖。保留项：TS 客户端缺 5 个写命令（R-M1-43）、杀进程测试设计（R-M1-44） |
+| T-M1-04 | ❌ **不成立** | R-M1-34/35 两个 P1 与 R-M1-36/37 两个 P2 均未修复（HEAD 实证），文档却标 ✅ |
+| T-M1-05 | ✅ 成立 | schema / 校验器 / fixture 平价保持 |
+
+### R-M1-34~41 复确认（HEAD `b695126` 实证）
+
+| ID | 复验结果 |
+|---|---|
+| R-M1-34 | ⬜ **未修复**。探针实测：`"花了50元"`、`"本月房租 3000"` 均 → `action=query`（应为 add_tx）。`intent.ts:22,25` 裸时间词与 query>record 优先级原样。 |
+| R-M1-35 | ⬜ **未修复**。探针实测：`parseInput('午餐 35', ctx.now=2026-01-15)` → `bizDate="2026-09-04"`（宿主今天）；`extractDate('12月25日', ctx.now=2026-12-15)` → `"2025-12-25"`（应为 2026）。`date.ts:164,186` 与 `parser.ts:138` 原样。**`parser.test.ts:48` 依赖宿主日期恰为 2026-09-04 才通过。** |
+| R-M1-36 | ⬜ 未修复。`转账` 仍在 INCOME_KEYWORDS（`tx-type.ts:34`）。 |
+| R-M1-37 | ⬜ 未修复。角位截断逻辑原样（`amount.ts:98`）。 |
+| R-M1-38~40 | ⬜ 未修复（低优先，挂账）。 |
+| R-M1-41 | ✅ 已知豁免（交接文档已声明）。 |
+
+### 本轮新发现问题
+
+| ID | 级别 | 摘要 |
+|---|---|---|
+| R-M1-42 | 🟡 P2 | **文档状态更新不同步（4 处）**：① `milestones/overview.md:17` 仍写 "T-M1-03 为 PARTIAL…设备持久性、杀进程…仍待验收"；② `APP-CONTEXT §3.1:124` "设备测试已编译未执行；远端 CI 首跑未验证 \| PARTIAL"、§3.2:136 同——与 §9:554 ✅ 直接矛盾（R-M1-09 失效模式再现）；③ `risk-register` R-PROD-02 仍"开放"且写"13 项测试"旧数字；④ R-PROD-06 仍写 SDK 34（已升 36） |
+| R-M1-43 | 🟡 P2 | **TS 桥客户端未覆盖新增写命令**：`native-bridge.ts` 仅 16 个方法，缺 `account.insert/archive`、`budget.insert/update/delete` 共 5 个，全仓无调用方。Kotlin 侧与 Repository 已补齐并有设备测试，文档"写路径补齐"对原生侧成立、对前端不可达。应补 TS 方法或在文档中明确列为开放项 |
+| R-M1-44 | 🟡 P2 | **`KillProcessPersistenceTest` 自动化绿色 ≠ 验收成立**：`connectedDebugAndroidTest` 将 step1/step2 背靠背执行、中间无 force-stop，只证明写读一致（该文件注释自己也写明需手工三步）。本轮以手工协议真正验证。建议将该类移出自动化套件或加显式门禁说明，避免未来 CI 拿假绿 |
+| R-M1-45 | 🟡 P2 | **WebView 设备测试全量跑不稳定**：gradle 整包首跑中 `bundledReactAndNativeCallbackWorkOverHttps` 挂起 407s（内部 5s/10s 超时均未触发）后 instrumentation 崩溃，整轮 1/23 中断；单独重跑 5.5s 通过。用例缺全局超时护栏；另小米设备 USB 安装弹窗超时会 `INSTALL_FAILED_USER_RESTRICTED` 中断安装。建议加 JUnit timeout/重试，设备测试进 CI 前必须处理 |
+| R-M1-46 | 🟢 P3 | `tools/validate-baseline.ps1` 硬依赖 `rg`，缺失时直接 CommandNotFoundException，无检测与友好降级（CI 预装，仅影响本地） |
+| R-M1-47 | 🔴 P1 | **验收状态失真**：R-M1-34~37 未修复，但 `APP-CONTEXT`（§9 T-M1-04 ✅）、`production-execution-plan.md`（"M1 全部通过"）、本文档"开放项已全部关闭"段落均宣告完成，且无任何文档提及这 4 项缺陷；同一治理材料内自相矛盾（本文档 T-M1-04 评审段落仍标 ⬜ 未修复）。在 R-M1-34/35 闭合前，T-M1-04 与 "M1 整体" 的 ✅ 结论不成立 |
+
+### 建议处理顺序
+
+1. **R-M1-34 / R-M1-35**（T-M1-04 两个 P1）：修 intent 词表 + 两处改注入时间，附回归用例；修复前将 T-M1-04 状态回退为 `PARTIAL`；
+2. **R-M1-47 / R-M1-42**：状态回退 + 4 处过期文档一次性同步，消除自相矛盾；
+3. **R-M1-36 / R-M1-37 / R-M1-43**：随后修复，各附回归用例；
+4. **R-M1-44 / R-M1-45**：设备测试进 CI 前必须处理的测试设计问题（假绿 / 假红风险）；
+5. **R-M1-38~40 / R-M1-46**：顺手修或挂账。
+
+
+---
+
+## 2026-09-04 第三轮：R-M1-34~47 修复增量复测
+
+### 基线与方法
+
+- **基线：** `95cde86`（`test(android): @Ignore KillProcess/WebView 设备测试`），前置 `18afadd`（`fix(nlu): 修复 R-M1-34/35/36/37/43/44/45/46`）。
+- **方法：**
+  1. 逐条查看 `18afadd` 全量 diff（11 文件）和 `95cde86` diff（2 个 `@Ignore` 注解）；
+  2. 编写临时 vitest 探针文件（`src/__tests__/probe.test.ts`）实证 9 个关键场景，运行后删除；
+  3. 重跑全部门禁（`npm run lint` / `typecheck` / `test -- --run`）与 Android 构建（`:app:testDebugUnitTest` + `:app:assembleDebug` + `:app:assembleDebugAndroidTest`）；
+  4. 在本机（无 `rg`）运行 `tools/validate-baseline.ps1` 验证 R-M1-46 降级。
+
+### 门禁与构建结果
+
+| 门禁 / 构建 | 结果 |
+|---|---|
+| `npm run lint` | ✅ exit 0 |
+| `npm run typecheck` | ✅ exit 0 |
+| `npm test -- --run` | ✅ **14 文件 / 313 tests pass**（+4 vs 上轮，回归用例已入库） |
+| `:app:testDebugUnitTest` | ✅（BUILD SUCCESSFUL in 17s，71 actionable tasks） |
+| `:app:assembleDebug` | ✅ |
+| `:app:assembleDebugAndroidTest` | ✅（`KillProcessPersistenceTest` / `WebViewBridgeTest` 已 `@Ignore`，20 个设备测试可执行） |
+| `tools/validate-baseline.ps1`（无 `rg` 环境） | ✅ 输出 `WARNING: rg (ripgrep) not found, skipping secret scan.` + `Baseline validation passed.` |
+
+### 逐条复验
+
+| ID | 结论 | 实证 |
+|---|---|---|
+| R-M1-34 | ✅ **修复成立** | `intent.ts` 移除裸时间词（`本月/这个月/今年/去年/上个月`）出 `QUERY_KEYWORDS`；新增"有疑问词 OR 无金额"双门槛。探针：`"花了50元"` → record/0.9/`花`、`"本月房租3000"` → record/0.7、`"这个月"` → chat/0.5、`"本月花了多少"` → query/0.9/`多少`（回归通过）。回归用例 +3（`note-intent.test.ts`）。 |
+| R-M1-35 | ✅ **修复成立（实质）** | `date.ts:164,186` 改为 `tryAbsoluteDate(text, currentYear, currentMonth)` + `tryMonthOnly(text, currentYear, currentMonth)`，`currentMonth` 由 `ctx.now` 经 `localBizDate` 注入；`parser.ts:139` 改为 `localBizDate(ctx.now, ctx.timezone)`。探针：`parseInput('午餐 35', ctx.now=2026-01-15)` → `bizDate="2026-01-15"`、`parseInput('昨天晚餐 80', ctx.now=2026-01-15)` → `bizDate="2026-01-14"`、`extractDate('12月25日', now=2026-12-15)` → `"2026-12-25"`。**但本项未附回归用例**（`date.test.ts` / `parser.test.ts` 无新增），违反项目硬约束"每次修复必须附上回归用例"。 |
+| R-M1-36 | ✅ **修复成立** | `tx-type.ts`：`INCOME_KEYWORDS` 移除 `'转账'`/`'收款'`，`'红包'` 保留并加注释（P.S. 红包实际双向，但本次范围不扩）。探针：`"转账给房东 3000"` → expense、`"收到转账 500"` → income/`收到`、`"转账 500"` → expense（默认）。回归用例 +2（`tx-type.test.ts`，旧 `it('转账（收入）')` 改写为 `it('转账（双向词，默认支出）')`）。 |
+| R-M1-37 | ⚠️ **部分修复，残留 bug** | `amount.ts:94-97` 在 `tryChineseUnits` 中加入 `jiao >= 10 → return null`。**但** `"早餐 5元35角"` 经探针实测返回 `{amount: 500, raw: '5', range: [3,4]}`——`tryChineseUnits` 拒绝后输入落到 `tryInteger`，`/(?<![-.])(\d{1,6})(?![\d/年月日号.-])/` 把 `"5"` 作为独立整数提取，静默得到 500 分（5 元）。修复将显式截断改为静默降级，用户可感知的错误结果未消除。另：`extractAllAmounts`（`amount.ts:203`）仍用 `.slice(0,1)` 截断（`"5元35角"` → `"5.3"`），与 `extractAmount` 行为不一致（目前为死路径，未在生产代码调用，但是潜伏 bug）。**且本项未附回归用例**（`amount.test.ts` 无新增 "5元35角" → null 断言）。 |
+| R-M1-43 | ✅ **修复成立（实质）** | `native-bridge.ts` 新增 `account.insert`/`account.archive`（L189, L193）+ `budget.insert`/`budget.update`/`budget.delete`（L204/208/212），TS 侧现在具备 21 个方法，与 Kotlin 侧 `AozoraBridge` 20 命令 + GET_VERSION 完全对齐。Android 编译通过。**但本项未附回归用例**（`native-bridge.test.ts` 无新增）。 |
+| R-M1-44 | ✅ **处置成立** | `KillProcessPersistenceTest` 加 `@Ignore("R-M1-44: connectedDebugAndroidTest 会把 step1/step2 背靠背执行且中间无 force-stop…真正的杀进程验证走手工三步协议…")`，并加 13 行重要说明注释。Android test APK 编译通过，20 个设备测试可执行。 |
+| R-M1-45 | ✅ **处置成立** | `WebViewBridgeTest` 加 `@Ignore("R-M1-45: 设备测试在完整 gradle 套件中不稳定…")` 与说明注释；同上编译通过。 |
+| R-M1-46 | ✅ **修复成立** | `tools/validate-baseline.ps1:20-27` 加 `$rgAvailable = Get-Command rg -ErrorAction SilentlyContinue` 分支，不可用时 `Write-Warning` + 跳过密钥扫描。本机（无 `rg`）实测输出友好警告并 `Baseline validation passed.`。 |
+| R-M1-47 | ⚠️ **部分消解** | 上轮指出的"状态失真"——R-M1-34/35/36/44/45/46 本轮已修复/处置，R-M1-37 残留 bug 待跟进。本轮完成后，本条应视为"已消解，待 R-M1-37 残留闭合后完全关闭"。 |
+
+### 本轮新发现
+
+| ID | 级别 | 摘要 |
+|---|---|---|
+| R-M1-48 | 🟡 P2 | **R-M1-37 残留 bug：`tryInteger` 兜底未拦截非法金额**。`"早餐 5元35角"` 经 `tryChineseUnits` 拒绝后，`tryInteger` 将 `"5"` 提取为 500 分，错误结果从"显式截断 5.30 元"变为"静默降级 5 元"，用户仍可感知错误但系统无告警。建议：在 `tryInteger` / `tryDecimal` 入口增加"原文含 `元/块/角/毛` 单位但未被 `tryChineseUnits` 接受 → 拒绝"兜底。 |
+| R-M1-49 | 🟢 P3 | `extractAllAmounts` 多额函数（`amount.ts:203`）对 `jiao >= 10` 仍用 `.slice(0,1)` 静默截断，与 `extractAmount` 行为不一致。当前为死路径（无生产调用方），但若后续启用会复现 R-M1-37 原 bug。建议同步修复，或显式标记 `@deprecated`。 |
+| R-M1-50 | 🟡 P2 | **项目硬约束"每次修复必须附上回归用例"在 R-M1-35 / R-M1-37 / R-M1-43 三项未执行**。本增量仅 R-M1-34（+3）与 R-M1-36（+2）附回归，R-M1-35（date/parser 注入）、R-M1-37（金额容错）、R-M1-43（TS 桥 5 个新方法）均无回归用例入库。后续补测应覆盖：`extractDate('1月15日', now=Feb-2026)` → `"2026-01-15"`、`extractAmount('5元35角')` → `null`（含 R-M1-48 修复后）、`nativeBridge.account.insert(...)` 命令字符串 / 参数结构。 |
+| R-M1-51 | 🟢 P3 | `intent.ts` 边界观察（不阻塞）：`"查询9月消费"` 经当前逻辑（L60-71）→ record（`消费` in `RECORD_KEYWORDS`）。"9" 命中 `hasAmount` 正则但实际是月份数字，`查询` 关键词被 `break` 让位给 record。这是"query>record 优先级 + 金额启发式"的已知权衡，非本轮修复目标，记录备查。 |
+
+### 任务级结论（本轮后）
+
+| 任务 | 结论 |
+|---|---|
+| T-M1-01 | ✅ 保持（CI lint/typecheck/test 全绿，SDK 36） |
+| T-M1-02 | ✅ 保持（313 tests 全绿，含本轮 +4 回归） |
+| T-M1-03 | ✅ 保持（Android 单元 + test APK 构建均成功，20 个可执行设备测试；R-M1-43 TS 桥补齐） |
+| T-M1-04 | ⚠️ **有条件成立**：R-M1-34/35/36 修复成立；R-M1-37 残留 bug 待闭合（R-M1-48）；R-M1-35/37 缺回归用例（R-M1-50） |
+| T-M1-05 | ✅ 保持（未触及） |
+
+### 后续建议处理顺序
+
+1. **R-M1-48 / R-M1-37 残留**（P2）：`tryInteger`/`tryDecimal` 加"原文含单位但未被 `tryChineseUnits` 接受 → 拒绝"兜底；
+2. **R-M1-50 / R-M1-49**（P2/P3）：为 R-M1-35、R-M1-37（含 R-M1-48 修复后）、R-M1-43 补回归用例；
+3. **R-M1-51**（P3）：记录备查，非阻塞；
+4. 完成 1、2 后可将 T-M1-04 升级为 ✅ 完全成立，并同步关闭 R-M1-47 / R-M1-48。
