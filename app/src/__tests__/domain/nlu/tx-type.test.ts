@@ -70,10 +70,19 @@ describe('detectTxType — 收入（高置信）', () => {
     expect(result.keyword).toBe('报销')
   })
 
-  it('转账（收入）', () => {
+  // R-M1-36 修复：转账是双向词，不再无条件判为收入
+  it('转账（双向词，默认支出）', () => {
+    // "转账给房东" 是支出，"收到转账" 是收入
+    // 单独的 "转账" 无明确方向，默认支出
     const result = detectTxType('转账 500')
+    expect(result.type).toBe('expense') // 默认支出
+    expect(result.keyword).toBeNull() // 无明确关键词
+  })
+
+  it('收到转账（明确收入）', () => {
+    const result = detectTxType('收到转账 500')
     expect(result.type).toBe('income')
-    expect(result.keyword).toBe('转账')
+    expect(result.keyword).toBe('收到')
   })
 })
 

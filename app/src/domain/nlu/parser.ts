@@ -25,7 +25,7 @@ import { extractDate } from './date'
 import type { DateMatch } from './date'
 import { extractNote } from './note'
 import { detectIntent } from './intent'
-import { todayBizDate } from '../date'
+import { localBizDate } from '../date'
 
 // ─── 上下文 ───
 
@@ -134,8 +134,9 @@ function buildRecordProposal(text: string, ctx: ParseContext, intentResult: { co
   warnings.push(...catResult.warnings)
 
   // 4. 解析日期（可选，默认今天）
+  // 使用 localBizDate(ctx.now, ctx.timezone) 而非 todayBizDate，避免宿主墙钟（R-M1-35）
   const dateMatch = extractDate(text, ctx.now, ctx.timezone)
-  const bizDate = dateMatch ? dateMatch.bizDate : todayBizDate(ctx.timezone)
+  const bizDate = dateMatch ? dateMatch.bizDate : localBizDate(ctx.now, ctx.timezone)
   if (dateMatch) {
     stripRanges.push(dateMatch.range)
   }

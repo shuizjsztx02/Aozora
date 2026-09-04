@@ -184,10 +184,32 @@ export class NativeBridge {
     return this.call<AccountData[]>('account.list')
   }
 
+  // R-M1-43 修复：补齐 Account 写命令
+  async insertAccount(account: { id: string; ownerId: string; name: string; icon?: string; version: number }, mutationId: string): Promise<{ id: string }> {
+    return this.call('account.insert', { account, mutationId })
+  }
+
+  async archiveAccount(id: string, mutationId: string): Promise<{ success: boolean }> {
+    return this.call('account.archive', { id, mutationId })
+  }
+
   // ─── Budget ───
 
   async listBudgets(bookId: string): Promise<BudgetData[]> {
     return this.call<BudgetData[]>('budget.list', { bookId })
+  }
+
+  // R-M1-43 修复：补齐 Budget 写命令
+  async insertBudget(budget: { id: string; bookId: string; budgetType: string; categoryId?: string | null; period: string; amountCents: number; version: number }, mutationId: string): Promise<{ id: string }> {
+    return this.call('budget.insert', { budget, mutationId })
+  }
+
+  async updateBudget(budget: { id: string; amountCents: number; version: number }, mutationId: string): Promise<{ id: string }> {
+    return this.call('budget.update', { budget, mutationId })
+  }
+
+  async deleteBudget(id: string, mutationId: string): Promise<{ success: boolean }> {
+    return this.call('budget.delete', { id, mutationId })
   }
 
   // ─── Pending Mutations ───

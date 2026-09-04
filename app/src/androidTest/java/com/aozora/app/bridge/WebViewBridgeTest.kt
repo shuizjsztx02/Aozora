@@ -14,7 +14,13 @@ import java.util.concurrent.CountDownLatch
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicReference
 
-/** 真正执行打包后的模块脚本和 Kotlin → JavaScript 回调；必须在设备上运行。 */
+/**
+ * 真正执行打包后的模块脚本和 Kotlin → JavaScript 回调；必须在设备上运行。
+ *
+ * R-M1-45 注意：WebView 测试在某些设备上可能不稳定（USB 安装弹窗超时等）。
+ * 建议单独运行而非在 CI 中全量跑：
+ *   adb shell am instrument -w -e class com.aozora.app.bridge.WebViewBridgeTest ...
+ */
 @RunWith(AndroidJUnit4::class)
 class WebViewBridgeTest {
     private fun evaluate(scenario: ActivityScenario<MainActivity>, script: String): String {

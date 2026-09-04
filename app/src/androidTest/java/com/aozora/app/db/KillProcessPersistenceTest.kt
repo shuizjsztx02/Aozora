@@ -12,12 +12,16 @@ import org.junit.runner.RunWith
 /**
  * 杀进程持久化测试。
  *
- * 验收标准（T-M1-03）：写入 → force-stop → 重启 → 校验实体与 pending mutation。
+ * ⚠️ 重要说明（R-M1-44）：
+ * connectedDebugAndroidTest 会把 step1/step2 背靠背执行，中间没有 force-stop，
+ * 因此自动化测试只能证明"写读一致"，不能真正验证杀进程持久化。
  *
- * 使用方式：
- * 1. 运行 step1_writeData 写入数据到真实数据库
- * 2. 手动执行 adb shell am force-stop com.aozora.app
- * 3. 运行 step2_verifyDataAfterKill 验证数据是否还在
+ * 真正的杀进程验证需要手工执行：
+ * 1. 运行 step1_writeDataToRealDatabase
+ * 2. 手动执行 `adb shell am force-stop com.aozora.app`
+ * 3. 运行 step2_verifyDataAfterKill
+ *
+ * 建议：将此测试拆出自动化套件或标记为 @Ignore，避免 CI 假绿。
  */
 @RunWith(AndroidJUnit4::class)
 class KillProcessPersistenceTest {

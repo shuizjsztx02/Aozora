@@ -51,9 +51,28 @@ describe('detectIntent', () => {
     expect(result.intent).toBe('query')
   })
 
-  it('查询：本月/这个月', () => {
+  it('裸时间词不判为查询（R-M1-34 修复）', () => {
+    // "这个月"、"本月"、"今年" 等裸时间词不再判为 query
     const result = detectIntent('这个月')
+    expect(result.intent).toBe('chat')
+  })
+
+  it('查询：有疑问词+时间词', () => {
+    // 有疑问词（多少）时仍判为 query
+    const result = detectIntent('这个月花了多少')
     expect(result.intent).toBe('query')
+  })
+
+  it('记账：花了+金额（R-M1-34 修复）', () => {
+    // "花了50元" 应判为 record 而非 query
+    const result = detectIntent('花了50元')
+    expect(result.intent).toBe('record')
+  })
+
+  it('记账：时间词+金额（R-M1-34 修复）', () => {
+    // "本月房租3000" 应判为 record
+    const result = detectIntent('本月房租3000')
+    expect(result.intent).toBe('record')
   })
 
   it('记账：花', () => {
@@ -64,7 +83,7 @@ describe('detectIntent', () => {
   it('记账：有数字', () => {
     const result = detectIntent('35')
     expect(result.intent).toBe('record')
-    expect(result.confidence).toBe(0.6)
+    expect(result.confidence).toBe(0.7) // 有金额时置信度提升
   })
 
   it('记账：收入', () => {

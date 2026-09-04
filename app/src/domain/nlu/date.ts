@@ -9,9 +9,8 @@
  * - 周X / 星期X → 最近的该星期几（过去 7 天内）
  * - 这周X / 本周X → 本周的该星期几
  * - 上周X → 上周的该星期几
- * - X月X日 / X月X号 → 绝对日期（当年或下一年）
+ * - X月X日 / X月X号 → 绝对日期（当年或上一年）
  * - X月 → 当月 1 日
- * - 月初 / 月底 → 当月 1 日 / 当月最后一天
  * - 月初 / 月底 → 当月 1 日 / 当月最后一天
  *
  * 默认：未识别日期时返回 null（由 parser 层决定是否用 todayBizDate）。
@@ -19,6 +18,7 @@
  * 约束：
  * - 纯函数，不依赖存储
  * - 使用 localBizDate 和 bizDateOfMonth 推导，避免 toISOString
+ * - 使用 ctx.now 推导当前月份，不使用宿主墙钟（R-M1-35 修复）
  */
 
 import { localBizDate, bizDateOfMonth, parseBizDate } from '../date'
@@ -68,11 +68,11 @@ export function extractDate(text: string, now: number, timezone: string): DateMa
   if (weekdayResult) return weekdayResult
 
   // 模式 3: X月X日 / X月X号
-  const absoluteResult = tryAbsoluteDate(trimmed, todayParsed.year)
+  const absoluteResult = tryAbsoluteDate(trimmed, todayParsed.year, todayParsed.month)
   if (absoluteResult) return absoluteResult
 
   // 模式 4: X月（当月 1 日）
-  const monthResult = tryMonthOnly(trimmed, todayParsed.year)
+  const monthResult = tryMonthOnly(trimmed, todayParsed.year, todayParsed.month)
   if (monthResult) return monthResult
 
   return null
@@ -151,7 +151,7 @@ function tryWeekday(text: string, todayParsed: { year: number; month: number; da
   }
 }
 
-function tryAbsoluteDate(text: string, currentYear: number): DateMatch | null {
+function tryAbsoluteDate(text: string, currentYear: number, currentMonth: number): DateMatch | null {
   // X月X日 / X月X号
   const regex = /(\d{1,2})月(\d{1,2})[日号]/
   const match = text.match(regex)
@@ -160,8 +160,9 @@ function tryAbsoluteDate(text: string, currentYear: number): DateMatch | null {
   const month = parseInt(match[1], 10)
   const day = parseInt(match[2], 10)
 
-  // 年份：如果月份 > 当前月份，视为去年；否则视为今年
-  const year = month > new Date().getMonth() + 1 ? currentYear - 1 : currentYear
+  // 年份：如果月份 > 当前月份（从 ctx.now 推导），视为上一年；否则视为今年
+  // 使用 currentMonth 而非 new Date()，避免宿主墙钟问题（R-M1-35）
+  const year = month > currentMonth ? currentYear - 1 : currentYear
 
   try {
     const bizDate = bizDateOfMonth(year, month, day)
@@ -176,14 +177,15 @@ function tryAbsoluteDate(text: string, currentYear: number): DateMatch | null {
   }
 }
 
-function tryMonthOnly(text: string, currentYear: number): DateMatch | null {
+function tryMonthOnly(text: string, currentYear: number, currentMonth: number): DateMatch | null {
   // X月（当月 1 日）— 仅在文本中没有"日/号"后缀时匹配
   const regex = /(\d{1,2})月(?!\d+[日号])/
   const match = text.match(regex)
   if (!match || match.index === undefined) return null
 
   const month = parseInt(match[1], 10)
-  const year = month > new Date().getMonth() + 1 ? currentYear - 1 : currentYear
+  // 使用 currentMonth 而非 new Date()，避免宿主墙钟问题（R-M1-35）
+  const year = month > currentMonth ? currentYear - 1 : currentYear
 
   try {
     const bizDate = bizDateOfMonth(year, month, 1)

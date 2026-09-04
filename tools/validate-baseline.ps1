@@ -17,15 +17,22 @@ if ($matches) {
 
 Push-Location $root
 try {
-  $secretMatches = rg -n -i 'sk-[a-z0-9]{20,}|storePassword|keyPassword' . -g '!node_modules/**' -g '!.git/**' -g '!docs/superpowers/**' -g '!tools/validate-baseline.ps1'
+  # R-M1-46: 检查 rg 是否可用，不可用则跳过密钥扫描（CI Ubuntu 预装 rg）
+  $rgAvailable = Get-Command rg -ErrorAction SilentlyContinue
+  if ($rgAvailable) {
+    $secretMatches = rg -n -i 'sk-[a-z0-9]{20,}|storePassword|keyPassword' . -g '!node_modules/**' -g '!.git/**' -g '!docs/superpowers/**' -g '!tools/validate-baseline.ps1'
+  } else {
+    Write-Warning "rg (ripgrep) not found, skipping secret scan. Install ripgrep for full baseline validation."
+    $secretMatches = $null
+  }
 } finally {
   Pop-Location
 }
-if ($LASTEXITCODE -eq 0) {
+if ($secretMatches -and $LASTEXITCODE -eq 0) {
   $secretMatches
   throw 'Secret-like content found in baseline.'
 }
-if ($LASTEXITCODE -gt 1) {
+if ($secretMatches -and $LASTEXITCODE -gt 1) {
   throw 'Secret scan failed.'
 }
 

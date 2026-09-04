@@ -91,11 +91,16 @@ function tryChineseUnits(text: string): AmountMatch | null {
   const yuanStr = match[1].replace(/[,，]/g, '')
   const jiaoStr = match[2] // 可选的角/毛数字
 
+  // R-M1-37 修复：角位 >= 10 是非法金额，拒绝而非静默截断
+  if (jiaoStr && parseInt(jiaoStr, 10) >= 10) {
+    return null
+  }
+
   try {
     let amountStr: string
     if (jiaoStr && jiaoStr !== '0') {
-      // 有角：拼接为 "yuan.jiao"，只取一位（5元3角 → 5.3，5元35角 → 仍 5.3）
-      amountStr = `${yuanStr}.${jiaoStr.padEnd(1, '0').slice(0, 1)}`
+      // 有角：拼接为 "yuan.jiao"（5元3角 → 5.3）
+      amountStr = `${yuanStr}.${jiaoStr.padEnd(1, '0')}`
     } else {
       amountStr = yuanStr
     }
