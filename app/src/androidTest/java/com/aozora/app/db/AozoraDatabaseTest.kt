@@ -32,7 +32,10 @@ class AozoraDatabaseTest {
         context.deleteDatabase(name)
         val disk = Room.databaseBuilder(context, AozoraDatabase::class.java, name).build()
         try {
-            Repository(disk).insertTransaction(sample(), "cache-test")
+            val repo = Repository(disk)
+            repo.insertBook(BookEntity("b1", "o", "B", "", 1, null), "seed-book")
+            repo.insertCategory(CategoryEntity("c1", "o", null, null, "expense", "C", null, 1), "seed-cat")
+            repo.insertTransaction(sample(), "cache-test")
             instrumentation.runOnMainSync {
                 val webView = WebView(context)
                 webView.clearCache(true)
@@ -52,7 +55,10 @@ class AozoraDatabaseTest {
         val name = "test-missing-migration.db"
         context.deleteDatabase(name)
         val disk = Room.databaseBuilder(context, AozoraDatabase::class.java, name).build()
-        Repository(disk).insertTransaction(sample(), "keep-me")
+        val repo = Repository(disk)
+        repo.insertBook(BookEntity("b1", "o", "B", "", 1, null), "seed-book")
+        repo.insertCategory(CategoryEntity("c1", "o", null, null, "expense", "C", null, 1), "seed-cat")
+        repo.insertTransaction(sample(), "keep-me")
         disk.close()
         val path = context.getDatabasePath(name).path
         SQLiteDatabase.openDatabase(path, null, SQLiteDatabase.OPEN_READWRITE).use { it.version = 2 }
@@ -116,10 +122,17 @@ class AozoraDatabaseTest {
     private lateinit var repository: Repository
 
     @Before
-    fun setup() {
+    fun setup() = runBlocking {
         val context = InstrumentationRegistry.getInstrumentation().targetContext
         db = AozoraDatabase.createInMemory(context)
         repository = Repository(db)
+        // 引用完整性：用 DAO 直接创建依赖实体（不产生 pending mutation，R-P1-RefInt）
+        db.bookDao().insert(BookEntity("b1", "owner-test", "Book1", "", 1, null))
+        db.bookDao().insert(BookEntity("book-1", "owner-test", "Book1", "", 1, null))
+        db.categoryDao().insert(CategoryEntity("c1", "owner-test", null, null, "expense", "Cat1", null, 1))
+        db.categoryDao().insert(CategoryEntity("cat-food", "owner-test", null, null, "expense", "Food", null, 1))
+        db.categoryDao().insert(CategoryEntity("cat-salary", "owner-test", null, null, "income", "Salary", null, 1))
+        Unit
     }
 
     @After
@@ -183,6 +196,8 @@ class AozoraDatabaseTest {
             .allowMainThreadQueries()
             .build()
         val repo = Repository(testDb)
+        repo.insertBook(BookEntity("book-1", "o", "B", "", 1, null), "seed-book")
+        repo.insertCategory(CategoryEntity("cat-salary", "o", null, null, "income", "C", null, 1), "seed-cat")
 
         val tx = TransactionEntity(
             id = "tx-persist", bookId = "book-1", type = "income",
@@ -454,5 +469,75 @@ class AozoraDatabaseTest {
         val fetched = repository.getBudget("bud-ver")
         assertEquals(200000L, fetched!!.amountCents)
         assertEquals(2, fetched.version)
+    }
+
+    // ─── 引用完整性（R-P1-RefInt） ───
+
+    @Test
+    fun insertTransaction_rejectsMissingBook() = runBlocking {
+        val tx = sample("tx-nobook").copy(bookId = "ghost-book")
+        try {
+            repository.insertTransaction(tx, "m-nobook"); fail("missing book accepted")
+        } catch (_: IllegalArgumentException) { }
+        assertNull(repository.getTransaction("tx-nobook"))
+        assertTrue(repository.listPendingMutations().isEmpty())
+    }
+
+    @Test
+    fun insertTransaction_rejectsMissingCategory() = runBlocking {
+        val tx = sample("tx-nocat").copy(categoryId = "ghost-cat")
+        try {
+            repository.insertTransaction(tx, "m-nocat"); fail("missing category accepted")
+        } catch (_: IllegalArgumentException) { }
+        assertNull(repository.getTransaction("tx-nocat"))
+        assertTrue(repository.listPendingMutations().isEmpty())
+    }
+
+    @Test
+    fun insertTransaction_rejectsMissingAccount() = runBlocking {
+        val tx = sample("tx-noacc").copy(accountId = "ghost-acc")
+        try {
+            repository.insertTransaction(tx, "m-noacc"); fail("missing account accepted")
+        } catch (_: IllegalArgumentException) { }
+        assertNull(repository.getTransaction("tx-noacc"))
+        assertTrue(repository.listPendingMutations().isEmpty())
+    }
+
+    @Test
+    fun insertTransaction_allowsNullAccount() = runBlocking {
+        val tx = sample("tx-nullacc").copy(accountId = null)
+        repository.insertTransaction(tx, "m-nullacc")
+        assertNotNull(repository.getTransaction("tx-nullacc"))
+    }
+
+    @Test
+    fun insertBudget_rejectsMissingBook() = runBlocking {
+        val budget = BudgetEntity("bud-nobook", "ghost-book", "monthly", null, "2026-09", 100, 1)
+        try {
+            repository.insertBudget(budget, "m-bud-nobook"); fail("missing book accepted")
+        } catch (_: IllegalArgumentException) { }
+        assertNull(repository.getBudget("bud-nobook"))
+        assertTrue(repository.listPendingMutations().isEmpty())
+    }
+
+    @Test
+    fun insertBudget_rejectsMissingCategory() = runBlocking {
+        val budget = BudgetEntity("bud-nocat", "b1", "monthly", "ghost-cat", "2026-09", 100, 1)
+        try {
+            repository.insertBudget(budget, "m-bud-nocat"); fail("missing category accepted")
+        } catch (_: IllegalArgumentException) { }
+        assertNull(repository.getBudget("bud-nocat"))
+        assertTrue(repository.listPendingMutations().isEmpty())
+    }
+
+    @Test
+    fun updateBudget_rejectsMissingBook() = runBlocking {
+        val budget = BudgetEntity("bud-upd-ref", "b1", "monthly", null, "2026-09", 100, 1)
+        repository.insertBudget(budget, "m-bud-ref-insert")
+        val stale = budget.copy(bookId = "ghost-book", amountCents = 200, version = 2)
+        try {
+            repository.updateBudget(stale, "m-bud-ref-bad"); fail("missing book on update accepted")
+        } catch (_: IllegalArgumentException) { }
+        assertEquals(100L, repository.getBudget("bud-upd-ref")!!.amountCents)
     }
 }

@@ -17,13 +17,12 @@ if ($matches) {
 
 Push-Location $root
 try {
-  # R-M1-46: 检查 rg 是否可用，不可用则跳过密钥扫描（CI Ubuntu 预装 rg）
+  # R-M1-46 / R-P1-Baseline: 检查 rg 是否可用，不可用则失败（避免假绿）
   $rgAvailable = Get-Command rg -ErrorAction SilentlyContinue
   if ($rgAvailable) {
     $secretMatches = rg -n -i 'sk-[a-z0-9]{20,}|storePassword|keyPassword' . -g '!node_modules/**' -g '!.git/**' -g '!docs/superpowers/**' -g '!tools/validate-baseline.ps1'
   } else {
-    Write-Warning "rg (ripgrep) not found, skipping secret scan. Install ripgrep for full baseline validation."
-    $secretMatches = $null
+    throw "rg (ripgrep) not found. Install ripgrep to run secret scan — skipping is not allowed (R-P1-Baseline)."
   }
 } finally {
   Pop-Location

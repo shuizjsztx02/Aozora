@@ -28,6 +28,11 @@ class Repository(private val db: AozoraDatabase) {
         require(Regex("\\d{4}-\\d{2}-\\d{2}").matches(tx.bizDate)) { "invalid bizDate" }
         require(runCatching { LocalDate.parse(tx.bizDate) }.isSuccess) { "invalid bizDate" }
         db.withTransaction {
+            require(db.bookDao().getById(tx.bookId) != null) { "book not found: ${tx.bookId}" }
+            require(db.categoryDao().getById(tx.categoryId) != null) { "category not found: ${tx.categoryId}" }
+            if (tx.accountId != null) {
+                require(db.accountDao().getById(tx.accountId) != null) { "account not found: ${tx.accountId}" }
+            }
             db.transactionDao().insert(tx)
             db.pendingMutationDao().insert(
                 PendingMutationEntity(
@@ -189,6 +194,10 @@ class Repository(private val db: AozoraDatabase) {
             else -> false
         }) { "invalid period format" }
         db.withTransaction {
+            require(db.bookDao().getById(budget.bookId) != null) { "book not found: ${budget.bookId}" }
+            if (budget.categoryId != null) {
+                require(db.categoryDao().getById(budget.categoryId) != null) { "category not found: ${budget.categoryId}" }
+            }
             db.budgetDao().insert(budget)
             db.pendingMutationDao().insert(
                 PendingMutationEntity(
@@ -215,6 +224,10 @@ class Repository(private val db: AozoraDatabase) {
             val current = db.budgetDao().getById(budget.id)
             require(current != null) { "budget not found" }
             require(budget.version > current.version) { "version must increase" }
+            require(db.bookDao().getById(budget.bookId) != null) { "book not found: ${budget.bookId}" }
+            if (budget.categoryId != null) {
+                require(db.categoryDao().getById(budget.categoryId) != null) { "category not found: ${budget.categoryId}" }
+            }
             db.budgetDao().update(budget)
             db.pendingMutationDao().insert(
                 PendingMutationEntity(

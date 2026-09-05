@@ -44,6 +44,18 @@ class KillProcessPersistenceTest {
             val db = AozoraDatabase.getInstance(context)
             val repo = Repository(db)
 
+            // 引用完整性：先创建依赖实体（R-P1-RefInt）
+            if (db.bookDao().getById("book-kill") == null) {
+                db.bookDao().insert(com.aozora.app.db.entity.BookEntity(
+                    "book-kill", "owner-kill", "KillBook", "", 1, null
+                ))
+            }
+            if (db.categoryDao().getById("cat-kill") == null) {
+                db.categoryDao().insert(com.aozora.app.db.entity.CategoryEntity(
+                    "cat-kill", "owner-kill", null, null, "expense", "KillCat", null, 1
+                ))
+            }
+
             val tx = TransactionEntity(
                 id = "tx-kill-test",
                 bookId = "book-kill",
