@@ -289,6 +289,29 @@ class TestTransactionsAPI:
         list_resp = auth_client.get(f"/transactions?book_id={book_id}", headers=_auth_header(user))
         assert list_resp.json()["total"] == 0
 
+    def test_write_to_soft_deleted_book_rejected(self, auth_client, user, book_and_category):
+        """N-01 regression: writing to a soft-deleted book must return 404.
+
+        _verify_book_ownership filters ``deleted_at IS NULL``; without that
+        filter, POST /transactions against a deleted book would succeed.
+        """
+        book_id, cat_id = book_and_category
+        # Create a tx first so we know the book is usable, then soft-delete it.
+        auth_client.post("/transactions", json={
+            "book_id": book_id, "type": "expense", "amount_cents": 100,
+            "category_id": cat_id, "biz_date": "2026-09-04", "occurred_at": "2026-09-04T12:00:00Z",
+        }, headers=_auth_header(user))
+
+        del_resp = auth_client.delete(f"/books/{book_id}", headers=_auth_header(user))
+        assert del_resp.status_code == 204
+
+        # Write must be rejected — ownership check sees deleted_at is set.
+        resp = auth_client.post("/transactions", json={
+            "book_id": book_id, "type": "expense", "amount_cents": 200,
+            "category_id": cat_id, "biz_date": "2026-09-05", "occurred_at": "2026-09-05T12:00:00Z",
+        }, headers=_auth_header(user))
+        assert resp.status_code == 404
+
     def test_undo_delete_transaction(self, auth_client, user, book_and_category):
         """POST /transactions/:id/undo should restore soft-deleted transaction."""
         book_id, cat_id = book_and_category

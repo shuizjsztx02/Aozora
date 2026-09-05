@@ -487,3 +487,51 @@ class TestAuthAPI:
             "device_id": "x" * 200,
         })
         assert resp.status_code == 422
+
+    def test_nickname_overlong_rejected(self, auth_client):
+        """N-26 regression: nickname > 64 chars → 422, not 500.
+
+        ``users.nickname`` is ``String(64)``; without schema validation,
+        overlong input would fall through to the DB layer and 500.
+        """
+        resp = auth_client.post("/auth/guest", json={
+            "device_id": "test-device-nick",
+            "nickname": "x" * 65,
+        })
+        assert resp.status_code == 422
+
+
+class TestMeEndpoint:
+    """R-M2-27: GET /me returns the authenticated user's profile."""
+
+    def test_me_returns_current_user(self, auth_client):
+        guest_resp = auth_client.post("/auth/guest", json={
+            "device_id": "test-device-me",
+            "nickname": "me-user",
+        })
+        body = guest_resp.json()
+        tokens = body["tokens"]
+
+        resp = auth_client.get(
+            "/me",
+            headers={"Authorization": f"Bearer {tokens['access_token']}"},
+        )
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["id"] == body["user_id"]
+        assert data["nickname"] == "me-user"
+        assert data["phone"] is None
+        assert data["status"] == "guest"
+        assert data["timezone"] == "Asia/Shanghai"
+        assert "created_at" in data
+
+    def test_me_without_token_rejected(self, auth_client):
+        # Missing Authorization header → 401 (FastAPI HTTPBearer).
+        resp = auth_client.get("/me")
+        assert resp.status_code == 401
+
+    def test_me_invalid_token_rejected(self, auth_client):
+        resp = auth_client.get(
+            "/me", headers={"Authorization": "Bearer not-a-real-token"},
+        )
+        assert resp.status_code == 401

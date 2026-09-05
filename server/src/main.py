@@ -40,6 +40,14 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
             "api_prefix": cfg.api_prefix,
         },
     )
+    # N-05: reclaim disk from export files that outlived the prior process.
+    from src.modules.exports.service import cleanup_expired_files
+    try:
+        deleted = cleanup_expired_files()
+        if deleted:
+            logger.info("Cleaned up %d stale export files", deleted)
+    except Exception:
+        logger.warning("Export cleanup failed", exc_info=True)
     yield
     from src.common.database import get_engine
 

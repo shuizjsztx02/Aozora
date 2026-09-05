@@ -46,7 +46,7 @@
 | R-M2-24 | 🟢 P3 | 模型 | `User.device_sessions` ORM cascade 与 FK ondelete 重复 | ⬜ 挂账 |
 | R-M2-25 | 🟢 P3 | 模型 | `Category.parent` 用字符串 `remote_side` | ⬜ 挂账 |
 | R-M2-26 | 🟢 P3 | 代码风格 | `check_auth_rate_limit` 标 async 但无 await | ⬜ 挂账 |
-| R-M2-27 | 🟢 P3 | API 缺失 | 缺 `/me` 或 `/auth/session` 端点 | ⬜ T-M2-04 应补 |
+| R-M2-27 | 🟢 P3 | API 缺失 | 缺 `/me` 或 `/auth/session` 端点 | ✅ 已修复（见文末 T-M2-04 修复记录） |
 | R-M2-28 | 🟢 P3 | 配置 | `alembic.ini` 的 `sqlalchemy.url` 为空 | ⬜ 文档化 |
 | R-M2-29 | 🟢 P3 | 配置 | `docker-compose.yml` 的 SECRET_KEY 明文硬编码 | ⬜ 已知（仅 dev） |
 | R-M2-30 | 🟢 P3 | 配置 | OpenAPI `version="0.1.0"` 硬编码 | ⬜ 挂账 |
@@ -471,3 +471,34 @@ T-M2-04 **除 R-M2-27 外全部交付正确**。R-M2-27 是从 T-M2-03 转移的
 ### 修复建议
 
 1. **R-M2-27**（P1）：实现 `GET /me` 端点，返回当前用户信息（user_id / nickname / status / created_at）。参考 `src/modules/auth/routes.py` 现有结构，新增路由 `@router.get("/me", response_model=UserResponse)`。
+
+### R-M2-27 修复记录（2026-09-04）
+
+**分析：**
+
+- 根因：T-M2-03 审查将 `/me` 端点挂账（"留给 T-M2-04"），T-M2-04 实现时遗漏，两个任务交接间丢失。`get_current_user` 依赖已存在且被 5 个账本模块复用，补端点本身无技术障碍，纯属流程遗漏。
+- 路径决策：实测探针打的是 `GET /me`（顶层路径），故未挂在 `auth` router（`prefix="/auth"`，会变成 `/auth/me`），而是在 auth 模块内新增独立 `me_router`（无前缀），由 `main.py` 统一以 `api_prefix` 注册，生产路径为 `GET /api/v1/me`。
+
+**修复内容：**
+
+| 文件 | 改动 |
+|---|---|
+| `server/src/modules/auth/schemas.py` | 新增 `MeResponse`（id / nickname / phone / status / timezone / created_at / updated_at，`from_attributes=True`） |
+| `server/src/modules/auth/routes.py` | 新增 `me_router` + `GET /me`，复用 `get_current_user` 依赖（401/403/503 语义随之继承） |
+| `server/src/main.py` | `include_router(me_router, prefix=cfg.api_prefix)` |
+| `server/tests/test_auth.py` | 新增 `TestMeEndpoint` 3 项：有效 token 返回本人资料、缺 token 401、无效 token 401 |
+
+**验证结果（修复后实测）：**
+
+| 检查 | 结果 |
+|---|---|
+| `pytest tests/ -q --ignore=tests/test_stats_exports.py` | ✅ **139 passed**（含新增 3 项，0 failed） |
+| 探针：`GET /api/v1/me`（无 token） | ✅ 401 |
+| 探针：`POST /api/v1/auth/guest` → `GET /api/v1/me`（有效 token） | ✅ 200，返回 `{id, nickname, phone, status, timezone, created_at, updated_at}`，字段与注册用户一致 |
+| 探针：`GET /me`（未带前缀） | ✅ 404（前缀接线正确，与 R-M2-01 修复行为一致） |
+| 探针：`GET /api/v1/me`（无效 token） | ✅ 401 |
+| OpenAPI | ✅ `/api/v1/me` 已出现在 paths |
+
+**说明：** 门禁总数从审查时的 106 变为 139，因工作区在审查基线后已纳入后续任务的新增测试（含本次 +3），非回归。
+
+**结论：** R-M2-27 关闭。按此前升级判定，T-M2-04 ✅ 完全成立。

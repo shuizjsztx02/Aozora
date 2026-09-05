@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import uuid
+from datetime import datetime
 from zoneinfo import available_timezones
 
 from pydantic import BaseModel, Field, field_validator
@@ -65,6 +66,19 @@ class PhoneLoginResponse(BaseModel):
     user_id: uuid.UUID
     is_new_user: bool
     tokens: TokenResponse
+
+
+# R-M2-27: profile of the authenticated user, served by GET /me.
+class MeResponse(BaseModel):
+    model_config = {"from_attributes": True}
+
+    id: uuid.UUID
+    nickname: str | None
+    phone: str | None
+    status: str
+    timezone: str
+    created_at: datetime
+    updated_at: datetime
 
 
 # R-M2-21: DeviceSessionResponse previously defined here was unused; removed.

@@ -270,6 +270,40 @@ class TestTrendStats:
         assert stats["transaction_count"] == len(transactions)
 
 
+# ── Period validation (N-02) ───────────────────────────────────────────
+
+class TestPeriodValidation:
+    """N-02 regression: invalid ``period`` and reversed range must return 422,
+    not 500 from uncaught ``ValueError``."""
+
+    @pytest.fixture()
+    def real_book(self, auth_client, user):
+        """Create a real book so ownership check passes before period validation."""
+        book_resp = auth_client.post("/books", json={"name": "Period Test"}, headers=_auth(user))
+        return book_resp.json()["id"]
+
+    def test_invalid_period_month_rejected(self, auth_client, user, real_book):
+        resp = auth_client.get(
+            f"/stats/monthly?book_id={real_book}&period=2026-13",
+            headers=_auth(user),
+        )
+        assert resp.status_code == 422
+
+    def test_period_zero_month_rejected(self, auth_client, user, real_book):
+        resp = auth_client.get(
+            f"/stats/monthly?book_id={real_book}&period=2026-00",
+            headers=_auth(user),
+        )
+        assert resp.status_code == 422
+
+    def test_period_range_order_rejected(self, auth_client, user, real_book):
+        resp = auth_client.get(
+            f"/stats/trends?book_id={real_book}&period_from=2026-12&period_to=2026-01",
+            headers=_auth(user),
+        )
+        assert resp.status_code == 422
+
+
 # ── Exports ─────────────────────────────────────────────────────────────
 
 class TestExportsAPI:

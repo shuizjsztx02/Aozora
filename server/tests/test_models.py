@@ -165,6 +165,67 @@ class TestBudget:
         with pytest.raises(IntegrityError):
             await db_session.flush()
 
+    @pytest.mark.asyncio
+    async def test_overall_budget_null_category_no_duplicate(self, db_session, sample_data):
+        """N-03 regression: two ``category_id IS NULL`` budgets with the same
+        (book_id, budget_type, period) must not coexist.
+
+        The old single UniqueConstraint let NULLs coexist because SQL treats
+        NULL as distinct.  The fix replaces it with two partial unique indexes.
+        """
+        book_id = sample_data["book"].id
+
+        db_session.add_all([
+            Budget(
+                book_id=book_id, budget_type=BudgetType.MONTHLY,
+                period="2026-09", amount_cents=300000,
+            ),
+            Budget(
+                book_id=book_id, budget_type=BudgetType.MONTHLY,
+                period="2026-09", amount_cents=400000,
+            ),
+        ])
+        with pytest.raises(IntegrityError):
+            await db_session.flush()
+
+    @pytest.mark.asyncio
+    async def test_upsert_budget_same_period_idempotent(self, db_session, sample_data):
+        """N-04 regression: ``BudgetService.upsert_budget`` against the same
+        (book, type, period, category_id=None) twice must leave exactly one
+        row — the second call updates, not duplicates.
+
+        (True TOCTOU concurrency requires PostgreSQL isolation; sequential
+        idempotency is the behaviour the partial unique index protects.)
+        """
+        from src.modules.budgets.schemas import BudgetUpsert
+        from src.modules.budgets.service import BudgetService
+
+        user_id = sample_data["user"].id
+        book_id = sample_data["book"].id
+
+        svc = BudgetService(db_session)
+        data = BudgetUpsert(book_id=book_id, budget_type="monthly", amount_cents=10000)
+
+        await svc.upsert_budget(user_id, "2026-09", data)
+        await db_session.commit()
+
+        # Second call — same key, different amount.
+        data2 = BudgetUpsert(book_id=book_id, budget_type="monthly", amount_cents=25000)
+        await svc.upsert_budget(user_id, "2026-09", data2)
+        await db_session.commit()
+
+        rows = (
+            await db_session.execute(
+                select(Budget).where(
+                    Budget.book_id == book_id,
+                    Budget.period == "2026-09",
+                    Budget.category_id.is_(None),
+                )
+            )
+        ).scalars().all()
+        assert len(rows) == 1
+        assert rows[0].amount_cents == 25000
+
 
 # ── Category ──────────────────────────────────────────────────────────
 

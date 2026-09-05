@@ -9,11 +9,13 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from src.common.config import get_config
 from src.common.database import get_db_session
+from src.models.user import User
 
-from .dependencies import check_auth_rate_limit
+from .dependencies import check_auth_rate_limit, get_current_user
 from .schemas import (
     GuestRequest,
     GuestResponse,
+    MeResponse,
     PhoneLoginRequest,
     PhoneLoginResponse,
     RefreshRequest,
@@ -22,6 +24,11 @@ from .schemas import (
 from .service import AuthService
 
 router = APIRouter(prefix="/auth", tags=["auth"])
+
+# R-M2-27: /me lives at the top level (not under /auth) — clients use it
+# to fetch the current user's profile after login. Registered separately
+# in main.py so the path is /me, not /auth/me.
+me_router = APIRouter(tags=["auth"])
 
 
 def _token_response(access_token: str, refresh_token: str) -> TokenResponse:
@@ -103,3 +110,11 @@ async def logout(
         raw_refresh_token=body.refresh_token,
         device_id=body.device_id,
     )
+
+
+@me_router.get("/me", response_model=MeResponse)
+async def get_me(
+    current_user: Annotated[User, Depends(get_current_user)] = ...,
+):
+    """R-M2-27: return the authenticated user's own profile."""
+    return MeResponse.model_validate(current_user)
