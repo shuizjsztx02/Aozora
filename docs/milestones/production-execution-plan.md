@@ -31,9 +31,9 @@
 ### T-M0-10 执行治理与长期规划
 
 **依赖：** T-M0-09。
-**交接产物：** 有效任务图、风险状态、本文档与交接模板。
-**验证：** `rg -n 'T-M1-05|T-M0-10' docs/APP-CONTEXT.md`、`git diff --check`。
-**状态：** 已完成。`T-M0-07` 继续作为 T-M2-01 的独立前置；下一项为 T-M1-01。
+**交接产物：** 有效任务图、风险状态、本文档、交接模板与 `docs/engineering/通用任务执行规范.md`。
+**验证：** `rg -n 'T-M1-05|T-M0-10|通用任务执行规范' AGENTS.md docs/APP-CONTEXT.md docs/engineering docs/milestones`、`git diff --check`。
+**状态：** 已完成。2026-09-05 补充开发实现、Review、Bug-fix 三类固定工作流；三类执行型口令默认包含文档更新、独立提交、推送和 CI 状态确认。`T-M0-07` 继续作为 T-M2-01 的独立前置；下一项为 T-M1-01。
 
 ## M1：客户端可靠数据底座 ✅
 
