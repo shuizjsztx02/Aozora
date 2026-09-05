@@ -83,10 +83,10 @@ class StatisticsService:
         # Parse period to date range
         year, month = self._parse_period(period)
         start_date = date(year, month, 1)
-        if month == "12":
-            end_date = date(int(year) + 1, 1, 1)
+        if month == 12:  # N-33: compare int with int, not str
+            end_date = date(year + 1, 1, 1)
         else:
-            end_date = date(int(year), int(month) + 1, 1)
+            end_date = date(year, month + 1, 1)
 
         # Base filter: non-deleted transactions in the period for this book
         base_filter = [
@@ -181,10 +181,10 @@ class StatisticsService:
             )
 
         start_date = date(fy, fm, 1)
-        if tm == "12":
-            end_date = date(int(ty) + 1, 1, 1)
+        if tm == 12:  # N-33: compare int with int, not str
+            end_date = date(ty + 1, 1, 1)
         else:
-            end_date = date(int(ty), int(tm) + 1, 1)
+            end_date = date(ty, tm + 1, 1)
 
         base_filter = [
             Transaction.book_id == book_id,

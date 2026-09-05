@@ -40,9 +40,13 @@ class BudgetService:
             raise AppException(404, "not_found", "Book not found")
 
     async def _verify_category_ownership(self, category_id: uuid.UUID, user_id: uuid.UUID) -> None:
-        """Verify the user owns the category."""
+        """Verify the user owns the category and it is not archived."""
         result = await self.db.execute(
-            select(Category).where(Category.id == category_id, Category.owner_id == user_id)
+            select(Category).where(
+                Category.id == category_id,
+                Category.owner_id == user_id,
+                Category.archived_at.is_(None),  # N-34: filter archived categories
+            )
         )
         if result.scalar_one_or_none() is None:
             raise AppException(404, "not_found", "Category not found")

@@ -2,9 +2,13 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
+import os
+import time
 import uuid
-from datetime import date, datetime, timezone
+from datetime import date, datetime, timedelta, timezone
+from pathlib import Path
 
 import pytest
 import pytest_asyncio
@@ -44,6 +48,9 @@ async def auth_client():
     app.dependency_overrides[get_db_session] = _override_get_db_session
 
     with TestClient(app) as c:
+        # Expose the session factory so tests can manipulate rows that
+        # the API cannot (e.g. forcing an export to be expired, N-06).
+        c.db_factory = factory
         yield c
 
     app.dependency_overrides.clear()
@@ -303,6 +310,34 @@ class TestPeriodValidation:
         )
         assert resp.status_code == 422
 
+    def test_december_boundary_monthly_stats(self, auth_client, user, real_book):
+        """N-36 regression: period=2026-12 must return 200 (not 500).
+
+        Catches N-33: ``month == "12"`` (str) vs ``int(12)`` always False → ValueError.
+        """
+        resp = auth_client.get(
+            f"/stats/monthly?book_id={real_book}&period=2026-12",
+            headers=_auth(user),
+        )
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["period"] == "2026-12"
+
+    def test_december_boundary_trend_stats(self, auth_client, user, real_book):
+        """N-36 regression: trends ending in December must not 500.
+
+        Catches N-33 in get_trend_stats: ``tm == "12"`` (str) vs int(12).
+        Bug triggers when period_to is December.
+        """
+        resp = auth_client.get(
+            f"/stats/trends?book_id={real_book}&period_from=2026-10&period_to=2026-12",
+            headers=_auth(user),
+        )
+        assert resp.status_code == 200
+        data = resp.json()
+        periods = [p["period"] for p in data["points"]]
+        assert "2026-12" in periods
+
 
 # ── Exports ─────────────────────────────────────────────────────────────
 
@@ -441,3 +476,148 @@ class TestExportsAPI:
 
         assert export_income == stats["total_income"]
         assert export_expense == stats["total_expense"]
+
+
+# ── Export expiration & file lifecycle (N-05 / N-06 / N-07) ────────────
+
+def _force_expire(db_factory, export_id: str) -> str | None:
+    """Rewrite an export's ``expires_at`` into the past; return file_path."""
+    from src.models.export import Export
+
+    async def _run():
+        async with db_factory() as session:
+            export = await session.get(Export, uuid.UUID(export_id))
+            assert export is not None
+            export.expires_at = datetime.now(timezone.utc) - timedelta(hours=1)
+            await session.commit()
+            return export.file_path
+
+    return asyncio.run(_run())
+
+
+class TestExportExpiration:
+    def test_expired_export_status_written_back(self, auth_client, user, book_data):
+        """N-06: get_export must flip status to EXPIRED past expires_at."""
+        create_resp = auth_client.post(
+            "/exports",
+            json={"book_id": book_data["book_id"], "format": "json"},
+            headers=_auth(user),
+        )
+        export_id = create_resp.json()["id"]
+        _force_expire(auth_client.db_factory, export_id)
+
+        resp = auth_client.get(f"/exports/{export_id}", headers=_auth(user))
+        assert resp.status_code == 200
+        assert resp.json()["status"] == "expired"
+
+    def test_expired_export_shown_expired_in_list(self, auth_client, user, book_data):
+        """N-06: list_exports must also report EXPIRED."""
+        create_resp = auth_client.post(
+            "/exports",
+            json={"book_id": book_data["book_id"], "format": "json"},
+            headers=_auth(user),
+        )
+        export_id = create_resp.json()["id"]
+        _force_expire(auth_client.db_factory, export_id)
+
+        resp = auth_client.get("/exports", headers=_auth(user))
+        assert resp.status_code == 200
+        match = next(e for e in resp.json() if e["id"] == export_id)
+        assert match["status"] == "expired"
+
+    def test_expired_export_download_rejected_and_file_deleted(self, auth_client, user, book_data):
+        """N-05/N-06: expired download returns 410 and the file is deleted."""
+        create_resp = auth_client.post(
+            "/exports",
+            json={"book_id": book_data["book_id"], "format": "json"},
+            headers=_auth(user),
+        )
+        export_id = create_resp.json()["id"]
+        file_path = _force_expire(auth_client.db_factory, export_id)
+        assert file_path and Path(file_path).exists()
+
+        resp = auth_client.get(f"/exports/{export_id}/download", headers=_auth(user))
+        assert resp.status_code == 410
+        assert resp.json()["code"] == "expired"
+        assert not Path(file_path).exists()
+
+    def test_unexpired_export_stays_completed(self, auth_client, user, book_data):
+        """Guard: the expiration flip must not touch fresh exports."""
+        create_resp = auth_client.post(
+            "/exports",
+            json={"book_id": book_data["book_id"], "format": "json"},
+            headers=_auth(user),
+        )
+        export_id = create_resp.json()["id"]
+
+        resp = auth_client.get(f"/exports/{export_id}", headers=_auth(user))
+        assert resp.json()["status"] == "completed"
+        dl = auth_client.get(f"/exports/{export_id}/download", headers=_auth(user))
+        assert dl.status_code == 200
+
+
+class TestExportFileLifecycle:
+    def test_startup_cleanup_removes_stale_files(self, tmp_path, monkeypatch):
+        """N-05: cleanup_expired_files deletes only old export files."""
+        from src.modules.exports import service as exports_service
+
+        monkeypatch.setattr(exports_service, "_get_export_dir", lambda: tmp_path)
+
+        stale = tmp_path / f"{uuid.uuid4()}.json"
+        fresh = tmp_path / f"{uuid.uuid4()}.csv"
+        unrelated = tmp_path / "notes.txt"
+        for p in (stale, fresh, unrelated):
+            p.write_text("x")
+        past = time.time() - 26 * 3600
+        os.utime(stale, (past, past))
+
+        deleted = exports_service.cleanup_expired_files()
+
+        assert deleted == 1
+        assert not stale.exists()
+        assert fresh.exists()
+        assert unrelated.exists()
+
+    @pytest.mark.skipif(os.name != "posix", reason="POSIX permission bits only")
+    def test_export_dir_forced_owner_only(self, tmp_path, monkeypatch):
+        """N-05: export dir must be 0o700 even if it pre-existed looser."""
+        from src.modules.exports import service as exports_service
+
+        target = tmp_path / "exports"
+        target.mkdir(mode=0o755)
+        monkeypatch.setattr(exports_service, "_get_export_dir", lambda: target)
+
+        result = exports_service._ensure_export_dir()
+
+        assert result == target
+        assert target.stat().st_mode & 0o777 == 0o700
+
+    def test_file_generation_runs_outside_event_loop_thread(self, auth_client, user, book_data, monkeypatch):
+        """N-07: sync file generation is offloaded, not run on the loop thread."""
+        import threading
+
+        from src.modules.exports.service import ExportService
+
+        seen: dict[str, int] = {}
+        orig_fetch = ExportService._fetch_export_rows
+        orig_generate = ExportService._generate_file
+
+        async def fetch_spy(self, export):
+            seen["loop"] = threading.get_ident()
+            return await orig_fetch(self, export)
+
+        def generate_spy(self, export, rows):
+            seen["worker"] = threading.get_ident()
+            return orig_generate(self, export, rows)
+
+        monkeypatch.setattr(ExportService, "_fetch_export_rows", fetch_spy)
+        monkeypatch.setattr(ExportService, "_generate_file", generate_spy)
+
+        resp = auth_client.post(
+            "/exports",
+            json={"book_id": book_data["book_id"], "format": "csv"},
+            headers=_auth(user),
+        )
+        assert resp.status_code == 201
+        assert "loop" in seen and "worker" in seen
+        assert seen["loop"] != seen["worker"]

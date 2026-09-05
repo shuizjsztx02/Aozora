@@ -25,9 +25,13 @@ class BudgetRepository:
         """List budgets for a book, optionally filtered by period."""
         from src.models.ledger import Book
 
-        # Verify book ownership
+        # Verify book ownership (not deleted) — N-35: defensive soft-delete guard
         book_result = await self.db.execute(
-            select(Book).where(Book.id == book_id, Book.owner_id == owner_id)
+            select(Book).where(
+                Book.id == book_id,
+                Book.owner_id == owner_id,
+                Book.deleted_at.is_(None),
+            )
         )
         if book_result.scalar_one_or_none() is None:
             return []
