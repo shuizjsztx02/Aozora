@@ -25,7 +25,7 @@ class TestMigrationConsistency:
 
         # Collect all migration upgrade() sources
         migrations = []
-        for rev in ("0001_initial", "0002_exports"):
+        for rev in ("0001_initial", "0002_exports", "0003_sync_idempotency"):
             try:
                 m = importlib.import_module(f"src.migrations.versions.{rev}")
                 migrations.append(m)
@@ -56,7 +56,7 @@ class TestMigrationConsistency:
 
         # Aggregate all create_table calls across migrations
         all_created = set()
-        for rev in ("0001_initial", "0002_exports"):
+        for rev in ("0001_initial", "0002_exports", "0003_sync_idempotency"):
             try:
                 m = importlib.import_module(f"src.migrations.versions.{rev}")
                 if hasattr(m, "upgrade"):
@@ -116,6 +116,6 @@ class TestMigrationConsistency:
                 f"{table_name} missing CHECK constraint on amount_cents"
             )
 
-    def test_12_tables_registered(self):
-        """The schema must define exactly 12 tables."""
-        assert len(Base.metadata.tables) == 12
+    def test_13_tables_registered(self):
+        """The schema must define exactly 13 tables."""
+        assert len(Base.metadata.tables) == 13

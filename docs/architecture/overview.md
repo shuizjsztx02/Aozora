@@ -4,7 +4,7 @@
 
 登录用户数据以服务端 PostgreSQL 为权威。客户端 Room 是本地副本和离线工作区；服务端 API 负责鉴权、事务、幂等、审计和同步，AI Gateway 仅输出经过校验的动作提案。
 
-## 本地数据层（T-M1-03 复审中，设备验收待完成）
+## 本地数据层（T-M1-03 ✅）
 
 - **Room 数据库：** `com.aozora.app.db.AozoraDatabase`，6 实体（Transaction/Book/Category/Account/Budget/PendingMutation），每个实体对应 DAO
 - **Repository：** 已开放的交易插入/软删除、账本插入和分类插入通过 `db.withTransaction` 包含实体与 pending mutation；其余业务写路径尚未完整交付，不能绕过 repository 直接写 DAO
@@ -12,6 +12,16 @@
 - **TypeScript 桥客户端：** `platform/bridge/native-bridge.ts`，Promise-based 封装，与 Kotlin 侧契约类型一一对应
 
 ## 后续关注
+
+## 同步模块（T-M3-01）
+
+服务端同步采用"服务端权威 + 本地副本 + 操作队列"协议：
+
+- **`POST /sync/push`**：客户端提交 mutation batch（上限 100），每个 mutation 包含 `mutationId`、`entityType`、`operation`、`version` 和 `payload`。服务端按顺序执行鉴权、幂等检查（`mutation_idempotency` 表）、版本校验和写入，每个成功 mutation 生成一条 `SyncChange`（自增 cursor）。遇到第一个版本冲突时停止处理，已成功的 mutation 在同一事务中提交。
+- **`GET /sync/pull?cursor=N&limit=100`**：返回 cursor N 之后的所有变更及完整实体数据，cursor 分页，上限 500。
+- **`POST /sync/bootstrap`**：返回用户完整数据快照（所有未删除/未归档实体）和当前 cursor，用于设备重建。
+
+幂等保证：客户端生成的 `mutationId`（UUID）写入 `mutation_idempotency` 表，重复 push 同一 mutationId 返回 `duplicate`。冲突响应返回 `409` 或 `conflict` 状态 + 服务端当前 version。
 
 - 同步引擎（T-M3-02）将通过 Bridge 消费 PendingMutation 队列
 - Room schema 变更使用 migration，不做破坏性 reset

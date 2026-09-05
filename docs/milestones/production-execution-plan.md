@@ -1,6 +1,6 @@
 # Aozora · 生产执行规划
 
-**状态：** M1 全部完成 ✅，M2 阶段 T-M2-01 至 T-M2-05 全部交付 ✅。当前任务为 T-M3-01 同步契约。
+**状态：** M1 全部完成 ✅，M2 阶段 T-M2-01 至 T-M2-05 全部交付 ✅。M3 阶段 T-M3-01 已交付 ✅。当前任务为 T-M3-02 Android 同步引擎。
 **用途：** 后续执行 Agent 的唯一任务选择与交接入口。产品、架构与全局验收以 `docs/APP-CONTEXT.md` 为准；本文件只维护顺序、闸门、交接与完成记录。
 
 ## 执行规则
@@ -26,6 +26,7 @@
 **交接产物：** 无密码基础设施清单、staging 可用性结论与实际技术栈 ADR。
 **验证：** 清单包含 OS、CPU/内存、网络、域名/证书、PostgreSQL、备份、容器、地域与合规状态。
 **阻塞：** T-M2-01、M6。
+**状态：** ⏸ 待外部确认（参数由账户所有者在外部控制）。`docs/adr/ADR-001-infrastructure-baseline.md` 与 `R-PROD-09` 已登记占位；T-M2-01/02 在开发环境（`docker-compose.yml` PostgreSQL 18 + SQLite 测试库）已完成，生产部署最晚 T-M6-01 前回填真实参数。
 
 ### T-M0-10 执行治理与长期规划
 
@@ -71,7 +72,7 @@
 **2026-09-04 M1 最终验收记录**
 - 首轮审查发现 18 项问题（R-M1-01～18），全部修复。
 - 四项 M1 闭环复审新增 R-M1-19～33，全部修复。
-- 设备测试 23/23 通过（Room 20 + WebView 1 + 杀进程 2）。
+- 设备测试 30/30 通过（Room 27 + WebView 1 + 杀进程 2）。
 - 杀进程持久化验证：写入 → force-stop → 重启 → 数据完整。
 - Account/Budget Repository 原子写补齐（insert/update/delete + pending mutation 同事务）。
 - Bridge 写命令补齐：`account.insert`/`account.archive`、`budget.insert`/`budget.update`/`budget.delete`。
@@ -118,7 +119,7 @@
 | T-M1-04 本地 NLU | ✅ 通过 | 纯函数 parser 309 项测试通过，契约闸兜底 |
 | T-M1-05 ActionProposal | ✅ 通过 | Draft-07 Schema、16 fixture、AJV 与 TS 校验器平价 |
 
-累计测试：前端 309 passed（14 files）；Android 设备 23/23 passed；JVM 8/8 passed。
+累计测试：前端 327 passed（14 files）；Android 设备 27/27 passed（+7 引用完整性回归，R-P1-RefInt）；JVM 8/8 passed；服务端 122 passed。
 
 ## M2：服务端与数据库基础
 
@@ -357,11 +358,60 @@
 
 **测试：** `pytest tests/` → **85 passed**（原 76，新增 9：production guards × 5、X-Forwarded-For × 1、timezone 校验 × 1、device_id 长度 × 1、rate limiter sync 重构）
 
-| 任务 | 硬依赖 | 交接产物 | 最低验证 |
-|---|---|---|---|
-| T-M3-01 同步契约与变更流 | T-M2-04 | push/pull、cursor、冲突响应 | 重复、乱序、分页、重试 |
-| T-M3-02 Android 同步引擎 | T-M1-03、T-M3-01 | WorkManager 队列与状态事件 | 飞行模式、重启、重复点击 |
-| T-M3-03 单设备恢复 | T-M3-02 | bootstrap checksum、Room 重建 | 清空 Room 后对账一致 |
+## M3：客户端—服务端同步与恢复
+
+| 任务 | 硬依赖 | 交接产物 | 最低验证 | 状态 |
+|---|---|---|---|---|
+| T-M3-01 同步契约与变更流 ✅ | T-M2-04 | push/pull、cursor、冲突响应 | 重复、乱序、分页、重试 | ✅ **通过** |
+| T-M3-02 Android 同步引擎 | T-M1-03、T-M3-01 | WorkManager 队列与状态事件 | 飞行模式、重启、重复点击 | — |
+| T-M3-03 单设备恢复 | T-M3-02 | bootstrap checksum、Room 重建 | 清空 Room 后对账一致 | — |
+
+### T-M3-01 完成记录
+
+按交接模板：
+
+- **任务编号：** T-M3-01
+- **完成范围 / 明确未做：**
+  - ✅ 完成：`POST /sync/push` — 批量提交客户端 mutations（上限 100），每个包含 `mutation_id`、`entity_type`（book/category/account/transaction/budget）、`operation`（insert/update/delete）、`entity_id`、`version` 和 `payload`。服务端按顺序执行鉴权、幂等检查（`mutation_idempotency` 表）、版本校验和写入，每个成功 mutation 生成一条 `SyncChange`（自增 cursor）。遇到第一个版本冲突时停止处理，已成功的 mutation 在同一事务中提交。
+  - ✅ 完成：`GET /sync/pull?cursor=N&limit=M` — 返回 cursor N 之后的所有变更及完整实体数据，cursor 分页（默认 100，上限 500），`has_more` 标记。
+  - ✅ 完成：`POST /sync/bootstrap` — 返回用户完整数据快照（所有未删除/未归档的 books、categories、accounts、transactions、budgets）和当前 cursor，用于设备重建。
+  - ✅ 完成：`MutationIdempotency` 模型（`mutation_id` PK、`user_id`、`entity_type`、`entity_id`、`sync_cursor`、`result_version`、`created_at`）
+  - ✅ 完成：Alembic 迁移 `0003_sync_idempotency.py`
+  - ✅ 完成：跨用户数据隔离（所有操作验证 `owner_id`）
+  - ❌ 未做：客户端 Android 同步引擎（T-M3-02）
+  - ❌ 未做：bootstrap checksum 校验（T-M3-03）
+  - ❌ 未做：服务端同步限流（首发暂不做）
+- **修改的文档、契约与代码：**
+  - 新增代码：`server/src/models/mutation.py`（MutationIdempotency 模型）
+  - 新增代码：`server/src/modules/sync/`（`__init__.py`、`schemas.py`、`repository.py`、`service.py`、`routes.py`）
+  - 新增迁移：`server/src/migrations/versions/0003_sync_idempotency.py`
+  - 更新：`server/src/models/__init__.py`（注册 MutationIdempotency）
+  - 更新：`server/src/main.py`（注册 sync_router）
+  - 更新：`server/tests/test_migrations.py`（新迁移纳入一致性检查，表数 12→13）
+  - 新增测试：`server/tests/test_sync.py`（30 项）
+  - 更新文档：`docs/architecture/overview.md`、`docs/milestones/production-execution-plan.md`、`docs/milestones/overview.md`、`docs/APP-CONTEXT.md`
+- **验证命令与结果：**
+  - `cd server && pytest tests/ -v` → **152 passed**（原 122 + 新增 30 项同步测试）
+  - `cd server && pytest tests/test_sync.py -v` → **30 passed**
+  - 幂等测试：重复 `mutation_id` 返回 `duplicate`，不重复写数据
+  - 冲突测试：版本不匹配返回 `conflict` + `current_version`，后续 mutation 不处理
+  - 分页测试：`cursor` 递进 + `has_more` 标记
+  - 跨用户测试：User B 无法访问 User A 的实体（404）
+  - 恢复测试：同一 `cursor` 拉取两次结果一致
+- **数据/同步/AI/安全影响：**
+  - 数据：`mutation_idempotency` 表新增；`sync_changes` 表已有（T-M2-02）；5 种实体类型均可通过 push 创建/更新/删除
+  - 同步：核心协议实现完成（push → SyncChange → pull cursor 流转）；幂等由 `mutation_id` UUID 保证；冲突由 `version` 乐观锁保证
+  - AI：无关（同步是确定性数据操作，不涉及 AI）
+  - 安全：所有端点需 Bearer token 认证；ownership 验证通过 `owner_id` 检查；跨用户实体返回 404
+- **兼容与回退方式：**
+  - 向后兼容：纯新增模块和迁移，不影响 T-M2-01/02/03/04/05
+  - 回退：删除 `server/src/modules/sync/`、`server/src/models/mutation.py`、`server/src/migrations/versions/0003_sync_idempotency.py`，从 `main.py` 和 `models/__init__.py` 移除注册
+- **开放风险与责任人：**
+  - push 无服务端限流——首发依赖客户端行为，后续可添加
+  - pull 返回完整实体数据——大量变更时响应体积较大；后续可考虑只返回变更字段
+  - `_serialize_entity` 手动序列化——与 Response schema 不完全同步，需保持一致
+  - 事务边界：push 中 conflict 后整个请求仍提交已成功的 mutation——这是设计决策（幂等重入），非 bug
+- **下一项未阻塞任务：** T-M3-02 Android 同步引擎
 
 ## M4：AI、原生能力与体验
 

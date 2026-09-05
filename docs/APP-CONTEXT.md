@@ -120,15 +120,15 @@
 | AI、规则 NLU 与动作协议 | 本地 NLU 与 ActionProposal 基础已实现；服务端 AI/执行闭环未接入 | `PARTIAL` |
 | 本地数据与离线队列 | Room 6 表、完整原子写 repository 与 pending mutation 队列已实现（account/budget/transaction 写路径闭环），设备可靠性已通过（23/23 含手工 force-stop 协议）；离线同步与备份归 M3/M5 | `PARTIAL` |
 | 原生桥、语音、图片、提醒与小组件 | 版本化 Bridge 与 React 打包接线已实现；其余原生能力待做 | `PARTIAL` |
-| 服务端 | FastAPI 骨架、配置校验、健康检查、OpenAPI 3.1、Dockerfile；11 实体模型 + Alembic 迁移（0001_initial + 0002_exports）；auth 模块；账本核心 API（Books/Categories/Accounts/Transactions/Budgets CRUD）；统计与导出 API（月度/趋势聚合、JSON/CSV 导出，对账不变量）| `PARTIAL`，T-M2-01/02/03/04/05 ✅；同步待实施 |
-| 测试 | 前端 313 + Android JVM 8 + 设备 Room 20 + 服务端 122 项通过；Android 设备 23/23 实测（含手工 force-stop 持久化验证，杀进程与 WebView 测试已 @Ignore 避免自动化假绿/假红）；前端/Android CI 已通过，服务端 CI 门禁尚未建立 | `PARTIAL` |
+| 服务端 | FastAPI 骨架、配置校验、健康检查、OpenAPI 3.1、Dockerfile；11 实体模型 + Alembic 迁移（0001_initial + 0002_exports + 0003_sync_idempotency）；auth 模块；账本核心 API（Books/Categories/Accounts/Transactions/Budgets CRUD）；统计与导出 API（月度/趋势聚合、JSON/CSV 导出，对账不变量）；同步模块（push/pull/bootstrap、幂等 mutation、cursor 变更流）| `PARTIAL`，T-M2-01/02/03/04/05 ✅；T-M3-01 ✅；Android 同步引擎待实施 |
+| 测试 | 前端 327 + Android JVM 8 + 设备 Room 27 + 服务端 122 项通过；Android 设备 30/30 实测（含手工 force-stop 持久化验证，杀进程与 WebView 测试已 @Ignore 避免自动化假绿/假红）；前端/Android CI 已通过，服务端 CI 门禁尚未建立 | `PARTIAL` |
 | 发布 | 无签名材料和可分发产物 | `TARGET` |
 
 ### 3.2 当前不能视为已交付的能力
 
 - 真实 AI 调用与提案确认/业务执行闭环
 - 安全的登录、鉴权和会话管理（服务端 auth 模块已实现；SMS 供应商未接入，当前开发模式用固定验证码）
-- 云端同步与换机恢复（服务端账本 API 与统计导出已就绪，同步模块待 T-M3-01+）
+- 云端同步与换机恢复（服务端同步 API 已实现 T-M3-01；Android 同步引擎待 T-M3-02）
 - 数据库版本迁移器（v1 → v2+ 升级路径未实现；设备持久性已通过 Room 6 表 + force-stop 协议实测；Alembic 服务端迁移流水线已就绪）
 - 可靠自动备份、数据库恢复和账号删除
 - 多账本、二级分类、支付渠道（Schema 已支持，业务 API 待实施）
@@ -551,7 +551,7 @@ app/src/
 - T-M0-07 仅在 T-M2-01 前必须完成；T-M1-01 是建立 CI 的唯一启动任务，T-M1-02 及其后的 M1 任务验收前必须启用该门禁。
 ### M1：客户端可靠数据底座 ✅
 
-> **M1 验收结论（2026-09-04）：✅ M1 全部通过，阶段完成。** 前端测试 327/327（含 R-M1-34/35/36/37/43/48/49 全部回归用例）；Android 设备测试 20 自动化 + 3 手工（Room 20 自动化、杀进程 2 手工 force-stop 协议、WebView 1 单独跑通过）；GitHub Actions CI 验证成功。NLU 修复闭环：R-M1-34/35/36/37/43/44/45/46/47/48/49/50 全部 ✅。
+> **M1 验收结论（2026-09-04）：✅ M1 全部通过，阶段完成。** 前端测试 327/327（含 R-M1-34/35/36/37/43/48/49 全部回归用例）；Android 设备测试 27 自动化 + 3 手工（Room 27 自动化，含 +7 引用完整性回归 R-P1-RefInt；杀进程 2 手工 force-stop 协议、WebView 1 单独跑通过）；GitHub Actions CI 验证成功。NLU 修复闭环：R-M1-34/35/36/37/43/44/45/46/47/48/49/50 全部 ✅。
 
 #### T-M1-01 前端 TypeScript 与测试门禁
 
@@ -575,7 +575,7 @@ app/src/
 - **依赖：** T-M1-02。
 - **实施：** Kotlin Room entities/DAO/repository；JS Bridge 使用 `requestId + callback` 的版本化命令与查询接口；Zustand 只保存 UI 状态。
 - **验收：** 杀进程重启数据完整；写入和 pending mutation 同事务；WebView 清缓存不丢 Room 数据；桥接口有契约测试。
-- **状态：** ✅ **通过**。6 实体/DAO、Repository 原子写（transaction/book/category/account/budget）、v1 20 命令桥（含 account/budget 写命令）、TS 客户端、Vite 入 APK 与本地 HTTPS 加载。设备测试 23/23 通过（Room 20 + WebView 1 + 杀进程 2）。杀进程持久化验证通过。
+- **状态：** ✅ **通过**。6 实体/DAO、Repository 原子写（transaction/book/category/account/budget）、v1 20 命令桥（含 account/budget 写命令）、TS 客户端、Vite 入 APK 与本地 HTTPS 加载。设备测试 30/30 通过（Room 27 + WebView 1 + 杀进程 2）。杀进程持久化验证通过。
 
 #### T-M1-04 本地规则 NLU 重建
 
