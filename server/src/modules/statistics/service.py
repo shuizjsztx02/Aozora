@@ -47,11 +47,31 @@ class StatisticsService:
         self.db = db
 
     async def _verify_book_ownership(self, book_id: uuid.UUID, user_id: uuid.UUID) -> None:
+        """Verify the user owns the book and it has not been soft-deleted.
+
+        N-01: filter ``deleted_at`` so statistics queries cannot be run
+        against soft-deleted books.
+        """
         result = await self.db.execute(
-            select(Book).where(Book.id == book_id, Book.owner_id == user_id)
+            select(Book).where(
+                Book.id == book_id,
+                Book.owner_id == user_id,
+                Book.deleted_at.is_(None),
+            )
         )
         if result.scalar_one_or_none() is None:
             raise AppException(404, "not_found", "Book not found")
+
+    @staticmethod
+    def _parse_period(period: str) -> tuple[int, int]:
+        """Parse 'YYYY-MM' and validate month range; raise 422 on invalid."""
+        try:
+            year, month = period.split("-")
+            y, m = int(year), int(month)
+            date(y, m, 1)  # raises ValueError if month out of range
+            return y, m
+        except ValueError:
+            raise AppException(422, "invalid_period", f"Invalid period: {period!r}")
 
     async def get_monthly_stats(self, book_id: uuid.UUID, user_id: uuid.UUID, period: str) -> MonthlyStats:
         """Aggregate monthly statistics for a book.
@@ -61,8 +81,8 @@ class StatisticsService:
         await self._verify_book_ownership(book_id, user_id)
 
         # Parse period to date range
-        year, month = period.split("-")
-        start_date = date(int(year), int(month), 1)
+        year, month = self._parse_period(period)
+        start_date = date(year, month, 1)
         if month == "12":
             end_date = date(int(year) + 1, 1, 1)
         else:
@@ -150,9 +170,17 @@ class StatisticsService:
         await self._verify_book_ownership(book_id, user_id)
 
         # Parse period range
-        fy, fm = period_from.split("-")
-        ty, tm = period_to.split("-")
-        start_date = date(int(fy), int(fm), 1)
+        fy, fm = self._parse_period(period_from)
+        ty, tm = self._parse_period(period_to)
+
+        # Validate period_from <= period_to
+        if (fy, fm) > (ty, tm):
+            raise AppException(
+                422, "invalid_period_range",
+                f"period_from ({period_from}) must be <= period_to ({period_to})",
+            )
+
+        start_date = date(fy, fm, 1)
         if tm == "12":
             end_date = date(int(ty) + 1, 1, 1)
         else:

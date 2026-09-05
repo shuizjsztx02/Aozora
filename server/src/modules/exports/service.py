@@ -30,8 +30,16 @@ class ExportService:
         self.db = db
 
     async def _verify_book_ownership(self, book_id: uuid.UUID, user_id: uuid.UUID) -> None:
+        """Verify the user owns the book and it has not been soft-deleted.
+
+        N-01: filter ``deleted_at`` so soft-deleted books cannot be exported.
+        """
         result = await self.db.execute(
-            select(Book).where(Book.id == book_id, Book.owner_id == user_id)
+            select(Book).where(
+                Book.id == book_id,
+                Book.owner_id == user_id,
+                Book.deleted_at.is_(None),
+            )
         )
         if result.scalar_one_or_none() is None:
             raise AppException(404, "not_found", "Book not found")

@@ -22,7 +22,7 @@ DEVICE_ID_MAX_LENGTH = 128
 # ---------------------------------------------------------------------------
 
 class GuestRequest(BaseModel):
-    nickname: str | None = None
+    nickname: str | None = Field(default=None, max_length=64)
     device_id: str = Field(max_length=DEVICE_ID_MAX_LENGTH)
     timezone: str = "Asia/Shanghai"
 

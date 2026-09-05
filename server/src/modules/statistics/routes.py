@@ -21,7 +21,7 @@ router = APIRouter(prefix="/stats", tags=["statistics"])
 @router.get("/monthly", response_model=MonthlyStats)
 async def get_monthly_stats(
     book_id: uuid.UUID = Query(...),
-    period: str = Query(..., pattern=r"^\d{4}-\d{2}$"),
+    period: str = Query(..., pattern=r"^\d{4}-(0[1-9]|1[0-2])$"),
     current_user: Annotated[User, Depends(get_current_user)] = ...,
     db: Annotated[AsyncSession, Depends(get_db_session)] = ...,
 ):
@@ -32,8 +32,8 @@ async def get_monthly_stats(
 @router.get("/trends", response_model=TrendStats)
 async def get_trend_stats(
     book_id: uuid.UUID = Query(...),
-    period_from: str = Query(..., pattern=r"^\d{4}-\d{2}$"),
-    period_to: str = Query(..., pattern=r"^\d{4}-\d{2}$"),
+    period_from: str = Query(..., pattern=r"^\d{4}-(0[1-9]|1[0-2])$"),
+    period_to: str = Query(..., pattern=r"^\d{4}-(0[1-9]|1[0-2])$"),
     current_user: Annotated[User, Depends(get_current_user)] = ...,
     db: Annotated[AsyncSession, Depends(get_db_session)] = ...,
 ):

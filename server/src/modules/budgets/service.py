@@ -5,6 +5,7 @@ from __future__ import annotations
 import uuid
 
 from sqlalchemy import select
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from src.common.errors import AppException
@@ -23,9 +24,17 @@ class BudgetService:
         self.repo = BudgetRepository(db)
 
     async def _verify_book_ownership(self, book_id: uuid.UUID, user_id: uuid.UUID) -> None:
-        """Verify the user owns the book."""
+        """Verify the user owns the book and it has not been soft-deleted.
+
+        N-01: filter ``deleted_at`` so soft-deleted books cannot receive
+        new budgets.
+        """
         result = await self.db.execute(
-            select(Book).where(Book.id == book_id, Book.owner_id == user_id)
+            select(Book).where(
+                Book.id == book_id,
+                Book.owner_id == user_id,
+                Book.deleted_at.is_(None),
+            )
         )
         if result.scalar_one_or_none() is None:
             raise AppException(404, "not_found", "Book not found")
@@ -63,10 +72,23 @@ class BudgetService:
         )
 
         if existing is None:
-            # Create new
-            return await self.repo.create(
-                data.book_id, data.budget_type, period, data.amount_cents, data.category_id,
-            )
+            # Create new — handle concurrent TOCTOU (N-04)
+            try:
+                return await self.repo.create(
+                    data.book_id, data.budget_type, period, data.amount_cents, data.category_id,
+                )
+            except IntegrityError:
+                # Concurrent insert: another request created the same unique
+                # key.  Rollback, re-read, and update instead.
+                await self.db.rollback()
+                existing = await self.repo.get_by_period_and_category(
+                    data.book_id, data.budget_type, period, data.category_id,
+                )
+                if existing is None:
+                    # IntegrityError without a visible row — unlikely but
+                    # possible under certain DB isolation levels.  Re-raise.
+                    raise
+                # Fall through to the update path below.
 
         # Update existing
         if data.version is not None and existing.version != data.version:
