@@ -88,6 +88,15 @@ class Settings(BaseSettings):
         validation_alias=AliasChoices("LOG_LEVEL", "log_level"),
     )
 
+    # --- exports ---
+    # N-05: export directory. Defaults to a /tmp sub-directory (ephemeral
+    # on most OSes); override via EXPORT_DIR for persistent deployments.
+    # Files are auto-deleted when their export expires (N-06).
+    export_dir: str = Field(
+        default="",
+        validation_alias=AliasChoices("EXPORT_DIR", "export_dir"),
+    )
+
     @property
     def is_production(self) -> bool:
         return self.env == "production"

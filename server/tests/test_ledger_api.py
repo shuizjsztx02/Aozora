@@ -198,6 +198,107 @@ class TestCategoriesAPI:
         resp = auth_client.delete(f"/categories/{cat_id}", headers=_auth_header(user))
         assert resp.status_code == 204
 
+    # ── N-08: unique-name conflicts must surface as 409, not 500 ──
+
+    def test_create_duplicate_category_returns_409(self, auth_client, user):
+        """N-08: creating a same-scope duplicate name → 409 duplicate_name."""
+        auth_client.post("/categories", json={"name": "餐饮", "kind": "expense"}, headers=_auth_header(user))
+        resp = auth_client.post("/categories", json={"name": "餐饮", "kind": "expense"}, headers=_auth_header(user))
+        assert resp.status_code == 409
+        assert resp.json()["code"] == "duplicate_name"
+
+    def test_rename_category_to_existing_name_returns_409(self, auth_client, user):
+        """N-08: renaming onto a live sibling name → 409, not 500."""
+        auth_client.post("/categories", json={"name": "餐饮", "kind": "expense"}, headers=_auth_header(user))
+        b_resp = auth_client.post("/categories", json={"name": "交通", "kind": "expense"}, headers=_auth_header(user))
+        b = b_resp.json()
+
+        resp = auth_client.patch(
+            f"/categories/{b['id']}",
+            json={"name": "餐饮", "version": b["version"]},
+            headers=_auth_header(user),
+        )
+        assert resp.status_code == 409
+        assert resp.json()["code"] == "duplicate_name"
+
+    def test_rename_category_to_own_name_ok(self, auth_client, user):
+        """N-08 guard: keeping/retyping the current name must not conflict."""
+        a_resp = auth_client.post("/categories", json={"name": "餐饮", "kind": "expense"}, headers=_auth_header(user))
+        a = a_resp.json()
+
+        resp = auth_client.patch(
+            f"/categories/{a['id']}",
+            json={"name": "餐饮", "version": a["version"]},
+            headers=_auth_header(user),
+        )
+        assert resp.status_code == 200
+        assert resp.json()["name"] == "餐饮"
+
+    def test_rename_to_archived_name_returns_409(self, auth_client, user):
+        """N-08: uq_categories_scope_name spans archived rows too, so an
+        archived twin still occupies the name — must be 409, not 500."""
+        a_resp = auth_client.post("/categories", json={"name": "餐饮", "kind": "expense"}, headers=_auth_header(user))
+        a = a_resp.json()
+        auth_client.delete(f"/categories/{a['id']}", headers=_auth_header(user))  # archive
+
+        b_resp = auth_client.post("/categories", json={"name": "交通", "kind": "expense"}, headers=_auth_header(user))
+        b = b_resp.json()
+        resp = auth_client.patch(
+            f"/categories/{b['id']}",
+            json={"name": "餐饮", "version": b["version"]},
+            headers=_auth_header(user),
+        )
+        assert resp.status_code == 409
+        assert resp.json()["code"] == "duplicate_name"
+
+    # ── N-09: parent self-reference / cycles must be rejected ──
+
+    def test_category_self_parent_rejected(self, auth_client, user):
+        """N-09: a category cannot become its own parent."""
+        a_resp = auth_client.post("/categories", json={"name": "餐饮", "kind": "expense"}, headers=_auth_header(user))
+        a = a_resp.json()
+
+        resp = auth_client.patch(
+            f"/categories/{a['id']}",
+            json={"parent_id": a["id"], "version": a["version"]},
+            headers=_auth_header(user),
+        )
+        assert resp.status_code == 400
+        assert resp.json()["code"] == "self_reference"
+
+    def test_category_parent_cycle_rejected(self, auth_client, user):
+        """N-09: reparenting A under its own descendant B (A→B→A) → 400."""
+        a_resp = auth_client.post("/categories", json={"name": "餐饮", "kind": "expense"}, headers=_auth_header(user))
+        a = a_resp.json()
+        b_resp = auth_client.post(
+            "/categories",
+            json={"name": "外卖", "kind": "expense", "parent_id": a["id"]},
+            headers=_auth_header(user),
+        )
+        assert b_resp.status_code == 201
+        b = b_resp.json()
+
+        resp = auth_client.patch(
+            f"/categories/{a['id']}",
+            json={"parent_id": b["id"], "version": a["version"]},
+            headers=_auth_header(user),
+        )
+        assert resp.status_code == 400
+        assert resp.json()["code"] == "cycle_detected"
+
+    def test_category_nested_parent_ok(self, auth_client, user):
+        """N-09 guard: a legitimate two-level hierarchy must still work."""
+        a_resp = auth_client.post("/categories", json={"name": "餐饮", "kind": "expense"}, headers=_auth_header(user))
+        a = a_resp.json()
+
+        resp = auth_client.post(
+            "/categories",
+            json={"name": "外卖", "kind": "expense", "parent_id": a["id"]},
+            headers=_auth_header(user),
+        )
+        assert resp.status_code == 201
+        assert resp.json()["parent_id"] == a["id"]
+
 
 # ── Accounts ────────────────────────────────────────────────────────────
 
@@ -258,6 +359,40 @@ class TestTransactionsAPI:
         assert data["amount_cents"] == 1000
         assert data["type"] == "expense"
 
+    def test_note_overlong_rejected(self, auth_client, user, book_and_category):
+        """N-13: note over 2000 chars must be rejected at the API boundary."""
+        book_id, cat_id = book_and_category
+        resp = auth_client.post(
+            "/transactions",
+            json={
+                "book_id": book_id,
+                "type": "expense",
+                "amount_cents": 1000,
+                "category_id": cat_id,
+                "note": "x" * 2001,
+                "biz_date": "2026-09-04",
+                "occurred_at": "2026-09-04T12:00:00Z",
+            },
+            headers=_auth_header(user),
+        )
+        assert resp.status_code == 422
+
+        # Boundary: exactly 2000 chars is still accepted.
+        ok_resp = auth_client.post(
+            "/transactions",
+            json={
+                "book_id": book_id,
+                "type": "expense",
+                "amount_cents": 1000,
+                "category_id": cat_id,
+                "note": "x" * 2000,
+                "biz_date": "2026-09-04",
+                "occurred_at": "2026-09-04T12:00:00Z",
+            },
+            headers=_auth_header(user),
+        )
+        assert ok_resp.status_code == 201
+
     def test_list_transactions_by_book(self, auth_client, user, book_and_category):
         """GET /transactions?book_id=... should list transactions for a book."""
         book_id, cat_id = book_and_category
@@ -310,6 +445,27 @@ class TestTransactionsAPI:
             "book_id": book_id, "type": "expense", "amount_cents": 200,
             "category_id": cat_id, "biz_date": "2026-09-05", "occurred_at": "2026-09-05T12:00:00Z",
         }, headers=_auth_header(user))
+        assert resp.status_code == 404
+
+    def test_list_transactions_on_soft_deleted_book_returns_404(self, auth_client, user, book_and_category):
+        """N-12 regression: listing transactions for a soft-deleted book
+        must return 404, not an empty list.
+
+        Previously the repo returned ([], 0) for soft-deleted books; the
+        service now raises 404 via _verify_book_ownership before the repo
+        runs, so a deleted book behaves as gone for reads too.
+        """
+        book_id, cat_id = book_and_category
+        # Create a tx so the book is provably non-empty, then soft-delete.
+        auth_client.post("/transactions", json={
+            "book_id": book_id, "type": "expense", "amount_cents": 100,
+            "category_id": cat_id, "biz_date": "2026-09-04", "occurred_at": "2026-09-04T12:00:00Z",
+        }, headers=_auth_header(user))
+
+        del_resp = auth_client.delete(f"/books/{book_id}", headers=_auth_header(user))
+        assert del_resp.status_code == 204
+
+        resp = auth_client.get(f"/transactions?book_id={book_id}", headers=_auth_header(user))
         assert resp.status_code == 404
 
     def test_undo_delete_transaction(self, auth_client, user, book_and_category):

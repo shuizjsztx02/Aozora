@@ -24,13 +24,16 @@ logger = logging.getLogger(__name__)
 
 bearer_scheme = HTTPBearer()
 
-# In-memory rate limiter — keyed by (client_ip, endpoint).
+# In-memory rate limiter — keyed by client_ip only.
 # Replaced by Redis-backed limiter in multi-instance deployments.
 # NOTE (R-M2-04): this dict is bounded by ``_MAX_ENTRIES``. Stale entries
 # (timestamps older than the window) are evicted periodically and when
 # the dict exceeds the cap, so memory use stays bounded even under
 # traffic from many distinct IPs.
-_rate_limits: dict[tuple[str, str], list[float]] = defaultdict(list)
+# NOTE (N-10): keyed by IP alone so all auth endpoints share a single
+# bucket per client. Previously keyed by (ip, path), which multiplied
+# the effective limit by the number of auth endpoints (4 × 10 = 40/min).
+_rate_limits: dict[str, list[float]] = defaultdict(list)
 _last_cleanup: float = 0.0
 _MAX_ENTRIES = 10_000
 
@@ -78,12 +81,15 @@ def check_auth_rate_limit(request: Request) -> None:
     Synchronous on purpose — the implementation is pure in-memory work
     (no IO), so there is nothing to await. Keeping it sync also lets
     tests exercise it without an event loop.
+
+    N-10: all auth endpoints share a single bucket per IP — the previous
+    per-(ip, path) keying multiplied the effective limit by the number
+    of auth endpoints.
     """
     global _last_cleanup  # noqa: PLW0603
     client_ip = _get_client_ip(request)
-    endpoint = request.url.path
     now = time.time()
-    key = (client_ip, endpoint)
+    key = client_ip
 
     # Periodic cleanup (cheap — only scans dict keys)
     if now - _last_cleanup > CLEANUP_INTERVAL_SECONDS:

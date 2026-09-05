@@ -119,3 +119,22 @@ class TestMigrationConsistency:
     def test_13_tables_registered(self):
         """The schema must define exactly 13 tables."""
         assert len(Base.metadata.tables) == 13
+
+    def test_transaction_note_column_bounded(self):
+        """N-13: transactions.note must be bounded at the DB layer too.
+
+        The Pydantic schema caps notes at 2000 chars; the column must
+        match so a writer that bypasses the API is still bounded.
+        """
+        from sqlalchemy import String
+
+        column = Base.metadata.tables["transactions"].columns["note"]
+        assert isinstance(column.type, String)
+        assert column.type.length == 2000
+
+    def test_note_length_migration_chains_onto_0004(self):
+        """N-13: 0005_note_length must extend the migration chain."""
+        m4 = importlib.import_module("src.migrations.versions.0004_budget_unique_constraint")
+        m5 = importlib.import_module("src.migrations.versions.0005_note_length")
+        assert m5.down_revision == m4.revision
+        assert m5.revision == "0005_note_length"

@@ -291,6 +291,78 @@ class TestRateLimiter:
             check_auth_rate_limit(FakeRequest())
         assert exc_info.value.status_code == 429
 
+    @pytest.mark.asyncio
+    async def test_rate_limit_shared_across_auth_endpoints(self):
+        """N-10: all auth endpoints share ONE bucket per IP (10/min total).
+
+        Previously the key was (ip, path), so hitting 4 auth endpoints in
+        rotation allowed 4x the limit. The 11th request overall must fail
+        even though each individual endpoint was only used 2-3 times.
+        """
+        from src.modules.auth.dependencies import check_auth_rate_limit, MAX_AUTH_REQUESTS
+
+        def make_request(path: str):
+            class FakeClient:
+                host = "9.9.9.9"
+
+            class FakeURL:
+                pass
+
+            class FakeHeaders(dict):
+                def get(self, key, default=None):
+                    return super().get(key, default)
+
+            url_obj = FakeURL()
+            url_obj.path = path
+
+            class FakeRequest:
+                client = FakeClient()
+                url = url_obj
+                headers = FakeHeaders()
+
+            return FakeRequest()
+
+        paths = ["/auth/guest", "/auth/login", "/auth/refresh", "/auth/logout"]
+        for i in range(MAX_AUTH_REQUESTS):
+            check_auth_rate_limit(make_request(paths[i % len(paths)]))
+
+        from src.common.errors import AppException
+        with pytest.raises(AppException) as exc_info:
+            check_auth_rate_limit(make_request("/auth/guest"))
+        assert exc_info.value.status_code == 429
+
+    @pytest.mark.asyncio
+    async def test_rate_limit_buckets_stay_per_ip(self):
+        """N-10 guard: converging keys must not merge distinct clients."""
+        from src.modules.auth.dependencies import check_auth_rate_limit, MAX_AUTH_REQUESTS
+
+        def make_request(host: str):
+            class FakeClient:
+                pass
+
+            class FakeURL:
+                path = "/auth/guest"
+
+            class FakeHeaders(dict):
+                def get(self, key, default=None):
+                    return super().get(key, default)
+
+            client_obj = FakeClient()
+            client_obj.host = host
+
+            class FakeRequest:
+                client = client_obj
+                url = FakeURL()
+                headers = FakeHeaders()
+
+            return FakeRequest()
+
+        for _ in range(MAX_AUTH_REQUESTS):
+            check_auth_rate_limit(make_request("8.8.8.1"))
+
+        # A different IP must still get through.
+        check_auth_rate_limit(make_request("8.8.8.2"))
+
 
 # ── Production config safety ──────────────────────────────────────────
 

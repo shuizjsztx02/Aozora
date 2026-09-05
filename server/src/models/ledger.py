@@ -14,7 +14,6 @@ from sqlalchemy import (
     ForeignKey,
     Index,
     String,
-    Text,
     UniqueConstraint,
 )
 from sqlalchemy.dialects.postgresql import UUID
@@ -152,7 +151,9 @@ class Transaction(Base, AuditMixin, VersionedMixin, SoftDeleteMixin):
         ForeignKey("accounts.id", ondelete="SET NULL"),
         nullable=True,
     )
-    note: Mapped[str] = mapped_column(Text, default="", server_default="", nullable=False)
+    # N-13: String(2000) matches the Pydantic schema max_length so the DB
+    # enforces the cap even if a future caller bypasses the API boundary.
+    note: Mapped[str] = mapped_column(String(2000), default="", server_default="", nullable=False)
     biz_date: Mapped[date] = mapped_column(Date, nullable=False)
     occurred_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False,
