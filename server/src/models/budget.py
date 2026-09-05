@@ -4,8 +4,9 @@ from __future__ import annotations
 
 import enum
 import uuid
+from datetime import datetime
 
-from sqlalchemy import BigInteger, CheckConstraint, ForeignKey, Index, String, text
+from sqlalchemy import BigInteger, CheckConstraint, DateTime, ForeignKey, Index, String, text
 from sqlalchemy.dialects.postgresql import UUID
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
@@ -24,21 +25,23 @@ class BudgetType(str, enum.Enum):
 # category_id IS NULL.  Replace with two partial unique indexes:
 #   - uq_budgets_overall:  WHERE category_id IS NULL
 #   - uq_budgets_category: WHERE category_id IS NOT NULL
+# T-M3-02: both also filter ``deleted_at IS NULL`` so a soft-deleted
+# budget does not block re-creating the same (book, type, period) budget.
 class Budget(Base, AuditMixin, VersionedMixin):
     __tablename__ = "budgets"
     __table_args__ = (
         Index(
             "uq_budgets_overall",
             "book_id", "budget_type", "period",
-            sqlite_where=text("category_id IS NULL"),
-            postgresql_where=text("category_id IS NULL"),
+            sqlite_where=text("category_id IS NULL AND deleted_at IS NULL"),
+            postgresql_where=text("category_id IS NULL AND deleted_at IS NULL"),
             unique=True,
         ),
         Index(
             "uq_budgets_category",
             "book_id", "budget_type", "period", "category_id",
-            sqlite_where=text("category_id IS NOT NULL"),
-            postgresql_where=text("category_id IS NOT NULL"),
+            sqlite_where=text("category_id IS NOT NULL AND deleted_at IS NULL"),
+            postgresql_where=text("category_id IS NOT NULL AND deleted_at IS NULL"),
             unique=True,
         ),
         CheckConstraint("amount_cents > 0", name="ck_budgets_amount_positive"),
@@ -62,6 +65,13 @@ class Budget(Base, AuditMixin, VersionedMixin):
     )
     period: Mapped[str] = mapped_column(String(10), nullable=False)
     amount_cents: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    # T-M3-02: sync delete must be durable. Client hard-deletes budgets
+    # locally; the server keeps a soft-deleted row so version checks,
+    # idempotent re-push and bootstrap behave consistently with the
+    # other entities (R-PROD: budget delete was previously silently lost).
+    deleted_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True,
+    )
 
     book: Mapped["Book"] = relationship(back_populates="budgets")
 

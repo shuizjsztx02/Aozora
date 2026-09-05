@@ -6,11 +6,13 @@ import logging
 import uuid
 from datetime import date, datetime, timezone
 
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy import select
 
 from src.common.errors import AppException
-from src.models.budget import Budget
-from src.models.ledger import Account, Book, Category, Transaction, TxType
+from src.models.budget import Budget, BudgetType
+from src.models.ledger import Account, Book, Category, CategoryKind, Transaction, TxSource, TxType
 from src.models.sync import SyncOperation
 
 from .repository import SyncRepository
@@ -68,6 +70,19 @@ class SyncService:
                 ))
                 # Stop processing remaining mutations after first conflict.
                 break
+            except IntegrityError as exc:
+                # PK / UNIQUE / FK violation — most commonly a duplicate
+                # ``entity_id`` on insert. Roll back happens in the session
+                # dependency; report as 409 so the client can reconcile.
+                raise AppException(
+                    409, "conflict", "Mutation conflicts with existing data",
+                ) from exc
+            except (KeyError, ValueError, TypeError) as exc:
+                # Missing required payload field, or unparseable UUID /
+                # date / datetime / enum. Convert to 422 rather than 500.
+                raise AppException(
+                    422, "validation_error", f"Invalid payload: {exc}",
+                ) from exc
 
             results.append(result)
 
@@ -144,6 +159,9 @@ class SyncService:
     ) -> tuple[uuid.UUID, int]:
         """Create a new entity. Returns (entity_id, version)."""
         if entity_type == "book":
+            _validate_name(payload["name"], 128, "name")
+            if payload.get("icon") is not None:
+                _validate_name(payload["icon"], 64, "icon")
             book = Book(
                 id=entity_id,
                 owner_id=user_id,
@@ -161,6 +179,13 @@ class SyncService:
             parent_id = payload.get("parent_id")
             if parent_id:
                 parent_id = uuid.UUID(parent_id) if isinstance(parent_id, str) else parent_id
+                # Verify the parent category exists and belongs to the user,
+                # mirroring the account_id check in transaction insert.
+                await self._verify_category_ownership(parent_id, user_id)
+            # Validate kind enum — invalid values raise ValueError → 422
+            # via the global catch in push().
+            CategoryKind(payload["kind"])
+            _validate_name(payload["name"], 64, "name")
             cat = Category(
                 id=entity_id,
                 owner_id=user_id,
@@ -174,6 +199,9 @@ class SyncService:
             return cat.id, cat.version
 
         if entity_type == "account":
+            _validate_name(payload["name"], 64, "name")
+            if payload.get("icon") is not None:
+                _validate_name(payload["icon"], 64, "icon")
             acc = Account(
                 id=entity_id,
                 owner_id=user_id,
@@ -190,6 +218,15 @@ class SyncService:
             account_id = _to_uuid(payload["account_id"]) if payload.get("account_id") else None
             await self._verify_book_ownership(book_id, user_id)
             await self._verify_category_ownership(category_id, user_id)
+            if account_id is not None:
+                await self._verify_account_ownership(account_id, user_id)
+            _validate_amount_cents(payload["amount_cents"])
+            _validate_note(payload.get("note", ""))
+            source = payload.get("source", "manual")
+            if source not in _TX_SOURCE_VALUES:
+                raise AppException(
+                    422, "validation_error", f"Invalid source: {source}",
+                )
 
             tx = Transaction(
                 id=entity_id,
@@ -201,7 +238,7 @@ class SyncService:
                 note=payload.get("note", ""),
                 biz_date=_to_date(payload["biz_date"]),
                 occurred_at=_to_datetime(payload["occurred_at"]),
-                source=payload.get("source", "manual"),
+                source=source,
             )
             self.db.add(tx)
             await self.db.flush()
@@ -211,6 +248,12 @@ class SyncService:
             book_id = _to_uuid(payload["book_id"])
             await self._verify_book_ownership(book_id, user_id)
             category_id = _to_uuid(payload["category_id"]) if payload.get("category_id") else None
+            if category_id is not None:
+                await self._verify_category_ownership(category_id, user_id)
+            _validate_amount_cents(payload["amount_cents"])
+            # Validate budget_type enum — invalid values raise ValueError → 422
+            # via the global catch in push().
+            BudgetType(payload["budget_type"])
             budget = Budget(
                 id=entity_id,
                 book_id=book_id,
@@ -244,43 +287,66 @@ class SyncService:
 
         if entity_type == "book":
             if "name" in payload:
+                _validate_name(payload["name"], 128, "name")
                 entity.name = payload["name"]
             if "icon" in payload:
+                if payload["icon"] is not None:
+                    _validate_name(payload["icon"], 64, "icon")
                 entity.icon = payload["icon"]
 
         elif entity_type == "category":
             if "name" in payload:
+                _validate_name(payload["name"], 64, "name")
                 entity.name = payload["name"]
             if "parent_id" in payload:
-                entity.parent_id = _to_uuid(payload["parent_id"]) if payload["parent_id"] else None
+                parent_id = _to_uuid(payload["parent_id"]) if payload["parent_id"] else None
+                if parent_id is not None:
+                    await self._verify_category_ownership(parent_id, user_id)
+                entity.parent_id = parent_id
 
         elif entity_type == "account":
             if "name" in payload:
+                _validate_name(payload["name"], 64, "name")
                 entity.name = payload["name"]
             if "icon" in payload:
+                if payload["icon"] is not None:
+                    _validate_name(payload["icon"], 64, "icon")
                 entity.icon = payload["icon"]
 
         elif entity_type == "transaction":
             if "type" in payload:
                 entity.type = TxType(payload["type"])
             if "amount_cents" in payload:
+                _validate_amount_cents(payload["amount_cents"])
                 entity.amount_cents = payload["amount_cents"]
             if "category_id" in payload and payload["category_id"] is not None:
                 cat_id = _to_uuid(payload["category_id"])
                 await self._verify_category_ownership(cat_id, user_id)
                 entity.category_id = cat_id
             if "account_id" in payload:
-                entity.account_id = _to_uuid(payload["account_id"]) if payload["account_id"] else None
+                account_id = _to_uuid(payload["account_id"]) if payload["account_id"] else None
+                if account_id is not None:
+                    await self._verify_account_ownership(account_id, user_id)
+                entity.account_id = account_id
             if "note" in payload:
+                _validate_note(payload["note"])
                 entity.note = payload["note"]
             if "biz_date" in payload:
                 entity.biz_date = _to_date(payload["biz_date"])
+            # ``occurred_at`` is intentionally not updatable via sync. It
+            # records when the transaction originally took place and is
+            # treated as immutable after creation — the direct transactions
+            # API (TransactionUpdate) makes the same design choice.
 
         elif entity_type == "budget":
             if "amount_cents" in payload:
+                _validate_amount_cents(payload["amount_cents"])
                 entity.amount_cents = payload["amount_cents"]
             if "category_id" in payload:
-                entity.category_id = _to_uuid(payload["category_id"]) if payload["category_id"] else None
+                category_id = _to_uuid(payload["category_id"]) if payload["category_id"] else None
+                if category_id is not None:
+                    await self._verify_category_ownership(category_id, user_id)
+                entity.category_id = category_id
 
         else:
             raise AppException(422, "validation_error", f"Unknown entity_type: {entity_type}")
@@ -309,7 +375,8 @@ class SyncService:
         if entity_type in _ARCHIVED_TYPES:
             entity.archived_at = now
         else:
-            # book, transaction use deleted_at
+            # book, transaction, budget use deleted_at
+            # (T-M3-02: budgets.deleted_at added in migration 0006)
             entity.deleted_at = now
 
         entity.version += 1
@@ -319,14 +386,31 @@ class SyncService:
     # -- Ownership helpers ------------------------------------------------
 
     async def _verify_book_ownership(self, book_id: uuid.UUID, user_id: uuid.UUID) -> None:
-        book = await self.repo.get_book(book_id, user_id)
-        if book is None:
+        """Verify the user owns the book and it has not been soft-deleted.
+
+        N-01: filter ``deleted_at`` so a soft-deleted book behaves as gone —
+        writes via sync return 404 instead of succeeding silently against a
+        zombie book. Mirrors ``transactions/service.py:_verify_book_ownership``.
+        """
+        result = await self.db.execute(
+            select(Book).where(
+                Book.id == book_id,
+                Book.owner_id == user_id,
+                Book.deleted_at.is_(None),
+            )
+        )
+        if result.scalar_one_or_none() is None:
             raise AppException(404, "not_found", "Book not found")
 
     async def _verify_category_ownership(self, cat_id: uuid.UUID, user_id: uuid.UUID) -> None:
         cat = await self.repo.get_category(cat_id, user_id)
         if cat is None:
             raise AppException(404, "not_found", "Category not found")
+
+    async def _verify_account_ownership(self, acc_id: uuid.UUID, user_id: uuid.UUID) -> None:
+        acc = await self.repo.get_account(acc_id, user_id)
+        if acc is None:
+            raise AppException(404, "not_found", "Account not found")
 
     # ------------------------------------------------------------------
     # Pull
@@ -384,6 +468,39 @@ class SyncService:
 # Helpers
 # ---------------------------------------------------------------------------
 
+_TX_SOURCE_VALUES = frozenset(s.value for s in TxSource)
+
+
+def _validate_amount_cents(value: object) -> None:
+    """Reject non-positive or non-integer ``amount_cents`` with 422."""
+    if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
+        raise AppException(
+            422, "validation_error", "amount_cents must be a positive integer",
+        )
+
+
+def _validate_note(value: object) -> None:
+    """Reject non-string or over-long ``note`` with 422."""
+    if not isinstance(value, str) or len(value) > 2000:
+        raise AppException(
+            422, "validation_error",
+            "note must be a string of at most 2000 characters",
+        )
+
+
+def _validate_name(value: object, max_length: int, field: str = "name") -> None:
+    """Reject non-string or over-long name fields with 422.
+
+    ``field`` parameter allows reuse for ``book.name``, ``category.name``,
+    ``account.name``, etc., each with its own column length limit.
+    """
+    if not isinstance(value, str) or len(value) > max_length:
+        raise AppException(
+            422, "validation_error",
+            f"{field} must be a string of at most {max_length} characters",
+        )
+
+
 class _Conflict(Exception):
     """Internal signal for version conflict."""
 
@@ -420,7 +537,10 @@ def _serialize_entity(entity: object) -> dict:
             "version": entity.version,
             "created_at": entity.created_at.isoformat(),
             "updated_at": entity.updated_at.isoformat(),
-            "archived_at": entity.archived_at.isoformat() if entity.archived_at else None,
+            # Book uses deleted_at for soft-delete (SoftDeleteMixin).
+            # Book.archived_at exists in the model but is never written by
+            # any API — sync and the direct books module only set deleted_at.
+            "deleted_at": entity.deleted_at.isoformat() if entity.deleted_at else None,
         }
     if isinstance(entity, Category):
         return {
@@ -472,5 +592,6 @@ def _serialize_entity(entity: object) -> dict:
             "version": entity.version,
             "created_at": entity.created_at.isoformat(),
             "updated_at": entity.updated_at.isoformat(),
+            "deleted_at": entity.deleted_at.isoformat() if entity.deleted_at else None,
         }
     raise TypeError(f"Cannot serialize {type(entity)}")

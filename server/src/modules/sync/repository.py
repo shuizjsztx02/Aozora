@@ -155,10 +155,11 @@ class SyncRepository:
         )
         transactions = list(txs_result.scalars().all())
 
-        # Budgets (only for user's books)
+        # Budgets (only for user's books, excluding soft-deleted — T-M3-02)
         budgets_result = await self.db.execute(
             select(Budget).where(
                 Budget.book_id.in_(book_ids),
+                Budget.deleted_at.is_(None),
             ) if book_ids else select(Budget).where(False)  # noqa: E712
         )
         budgets = list(budgets_result.scalars().all())

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import uuid
+from datetime import datetime, timezone
 
 import pytest
 import pytest_asyncio
@@ -351,6 +352,82 @@ class TestPushUpdateDelete:
         r = resp2.json()["results"][0]
         assert r["status"] == "applied"
         assert r["version"] == 2
+
+    @pytest.mark.asyncio
+    async def test_delete_budget(self, auth_client):
+        """T-M3-02: budgets can be soft-deleted via sync; server row is
+        kept with deleted_at populated so idempotent re-push and conflict
+        detection keep working, and bootstrap/pull no longer return it."""
+        ctx = auth_client
+        budget_id = uuid.uuid4()
+        # Insert
+        resp = ctx["client"].post(
+            "/sync/push",
+            json={
+                "mutations": [
+                    {
+                        "mutation_id": str(uuid.uuid4()),
+                        "entity_type": "budget",
+                        "operation": "insert",
+                        "entity_id": str(budget_id),
+                        "payload": {
+                            "book_id": str(ctx["book_a"].id),
+                            "budget_type": "monthly",
+                            "amount_cents": 200000,
+                            "category_id": str(ctx["cat_expense_a"].id),
+                            "period": "2026-09",
+                        },
+                    }
+                ],
+            },
+            headers=_auth_header(ctx["user_a"].id),
+        )
+        assert resp.status_code == 200
+        v1 = resp.json()["results"][0]["version"]
+        assert v1 == 1
+
+        # Delete
+        resp2 = ctx["client"].post(
+            "/sync/push",
+            json={
+                "mutations": [
+                    {
+                        "mutation_id": str(uuid.uuid4()),
+                        "entity_type": "budget",
+                        "operation": "delete",
+                        "entity_id": str(budget_id),
+                        "version": 1,
+                        "payload": {},
+                    }
+                ],
+            },
+            headers=_auth_header(ctx["user_a"].id),
+        )
+        assert resp2.status_code == 200
+        r = resp2.json()["results"][0]
+        assert r["status"] == "applied"
+        assert r["version"] == 2
+
+        # Bootstrap must no longer include the deleted budget
+        resp_bs = ctx["client"].post(
+            "/sync/bootstrap",
+            headers=_auth_header(ctx["user_a"].id),
+        )
+        assert resp_bs.status_code == 200
+        assert resp_bs.json()["budgets"] == []
+
+        # Pull must report the delete with entity=null
+        resp_pull = ctx["client"].get(
+            "/sync/pull?cursor=0",
+            headers=_auth_header(ctx["user_a"].id),
+        )
+        changes = resp_pull.json()["changes"]
+        budget_delete_change = next(
+            c for c in changes
+            if c["entity_type"] == "budget" and c["operation"] == "delete"
+        )
+        assert budget_delete_change["version"] == 2
+        assert budget_delete_change["entity"] is None
 
 
 # ---------------------------------------------------------------------------
@@ -1324,4 +1401,923 @@ class TestIntegration:
         assert changes[1]["operation"] == "update"
         assert changes[2]["operation"] == "delete"
         assert changes[2]["entity"] is None
+
+
+# ---------------------------------------------------------------------------
+# Payload validation (review T-M3-01 #3)
+# ---------------------------------------------------------------------------
+
+class TestPayloadValidation:
+
+    @pytest.mark.asyncio
+    async def test_insert_transaction_amount_zero_rejected(self, auth_client):
+        ctx = auth_client
+        resp = ctx["client"].post(
+            "/sync/push",
+            json={
+                "mutations": [
+                    {
+                        "mutation_id": str(uuid.uuid4()),
+                        "entity_type": "transaction",
+                        "operation": "insert",
+                        "entity_id": str(uuid.uuid4()),
+                        "payload": {
+                            "book_id": str(ctx["book_a"].id),
+                            "type": "expense",
+                            "amount_cents": 0,
+                            "category_id": str(ctx["cat_expense_a"].id),
+                            "biz_date": "2026-09-04",
+                            "occurred_at": "2026-09-04T12:00:00+08:00",
+                        },
+                    }
+                ],
+            },
+            headers=_auth_header(ctx["user_a"].id),
+        )
+        assert resp.status_code == 422
+
+    @pytest.mark.asyncio
+    async def test_insert_transaction_amount_negative_rejected(self, auth_client):
+        ctx = auth_client
+        resp = ctx["client"].post(
+            "/sync/push",
+            json={
+                "mutations": [
+                    {
+                        "mutation_id": str(uuid.uuid4()),
+                        "entity_type": "transaction",
+                        "operation": "insert",
+                        "entity_id": str(uuid.uuid4()),
+                        "payload": {
+                            "book_id": str(ctx["book_a"].id),
+                            "type": "expense",
+                            "amount_cents": -1,
+                            "category_id": str(ctx["cat_expense_a"].id),
+                            "biz_date": "2026-09-04",
+                            "occurred_at": "2026-09-04T12:00:00+08:00",
+                        },
+                    }
+                ],
+            },
+            headers=_auth_header(ctx["user_a"].id),
+        )
+        assert resp.status_code == 422
+
+    @pytest.mark.asyncio
+    async def test_update_transaction_amount_zero_rejected(self, auth_client):
+        ctx = auth_client
+        tx_id = uuid.uuid4()
+        # Insert a valid transaction first.
+        ctx["client"].post(
+            "/sync/push",
+            json={
+                "mutations": [
+                    {
+                        "mutation_id": str(uuid.uuid4()),
+                        "entity_type": "transaction",
+                        "operation": "insert",
+                        "entity_id": str(tx_id),
+                        "payload": {
+                            "book_id": str(ctx["book_a"].id),
+                            "type": "expense",
+                            "amount_cents": 5000,
+                            "category_id": str(ctx["cat_expense_a"].id),
+                            "biz_date": "2026-09-04",
+                            "occurred_at": "2026-09-04T12:00:00+08:00",
+                        },
+                    }
+                ],
+            },
+            headers=_auth_header(ctx["user_a"].id),
+        )
+        # Now try to set amount_cents to 0.
+        resp = ctx["client"].post(
+            "/sync/push",
+            json={
+                "mutations": [
+                    {
+                        "mutation_id": str(uuid.uuid4()),
+                        "entity_type": "transaction",
+                        "operation": "update",
+                        "entity_id": str(tx_id),
+                        "version": 1,
+                        "payload": {"amount_cents": 0},
+                    }
+                ],
+            },
+            headers=_auth_header(ctx["user_a"].id),
+        )
+        assert resp.status_code == 422
+
+    @pytest.mark.asyncio
+    async def test_insert_transaction_note_too_long_rejected(self, auth_client):
+        ctx = auth_client
+        resp = ctx["client"].post(
+            "/sync/push",
+            json={
+                "mutations": [
+                    {
+                        "mutation_id": str(uuid.uuid4()),
+                        "entity_type": "transaction",
+                        "operation": "insert",
+                        "entity_id": str(uuid.uuid4()),
+                        "payload": {
+                            "book_id": str(ctx["book_a"].id),
+                            "type": "expense",
+                            "amount_cents": 1000,
+                            "category_id": str(ctx["cat_expense_a"].id),
+                            "note": "x" * 2001,
+                            "biz_date": "2026-09-04",
+                            "occurred_at": "2026-09-04T12:00:00+08:00",
+                        },
+                    }
+                ],
+            },
+            headers=_auth_header(ctx["user_a"].id),
+        )
+        assert resp.status_code == 422
+
+    @pytest.mark.asyncio
+    async def test_insert_transaction_invalid_source_rejected(self, auth_client):
+        ctx = auth_client
+        resp = ctx["client"].post(
+            "/sync/push",
+            json={
+                "mutations": [
+                    {
+                        "mutation_id": str(uuid.uuid4()),
+                        "entity_type": "transaction",
+                        "operation": "insert",
+                        "entity_id": str(uuid.uuid4()),
+                        "payload": {
+                            "book_id": str(ctx["book_a"].id),
+                            "type": "expense",
+                            "amount_cents": 1000,
+                            "category_id": str(ctx["cat_expense_a"].id),
+                            "source": "bogus",
+                            "biz_date": "2026-09-04",
+                            "occurred_at": "2026-09-04T12:00:00+08:00",
+                        },
+                    }
+                ],
+            },
+            headers=_auth_header(ctx["user_a"].id),
+        )
+        assert resp.status_code == 422
+
+    @pytest.mark.asyncio
+    async def test_insert_transaction_invalid_biz_date_rejected(self, auth_client):
+        ctx = auth_client
+        resp = ctx["client"].post(
+            "/sync/push",
+            json={
+                "mutations": [
+                    {
+                        "mutation_id": str(uuid.uuid4()),
+                        "entity_type": "transaction",
+                        "operation": "insert",
+                        "entity_id": str(uuid.uuid4()),
+                        "payload": {
+                            "book_id": str(ctx["book_a"].id),
+                            "type": "expense",
+                            "amount_cents": 1000,
+                            "category_id": str(ctx["cat_expense_a"].id),
+                            "biz_date": "not-a-date",
+                            "occurred_at": "2026-09-04T12:00:00+08:00",
+                        },
+                    }
+                ],
+            },
+            headers=_auth_header(ctx["user_a"].id),
+        )
+        assert resp.status_code == 422
+
+    @pytest.mark.asyncio
+    async def test_insert_transaction_invalid_type_rejected(self, auth_client):
+        ctx = auth_client
+        resp = ctx["client"].post(
+            "/sync/push",
+            json={
+                "mutations": [
+                    {
+                        "mutation_id": str(uuid.uuid4()),
+                        "entity_type": "transaction",
+                        "operation": "insert",
+                        "entity_id": str(uuid.uuid4()),
+                        "payload": {
+                            "book_id": str(ctx["book_a"].id),
+                            "type": "refund",  # invalid TxType
+                            "amount_cents": 1000,
+                            "category_id": str(ctx["cat_expense_a"].id),
+                            "biz_date": "2026-09-04",
+                            "occurred_at": "2026-09-04T12:00:00+08:00",
+                        },
+                    }
+                ],
+            },
+            headers=_auth_header(ctx["user_a"].id),
+        )
+        assert resp.status_code == 422
+
+    @pytest.mark.asyncio
+    async def test_insert_transaction_invalid_uuid_rejected(self, auth_client):
+        ctx = auth_client
+        resp = ctx["client"].post(
+            "/sync/push",
+            json={
+                "mutations": [
+                    {
+                        "mutation_id": str(uuid.uuid4()),
+                        "entity_type": "transaction",
+                        "operation": "insert",
+                        "entity_id": str(uuid.uuid4()),
+                        "payload": {
+                            "book_id": "not-a-uuid",
+                            "type": "expense",
+                            "amount_cents": 1000,
+                            "category_id": str(ctx["cat_expense_a"].id),
+                            "biz_date": "2026-09-04",
+                            "occurred_at": "2026-09-04T12:00:00+08:00",
+                        },
+                    }
+                ],
+            },
+            headers=_auth_header(ctx["user_a"].id),
+        )
+        assert resp.status_code == 422
+
+    @pytest.mark.asyncio
+    async def test_insert_transaction_missing_required_field_rejected(self, auth_client):
+        ctx = auth_client
+        resp = ctx["client"].post(
+            "/sync/push",
+            json={
+                "mutations": [
+                    {
+                        "mutation_id": str(uuid.uuid4()),
+                        "entity_type": "transaction",
+                        "operation": "insert",
+                        "entity_id": str(uuid.uuid4()),
+                        "payload": {
+                            "book_id": str(ctx["book_a"].id),
+                            "type": "expense",
+                            "amount_cents": 1000,
+                            "category_id": str(ctx["cat_expense_a"].id),
+                            # biz_date missing
+                            "occurred_at": "2026-09-04T12:00:00+08:00",
+                        },
+                    }
+                ],
+            },
+            headers=_auth_header(ctx["user_a"].id),
+        )
+        assert resp.status_code == 422
+
+    @pytest.mark.asyncio
+    async def test_insert_duplicate_entity_id_conflict(self, auth_client):
+        """Inserting two mutations with the same entity_id but different
+        mutation_ids should yield 409 (PK conflict) on the second."""
+        ctx = auth_client
+        shared_id = uuid.uuid4()
+        resp = ctx["client"].post(
+            "/sync/push",
+            json={
+                "mutations": [
+                    {
+                        "mutation_id": str(uuid.uuid4()),
+                        "entity_type": "account",
+                        "operation": "insert",
+                        "entity_id": str(shared_id),
+                        "payload": {"name": "first"},
+                    },
+                    {
+                        "mutation_id": str(uuid.uuid4()),
+                        "entity_type": "account",
+                        "operation": "insert",
+                        "entity_id": str(shared_id),
+                        "payload": {"name": "second"},
+                    },
+                ],
+            },
+            headers=_auth_header(ctx["user_a"].id),
+        )
+        assert resp.status_code == 409
+
+    @pytest.mark.asyncio
+    async def test_push_exactly_100_mutations_accepted(self, auth_client):
+        """100 mutations is the batch upper bound — should be accepted."""
+        ctx = auth_client
+        mutations = [
+            {
+                "mutation_id": str(uuid.uuid4()),
+                "entity_type": "account",
+                "operation": "insert",
+                "entity_id": str(uuid.uuid4()),
+                "payload": {"name": f"acc-{i}"},
+            }
+            for i in range(100)
+        ]
+        resp = ctx["client"].post(
+            "/sync/push",
+            json={"mutations": mutations},
+            headers=_auth_header(ctx["user_a"].id),
+        )
+        assert resp.status_code == 200
+        data = resp.json()
+        assert len(data["results"]) == 100
+        assert all(r["status"] == "applied" for r in data["results"])
+
+
+# ---------------------------------------------------------------------------
+# Pull boundaries (review T-M3-01 #5)
+# ---------------------------------------------------------------------------
+
+class TestPullBoundaries:
+
+    @pytest.mark.asyncio
+    async def test_pull_limit_zero_rejected(self, auth_client):
+        resp = auth_client["client"].get(
+            "/sync/pull?cursor=0&limit=0",
+            headers=_auth_header(auth_client["user_a"].id),
+        )
+        assert resp.status_code == 422
+
+    @pytest.mark.asyncio
+    async def test_pull_limit_max_accepted(self, auth_client):
+        resp = auth_client["client"].get(
+            "/sync/pull?cursor=0&limit=500",
+            headers=_auth_header(auth_client["user_a"].id),
+        )
+        assert resp.status_code == 200
+
+
+# ---------------------------------------------------------------------------
+# Account ownership (review T-M3-01 #2)
+# ---------------------------------------------------------------------------
+
+class TestAccountOwnership:
+
+    @pytest.mark.asyncio
+    async def test_insert_transaction_cross_user_account_rejected(self, auth_client, db_session):
+        """User A cannot insert a transaction referencing User B's account."""
+        ctx = auth_client
+        # Account owned by User B.
+        acc_b = Account(id=uuid.uuid4(), owner_id=ctx["user_b"].id, name="Bob Acc")
+        db_session.add(acc_b)
+        await db_session.commit()
+
+        resp = ctx["client"].post(
+            "/sync/push",
+            json={
+                "mutations": [
+                    {
+                        "mutation_id": str(uuid.uuid4()),
+                        "entity_type": "transaction",
+                        "operation": "insert",
+                        "entity_id": str(uuid.uuid4()),
+                        "payload": {
+                            "book_id": str(ctx["book_a"].id),
+                            "type": "expense",
+                            "amount_cents": 1000,
+                            "category_id": str(ctx["cat_expense_a"].id),
+                            "account_id": str(acc_b.id),
+                            "biz_date": "2026-09-04",
+                            "occurred_at": "2026-09-04T12:00:00+08:00",
+                        },
+                    }
+                ],
+            },
+            headers=_auth_header(ctx["user_a"].id),
+        )
+        assert resp.status_code == 404
+
+    @pytest.mark.asyncio
+    async def test_update_transaction_cross_user_account_rejected(self, auth_client, db_session):
+        """User A cannot update a transaction to reference User B's account."""
+        ctx = auth_client
+        # Insert transaction for User A without account_id.
+        tx_id = uuid.uuid4()
+        ctx["client"].post(
+            "/sync/push",
+            json={
+                "mutations": [
+                    {
+                        "mutation_id": str(uuid.uuid4()),
+                        "entity_type": "transaction",
+                        "operation": "insert",
+                        "entity_id": str(tx_id),
+                        "payload": {
+                            "book_id": str(ctx["book_a"].id),
+                            "type": "expense",
+                            "amount_cents": 1000,
+                            "category_id": str(ctx["cat_expense_a"].id),
+                            "biz_date": "2026-09-04",
+                            "occurred_at": "2026-09-04T12:00:00+08:00",
+                        },
+                    }
+                ],
+            },
+            headers=_auth_header(ctx["user_a"].id),
+        )
+
+        # Account owned by User B.
+        acc_b = Account(id=uuid.uuid4(), owner_id=ctx["user_b"].id, name="Bob Acc")
+        db_session.add(acc_b)
+        await db_session.commit()
+
+        resp = ctx["client"].post(
+            "/sync/push",
+            json={
+                "mutations": [
+                    {
+                        "mutation_id": str(uuid.uuid4()),
+                        "entity_type": "transaction",
+                        "operation": "update",
+                        "entity_id": str(tx_id),
+                        "version": 1,
+                        "payload": {"account_id": str(acc_b.id)},
+                    }
+                ],
+            },
+            headers=_auth_header(ctx["user_a"].id),
+        )
+        assert resp.status_code == 404
+
+
+# ---------------------------------------------------------------------------
+# Serialization (review T-M3-01 #1, #4)
+# ---------------------------------------------------------------------------
+
+class TestSerialization:
+
+    @pytest.mark.asyncio
+    async def test_pull_book_entity_has_deleted_at(self, auth_client):
+        """Book serialization exposes ``deleted_at`` (not ``archived_at``)."""
+        ctx = auth_client
+        # Push the existing book_a via bootstrap to confirm it's there;
+        # simpler: insert a fresh book via sync and pull it.
+        new_book_id = uuid.uuid4()
+        ctx["client"].post(
+            "/sync/push",
+            json={
+                "mutations": [
+                    {
+                        "mutation_id": str(uuid.uuid4()),
+                        "entity_type": "book",
+                        "operation": "insert",
+                        "entity_id": str(new_book_id),
+                        "payload": {"name": "Sync Book"},
+                    }
+                ],
+            },
+            headers=_auth_header(ctx["user_a"].id),
+        )
+        resp = ctx["client"].get(
+            "/sync/pull?cursor=0",
+            headers=_auth_header(ctx["user_a"].id),
+        )
+        data = resp.json()
+        book_change = next(
+            c for c in data["changes"] if c["entity_id"] == str(new_book_id)
+        )
+        entity = book_change["entity"]
+        assert "deleted_at" in entity
+        assert "archived_at" not in entity
+        assert entity["deleted_at"] is None
+
+    @pytest.mark.asyncio
+    async def test_update_transaction_occurred_at_is_immutable(self, auth_client):
+        """Pushing ``occurred_at`` in an update payload is silently ignored;
+        the field value stays at its original insert-time value."""
+        ctx = auth_client
+        tx_id = uuid.uuid4()
+        original_ts = "2026-09-04T12:00:00"
+        ctx["client"].post(
+            "/sync/push",
+            json={
+                "mutations": [
+                    {
+                        "mutation_id": str(uuid.uuid4()),
+                        "entity_type": "transaction",
+                        "operation": "insert",
+                        "entity_id": str(tx_id),
+                        "payload": {
+                            "book_id": str(ctx["book_a"].id),
+                            "type": "expense",
+                            "amount_cents": 1000,
+                            "category_id": str(ctx["cat_expense_a"].id),
+                            "biz_date": "2026-09-04",
+                            "occurred_at": original_ts,
+                        },
+                    }
+                ],
+            },
+            headers=_auth_header(ctx["user_a"].id),
+        )
+
+        # Update with occurred_at in payload + a normal field.
+        ctx["client"].post(
+            "/sync/push",
+            json={
+                "mutations": [
+                    {
+                        "mutation_id": str(uuid.uuid4()),
+                        "entity_type": "transaction",
+                        "operation": "update",
+                        "entity_id": str(tx_id),
+                        "version": 1,
+                        "payload": {
+                            "note": "changed",
+                            "occurred_at": "2099-01-01T00:00:00",
+                        },
+                    }
+                ],
+            },
+            headers=_auth_header(ctx["user_a"].id),
+        )
+
+        # Pull the update change and confirm occurred_at was NOT modified.
+        resp = ctx["client"].get(
+            "/sync/pull?cursor=0",
+            headers=_auth_header(ctx["user_a"].id),
+        )
+        data = resp.json()
+        update_change = next(
+            c for c in data["changes"]
+            if c["operation"] == "update" and c["entity_id"] == str(tx_id)
+        )
+        assert update_change["entity"]["occurred_at"] == original_ts
+        assert update_change["entity"]["note"] == "changed"
+
+
+# ---------------------------------------------------------------------------
+# Extended validation (review T-M3-01 follow-up)
+# ---------------------------------------------------------------------------
+
+class TestExtendedValidation:
+
+    @pytest.mark.asyncio
+    async def test_insert_book_name_too_long_rejected(self, auth_client):
+        ctx = auth_client
+        resp = ctx["client"].post(
+            "/sync/push",
+            json={
+                "mutations": [
+                    {
+                        "mutation_id": str(uuid.uuid4()),
+                        "entity_type": "book",
+                        "operation": "insert",
+                        "entity_id": str(uuid.uuid4()),
+                        "payload": {"name": "x" * 129},
+                    }
+                ],
+            },
+            headers=_auth_header(ctx["user_a"].id),
+        )
+        assert resp.status_code == 422
+
+    @pytest.mark.asyncio
+    async def test_insert_category_kind_invalid_rejected(self, auth_client):
+        ctx = auth_client
+        resp = ctx["client"].post(
+            "/sync/push",
+            json={
+                "mutations": [
+                    {
+                        "mutation_id": str(uuid.uuid4()),
+                        "entity_type": "category",
+                        "operation": "insert",
+                        "entity_id": str(uuid.uuid4()),
+                        "payload": {
+                            "name": "交通",
+                            "kind": "bogus",  # invalid CategoryKind
+                            "book_id": str(ctx["book_a"].id),
+                        },
+                    }
+                ],
+            },
+            headers=_auth_header(ctx["user_a"].id),
+        )
+        assert resp.status_code == 422
+
+    @pytest.mark.asyncio
+    async def test_insert_category_name_too_long_rejected(self, auth_client):
+        ctx = auth_client
+        resp = ctx["client"].post(
+            "/sync/push",
+            json={
+                "mutations": [
+                    {
+                        "mutation_id": str(uuid.uuid4()),
+                        "entity_type": "category",
+                        "operation": "insert",
+                        "entity_id": str(uuid.uuid4()),
+                        "payload": {
+                            "name": "x" * 65,
+                            "kind": "expense",
+                            "book_id": str(ctx["book_a"].id),
+                        },
+                    }
+                ],
+            },
+            headers=_auth_header(ctx["user_a"].id),
+        )
+        assert resp.status_code == 422
+
+    @pytest.mark.asyncio
+    async def test_insert_category_parent_id_cross_user_rejected(self, auth_client, db_session):
+        """User A cannot insert a category with User B's parent category."""
+        ctx = auth_client
+        # Category owned by User B.
+        cat_b = Category(
+            id=uuid.uuid4(), owner_id=ctx["user_b"].id,
+            book_id=ctx["book_a"].id,  # book_id doesn't matter for this test
+            kind=CategoryKind.EXPENSE, name="Bob Cat",
+        )
+        db_session.add(cat_b)
+        await db_session.commit()
+
+        resp = ctx["client"].post(
+            "/sync/push",
+            json={
+                "mutations": [
+                    {
+                        "mutation_id": str(uuid.uuid4()),
+                        "entity_type": "category",
+                        "operation": "insert",
+                        "entity_id": str(uuid.uuid4()),
+                        "payload": {
+                            "name": "Child",
+                            "kind": "expense",
+                            "book_id": str(ctx["book_a"].id),
+                            "parent_id": str(cat_b.id),
+                        },
+                    }
+                ],
+            },
+            headers=_auth_header(ctx["user_a"].id),
+        )
+        assert resp.status_code == 404
+
+    @pytest.mark.asyncio
+    async def test_insert_account_name_too_long_rejected(self, auth_client):
+        ctx = auth_client
+        resp = ctx["client"].post(
+            "/sync/push",
+            json={
+                "mutations": [
+                    {
+                        "mutation_id": str(uuid.uuid4()),
+                        "entity_type": "account",
+                        "operation": "insert",
+                        "entity_id": str(uuid.uuid4()),
+                        "payload": {"name": "x" * 65},
+                    }
+                ],
+            },
+            headers=_auth_header(ctx["user_a"].id),
+        )
+        assert resp.status_code == 422
+
+    @pytest.mark.asyncio
+    async def test_insert_budget_type_invalid_rejected(self, auth_client):
+        ctx = auth_client
+        resp = ctx["client"].post(
+            "/sync/push",
+            json={
+                "mutations": [
+                    {
+                        "mutation_id": str(uuid.uuid4()),
+                        "entity_type": "budget",
+                        "operation": "insert",
+                        "entity_id": str(uuid.uuid4()),
+                        "payload": {
+                            "book_id": str(ctx["book_a"].id),
+                            "budget_type": "weekly",  # invalid BudgetType
+                            "amount_cents": 100000,
+                            "period": "2026-09",
+                        },
+                    }
+                ],
+            },
+            headers=_auth_header(ctx["user_a"].id),
+        )
+        assert resp.status_code == 422
+
+    @pytest.mark.asyncio
+    async def test_update_book_name_too_long_rejected(self, auth_client):
+        ctx = auth_client
+        resp = ctx["client"].post(
+            "/sync/push",
+            json={
+                "mutations": [
+                    {
+                        "mutation_id": str(uuid.uuid4()),
+                        "entity_type": "book",
+                        "operation": "update",
+                        "entity_id": str(ctx["book_a"].id),
+                        "version": 1,
+                        "payload": {"name": "x" * 129},
+                    }
+                ],
+            },
+            headers=_auth_header(ctx["user_a"].id),
+        )
+        assert resp.status_code == 422
+
+    @pytest.mark.asyncio
+    async def test_update_category_parent_id_cross_user_rejected(self, auth_client, db_session):
+        """User A cannot update a category to reference User B's parent."""
+        ctx = auth_client
+        # Insert a category for User A.
+        cat_id = uuid.uuid4()
+        ctx["client"].post(
+            "/sync/push",
+            json={
+                "mutations": [
+                    {
+                        "mutation_id": str(uuid.uuid4()),
+                        "entity_type": "category",
+                        "operation": "insert",
+                        "entity_id": str(cat_id),
+                        "payload": {
+                            "name": "Parent",
+                            "kind": "expense",
+                            "book_id": str(ctx["book_a"].id),
+                        },
+                    }
+                ],
+            },
+            headers=_auth_header(ctx["user_a"].id),
+        )
+
+        # Category owned by User B.
+        cat_b = Category(
+            id=uuid.uuid4(), owner_id=ctx["user_b"].id,
+            book_id=ctx["book_a"].id,
+            kind=CategoryKind.EXPENSE, name="Bob Cat",
+        )
+        db_session.add(cat_b)
+        await db_session.commit()
+
+        resp = ctx["client"].post(
+            "/sync/push",
+            json={
+                "mutations": [
+                    {
+                        "mutation_id": str(uuid.uuid4()),
+                        "entity_type": "category",
+                        "operation": "update",
+                        "entity_id": str(cat_id),
+                        "version": 1,
+                        "payload": {"parent_id": str(cat_b.id)},
+                    }
+                ],
+            },
+            headers=_auth_header(ctx["user_a"].id),
+        )
+        assert resp.status_code == 404
+
+
+# ---------------------------------------------------------------------------
+# Soft-delete consistency (N-01 follow-up)
+# ---------------------------------------------------------------------------
+
+class TestSoftDeleteConsistency:
+
+    @pytest.mark.asyncio
+    async def test_soft_deleted_book_rejects_sync_insert(self, auth_client, db_session):
+        """A soft-deleted book cannot be used for sync insert operations.
+
+        N-01: _verify_book_ownership filters deleted_at IS NULL, so a
+        soft-deleted book behaves as gone — sync writes return 404.
+        """
+        ctx = auth_client
+        # Soft-delete book_a by setting deleted_at.
+        ctx["book_a"].deleted_at = datetime.now(timezone.utc)
+        await db_session.commit()
+
+        # Try to insert a transaction referencing the soft-deleted book.
+        resp = ctx["client"].post(
+            "/sync/push",
+            json={
+                "mutations": [
+                    {
+                        "mutation_id": str(uuid.uuid4()),
+                        "entity_type": "transaction",
+                        "operation": "insert",
+                        "entity_id": str(uuid.uuid4()),
+                        "payload": {
+                            "book_id": str(ctx["book_a"].id),
+                            "type": "expense",
+                            "amount_cents": 1000,
+                            "category_id": str(ctx["cat_expense_a"].id),
+                            "biz_date": "2026-09-04",
+                            "occurred_at": "2026-09-04T12:00:00",
+                        },
+                    }
+                ],
+            },
+            headers=_auth_header(ctx["user_a"].id),
+        )
+        assert resp.status_code == 404
+
+
+# ---------------------------------------------------------------------------
+# Budget category ownership (N-M3-1)
+# ---------------------------------------------------------------------------
+
+class TestBudgetCategoryOwnership:
+
+    @pytest.mark.asyncio
+    async def test_insert_budget_cross_user_category_rejected(self, auth_client, db_session):
+        """User A cannot insert a budget referencing User B's category.
+
+        N-M3-1: sync budget insert was missing the category_id ownership
+        check that the direct budgets API already performs.
+        """
+        ctx = auth_client
+        cat_b = Category(
+            id=uuid.uuid4(), owner_id=ctx["user_b"].id,
+            book_id=ctx["book_a"].id,
+            kind=CategoryKind.EXPENSE, name="Bob Cat",
+        )
+        db_session.add(cat_b)
+        await db_session.commit()
+
+        resp = ctx["client"].post(
+            "/sync/push",
+            json={
+                "mutations": [
+                    {
+                        "mutation_id": str(uuid.uuid4()),
+                        "entity_type": "budget",
+                        "operation": "insert",
+                        "entity_id": str(uuid.uuid4()),
+                        "payload": {
+                            "book_id": str(ctx["book_a"].id),
+                            "budget_type": "monthly",
+                            "amount_cents": 100000,
+                            "category_id": str(cat_b.id),
+                            "period": "2026-09",
+                        },
+                    }
+                ],
+            },
+            headers=_auth_header(ctx["user_a"].id),
+        )
+        assert resp.status_code == 404
+
+    @pytest.mark.asyncio
+    async def test_update_budget_cross_user_category_rejected(self, auth_client, db_session):
+        """User A cannot update a budget to reference User B's category."""
+        ctx = auth_client
+        # Insert a budget with no category_id first.
+        budget_id = uuid.uuid4()
+        ctx["client"].post(
+            "/sync/push",
+            json={
+                "mutations": [
+                    {
+                        "mutation_id": str(uuid.uuid4()),
+                        "entity_type": "budget",
+                        "operation": "insert",
+                        "entity_id": str(budget_id),
+                        "payload": {
+                            "book_id": str(ctx["book_a"].id),
+                            "budget_type": "monthly",
+                            "amount_cents": 100000,
+                            "period": "2026-09",
+                        },
+                    }
+                ],
+            },
+            headers=_auth_header(ctx["user_a"].id),
+        )
+
+        cat_b = Category(
+            id=uuid.uuid4(), owner_id=ctx["user_b"].id,
+            book_id=ctx["book_a"].id,
+            kind=CategoryKind.EXPENSE, name="Bob Cat",
+        )
+        db_session.add(cat_b)
+        await db_session.commit()
+
+        resp = ctx["client"].post(
+            "/sync/push",
+            json={
+                "mutations": [
+                    {
+                        "mutation_id": str(uuid.uuid4()),
+                        "entity_type": "budget",
+                        "operation": "update",
+                        "entity_id": str(budget_id),
+                        "version": 1,
+                        "payload": {"category_id": str(cat_b.id)},
+                    }
+                ],
+            },
+            headers=_auth_header(ctx["user_a"].id),
+        )
+        assert resp.status_code == 404
 

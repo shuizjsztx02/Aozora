@@ -97,7 +97,9 @@ class TestMigrationConsistency:
 
     def test_soft_delete_columns_present(self):
         """Soft-deletable entities must have a deleted_at column."""
-        soft_delete_tables = {"books", "transactions"}
+        # T-M3-02: budgets joined the soft-delete set (migration 0006) so
+        # sync deletes are durable instead of silently lost.
+        soft_delete_tables = {"books", "transactions", "budgets"}
         for table_name in soft_delete_tables:
             table = Base.metadata.tables[table_name]
             assert "deleted_at" in table.columns, (
@@ -138,3 +140,10 @@ class TestMigrationConsistency:
         m5 = importlib.import_module("src.migrations.versions.0005_note_length")
         assert m5.down_revision == m4.revision
         assert m5.revision == "0005_note_length"
+
+    def test_budget_deleted_at_migration_chains_onto_0005(self):
+        """T-M3-02: 0006_budget_deleted_at must extend the migration chain."""
+        m5 = importlib.import_module("src.migrations.versions.0005_note_length")
+        m6 = importlib.import_module("src.migrations.versions.0006_budget_deleted_at")
+        assert m6.down_revision == m5.revision
+        assert m6.revision == "0006_budget_deleted_at"
