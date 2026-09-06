@@ -32,6 +32,10 @@ afterEach(() => {
   delete win.AozoraBridge
   delete win.__aozoraBridgeRespond
   delete win.__aozoraPermissionResult__
+  delete win.__aozoraVoicePartial__
+  delete win.__aozoraVoiceFinal__
+  delete win.__aozoraVoiceError__
+  delete win.__aozoraImageProgress__
 })
 
 // ─── 类型完整性 ───
@@ -546,5 +550,170 @@ describe('NativeBridge — T-M4-02c AI 助手对话', () => {
     expect(payload.confirmation_token).toBe('token-123')
     expect(result.transaction_ids).toEqual(['tx-1', 'tx-2'])
     expect(result.undo_window_seconds).toBe(5)
+  })
+})
+
+// ─── T-M4-04b: 语音识别桥命令 ───
+
+describe('NativeBridge — T-M4-04b 语音识别', () => {
+  let bridge: NativeBridge
+  let mockNative: ReturnType<typeof installMockBridge>
+  let capturedCommand = ''
+
+  beforeEach(() => {
+    bridge = new NativeBridge()
+    mockNative = installMockBridge()
+    mockNative.call.mockImplementation((_v: number, requestId: string, cmd: string) => {
+      capturedCommand = cmd
+      setTimeout(() => simulateResponse(requestId, { started: true }), 0)
+    })
+  })
+
+  it('startVoiceRecording → voice.startRecording 命令', async () => {
+    const result = await bridge.startVoiceRecording()
+    expect(capturedCommand).toBe('voice.startRecording')
+    expect(result.started).toBe(true)
+  })
+
+  it('stopVoiceRecording → voice.stopRecording 命令，返回转写文本', async () => {
+    mockNative.call.mockImplementation((_v: number, requestId: string, cmd: string) => {
+      capturedCommand = cmd
+      setTimeout(() => simulateResponse(requestId, { stopped: true, text: '你好世界' }), 0)
+    })
+    const result = await bridge.stopVoiceRecording()
+    expect(capturedCommand).toBe('voice.stopRecording')
+    expect(result.stopped).toBe(true)
+    expect(result.text).toBe('你好世界')
+  })
+
+  it('startVoiceRecording 失败时抛出 BridgeError', async () => {
+    mockNative.call.mockImplementation((_v: number, requestId: string) => {
+      setTimeout(() => simulateResponse(requestId, null, false, 'permission_denied', 'RECORD_AUDIO not granted'), 0)
+    })
+    await expect(bridge.startVoiceRecording()).rejects.toMatchObject({
+      code: 'permission_denied',
+    })
+  })
+
+  it('onVoicePartial 监听实时部分转写', () => {
+    const texts: string[] = []
+    const unsubscribe = bridge.onVoicePartial(t => texts.push(t))
+    win.__aozoraVoicePartial__('你')
+    win.__aozoraVoicePartial__('你好')
+    expect(texts).toEqual(['你', '你好'])
+    unsubscribe()
+  })
+
+  it('onVoiceFinal 监听最终转写结果', () => {
+    let finalText = ''
+    const unsubscribe = bridge.onVoiceFinal(t => { finalText = t })
+    win.__aozoraVoiceFinal__('你好世界')
+    expect(finalText).toBe('你好世界')
+    unsubscribe()
+  })
+
+  it('onVoiceError 监听语音错误（对象格式）', () => {
+    const errors: Array<{ code: string; message: string }> = []
+    const unsubscribe = bridge.onVoiceError(e => errors.push(e))
+    win.__aozoraVoiceError__({ code: 'model_not_loaded', message: 'Vosk model not loaded' })
+    expect(errors).toHaveLength(1)
+    expect(errors[0].code).toBe('model_not_loaded')
+    unsubscribe()
+  })
+
+  it('onVoiceError 兼容旧版字符串格式（R-M4-04b Bug-B4）', () => {
+    const errors: Array<{ code: string; message: string }> = []
+    const unsubscribe = bridge.onVoiceError(e => errors.push(e))
+    win.__aozoraVoiceError__(JSON.stringify({ code: 'start_error', message: 'audio init failed' }))
+    expect(errors).toHaveLength(1)
+    expect(errors[0].code).toBe('start_error')
+    unsubscribe()
+  })
+})
+
+// ─── T-M4-04d: 图片链路桥命令 ───
+
+describe('NativeBridge — T-M4-04d 图片链路', () => {
+  let bridge: NativeBridge
+  let mockNative: ReturnType<typeof installMockBridge>
+  let capturedCommand = ''
+  let capturedPayload = ''
+
+  beforeEach(() => {
+    bridge = new NativeBridge()
+    mockNative = installMockBridge()
+  })
+
+  it('pickImage → image.pick 命令，payload 含 source 和 quality', async () => {
+    mockNative.call.mockImplementation((_v: number, requestId: string, cmd: string, payload: string) => {
+      capturedCommand = cmd
+      capturedPayload = payload
+      setTimeout(() => simulateResponse(requestId, {
+        attachmentId: 'att-1',
+        mimeType: 'image/jpeg',
+        fileSize: 102400,
+      }), 0)
+    })
+    const result = await bridge.pickImage('gallery', 85)
+    expect(capturedCommand).toBe('image.pick')
+    const payload = JSON.parse(capturedPayload)
+    expect(payload.source).toBe('gallery')
+    expect(payload.quality).toBe(85)
+    expect(result.attachmentId).toBe('att-1')
+    expect(result.mimeType).toBe('image/jpeg')
+    expect(result.fileSize).toBe(102400)
+  })
+
+  it('pickImage 使用默认 quality=80', async () => {
+    mockNative.call.mockImplementation((_v: number, requestId: string, _cmd: string, payload: string) => {
+      capturedPayload = payload
+      setTimeout(() => simulateResponse(requestId, { attachmentId: 'att-2', mimeType: 'image/jpeg', fileSize: 50000 }), 0)
+    })
+    await bridge.pickImage('camera')
+    const payload = JSON.parse(capturedPayload)
+    expect(payload.source).toBe('camera')
+    expect(payload.quality).toBe(80)
+  })
+
+  it('pickImage 不设固定超时（timeoutMs=0），用户可能在相机停留很久', () => {
+    vi.useFakeTimers()
+    mockNative.call.mockImplementation(() => { /* 不响应 */ })
+    bridge.pickImage('camera')
+    // 推进 60 秒，不应超时（默认命令 10s 超时）
+    vi.advanceTimersByTime(60_000)
+    expect(bridge.pendingCount()).toBe(1)
+    vi.useRealTimers()
+  })
+
+  it('deleteImage → image.delete 命令，payload 含 attachmentId', async () => {
+    mockNative.call.mockImplementation((_v: number, requestId: string, cmd: string, payload: string) => {
+      capturedCommand = cmd
+      capturedPayload = payload
+      setTimeout(() => simulateResponse(requestId, { success: true }), 0)
+    })
+    const result = await bridge.deleteImage('att-1')
+    expect(capturedCommand).toBe('image.delete')
+    const payload = JSON.parse(capturedPayload)
+    expect(payload.attachmentId).toBe('att-1')
+    expect(result.success).toBe(true)
+  })
+
+  it('onImageProgress 监听上传进度', () => {
+    const progress: Array<{ sent: number; total: number }> = []
+    const unsubscribe = bridge.onImageProgress(e => progress.push(e))
+    win.__aozoraImageProgress__({ sent: 51200, total: 102400 })
+    win.__aozoraImageProgress__({ sent: 102400, total: 102400 })
+    expect(progress).toEqual([
+      { sent: 51200, total: 102400 },
+      { sent: 102400, total: 102400 },
+    ])
+    unsubscribe()
+  })
+
+  it('pickImage cancelled 时抛出 BridgeError code=cancelled', async () => {
+    mockNative.call.mockImplementation((_v: number, requestId: string) => {
+      setTimeout(() => simulateResponse(requestId, null, false, 'cancelled', 'Image picker cancelled'), 0)
+    })
+    await expect(bridge.pickImage('camera')).rejects.toMatchObject({ code: 'cancelled' })
   })
 })

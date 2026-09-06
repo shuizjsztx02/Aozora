@@ -15,6 +15,7 @@ import * as Money from '../../domain/money'
 import type { TransactionData, CategoryData } from '../../platform/bridge/bridge-types'
 import { toDomainTransaction } from '../../domain/types'
 import { useChartColors } from '../../design/theme'
+import { AiInsightCard } from './AiInsightCard'
 
 function formatCents(cents: number): string {
   return Money.formatDisplay(Money.cents(cents))
@@ -27,6 +28,7 @@ export function ReportsPage() {
     const now = new Date()
     return `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}`
   })()
+  const [bookId, setBookId] = useState<string | null>(null)
   const [txs, setTxs] = useState<TransactionData[]>([])
   const [categories, setCategories] = useState<CategoryData[]>([])
   const [budget, setBudget] = useState<{ amountCents: number } | null>(null)
@@ -37,6 +39,7 @@ export function ReportsPage() {
       const books = await bridge.call('book.list', {}) as { id: string }[]
       const id = books[0]?.id ?? null
       if (!id) return
+      setBookId(id)
 
       const [allTxs, cats, budgets] = await Promise.all([
         bridge.call('transaction.listByBook', { bookId: id }) as Promise<TransactionData[]>,
@@ -104,6 +107,9 @@ export function ReportsPage() {
             </div>
           </div>
         </div>
+
+        {/* AI 洞察 */}
+        <AiInsightCard bridge={bridge} bookId={bookId} period={period} />
 
         {/* 收支切换 */}
         <div className="flex gap-2">
