@@ -42,8 +42,11 @@ asyncio_mode = "auto"
 testpaths = ["tests"]
 filterwarnings = [
     "error",
-    "ignore::DeprecationWarning:httpx",
-    "ignore::DeprecationWarning:starlette",
+    "ignore::DeprecationWarning:httpx\\..*",
+    "ignore::DeprecationWarning:starlette\\..*",
+    # starlette 1.6+ emits StarletteDeprecationWarning (subclass of UserWarning,
+    # NOT DeprecationWarning) when httpx is used with TestClient.
+    "ignore:.*httpx.*starlette\\.testclient:Warning",
     # asyncio.run() on Windows ProactorEventLoop leaves unclosed loop warnings
     "ignore::ResourceWarning",
 ]
