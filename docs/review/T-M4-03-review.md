@@ -15,7 +15,7 @@
 | 任务级测试 | `pytest tests/test_fact_pack.py tests/test_narrative_report.py -q` | **28 passed**（13+15，与实现总结声称一致） |
 | 全量服务端测试 | `pytest tests/ --tb=short -q` | **366 passed, 1 skipped, 1 error**；error 为 `test_stats_exports.py::test_startup_cleanup_removes_stale_files` 的 Windows 临时目录 `PermissionError`（fixture setup 阶段，环境问题，与 T-M4-03 无关，单独重跑同样 error） |
 | Lint（CI 门禁） | `ruff check src/ tests/` | **无法执行**——本机未安装 ruff 且 `pyproject.toml` 未声明（沿用 R-M4-04，未重复建项） |
-| 远端 CI | — | 本轮未推送代码，无对应远端运行；审查文档提交后单独确认 |
+| 远端 CI | 本审查文档提交 `f6aee16` 触发 run `34024846526` | **failure**——但失败的是 `Client Lint & Test` 与 `Android Compile & JVM Test` 两个既存失败 job（与上一次 T-M4-01-review 文档提交 `34024129435` 失败模式完全一致；根因 `:app:buildWeb FAILED`，纯文档提交不可能触发）。**关键：HEAD 上 committed 的 `ci.yml` 只有 client + android 两个 job，无 server job**（`git show HEAD:.github/workflows/ci.yml` 确认）——带 ruff+pytest 的 server job 仅存在于 `.github/workflows/ci.yml` 的**未提交工作树改动**中，故远端 CI 对 T-M4-03 服务端代码零覆盖（强化 R-M4-01/R-M4-04） |
 
 > 注：`T-M4-03-final-summary.md` 写"297 个集成测试全部通过"，实测当前为 366 passed（数字过期，见 R-M4-13）。
 
