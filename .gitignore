@@ -29,3 +29,4 @@ server/.env
 .claude/
 server/.pytest_tmp/
 app/src/main/assets/vosk-model-small-cn/
+src/main/assets/vosk-model-small-cn/

@@ -2,7 +2,7 @@
  * T-M4-06b: 可访问性工具测试。
  */
 
-import { describe, it, expect, beforeEach } from 'vitest'
+import { describe, it, expect, beforeEach, vi } from 'vitest'
 import { renderHook } from '@testing-library/react'
 import { useReducedMotion, useLowPerformance } from '../../design/a11y'
 
@@ -21,10 +21,35 @@ describe('useLowPerformance', () => {
 
   it('returns false when device has sufficient resources', () => {
     // jsdom defaults: hardwareConcurrency undefined → 4, deviceMemory undefined → 4
+    // Explicitly set high values to ensure test stability across environments
+    const nav = navigator as any
+    const origCores = nav.hardwareConcurrency
+    const origMem = nav.deviceMemory
+    Object.defineProperty(nav, 'hardwareConcurrency', { value: 8, configurable: true })
+    Object.defineProperty(nav, 'deviceMemory', { value: 8, configurable: true })
+
+    // Mock matchMedia to return no reduced motion
+    const origMatchMedia = window.matchMedia
+    window.matchMedia = vi.fn().mockImplementation(query => ({
+      matches: false,
+      media: query,
+      onchange: null,
+      addListener: vi.fn(),
+      removeListener: vi.fn(),
+      addEventListener: vi.fn(),
+      removeEventListener: vi.fn(),
+      dispatchEvent: vi.fn(),
+    }))
+
     const { result } = renderHook(() => useLowPerformance())
     expect(result.current).toBe(false)
     // 验证 classList 操作：低性能标记未添加
     expect(document.documentElement.classList.contains('low-perf')).toBe(false)
+
+    // Restore
+    Object.defineProperty(nav, 'hardwareConcurrency', { value: origCores, configurable: true })
+    Object.defineProperty(nav, 'deviceMemory', { value: origMem, configurable: true })
+    window.matchMedia = origMatchMedia
   })
 
   it('returns true when hardwareConcurrency <= 2', () => {

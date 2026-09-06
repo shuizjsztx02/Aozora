@@ -84,9 +84,11 @@ describe('Bridge types — 命令完整性', () => {
     // T-M4-04d: 图片链路
     'image.pick',
     'image.delete',
+    // T-M4-04e: 图片记账解析
+    'image.parse',
   ]
 
-  it('BridgeCommands 包含所有 36 个命令（含 AI 4 个 + T-M4-04a 权限 3 个 + 语音 2 个 + 图片 2 个）', () => {
+  it('BridgeCommands 包含所有 37 个命令（含 AI 4 个 + T-M4-04a 权限 3 个 + 语音 2 个 + 图片 3 个）', () => {
     const actualCommands = Object.values(BridgeCommands)
     expect(actualCommands).toHaveLength(expectedCommands.length)
     for (const cmd of expectedCommands) {
