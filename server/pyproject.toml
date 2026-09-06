@@ -22,6 +22,8 @@ dependencies = [
     "httpx>=0.27,<1",
     # T-M4-02: ActionProposal server-side validation (Draft-07 parity with ajv/TS).
     "jsonschema>=4.23,<5",
+    # FastAPI requires python-multipart for form data parsing (e.g. /interpret).
+    "python-multipart>=0.0.7,<1",
 ]
 
 [project.optional-dependencies]
@@ -47,6 +49,8 @@ filterwarnings = [
     # starlette 1.6+ emits StarletteDeprecationWarning (subclass of UserWarning,
     # NOT DeprecationWarning) when httpx is used with TestClient.
     "ignore:.*httpx.*starlette\\.testclient:Warning",
+    # PyJWT 2.13+ warns when HMAC key < 32 bytes (test keys are short).
+    "ignore:.*HMAC key.*below the minimum recommended length.*:Warning",
     # asyncio.run() on Windows ProactorEventLoop leaves unclosed loop warnings
     "ignore::ResourceWarning",
 ]
