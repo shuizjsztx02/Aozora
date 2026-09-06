@@ -3,15 +3,17 @@
 from __future__ import annotations
 
 import uuid
-from datetime import date, datetime, timezone
 
-import pytest
 import pytest_asyncio
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
 from src.models.base import Base
+from src.models.ledger import (
+    Book,
+    Category,
+    CategoryKind,
+)
 from src.models.user import User
-from src.models.ledger import Book, Category, Transaction, TxType, TxSource, CategoryKind
 
 
 @pytest_asyncio.fixture()

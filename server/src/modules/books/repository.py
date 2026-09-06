@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import uuid
+from datetime import UTC
 
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -68,7 +69,7 @@ class BookRepository:
         return book
 
     async def soft_delete(self, book: Book) -> None:
-        from datetime import datetime, timezone
-        book.deleted_at = datetime.now(timezone.utc)
+        from datetime import datetime
+        book.deleted_at = datetime.now(UTC)
         book.version += 1
         await self.db.flush()

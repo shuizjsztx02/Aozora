@@ -2,17 +2,22 @@
 
 from __future__ import annotations
 
-import uuid
 from typing import Annotated
 
 from fastapi import APIRouter, Depends
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from src.common.database import get_db_session
-from src.modules.auth.dependencies import get_current_user
 from src.models.user import User
+from src.modules.auth.dependencies import get_current_user
 
-from .schemas import BootstrapResponse, PullRequest, PullResponse, PushRequest, PushResponse
+from .schemas import (
+    BootstrapResponse,
+    PullRequest,
+    PullResponse,
+    PushRequest,
+    PushResponse,
+)
 from .service import SyncService
 
 router = APIRouter(prefix="/sync", tags=["sync"])

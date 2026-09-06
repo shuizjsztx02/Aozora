@@ -26,6 +26,14 @@ import {
   type PendingMutationData,
   type SyncStatusData,
   type SyncEvent,
+  type ReminderStatusData,
+  type AiReportResponse,
+  type AiInterpretResponse,
+  type AiValidateResponse,
+  type AiExecuteResponse,
+  type PermissionStatusData,
+  type PermissionType,
+  type PermissionResultEvent,
 } from './bridge-types'
 
 declare global {
@@ -45,6 +53,14 @@ function generateRequestId(): string {
 
 /** 默认超时（ms） */
 const DEFAULT_TIMEOUT = 10_000
+
+/** AI 命令超时（ms），与 ADR-003 的 25s SLO 对齐 */
+const AI_TIMEOUT = 25_000
+
+/** per-command 调用选项 */
+export interface CallOptions {
+  timeoutMs?: number
+}
 
 /**
  * NativeBridge — 与 Kotlin 侧 AozoraBridge 通信的 Promise-based 客户端。
@@ -74,7 +90,7 @@ export class NativeBridge {
   }
 
   /** 底层调用 */
-  call<T>(command: string, payload?: Record<string, unknown>): Promise<T> {
+  call<T>(command: string, payload?: Record<string, unknown>, options?: CallOptions): Promise<T> {
     return new Promise<T>((resolve, reject) => {
       if (!this.isAvailable()) {
         reject(new BridgeError('bridge_unavailable', 'Native bridge not available', ''))
@@ -82,10 +98,11 @@ export class NativeBridge {
       }
 
       const requestId = generateRequestId()
+      const timeout = options?.timeoutMs ?? DEFAULT_TIMEOUT
       const timer = setTimeout(() => {
         this.pending.delete(requestId)
         reject(new BridgeError('timeout', `Command "${command}" timed out`, requestId))
-      }, DEFAULT_TIMEOUT)
+      }, timeout)
 
       this.pending.set(requestId, {
         resolve: resolve as (value: unknown) => void,
@@ -265,6 +282,94 @@ export class NativeBridge {
       if ((window as any).__aozoraSyncEvent__ === wrapped) {
         // eslint-disable-next-line @typescript-eslint/no-explicit-any
         ;(window as any).__aozoraSyncEvent__ = prev
+      }
+    }
+  }
+
+  // ─── T-M4-05a: 提醒调度 ───
+
+  /** 查询提醒设置与通知权限状态。 */
+  async getReminderStatus(): Promise<ReminderStatusData> {
+    return this.call<ReminderStatusData>('reminder.getStatus')
+  }
+
+  /** 设置或取消每日提醒。 */
+  async setReminder(enabled: boolean, hour: number, minute: number): Promise<{ success: boolean }> {
+    return this.call('reminder.set', { enabled, hour, minute })
+  }
+
+  /** 检查通知权限是否已授予。 */
+  async checkReminderPermission(): Promise<{ granted: boolean }> {
+    return this.call('reminder.checkPermission')
+  }
+
+  // ─── T-M4-03c: AI 洞察 ───
+
+  /** 请求 AI 月度报告（ADR-003 通道，25s 超时）。 */
+  async reportAI(bookId: string, period: string): Promise<AiReportResponse> {
+    return this.call<AiReportResponse>('ai.report', { bookId, period }, { timeoutMs: AI_TIMEOUT })
+  }
+
+  // ─── T-M4-02c: AI 助手对话 ───
+
+  /** AI 解读自然语言输入（ADR-003 通道，25s 超时）。 */
+  async interpretAI(input: string): Promise<AiInterpretResponse> {
+    return this.call<AiInterpretResponse>('ai.interpret', { input }, { timeoutMs: AI_TIMEOUT })
+  }
+
+  /** AI 验证 ActionProposal（ADR-003 通道，25s 超时）。 */
+  async validateProposal(proposal: Record<string, unknown>, bookId: string): Promise<AiValidateResponse> {
+    return this.call<AiValidateResponse>('ai.validate', { proposal, book_id: bookId }, { timeoutMs: AI_TIMEOUT })
+  }
+
+  /** AI 执行已验证的 ActionProposal（ADR-003 通道，25s 超时）。 */
+  async executeProposal(proposal: Record<string, unknown>, bookId: string, confirmationToken: string): Promise<AiExecuteResponse> {
+    return this.call<AiExecuteResponse>('ai.execute', { proposal, book_id: bookId, confirmation_token: confirmationToken }, { timeoutMs: AI_TIMEOUT })
+  }
+
+  // ─── T-M4-04a: 权限管理 ───
+
+  /** 查询所有 T-M4-04 相关权限状态。 */
+  async getPermissionStatus(): Promise<PermissionStatusData> {
+    return this.call<PermissionStatusData>('permissions.getStatus')
+  }
+
+  /**
+   * 请求单个权限。
+   *
+   * 立即返回 { pending: true }，实际结果通过 onPermissionResult 监听。
+   */
+  async requestPermission(permission: PermissionType): Promise<{ pending: boolean }> {
+    return this.call('permissions.request', { permission })
+  }
+
+  /** 打开应用设置页（用于永久拒绝后的引导）。 */
+  async openPermissionSettings(): Promise<{ success: boolean }> {
+    return this.call('permissions.openSettings')
+  }
+
+  /**
+   * 注册权限结果监听（Android 权限对话框关闭后的异步推送）。
+   * 返回取消订阅函数。
+   */
+  onPermissionResult(listener: (event: PermissionResultEvent) => void): () => void {
+    if (typeof window === 'undefined') return () => {}
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const prev = (window as any).__aozoraPermissionResult__
+    const wrapped = (eventJson: string) => {
+      try {
+        const event = typeof eventJson === 'string' ? JSON.parse(eventJson) : eventJson
+        listener(event as PermissionResultEvent)
+      } catch { /* ignore parse errors */ }
+      if (typeof prev === 'function') prev(eventJson)
+    }
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    ;(window as any).__aozoraPermissionResult__ = wrapped
+    return () => {
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      if ((window as any).__aozoraPermissionResult__ === wrapped) {
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        ;(window as any).__aozoraPermissionResult__ = prev
       }
     }
   }

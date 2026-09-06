@@ -7,7 +7,7 @@
   /* 默认昼间主题 */
   --ink: #122031;
   --ink2: #3C5069;
-  --ink3: #69809B;
+  --ink3: #4A6380; /* T-M4-06a: match .t-day */
   --accent: #1D6CB0;
   --glass: rgba(255, 255, 255, 0.52);
   --glass-border: rgba(255, 255, 255, 0.3);
@@ -25,7 +25,7 @@
 .t-dawn {
   --ink: #1E2733;
   --ink2: #46536B;
-  --ink3: #6E7C90;
+  --ink3: #526078; /* T-M4-06a: darken for WCAG AA ≥4.5:1 on glass */
   --accent: #D96F5A;
   --glass: rgba(255, 253, 250, 0.6);
   --glass-border: rgba(255, 200, 180, 0.3);
@@ -42,7 +42,7 @@
 .t-day {
   --ink: #122031;
   --ink2: #3C5069;
-  --ink3: #69809B;
+  --ink3: #4A6380; /* T-M4-06a: darken for WCAG AA ≥4.5:1 on glass */
   --accent: #1D6CB0;
   --glass: rgba(255, 255, 255, 0.52);
   --glass-border: rgba(255, 255, 255, 0.3);
@@ -59,13 +59,13 @@
 .t-dusk {
   --ink: #241C36;
   --ink2: #4E4066;
-  --ink3: #7A6C92;
+  --ink3: #554575; /* T-M4-06a: darken for WCAG AA ≥4.5:1 on glass */
   --accent: #D95F3B;
-  --glass: rgba(255, 249, 242, 0.52);
+  --glass: rgba(255, 249, 242, 0.68); /* T-M4-06a: increase opacity for contrast on gradient */
   --glass-border: rgba(200, 150, 100, 0.25);
   --income: #1E9E6A;
   --expense: #D95F3B;
-  --warn: #A8730F;
+  --warn: #E9C56A;
   --sky-from: #E8756A;
   --sky-to: #2D1B4E;
   --nav-bg: rgba(60, 40, 70, 0.65);
@@ -194,6 +194,8 @@ body {
 
 /* ─── 辅助 ─── */
 
+.safe-bottom { padding-bottom: env(safe-area-inset-bottom, 0px); }
+
 .text-income { color: var(--income); }
 .text-expense { color: var(--expense); }
 .text-accent { color: var(--accent); }
@@ -210,7 +212,20 @@ body {
   }
 }
 
-/* 字体放大适配 */
-.text-lg-scale {
-  font-size: 1.3em;
+/* T-M4-06b: 低性能模式 — 关闭所有装饰动画与模糊 */
+.low-perf .sky-fixed,
+.low-perf .glass-card,
+.low-perf .sheet-glass,
+.low-perf .nav-glass {
+  backdrop-filter: none !important;
+  -webkit-backdrop-filter: none !important;
 }
+.low-perf .sky-fixed * {
+  display: none !important;
+}
+
+/*
+ * R-M4-12: 大字体标记 class（由 FontScaleAdapter 检测后添加到 html）。
+ * 不覆盖 font-size，让浏览器自然使用用户系统字体缩放设置。
+ * 如需布局适配（调整 padding/gap 避免大字体溢出），可在此处添加规则。
+ */

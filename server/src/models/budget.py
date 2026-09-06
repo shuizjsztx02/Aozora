@@ -6,7 +6,15 @@ import enum
 import uuid
 from datetime import datetime
 
-from sqlalchemy import BigInteger, CheckConstraint, DateTime, ForeignKey, Index, String, text
+from sqlalchemy import (
+    BigInteger,
+    CheckConstraint,
+    DateTime,
+    ForeignKey,
+    Index,
+    String,
+    text,
+)
 from sqlalchemy.dialects.postgresql import UUID
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
@@ -73,8 +81,8 @@ class Budget(Base, AuditMixin, VersionedMixin):
         DateTime(timezone=True), nullable=True,
     )
 
-    book: Mapped["Book"] = relationship(back_populates="budgets")
+    book: Mapped[Book] = relationship(back_populates="budgets")
 
 
 # Type-only import to avoid circular dependency at module load.
-from src.models.ledger import Book  # noqa: E402, F401
+from src.models.ledger import Book

@@ -11,6 +11,10 @@ AI 只返回通过 JSON Schema 校验的 ActionProposal。金额、日期、权�
 - **Fixtures：** `contracts/action-proposal/fixtures/`（valid + invalid 正反例）
 - **变更规则：** 协议修改必须先更新本文件和 `contracts/action-proposal/schema.json`，并新增 ADR 或协议版本号
 
+## WebView 调用通道
+
+客户端 WebView 经 `AozoraBridge` 的 `ai.*` 命令族调用服务端 `/ai/*`；Kotlin 层负责 token 注入，Bearer token 全程不出 Kotlin 层（详见 `docs/adr/ADR-003-webview-ai-channel.md`）。超时预算遵循 APP-CONTEXT §10.3：12 s 客户端慢速提示 / 25 s 取消并回退本地 NLU。
+
 ### T-M1-05 v1 约束修复
 
 - 未知字段必须拒绝；金额上限为 9007199254740991 分；出现 transactions 时必须非空。

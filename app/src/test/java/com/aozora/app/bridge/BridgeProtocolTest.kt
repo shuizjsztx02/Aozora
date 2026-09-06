@@ -90,8 +90,27 @@ class BridgeProtocolTest {
             // T-M3-02: 同步引擎
             BridgeCommands.SYNC_GET_STATUS,
             BridgeCommands.SYNC_TRIGGER,
+            // T-M4-05a: 提醒调度
+            BridgeCommands.REMINDER_GET_STATUS,
+            BridgeCommands.REMINDER_SET,
+            BridgeCommands.REMINDER_CHECK_PERMISSION,
+            // T-M4-03c: AI 洞察
+            BridgeCommands.AI_REPORT,
+            // T-M4-02c: AI 助手对话流
+            BridgeCommands.AI_INTERPRET,
+            BridgeCommands.AI_VALIDATE,
+            BridgeCommands.AI_EXECUTE,
+            // T-M4-04a: 权限管理
+            BridgeCommands.PERMISSIONS_GET_STATUS,
+            BridgeCommands.PERMISSIONS_REQUEST,
+            BridgeCommands.PERMISSIONS_OPEN_SETTINGS,
+            // T-M4-04b 占位：语音
+            BridgeCommands.VOICE_START_RECORDING,
+            BridgeCommands.VOICE_STOP_RECORDING,
+            // T-M4-04d 占位：图片
+            BridgeCommands.IMAGE_PICK,
         )
-        assertEquals(22, commands.size)
+        assertEquals(35, commands.size)
         // 无重复
         assertEquals(commands.size, commands.toSet().size)
     }

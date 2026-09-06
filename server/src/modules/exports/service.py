@@ -9,7 +9,7 @@ import logging
 import os
 import tempfile
 import uuid
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 from sqlalchemy import select
@@ -58,7 +58,7 @@ def cleanup_expired_files() -> int:
     if not export_dir.exists():
         return 0
     deleted = 0
-    now = datetime.now(timezone.utc)
+    now = datetime.now(UTC)
     for path in export_dir.iterdir():
         if not path.is_file():
             continue
@@ -67,7 +67,7 @@ def cleanup_expired_files() -> int:
             continue
         # Heuristic: file mtime older than 24h + grace.
         try:
-            mtime = datetime.fromtimestamp(path.stat().st_mtime, tz=timezone.utc)
+            mtime = datetime.fromtimestamp(path.stat().st_mtime, tz=UTC)
         except OSError:
             continue
         if now - mtime > timedelta(hours=25):
@@ -110,8 +110,8 @@ class ExportService:
             return
         expires = export.expires_at
         if expires.tzinfo is None:
-            expires = expires.replace(tzinfo=timezone.utc)
-        if expires >= datetime.now(timezone.utc):
+            expires = expires.replace(tzinfo=UTC)
+        if expires >= datetime.now(UTC):
             return
 
         export.status = ExportStatus.EXPIRED
@@ -138,7 +138,7 @@ class ExportService:
             book_id=book_id,
             format=ExportFormat(fmt),
             status=ExportStatus.PENDING,
-            expires_at=datetime.now(timezone.utc) + timedelta(hours=24),
+            expires_at=datetime.now(UTC) + timedelta(hours=24),
         )
         self.db.add(export)
         await self.db.flush()

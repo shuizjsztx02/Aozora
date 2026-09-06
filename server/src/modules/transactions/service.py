@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import uuid
-from datetime import date, datetime
+from datetime import UTC, date, datetime
 
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -81,6 +81,49 @@ class TransactionService:
             biz_date=data.biz_date,
             occurred_at=data.occurred_at,
         )
+
+    async def create_transaction_batch(
+        self,
+        user_id: uuid.UUID,
+        book_id: uuid.UUID,
+        items: list[dict],
+        source: str = "ai",
+    ) -> list[Transaction]:
+        """Batch create transactions atomically.
+
+        All transactions must belong to the same book. Ownership of the book
+        and all categories is verified before any writes. If any validation
+        fails, the entire batch is rolled back (atomic).
+
+        ``items`` is a list of dicts with keys: type, amount_cents, category_id,
+        account_id (optional), note, biz_date.
+        """
+
+        # Verify book ownership once
+        await self._verify_book_ownership(book_id, user_id)
+
+        # Verify all category IDs upfront
+        category_ids = {item["category_id"] for item in items if item.get("category_id")}
+        for cat_id in category_ids:
+            await self._verify_category_ownership(cat_id, user_id)
+
+        # Build transaction dicts
+        now = datetime.now(UTC)
+        tx_data_list = []
+        for item in items:
+            tx_data_list.append({
+                "book_id": book_id,
+                "type": item["type"],
+                "amount_cents": item["amount_cents"],
+                "category_id": item.get("category_id"),
+                "account_id": item.get("account_id"),
+                "note": item.get("note", ""),
+                "biz_date": item["biz_date"],
+                "occurred_at": now,
+                "source": source,
+            })
+
+        return await self.repo.create_batch(tx_data_list)
 
     async def update_transaction(self, tx_id: uuid.UUID, user_id: uuid.UUID, data: TransactionUpdate) -> Transaction:
         tx = await self.get_transaction(tx_id, user_id)

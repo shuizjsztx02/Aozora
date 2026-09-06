@@ -4,8 +4,8 @@ from __future__ import annotations
 
 import logging
 import time
+from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
-from typing import AsyncIterator
 
 from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
@@ -15,16 +15,18 @@ from src.common.errors import register_exception_handlers
 from src.common.health import router as health_router
 from src.common.logging import setup_logging
 from src.common.request_id import RequestIdMiddleware
-from src.modules.auth.routes import me_router, router as auth_router
-from src.modules.books.routes import router as books_router
-from src.modules.categories.routes import router as categories_router
 from src.modules.accounts.routes import router as accounts_router
-from src.modules.transactions.routes import router as transactions_router
-from src.modules.budgets.routes import router as budgets_router
-from src.modules.statistics.routes import router as stats_router
-from src.modules.exports.routes import router as exports_router
-from src.modules.sync.routes import router as sync_router
 from src.modules.ai.routes import router as ai_router
+from src.modules.attachments.routes import router as attachments_router
+from src.modules.auth.routes import me_router
+from src.modules.auth.routes import router as auth_router
+from src.modules.books.routes import router as books_router
+from src.modules.budgets.routes import router as budgets_router
+from src.modules.categories.routes import router as categories_router
+from src.modules.exports.routes import router as exports_router
+from src.modules.statistics.routes import router as stats_router
+from src.modules.sync.routes import router as sync_router
+from src.modules.transactions.routes import router as transactions_router
 
 logger = logging.getLogger(__name__)
 
@@ -49,16 +51,35 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
             logger.info("Cleaned up %d stale export files", deleted)
     except Exception:
         logger.warning("Export cleanup failed", exc_info=True)
-    # T-M4-01: a missing provider key must not block startup (dev/staging
-    # run without provider access); the gateway degrades to 503 at runtime.
-    from src.modules.ai.provider import build_provider
-    if build_provider(cfg) is None:
+    # T-M4-04c: reclaim disk from expired PENDING attachment uploads.
+    from src.modules.attachments.service import (
+        cleanup_expired_files as cleanup_attachments,
+    )
+    try:
+        att_deleted = cleanup_attachments()
+        if att_deleted:
+            logger.info("Cleaned up %d stale attachment files", att_deleted)
+    except Exception:
+        logger.warning("Attachment cleanup failed", exc_info=True)
+    # T-M4-01: in dev/staging a missing provider key must not block startup
+    # (production refuses earlier, at Settings validation — T-M4-01a); the
+    # gateway degrades to 503 at runtime. Check the key directly rather than
+    # calling build_provider(): constructing a provider just for this check
+    # would open a pooled HTTP client that is never used or closed.
+    if not cfg.ai_provider_api_key:
         logger.warning(
             "AI provider not configured (AI_PROVIDER_API_KEY empty) — "
             "/ai/interpret will return 503 ai_unavailable"
         )
     yield
     from src.common.database import get_engine
+
+    # P1#1: close the pooled AI provider HTTP client before disposing the engine.
+    from src.modules.ai.provider import close_llm_provider
+    try:
+        await close_llm_provider()
+    except Exception:
+        logger.warning("Error closing AI provider during shutdown", exc_info=True)
 
     try:
         engine = get_engine()
@@ -99,7 +120,7 @@ register_exception_handlers(app)
 # -- Request logging ------------------------------------------------------
 
 @app.middleware("http")
-async def log_requests(request: Request, call_next):  # noqa: ANN001
+async def log_requests(request: Request, call_next):
     start = time.perf_counter()
     response = await call_next(request)
     duration_ms = round((time.perf_counter() - start) * 1000, 2)
@@ -135,6 +156,7 @@ app.include_router(stats_router, prefix=cfg.api_prefix)
 app.include_router(exports_router, prefix=cfg.api_prefix)
 app.include_router(sync_router, prefix=cfg.api_prefix)
 app.include_router(ai_router, prefix=cfg.api_prefix)
+app.include_router(attachments_router, prefix=cfg.api_prefix)
 
 
 @app.get("/", tags=["meta"])

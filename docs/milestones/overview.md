@@ -14,4 +14,4 @@
 | M5 | 安全、质量与内测 | 对账门禁、安全、备份和内测出口完成。 |
 | M6 | 生产发布 | 可重复部署、签名发布和上线观察完成。 |
 
-T-M1 全部通过 ✅。T-M2 全部通过 ✅：T-M2-01 服务端骨架、T-M2-02 数据库 Schema 与迁移、T-M2-03 认证与会话、T-M2-04 账本核心 API（Books/Categories/Accounts/Transactions/Budgets CRUD，ownership guard，version 乐观并发，软删除，分页）、T-M2-05 统计与导出（月度/趋势聚合、JSON/CSV 导出、对账不变量，122 项服务端测试全部通过）。SMS 供应商（D-EXEC-03）待外部确认。T-M3 已全部交付；M4 已按实现工程量拆解为子任务（编号如 T-M4-01a，新增 T-M4-00 前端骨架与核心页面），执行入口见生产执行规划 M4 章节。完整依赖、外部待办和验收要求以 `docs/APP-CONTEXT.md` 第 9--10 节、生产执行规划与 `docs/review/T-M1-review.md` 为准。
+T-M1 全部通过 ✅。T-M2 全部通过 ✅：T-M2-01 服务端骨架、T-M2-02 数据库 Schema 与迁移、T-M2-03 认证与会话、T-M2-04 账本核心 API（Books/Categories/Accounts/Transactions/Budgets CRUD，ownership guard，version 乐观并发，软删除，分页）、T-M2-05 统计与导出（月度/趋势聚合、JSON/CSV 导出、对账不变量，122 项服务端测试全部通过）。SMS 供应商（D-EXEC-03）待外部确认。T-M3 已全部交付。M4 已按实现工程量拆解为子任务（编号如 T-M4-01a，新增 T-M4-00 前端骨架与核心页面）。M5 与 M6 已完成精细化子任务拆解（编号如 T-M5-01a–01d、T-M6-01a–01d），每父任务含具体实现要点、文件路径、验证命令与外部前置。执行入口见生产执行规划 M4/M5/M6 章节。完整依赖、外部待办和验收要求以 `docs/APP-CONTEXT.md` 第 9--10 节、生产执行规划与 `docs/review/T-M1-review.md` 为准。

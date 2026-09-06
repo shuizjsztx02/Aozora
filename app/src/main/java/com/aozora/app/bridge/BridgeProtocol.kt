@@ -54,6 +54,31 @@ object BridgeCommands {
     // T-M3-02: 同步引擎（可选；未注入时返回 unavailable）
     const val SYNC_GET_STATUS = "sync.getStatus"
     const val SYNC_TRIGGER = "sync.trigger"
+
+    // T-M4-05a: 提醒调度
+    const val REMINDER_GET_STATUS = "reminder.getStatus"
+    const val REMINDER_SET = "reminder.set"
+    const val REMINDER_CHECK_PERMISSION = "reminder.checkPermission"
+
+    // T-M4-03c: AI 洞察（ADR-003 通道）
+    const val AI_REPORT = "ai.report"
+
+    // T-M4-02c: AI 助手对话流（ADR-003 通道）
+    const val AI_INTERPRET = "ai.interpret"
+    const val AI_VALIDATE = "ai.validate"
+    const val AI_EXECUTE = "ai.execute"
+
+    // T-M4-04a: 权限管理
+    const val PERMISSIONS_GET_STATUS = "permissions.getStatus"
+    const val PERMISSIONS_REQUEST = "permissions.request"
+    const val PERMISSIONS_OPEN_SETTINGS = "permissions.openSettings"
+
+    // T-M4-04b 占位：语音（04a 仅声明命令，handler 返回 unavailable）
+    const val VOICE_START_RECORDING = "voice.startRecording"
+    const val VOICE_STOP_RECORDING = "voice.stopRecording"
+
+    // T-M4-04d 占位：图片（04a 仅声明命令，handler 返回 unavailable）
+    const val IMAGE_PICK = "image.pick"
 }
 
 /**

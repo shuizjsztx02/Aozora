@@ -97,11 +97,23 @@ class Settings(BaseSettings):
         validation_alias=AliasChoices("EXPORT_DIR", "export_dir"),
     )
 
+    # --- attachments (T-M4-04c) ---
+    # D-EXEC-05 (object storage) is pending external confirmation;
+    # until then, uploads land in a local temp directory that mirrors
+    # the export-dir pattern (ephemeral, reclaimed on startup).
+    # Override via UPLOAD_DIR for persistent deployments.
+    upload_dir: str = Field(
+        default="",
+        validation_alias=AliasChoices("UPLOAD_DIR", "upload_dir"),
+    )
+
     # --- ai gateway (T-M4-01) ---
     # D-EXEC-04 (AI account/quota/limits/rotation) is pending external
     # confirmation; defaults below are conservative placeholders.
-    # A missing key does NOT block startup — the gateway degrades to 503
-    # at runtime so dev/staging environments run without provider access.
+    # A missing key does NOT block startup in dev/staging/test — the
+    # gateway degrades to 503 at runtime so those environments run
+    # without provider access. In production the key IS required
+    # (T-M4-01a acceptance: refuse startup — see _check_production_safety).
     ai_provider_api_key: str | None = Field(
         default=None,
         validation_alias=AliasChoices("AI_PROVIDER_API_KEY", "ai_provider_api_key"),
@@ -155,7 +167,7 @@ class Settings(BaseSettings):
         return [o.strip() for o in self.cors_origins.split(",") if o.strip()]
 
     @model_validator(mode="after")
-    def _check_production_safety(self) -> "Settings":
+    def _check_production_safety(self) -> Settings:
         """Block obviously-insecure defaults when running in production."""
         if self.env != "production":
             return self
@@ -170,6 +182,11 @@ class Settings(BaseSettings):
         if self.cors_origins.strip() == "*":
             raise ValueError(
                 "CORS_ORIGINS must be an explicit allow-list in production"
+            )
+        if not self.ai_provider_api_key:
+            raise ValueError(
+                "AI_PROVIDER_API_KEY must be set in production; the 503 "
+                "degradation fallback is only for dev/staging"
             )
         return self
 
@@ -188,7 +205,7 @@ def load_config() -> Settings:
 
 def get_config() -> Settings:
     """Return cached settings, loading on first call."""
-    global _settings  # noqa: PLW0603
+    global _settings
     if _settings is None:
         _settings = load_config()
     return _settings
@@ -196,11 +213,11 @@ def get_config() -> Settings:
 
 def set_config(settings: Settings) -> None:
     """Override settings (used in tests)."""
-    global _settings  # noqa: PLW0603
+    global _settings
     _settings = settings
 
 
 def reset_config() -> None:
     """Clear cached settings (used in tests)."""
-    global _settings  # noqa: PLW0603
+    global _settings
     _settings = None

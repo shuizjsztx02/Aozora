@@ -119,9 +119,9 @@
 | 页面、手动记账与统计 | 首页、明细、报表、快速记账 Sheet、我的、首启、登录；四时设计系统；状态组件 | `PARTIAL`，T-M4-00 ✅ |
 | AI、规则 NLU 与动作协议 | 本地 NLU 与 ActionProposal 基础已实现；服务端 AI/执行闭环未接入 | `PARTIAL` |
 | 本地数据与离线队列 | Room v2 schema（6 实体 + `sync_meta`），`pending_mutations` 携带 `expectedVersion`/`lastError`；Repository 单事务合并路径 `applyServerChanges`；WorkManager 同步调度打通；设备可靠性已通过 | `PARTIAL`，T-M3-02 ✅ |
-| 原生桥、语音、图片、提醒与小组件 | 版本化 Bridge v1 22 命令（含 `sync.getStatus`/`sync.trigger`）与 React 打包接线已实现；其余原生能力待做 | `PARTIAL` |
+| 原生桥、提醒、小组件与快捷方式 | 版本化 Bridge v1 25 命令（含 `sync.*` + `reminder.*` 3 个）；ReminderScheduler + AlarmManager + BootReceiver；AozoraWidgetProvider（Room 聚合，三状态）；静态 shortcut + deep link 路由 | `PARTIAL`，T-M4-05 ✅ |
 | 服务端 | FastAPI 骨架、配置校验、健康检查、OpenAPI 3.1、Dockerfile；11 实体模型 + Alembic 迁移（0001_initial → 0006_budget_deleted_at）；auth 模块；账本核心 API（Books/Categories/Accounts/Transactions/Budgets CRUD）；统计与导出 API（月度/趋势聚合、JSON/CSV 导出，对账不变量）；同步模块（push/pull/bootstrap、幂等 mutation、cursor 变更流、budget 软删支持）| `PARTIAL`，T-M2-01/02/03/04/05 ✅；T-M3-01 ✅；T-M3-02 服务端 budget 扩展 ✅ |
-| 测试 | 前端 348 + Android JVM（含 SyncPayloadMapperTest 11 + BridgeProtocolTest 22 命令检查）+ 设备 Room（含 Migration1To2 + SyncEngineTest + 手工 FlightMode）+ 服务端 184 项通过 | `PARTIAL` |
+| 测试 | 前端 349 + Android JVM（含 SyncPayloadMapperTest 11 + BridgeProtocolTest 25 命令检查 + ReminderSchedulerTest）+ 设备 Room（含 Migration1To2 + SyncEngineTest + 手工 FlightMode）+ 服务端 184 项通过 | `PARTIAL` |
 | 发布 | 无签名材料和可分发产物 | `TARGET` |
 
 ### 3.2 当前不能视为已交付的能力
@@ -414,7 +414,7 @@ type ActionProposal = {
 - 每个主题的正文、辅助文字、卡面和按钮均需达到 WCAG AA；正文对比度至少 4.5:1。
 - 金额是首页视觉主角，但不得牺牲同步状态、错误提示和可访问性。
 - 动效遵循 reduced motion；低端 Android 设备可关闭云、星、彗尾等氛围层。
-- 当前原型白天主题存在文字对比度不足，属于 M4 视觉验收阻塞项。
+- 当前原型白天主题存在文字对比度不足，属于 M4 视觉验收阻塞项。**T-M4-06a 已修复**（2026-09-06）：四主题 ink3 均经 WCAG AA 对比度验证，自动化测试 `contrast.test.ts` 覆盖。
 
 ### 7.3 目标前端目录
 
@@ -711,63 +711,75 @@ app/src/
 
 ### M5：安全、质量、合规与内测
 
+> 2026-09-06 起 M5 各任务按实现工程量拆解为子任务（编号如 T-M5-01a、T-M5-02a），子任务范围、依赖、实现要点、文件路径与验证命令的权威来源为 `docs/milestones/production-execution-plan.md` M5 章节；本节维持父任务目标与验收边界。四条线并行——质量线 `T-M5-01a→01d`、安全线 `T-M5-02a→02d`、备份线 `T-M5-03a→03c`、隐私线 `T-M5-04a→04c`；可观测栈 `T-M5-05a→05b` 建议提前部署。
+
 #### T-M5-01 对账不变量与端到端测试
 
-- **目标：** 建立数据正确性一票否决门禁。
+- **目标：** 建立数据正确性一票否决门禁，覆盖 domain/API/Room 三端等价的 fixture 与断言、固定种子 fuzz、同步异常注入、真机 E2E 核心路径。
 - **依赖：** M1–M4 核心链路。
-- **实施：** domain/API/Room 共享 fixtures、固定随机种子 fuzz、同步异常注入、Android E2E 核心路径。
-- **验收：** 流水/统计/导出四方一致；网络中断、重复、乱序、冲突场景全绿；S0/S1 用例进入 CI。
+- **实施：** `contracts/fixtures/reconciliation/` 共享 fixture 集 + 四方对账断言（TS/Python/Kotlin 三端等价）；`Random(42)` 固定种子 fuzz 套件（vitest 100 轮 + pytest 50 轮）；MockWebServer 五态异常注入（断网/重复/乱序/冲突/杀进程）；E2E 脚本（登录→记账→离线→同步→冲突→恢复→删除）。
+- **验收：** 同一 fixture 三端聚合输出一致；对账断言捕获故意篡改；fuzz 同种子可重现；CI 含服务端 job 且为 required check。
+- **子任务：** T-M5-01a 共享 fixture 与对账不变量基础 → 01b 固定种子对账 fuzz → 01c 同步异常注入 → 01d E2E 核心路径与 CI 门禁。
 
 #### T-M5-02 安全加固
 
-- **目标：** 关闭已知客户端和服务端高风险项。
+- **目标：** 关闭已知客户端和服务端高风险项，建立密钥治理、依赖扫描与日志脱敏的持续门禁。
 - **依赖：** T-M4-01。
-- **实施：** 轮换已暴露模型密钥、关闭 cleartext 和系统备份、TLS、安全头、输入限制、依赖扫描、日志脱敏。
-- **验收：** `usesCleartextTraffic=false`、`allowBackup=false`；仓库和 APK 无生产密钥；鉴权/越权/限流安全测试通过。
+- **实施：** `AndroidManifest.xml` 禁用明文/备份 + `network_security_config.xml` TLS 锁定 + WebView 关闭 file/content access + Bridge 白名单复核；服务端 Starlette 安全头中间件（HSTS/CSP/XFO/RP/PP） + 请求体 10MB 限制 + CORS 细化；`gitleaks` + `truffleHog` CI 密钥扫描 + `npm audit`/`pip-audit`/OWASP DependencyCheck 依赖扫描；服务端/客户端日志脱敏正则过滤。
+- **验收：** Manifest/WebView 配置断言进 JVM 测试；安全头存在性断言 + 413 限流 + CORS 预检正确；CI 密钥/依赖门禁生效；日志审计无敏感字段。
+- **子任务：** T-M5-02a 客户端安全基线 → 02b 服务端安全加固 → 02c 密钥治理与产物扫描 → 02d 依赖扫描与日志脱敏。
 
 #### T-M5-03 备份恢复与灾难演练
 
-- **目标：** 证明生产数据可恢复。
+- **目标：** 证明生产数据可恢复，RPO ≤24h、RTO ≤4h；建立自动化备份、定期演练、备份完整性校验的闭环。
 - **依赖：** T-M2-02、D-PROD-06。
-- **实施：** 自动备份、异地副本、恢复 runbook、定期演练、校验与告警。
-- **验收：** 隔离环境恢复成功；RPO ≤24h、RTO ≤4h；演练记录包含时间、校验结果和失败处置。
+- **实施：** pg_dump 定时备份 + 异地副本脚本（`infra/backup/`）；恢复 runbook 含步骤/校验/失败处置（`docs/runbooks/disaster-recovery.md`）；隔离环境演练记录实测 RPO/RTO；备份完整性校验 cron + Alertmanager 告警。
+- **验收：** 备份产物含全部 13 张业务表；隔离环境恢复成功且四方对账一致；RPO ≤24h、RTO ≤4h 实测达标；备份失败告警触发。
+- **子任务：** T-M5-03a 备份策略与自动化 → 03b 恢复 runbook 与隔离演练 → 03c 备份校验与告警。
 
 #### T-M5-04 隐私、权限与账号生命周期
 
-- **目标：** 满足上架和真实用户数据治理要求。
+- **目标：** 满足上架和真实用户数据治理要求：隐私同意流、权限按需申请、数据导出、账号删除与保留策略，全部通过审计。
 - **依赖：** T-M2-03、T-M2-05。
-- **实施：** 隐私政策、首启同意、权限说明、AI 内容标识、数据导出、账号删除、保留策略。
-- **验收：** 未同意前不上传业务数据；权限按需申请；导出/删除可完成；政策版本和同意时间可审计。
+- **实施：** 隐私政策版本化 + `UserConsent` 表入库（Alembic `0007_user_consents`）；我的页导出入口接入服务端 exports（JSON/CSV）；`DELETE /me` 二次确认→冻结→7 天物理删除→`deletion_audit` 完成证明；附件解析后 24h 清理（`infra/cleanup/`）。
+- **验收：** 未同意前无业务数据上行；导出合计与流水一致；冻结期 403/空数据；删除后 Room/Keystore 清理断言。
+- **子任务：** T-M5-04a 隐私政策与首启同意 → 04b 用户数据导出 → 04c 账号删除与数据保留。
 
 #### T-M5-05 生产监控与种子内测
 
-- **目标：** 用可观测数据验证 20–50 人真实使用。
-- **依赖：** T-M5-01 至 T-M5-04。
-- **实施：** 部署 OpenTelemetry Collector、Prometheus、Loki、Tempo、Grafana、Alertmanager；建立 crash、API SLO、PostgreSQL、同步积压、AI 失败率/成本和产品漏斗看板；完成两轮反馈修复。
-- **验收：** crash-free ≥99.5%；最终记账成功率 ≥95%；AI 路径占比、D7 和性能指标可统计；无开放 S0/S1。
+- **目标：** 建立 staging 可观测栈（OTel/Prometheus/Loki/Tempo/Grafana/Alertmanager），六类看板就绪，S0/S1 告警可到达维护者；完成 20–50 人种子内测。
+- **依赖：** T-M5-01 至 T-M5-04（05a/05b 可提前）。
+- **实施：** `docker-compose.staging.yml` 一站部署可观测栈 + 服务端 OTel 埋点；六类 Grafana 看板 + S0/S1 告警规则（`infra/monitoring/`）；Android `CrashReporter` 脱敏崩溃上报；内测构建（内测签名 + staging 基址）+ 两轮反馈-修复-回归。
+- **验收：** staging 从零可重复部署且三类数据可查；六类看板有真实数据；crash-free ≥99.5%、记账成功率 ≥95%；无开放 S0/S1。
+- **子任务：** T-M5-05a staging 环境与可观测栈部署 → 05b 看板、告警与崩溃上报 → 05c 种子内测与反馈闭环。
 
 ### M6：生产发布
 
+> 2026-09-06 起 M6 各任务按实现工程量拆解为子任务（编号如 T-M6-01a、T-M6-02a），子任务范围、依赖、实现要点、文件路径与验证命令的权威来源为 `docs/milestones/production-execution-plan.md` M6 章节；本节维持父任务目标与验收边界。严格串行 `T-M6-01a→01d` → `T-M6-02a→02c` → `T-M6-03a→03c`。D-EXEC-01/02 必须在 T-M6-01a/01c 前回填 ADR-001。
+
 #### T-M6-01 Production 基础设施与发布流水线
 
-- **目标：** 可审核地部署 API、迁移数据库并回滚应用版本。
+- **目标：** 可审核地部署 API、迁移数据库并回滚应用版本，完成从干净环境到生产服务的全自动化部署。
 - **依赖：** M5 全部出口。
-- **实施：** production 配置、域名/TLS、CI/CD、镜像签名、迁移审批、蓝绿或滚动发布、回滚 runbook。
-- **验收：** 从干净环境可重复部署；密钥来自 secret manager；发布失败可回退；迁移前自动备份。
+- **实施：** `docker-compose.prod.yml` + nginx + Let's Encrypt certbot 自动续期；GitHub Actions 五阶段流水线（build→test→image→sign→deploy）；Alembic 迁移审批流（PR + CI 验证 + 自动备份）；蓝绿部署 ADR；回滚 runbook（应用回退 + 数据库 `downgrade`/前向修复）。
+- **验收：** 从干净环境可重复部署；密钥来自 secret manager；发布失败可回退（10min 内）；迁移前自动备份。
+- **子任务：** T-M6-01a 生产环境、域名与 TLS → 01b CI/CD 与镜像签名 → 01c 迁移审批与发布策略 → 01d 回滚 runbook 与演练。
 
 #### T-M6-02 Android 上架包与渠道验收
 
-- **目标：** 产出与生产 API 配套的签名 APK/AAB 和商店材料。
+- **目标：** 产出与生产 API 配套的签名 APK/AAB 和商店材料，完成 Android 8/12/15 真机矩阵走查，至少一个渠道提交成功。
 - **依赖：** T-M6-01。
-- **实施：** 版本统一、环境开关、混淆、包体检查、隐私清单、商店截图和渠道测试。
+- **实施：** `versionCode` 时间戳 + `versionName` 语义化；`buildConfigField` 三环境隔离（debug/staging/release）；R8 混淆 + `proguard-rules.pro` 保留序列化路径；外部 keystore 签名；包体预算检查（含 Vosk 模型，≤上一版 110%）；隐私清单与数据安全表单；三台真机走查 + 商店截图提交。
 - **验收：** staging/prod 不串环境；签名和版本号正确；Android 8/12/15 真机矩阵通过；至少一个渠道提交成功。
+- **子任务：** T-M6-02a Release 构建与签名 → 02b 包体与隐私清单 → 02c 真机矩阵与渠道提交。
 
 #### T-M6-03 上线观察与回滚门槛
 
-- **目标：** 小流量上线并用明确阈值决定扩量或回滚。
+- **目标：** 小流量上线并用明确阈值决定扩量或回滚，建立 S0 自动止损、事故复盘和客户端兼容策略。
 - **依赖：** T-M6-02。
-- **实施：** 分阶段放量、实时看板、值守清单、数据库/客户端兼容策略、问题复盘。
-- **验收：** S0 自动停止扩量；核心 SLO 连续达标后才扩大范围；每次事故有时间线、根因和守护用例。
+- **实施：** 四阶梯放量（5%→25%→50%→100%）+ 晋级门槛（API 可用性 ≥99.9%、crash-free ≥99.5% 等连续达标 12h）；S0 自动监测（重复入账/金额错误/数据丢失/crash-free 骤降）→ 自动停止扩量 + 告警回滚；客户端兼容策略（新旧版本共存矩阵）；事故复盘模板（时间线/根因/守护用例）。
+- **验收：** S0 自动停止扩量；核心 SLO 连续达标后才扩大范围；每次事故有时间线、根因和守护用例；M6 收口记录归档全部发布复盘。
+- **子任务：** T-M6-03a 分阶段放量与值守 → 03b S0 自动止损与回滚阈值 → 03c 兼容策略与事故复盘。
 
 ---
 

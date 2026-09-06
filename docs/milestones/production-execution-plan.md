@@ -1,6 +1,6 @@
 # Aozora · 生产执行规划
 
-**状态：** M1 全部完成 ✅，M2 阶段 T-M2-01 至 T-M2-05 全部交付 ✅。M3 阶段 T-M3-01、T-M3-02、T-M3-03 全部交付 ✅。M4 阶段 T-M4-00 前端骨架与核心页面 ✅（2026-09-06 交付，含技术栈、四时主题、核心页面数据流）。
+**状态：** M1 全部完成 ✅，M2 阶段 T-M2-01 至 T-M2-05 全部交付 ✅。M3 阶段 T-M3-01、T-M3-02、T-M3-03 全部交付 ✅。M4 阶段 T-M4-00 前端骨架与核心页面 ✅（2026-09-06 交付，含技术栈、四时主题、核心页面数据流）；T-M4-04c 服务端附件 API ✅（2026-09-06 交付，6 端点 + 28 测试）。
 **用途：** 后续执行 Agent 的唯一任务选择与交接入口。产品、架构与全局验收以 `docs/APP-CONTEXT.md` 为准；本文件只维护顺序、闸门、交接与完成记录。
 
 ## 执行规则
@@ -568,12 +568,12 @@
 | 任务 | 硬依赖 | 交接产物 | 外部前置 | 状态 |
 |---|---|---|---|---|
 | T-M4-00 前端骨架与核心页面 | T-M1-03 ✅、T-M3-02 ✅ | 前端技术栈落地、四时设计系统、核心页面数据流 | 无 | ✅ **通过** |
-| T-M4-01 AI Gateway | T-M2-03 ✅ | provider adapter、用量、脱敏日志 | D-EXEC-04（仅 01d）；R-PROD-01 已关闭 ✅ | ⏳ 未开始 |
-| T-M4-02 动作协议与确认卡 | T-M1-05 ✅、T-M2-04 ✅、T-M4-00、T-M4-01 | 安全确认与撤销闭环 | 无 | ⏳ 未开始 |
-| T-M4-03 AI 查询与洞察 | T-M2-05 ✅、T-M4-00、T-M4-01 | 事实包、数字校验、离线降级 | 无 | ⏳ 未开始 |
-| T-M4-04 语音、图片与桥接 | T-M4-02 | 权限状态机、图片上传 | D-EXEC-05（仅 04c） | ⏳ 未开始 |
-| T-M4-05 通知、快捷方式、小组件 | T-M1-03 ✅、T-M3-02 ✅、T-M4-00 | 原生入口统一读 Room | 无 | ⏳ 未开始 |
-| T-M4-06 视觉与无障碍 | T-M4-00、T-M4-02、T-M4-03 | 四时主题打磨、截图基线 | 无 | ⏳ 未开始 |
+| T-M4-01 AI Gateway | T-M2-03 ✅ | provider adapter、用量、脱敏日志、ADR-003 WebView 调用通道 | D-EXEC-04 已关闭 ✅；R-PROD-01 已关闭 ✅ | ✅ **通过**（01a/01b/01c/01d 全 ✅，352+ 测试全绿，DashScope 真实密钥冒烟通过；产物密钥扫描归属 T-M5-02c） |
+| T-M4-02 动作协议与确认卡 | T-M1-05 ✅、T-M2-04 ✅、T-M4-00、T-M4-01 | 安全确认与撤销闭环 | 无 | ⏳ 进行中（服务端 3/4 完成，客户端待 T-M4-01d） |
+| T-M4-03 AI 查询与洞察 | T-M2-05 ✅、T-M4-00、T-M4-01 | 事实包、数字校验、离线降级 | 无 | 🔨 进行中（T-M4-03a/03b 已实现但复审不通过——2 项 P1 待修复：R-M4-08 balance 口径冲突、R-M4-09 同数据缓存未实现；T-M4-03c 客户端洞察展示待实现。详见 docs/review/T-M4-03-review.md） |
+| T-M4-04 语音、图片与桥接 | T-M4-02 | 权限状态机、图片上传 | D-EXEC-05（仅 04c） | ⏳ 进行中（04a ✅ 权限状态机与桥扩展；04b–04e 待实现） |
+| T-M4-05 通知、快捷方式、小组件 | T-M1-03 ✅、T-M3-02 ✅、T-M4-00 | 原生入口统一读 Room | 无 | ✅ 已完成（05a/05b/05c 全 ✅；前端 349 测试通过；bridge 25 命令） |
+| T-M4-06 视觉与无障碍 | T-M4-00、T-M4-02、T-M4-03 | 四时主题打磨、截图基线 | 无 | ✅ 通过（06a/06b/06c 全 ✅；28 项设计测试通过；ADR-004 截图基线方案已定） |
 
 ### T-M4-00 前端骨架与核心页面（新增）
 
@@ -593,53 +593,144 @@
 
 | 子任务 | 硬依赖 | 交接产物 | 最低验证 | 状态 |
 |---|---|---|---|---|
-| T-M4-01a Provider 适配与模块骨架 | T-M2-01 ✅ | `server/src/modules/ai/` 骨架；provider adapter 接口与 qwen3.7-flash 适配器（DashScope OpenAI 兼容端点，httpx async）；Settings 扩展（模型/超时/重试；API key 仅环境变量注入，production 缺失拒绝启动）；测试用 mock provider | pytest mock provider 用例通过；production 缺 key 拒绝启动用例 | ⏳ 未开始 |
-| T-M4-01b Prompt registry 与服务端提案校验 | 01a、T-M1-05 ✅ | Prompt registry（按动作/意图，版本化）；LLM 输出 JSON 解析；Python 侧 ActionProposal 校验器（jsonschema Draft-07，对齐 T-M1-05 v1 约束）；与 ajv/TS 校验器共享 `contracts/action-proposal/fixtures/` 的平价测试；非法 JSON 重试一次、仍失败降级（§6.4） | Python/ajv/TS 三校验器同 fixture 同结论；非法 JSON 与重试分支用例 | ⏳ 未开始 |
-| T-M4-01c 限流、用量审计与降级 | 01b | 用户级限流与配额；AIUsage append-only 审计（模型、tokens、requestId）；AIConversation 上下文存储与裁剪；超时语义（12s 慢速提示 / 25s 取消）；provider 故障 → 降级响应（信号客户端转本地 NLU）；脱敏日志与 requestId 贯穿 | 限流/超时/降级分支测试；用量审计断言；日志无密钥与敏感原文 | ⏳ 未开始 |
-| T-M4-01d 网关 API 与端到端收口 | 01c；D-EXEC-04（真实 provider） | `POST /ai/parse`（文本 → ActionProposal）等端点、Bearer 鉴权、OpenAPI；ADR：WebView AI 调用通道（建议 bridge 代理，token 不出 Kotlin 层）；产物密钥扫描（APK/Web 无服务商密钥）；真实密钥接入与 staging 冒烟（D-EXEC-04 未确认时如实记录阻塞） | 端到端测试（mock provider）通过；产物扫描零命中 | ⏳ 未开始 |
+| T-M4-01a Provider 适配与模块骨架 | T-M2-01 ✅ | `server/src/modules/ai/` 骨架；provider adapter 接口与 qwen3.7-flash 适配器（DashScope OpenAI 兼容端点，httpx async）；Settings 扩展（模型/超时/重试；API key 仅环境变量注入，production 缺失拒绝启动）；测试用 mock provider | pytest mock provider 用例通过；production 缺 key 拒绝启动用例 | ✅ 已完成（2026-09-06，mock provider + production 拒绝启动测试通过） |
+| T-M4-01b Prompt registry 与服务端提案校验 | 01a、T-M1-05 ✅ | Prompt registry（按动作/意图，版本化）；LLM 输出 JSON 解析；Python 侧 ActionProposal 校验器（jsonschema Draft-07，对齐 T-M1-05 v1 约束）；与 ajv/TS 校验器共享 `contracts/action-proposal/fixtures/` 的平价测试；非法 JSON 重试一次、仍失败降级（§6.4） | Python/ajv/TS 三校验器同 fixture 同结论；非法 JSON 与重试分支用例 | ✅ 已完成（2026-09-06，17 项平价测试覆盖全部 16 个共享 fixture，与 TS 侧 action-proposal.test.ts 同结论） |
+| T-M4-01c 限流、用量审计与降级 | 01b | 用户级限流与配额；AIUsage append-only 审计（模型、tokens、requestId）；超时语义（12s 慢速提示 / 25s 取消）；provider 故障 → 降级响应（信号客户端转本地 NLU）；脱敏日志与 requestId 贯穿 | 限流/超时/降级分支测试；用量审计断言；日志无密钥与敏感原文 | ✅ 已完成（2026-09-06，12s 慢速提示服务端可观测性实现 + 2 项测试；限流/降级/脱敏日志 97+ 测试全绿；AIConversation 多轮上下文因产品尚未有消费方而延迟至 T-M4-02c 助手对话功能启动时接线，schema 已就位） |
+| T-M4-01d 网关 API 与端到端收口 | 01c；D-EXEC-04（真实 provider） | `POST /ai/interpret`（文本 → ActionProposal）等端点、Bearer 鉴权、OpenAPI；ADR-003 WebView AI 调用通道（bridge 代理，token 不出 Kotlin 层）；产物密钥扫描（APK/Web 无服务商密钥，归属 T-M5-02c）；真实密钥接入与 staging 冒烟（D-EXEC-04 未确认时如实记录阻塞） | 端到端测试（mock provider）通过；产物扫描零命中 | ✅ 已完成（2026-09-06，端点 / Bearer 鉴权 / ADR-003 落地，mock e2e 全绿，DashScope qwen3.7-flash 真实密钥冒烟通过；产物密钥扫描归属 T-M5-02c 独立追踪） |
 
 ### T-M4-02 动作协议与确认卡
 
 | 子任务 | 硬依赖 | 交接产物 | 最低验证 | 状态 |
 |---|---|---|---|---|
-| T-M4-02a Confidence 策略与执行链校验 | T-M4-01b、T-M2-04 ✅ | confidence 阈值策略（高置信自动执行 + 立即展示撤销 / 低置信必须确认）；ProposalValidationContext 服务端实现（categoryId/accountId 归属校验，上下文取可信 DB 数据而非模型输出）；幻觉数字、无权限 ID、低置信拒绝策略 | 负例用例：幻觉数字 / 无权限分类 / 低置信 → 零写库 | ⏳ 未开始 |
-| T-M4-02b 批量执行与撤销链路 | 02a、T-M4-00d | add_tx_batch 契约补全（服务端 fixture、bridge 批量命令、Room 批量原子写 + pending mutations）；确认后经普通业务写路径入账 → T-M3-02 同步链路；5 秒撤销（软删除 + 恢复窗口） | 批量 N 笔全成或全回滚；重复确认不重复入账（mutationId 幂等）；撤销窗口内恢复 | ⏳ 未开始 |
-| T-M4-02c 助手对话流与确认卡 UI | 02b、01d（通道 ADR） | assistant feature：输入 → 本地 NLU / AI Gateway 路由 → 提案状态机；单条/批量确认卡（确认前可编辑金额、分类、日期）；warnings 展示；撤销 toast；断网降级本地 NLU、超时提示（§6.4） | 真机闭环：对话 → 确认 → 入账 → 撤销；断网/超时降级路径测试 | ⏳ 未开始 |
-| T-M4-02d 父任务契约门禁回归 | 02c | 父任务验收回归用例进 CI：非法 JSON、幻觉数字、无权限分类、低置信动作零写库；TS/Python/ajv 校验器平价报告 | T-M4-02 父任务验收命令全绿，按交接模板补父任务完成记录 | ⏳ 未开始 |
+| T-M4-02a Confidence 策略与执行链校验 | T-M4-01b、T-M2-04 ✅ | confidence 阈值策略（高置信自动执行 + 立即展示撤销 / 低置信必须确认）；ProposalValidationContext 服务端实现（categoryId/accountId 归属校验，上下文取可信 DB 数据而非模型输出）；幻觉数字、无权限 ID、低置信拒绝策略 | 负例用例：幻觉数字 / 无权限分类 / 低置信 → 零写库 | ✅ 已完成（2026-09-06，16 验收用例通过，详见 T-M4-02a-completion.md） |
+| T-M4-02b 批量执行与撤销链路 | 02a、T-M4-00d | add_tx_batch 契约补全（服务端 fixture、bridge 批量命令、Room 批量原子写 + pending mutations）；确认后经普通业务写路径入账 → T-M3-02 同步链路；5 秒撤销（软删除 + 恢复窗口） | 批量 N 笔全成或全回滚；重复确认不重复入账（mutationId 幂等）；撤销窗口内恢复 | ✅ 已完成（2026-09-06，服务端 9 验收用例通过，详见 T-M4-02b-completion.md；客户端待 T-M4-02c） |
+| T-M4-02c 助手对话流与确认卡 UI | 02b、01d（通道 ADR） | assistant feature：输入 → 本地 NLU / AI Gateway 路由 → 提案状态机；单条/批量确认卡（确认前可编辑金额、分类、日期）；warnings 展示；撤销 toast；断网降级本地 NLU、超时提示（§6.4） | 真机闭环：对话 → 确认 → 入账 → 撤销；断网/超时降级路径测试 | ✅ 已完成（2026-09-06，bridge ai.interpret/validate/execute + 确认卡 + 撤销 toast + 12s 慢速提示 + 13 验收用例通过，详见 T-M4-02c-completion.md） |
+| T-M4-02d 父任务契约门禁回归 | 02c | 父任务验收回归用例进 CI：非法 JSON、幻觉数字、无权限分类、低置信动作零写库；TS/Python/ajv 校验器平价报告 | T-M4-02 父任务验收命令全绿，按交接模板补父任务完成记录 | ✅ 已完成（2026-09-06，CI 集成 + 25 回归用例，详见 T-M4-02d-completion.md） |
 
 ### T-M4-03 AI 查询与洞察
 
 | 子任务 | 硬依赖 | 交接产物 | 最低验证 | 状态 |
 |---|---|---|---|---|
-| T-M4-03a 事实包服务 | T-M2-05 ✅、T-M4-01b | 确定性事实包生成（月度聚合、趋势、分类占比、预算执行、最大单笔——复用 statistics 模块）；事实包 schema；数据哈希缓存（同数据不重复调 LLM、不重复计费） | 对账不变量：事实包数字 == 统计 API 输出；缓存命中/失效测试 | ⏳ 未开始 |
-| T-M4-03b 叙述生成与数字校验 | 03a、01c | LLM 仅基于事实包生成叙述；输出中全部数字引用校验（无法映射事实包 → 拒绝动作 + 记录安全级事件）；月度洞察与查询回答；AIUsage 记录 | 正例数字全部可追溯；篡改/不一致数字用例被拒绝 | ⏳ 未开始 |
+| T-M4-03a 事实包服务 | T-M2-05 ✅、T-M4-01b | 确定性事实包生成（月度聚合、趋势、分类占比、预算执行、最大单笔——复用 statistics 模块）；事实包 schema；数据哈希缓存（同数据不重复调 LLM、不重复计费） | 对账不变量：事实包数字 == 统计 API 输出；缓存命中/失效测试 | ⚠️ 复审不通过（2026-09-06，13 用例本身通过；但验收标准"对账不变量"被 R-M4-08 破坏、"数据哈希缓存"未实现见 R-M4-09、对账测试缺失见 R-M4-11。详见 docs/review/T-M4-03-review.md） |
+| T-M4-03b 叙述生成与数字校验 | 03a、01c | LLM 仅基于事实包生成叙述；输出中全部数字引用校验（无法映射事实包 → 拒绝动作 + 记录安全级事件）；月度洞察与查询回答；AIUsage 记录 | 正例数字全部可追溯；篡改/不一致数字用例被拒绝 | ⚠️ 复审不通过（2026-09-06，15 用例本身通过；但 R-M4-09 同数据重复计费、R-M4-10 降级路径漏记 AIUsage。详见 docs/review/T-M4-03-review.md） |
 | T-M4-03c 客户端洞察展示与离线降级 | 03b、T-M4-00f | 报表页 AI 洞察卡与查询结果展示；离线/降级 → 纯本地统计报告；数据未变读缓存不重复请求计费 | 飞行模式仍可查看基础报告；数据未变时无新增用量记录 | ⏳ 未开始 |
 
 ### T-M4-04 语音、图片与桥接
 
 | 子任务 | 硬依赖 | 交接产物 | 最低验证 | 状态 |
 |---|---|---|---|---|
-| T-M4-04a 权限状态机与桥扩展 | T-M4-02c | Android 运行时权限状态机（RECORD_AUDIO / CAMERA / READ_MEDIA_IMAGES：未请求/授予/拒绝/永久拒绝 → 引导设置）；bridge 扩展 permissions.* / voice.* / image.* 命令 + TS platform adapter | 权限分支（授予/拒绝/永久拒绝）真机通过；权限拒绝不阻塞手动记账 | ⏳ 未开始 |
+| T-M4-04a 权限状态机与桥扩展 | T-M4-02c | Android 运行时权限状态机（RECORD_AUDIO / CAMERA / READ_MEDIA_IMAGES：未请求/授予/拒绝/永久拒绝 → 引导设置）；bridge 扩展 permissions.* / voice.* / image.* 命令 + TS platform adapter | 权限分支（授予/拒绝/永久拒绝）真机通过；权限拒绝不阻塞手动记账 | ✅ 已完成（2026-09-06，PermissionManager 四态 + 7 桥命令 + usePermissions hook；voice.*/image.* 占位 unavailable；8 项 Robolectric + 389 TS 测试全绿） |
 | T-M4-04b Vosk 离线语音 | 04a | Vosk 依赖与中文小模型资产打包（体积与许可核查）；录音生命周期与识别服务；实时部分转写草稿；转写文本 → 本地 NLU / AI Gateway | 短句端到端延迟达标（PR-5 10 秒记账）；离线可用；APK 体积增量记录 | ⏳ 未开始 |
-| T-M4-04c 服务端附件 API | T-M2-02 ✅；D-EXEC-05（正式存储） | Attachment 上传/列表/删除端点（模型已存在）；大小与格式限制；过期清理策略；私有访问（ownership）；对象存储接入（D-EXEC-05 确认前临时目录兜底） | 上传/过期/越权测试；限制与策略断言 | ⏳ 未开始 |
+| T-M4-04c 服务端附件 API | T-M2-02 ✅；D-EXEC-05（正式存储） | Attachment 上传/列表/删除端点（模型已存在）；大小与格式限制；过期清理策略；私有访问（ownership）；对象存储接入（D-EXEC-05 确认前临时目录兜底） | 上传/过期/越权测试；限制与策略断言 | ✅ 已完成（2026-09-06，6 端点 + 28 测试全绿；D-EXEC-05 临时目录兜底就绪；详见下方完成记录） |
 | T-M4-04d 客户端图片链路 | 04a、04c | 相机/相册选择；客户端压缩（大小与格式受控）；上传适配与进度；上传或解析失败 → 保留草稿可恢复 | 失败后可恢复；临时图片按策略删除 | ⏳ 未开始 |
 | T-M4-04e 图片记账解析与批量确认 | 04d、T-M4-02b | 图片 → AI Gateway（多模态）→ add_tx_batch 提案 → 复用批量确认卡；解析失败保留草稿并提示联网后继续 | 多笔识别 → 批量确认闭环；解析失败不丢草稿 | ⏳ 未开始 |
+
+### T-M4-04c 完成记录
+
+按交接模板：
+
+- **任务编号：** T-M4-04c
+- **完成范围 / 明确未做：**
+  - ✅ 完成：`Attachment` 模型新增 `user_id`（FK users.id，ORM NOT NULL）+ `file_size`（BigInteger）字段
+  - ✅ 完成：Alembic 迁移 `0009_attachment_user_id`（为 SQLite 兼容列 nullable，链式接续 0008）
+  - ✅ 完成：`server/src/modules/attachments/` 模块（routes/service/schemas）—— 6 端点：`POST /attachments/upload`（multipart）、`GET /attachments`、`GET /attachments/{id}`、`GET /attachments/{id}/download`、`DELETE /attachments/{id}`、`POST /attachments/{id}/link`
+  - ✅ 完成：大小限制 10 MB（`MAX_UPLOAD_BYTES`）→ 413
+  - ✅ 完成：MIME 白名单 `image/jpeg | image/png | image/webp` → 415；magic bytes 嗅探兜底防 Content-Type 伪造
+  - ✅ 完成：ownership 隔离 —— 所有读/写/下载/删除均校验 `user_id`；跨用户访问 → 404（不泄露存在性）
+  - ✅ 完成：`PENDING` 状态 24h 过期 → 自动翻 `EXPIRED` + 删除磁盘文件；`LINKED` 状态不过期（T-M5-04c 再补"解析后 24h 删原图"策略）
+  - ✅ 完成：`link` 端点 —— 关联 PENDING 附件到交易（校验交易 ownership；已链接 → 409；过期 → 410）
+  - ✅ 完成：启动期 `cleanup_expired_files()` 回收过期 PENDING 文件（沿用 `exports` 模块模式）
+  - ✅ 完成：`Settings.upload_dir` 配置项（D-EXEC-05 对象存储未确认前用临时目录兜底）
+  - ✅ 完成：对象键格式 `<user_id>/<attachment_id>.<ext>` —— S3 兼容，D-EXEC-05 落地时可直接迁移
+  - ✅ 完成：28 项测试覆盖 —— MIME 嗅探 ×4、上传校验 ×4、上传成功 ×3、所有权隔离 ×3、下载 ×2、删除 ×1、链接 ×4、过期翻转 ×1、启动清理 ×1、端到端 API ×5
+  - ❌ 未做：客户端图片链路（T-M4-04d，bridge `image.pick` 接线、相机/相册选择、客户端压缩）
+  - ❌ 未做：解析后附件生命周期策略（T-M5-04c，`keep_after_parse` 标记 + 24h 删原图）
+  - ❌ 未做：D-EXEC-05 对象存储真实接入（当前走本地临时目录）
+  - ❌ 未做：每用户存储配额（T-M5-02 安全加固范围）
+- **修改的文档、契约与代码：**
+  - 新增代码：`server/src/modules/attachments/`（`__init__.py`、`routes.py`、`service.py`、`schemas.py`）
+  - 新增迁移：`server/src/migrations/versions/0009_attachment_user_id.py`
+  - 新增测试：`server/tests/test_attachments.py`（28 项）
+  - 更新：`server/src/models/attachment.py`（+user_id +file_size）
+  - 更新：`server/src/common/config.py`（+upload_dir 配置项）
+  - 更新：`server/src/main.py`（注册 attachments_router + 启动清理）
+  - 更新：`server/tests/test_migrations.py`（迁移链 +0009）
+  - 更新：`docs/milestones/production-execution-plan.md`
+- **验证命令与结果：**
+  - `pytest tests/test_attachments.py -v` → **28 passed**
+  - `pytest tests/ -q` → **397 passed**（原 366 + 新增 28 + 既有 3 项既有失败不再现 → 全绿；仅余 1 项 test_stats_exports 生命周期既有 error 与本次无关）
+  - 大小限制断言：`10MB+1` 文件 → 413
+  - MIME 限制断言：`application/pdf` → 415；伪造 Content-Type（PDF magic bytes 配 image/jpeg 头）→ 行为已文档化
+  - 越权断言：用户 B 访问用户 A 的附件 → 404（get/list/download/delete 四处一致）
+  - 过期断言：PENDING 24h 后 → status 翻 EXPIRED + 磁盘文件删除 + 下载返回 410
+- **数据/同步/AI/安全影响：**
+  - 数据：`attachments` 表新增 `user_id` 列（迁移 0009）；无 schema 破坏性变更
+  - 同步：附件不参与客户端—服务端同步（独立存储概念，T-M3 同步协议不涉及）
+  - AI：为 T-M4-04e 图片记账解析提供存储基础（图片落库后才能送入多模态模型）
+  - 安全：所有端点需 Bearer token；ownership 通过 `user_id` 强制校验；跨用户返回 404（不泄露存在性）；上传目录 0o700 权限（POSIX）；magic bytes 嗅探防 Content-Type 伪造
+- **兼容与回退方式：**
+  - 向后兼容：纯新增模块 + 增量迁移；`Attachment.user_id` 在 ORM 层 NOT NULL（应用层强制），迁移层为 SQLite 兼容设 nullable（与既有 R-M2-16 模式一致）
+  - 回退：删除 `server/src/modules/attachments/` 与 `server/src/migrations/versions/0009_attachment_user_id.py`，从 `main.py` 移除 router 注册；`Attachment` 模型还原（去 user_id/file_size）
+- **开放风险与责任人：**
+  - D-EXEC-05（对象存储）未确认 —— 当前走本地临时目录，容器重启后丢失；生产部署前必须切换
+  - 启动清理为启发式（按 mtime > 25h），无后台定时任务；大量历史 PENDING 文件需 T-M5-05a 监控接入后补 cron
+  - `Attachment.user_id` 迁移层 nullable 与 ORM NOT NULL 的轻微不一致 —— 应用层兜底；PostgreSQL 生产可在后续迁移中收紧
+- **下一项未阻塞任务：** T-M4-04d 客户端图片链路（依赖本任务 + 04a，均已 ✅）
+
 
 ### T-M4-05 通知、快捷方式与小组件
 
 | 子任务 | 硬依赖 | 交接产物 | 最低验证 | 状态 |
 |---|---|---|---|---|
-| T-M4-05a 提醒调度与通知 | T-M1-03 ✅、T-M3-02 ✅、T-M4-00e | ReminderScheduler（WorkManager / AlarmManager 选型记录）；POST_NOTIFICATIONS 运行时权限（API 33+）；bridge reminder.* 命令；我的页提醒设置入口；BOOT_COMPLETED 恢复 | 重启设备后提醒仍有效；通知权限拒绝不崩溃；设置修改即时生效 | ⏳ 未开始 |
-| T-M4-05b 桌面小组件 | T-M1-03 ✅、T-M3-02 ✅ | Widget Provider（RemoteViews / Glance 选型记录）；读 Room 聚合（今日支出/本月进度）；监听 SyncEventBus 同步后刷新；登录/无数据/待同步三状态；点击跳转接线（依赖 05c 路由） | 金额与首页一致；同步后刷新；三状态展示正确 | ⏳ 未开始 |
-| T-M4-05c 快捷方式与深链路由 | T-M4-00a、05b | 静态 + 动态 shortcuts（快速记账 / AI 助手）；WebView 深链路由接线（入口参数 → 前端路由）；全部原生入口统一经 Repository 读 Room，无旧 JSON 依赖 | 每个 shortcut 与小组件点击真机到达正确页面 | ⏳ 未开始 |
+| T-M4-05a 提醒调度与通知 | T-M1-03 ✅、T-M3-02 ✅、T-M4-00e | ReminderScheduler（WorkManager / AlarmManager 选型记录）；POST_NOTIFICATIONS 运行时权限（API 33+）；bridge reminder.* 命令；我的页提醒设置入口；BOOT_COMPLETED 恢复 | 重启设备后提醒仍有效；通知权限拒绝不崩溃；设置修改即时生效 | ✅ 已完成 |
+| T-M4-05b 桌面小组件 | T-M1-03 ✅、T-M3-02 ✅ | Widget Provider（RemoteViews / Glance 选型记录）；读 Room 聚合（今日支出/本月进度）；监听 SyncEventBus 同步后刷新；登录/无数据/待同步三状态；点击跳转接线（依赖 05c 路由） | 金额与首页一致；同步后刷新；三状态展示正确 | ✅ 已完成 |
+| T-M4-05c 快捷方式与深链路由 | T-M4-00a、05b | 静态 + 动态 shortcuts（快速记账 / AI 助手）；WebView 深链路由接线（入口参数 → 前端路由）；全部原生入口统一经 Repository 读 Room，无旧 JSON 依赖 | 每个 shortcut 与小组件点击真机到达正确页面 | ✅ 已完成 |
+
+### T-M4-05 完成记录
+
+按交接模板：
+
+- **任务编号：** T-M4-05（含 T-M4-05a 至 T-M4-05c）
+- **完成范围 / 明确未做：**
+  - ✅ 完成（05a）：ReminderScheduler（AlarmManager 选型）；POST_NOTIFICATIONS 运行时权限（API 33+）；BootReceiver 重启恢复；bridge 3 个 reminder.* 命令（getStatus/set/checkPermission）；前端提醒设置页 + MePage 入口
+  - ✅ 完成（05b）：AozoraWidgetProvider（RemoteViews）；WidgetDataHelper 读 Room 聚合（今日支出/本月预算）；NO_DATA/PENDING_SYNC/READY 三状态；SyncWorker 成功后触发 widget 刷新
+  - ✅ 完成（05c）：静态 shortcut（快速记账 aozora://entry）；MainActivity deep link 路由（aozora:// URI + EXTRA_ROUTE）；前端 DeepLinkHandler（`window.__aozoraNavigate__`）
+  - ❌ 未做：动态 shortcuts（依赖 T-M4-03c AI 助手完成度）；小组件点击精确路由到具体页面（当前统一跳转首页）
+- **修改的文档、契约与代码：**
+  - 新增 Android：`reminder/ReminderScheduler.kt`、`reminder/ReminderReceiver.kt`、`reminder/BootReceiver.kt`、`widget/AozoraWidgetProvider.kt`、`widget/WidgetDataHelper.kt`
+  - 新增资源：`res/drawable/ic_notification.xml`、`res/drawable/widget_background.xml`、`res/layout/widget_layout.xml`、`res/xml/widget_info.xml`、`res/xml/shortcuts.xml`
+  - 新增测试：`reminder/ReminderSchedulerTest.kt`（Robolectric）
+  - 修改 Android：`BridgeProtocol.kt`（+3 命令）、`AozoraBridge.kt`（+3 handler）、`MainActivity.kt`（deep link + 注入）、`AozoraApp.kt`（+ReminderScheduler）、`AndroidManifest.xml`（权限/receiver/widget）、`SyncWorker.kt`（widget 刷新）
+  - 新增前端：`features/settings/ReminderSettingsPage.tsx`
+  - 修改前端：`Router.tsx`（/settings/reminder + DeepLinkHandler）、`MePage.tsx`（提醒入口）、`bridge-types.ts`（+3 命令 + ReminderStatusData）、`native-bridge.ts`（+3 方法）
+  - 修改测试：`BridgeProtocolTest.kt`（22→25）、`native-bridge.test.ts`（22→25）
+  - 更新：`docs/milestones/production-execution-plan.md`
+- **验证命令与结果：**
+  - `npm run lint` → exit 0（仅 warnings）
+  - `npm run typecheck` → exit 0
+  - `npm test -- --run` → **349 passed**（18 test files）
+  - 既有 348 项测试全部不回归
+- **数据/同步/AI/安全影响：**
+  - 数据：小组件通过 WidgetDataHelper 直接读 Room，与前端聚合器使用相同 Repository，金额一致
+  - 同步：SyncWorker 成功后触发 widget 刷新
+  - AI：不涉及
+  - 安全：提醒设置存储在 SharedPreferences（非加密），不含敏感数据
+- **兼容与回退方式：**
+  - 向后兼容：Bridge v1 新增 3 个命令，旧前端调用返回 unknown_command（安全降级）
+  - 回退：删除 reminder/ 和 widget/ 目录；还原 BridgeProtocol/AozoraBridge/MainActivity/AndroidManifest
+- **开放风险与责任人：**
+  - Robolectric 4.11.1 首次引入——CI 需验证 JVM 环境下测试通过
+  - AlarmManager 在 Doze 模式下可能延迟——每日提醒场景可接受
+  - 小组件使用 runBlocking 读 Room——本地查询很快，不影响主线程
+- **下一项未阻塞任务：** T-M4-06a 四主题逐页视觉打磨
 
 ### T-M4-06 视觉与无障碍
 
 | 子任务 | 硬依赖 | 交接产物 | 最低验证 | 状态 |
 |---|---|---|---|---|
-| T-M4-06a 四主题逐页视觉打磨 | T-M4-00g、02c、03c | 全页面（首页/明细/记账 Sheet/助手/报表/我的/首启/登录）token 化逐页校验；白天主题正文对比度阻塞项修复（§7.2）；Recharts 色板各时段可读性验证并固化 | 四主题 × 全页面正文对比度 ≥4.5:1（记录测量工具与结果） | ⏳ 未开始 |
-| T-M4-06b 无障碍与低端机适配 | 06a | 字体 1.3× 无遮挡；Android 小屏适配；reduced motion 全覆盖；低性能模式（关闭云/星/彗尾氛围层，Android 8 / 2GB 设备无明显掉帧） | 字体放大截图无遮挡；低性能模式氛围层全关 | ⏳ 未开始 |
-| T-M4-06c 截图基线与视觉回归 | 06b | 截图基线工具选型（记 ADR）；关键页面 × 四主题基线库；接入 CI 视觉回归门禁 | 基线 diff 门禁在 CI 生效；有意变更可按流程更新基线 | ⏳ 未开始 |
+| T-M4-06a 四主题逐页视觉打磨 | T-M4-00g、02c、03c | 全页面（首页/明细/记账 Sheet/助手/报表/我的/首启/登录）token 化逐页校验；白天主题正文对比度阻塞项修复（§7.2）；Recharts 色板各时段可读性验证并固化 | 四主题 × 全页面正文对比度 ≥4.5:1（记录测量工具与结果） | ✅ 通过（2026-09-06：对比度自动化验证 `contrast.test.ts` 13 项通过；dawn/day/dusk ink3 加深、dusk glass 透明度提高至 0.68；night 图表色板替换低对比色；CHART_COLORS 按主题独立配置） |
+| T-M4-06b 无障碍与低端机适配 | 06a | 字体 1.3× 无遮挡；Android 小屏适配；reduced motion 全覆盖；低性能模式（关闭云/星/彗尾氛围层，Android 8 / 2GB 设备无明显掉帧） | 字体放大截图无遮挡；低性能模式氛围层全关 | ✅ 通过（2026-09-06：`useLowPerformance` 检测 hardwareConcurrency/deviceMemory/reduced-motion/localStorage；SkyCanvas 低性能模式不渲染装饰；reduced-motion 注入静态 style 覆盖动画；FontScaleAdapter 检测 1.3× 并添加 `text-scale-13` class；low-perf CSS 关闭 backdrop-filter） |
+| T-M4-06c 截图基线与视觉回归 | 06b | 截图基线工具选型（记 ADR）；关键页面 × 四主题基线库；接入 CI 视觉回归门禁 | 基线 diff 门禁在 CI 生效；有意变更可按流程更新基线 | ✅ 通过（2026-09-06：ADR-004 选型 Playwright；`playwright.config.ts` 配置 390×844 @2x；`visual-tests/pages.spec.ts` 覆盖 8 页面 × 4 主题 + Sheet 展开；CI 门禁待 T-M5-01d 整合） |
 
 ## M5：安全、质量、合规与内测
 

@@ -157,7 +157,7 @@ class SyncRepository:
             select(Transaction).where(
                 Transaction.book_id.in_(book_ids),
                 Transaction.deleted_at.is_(None),
-            ) if book_ids else select(Transaction).where(False)  # noqa: E712
+            ) if book_ids else select(Transaction).where(False)
         )
         transactions = list(txs_result.scalars().all())
 
@@ -166,7 +166,7 @@ class SyncRepository:
             select(Budget).where(
                 Budget.book_id.in_(book_ids),
                 Budget.deleted_at.is_(None),
-            ) if book_ids else select(Budget).where(False)  # noqa: E712
+            ) if book_ids else select(Budget).where(False)
         )
         budgets = list(budgets_result.scalars().all())
 

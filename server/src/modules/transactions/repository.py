@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import uuid
-from datetime import date, datetime, timezone
+from datetime import UTC, date, datetime
 
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -105,6 +105,29 @@ class TransactionRepository:
         await self.db.refresh(transaction)
         return transaction
 
+    async def create_batch(
+        self,
+        transactions: list[dict],
+    ) -> list[Transaction]:
+        """Batch create transactions atomically.
+
+        Each dict in ``transactions`` must have keys: book_id, type, amount_cents,
+        category_id, account_id (optional), note, biz_date, occurred_at, source.
+
+        All transactions are added in a single flush — if any fails validation,
+        the entire batch is rolled back (atomic).
+        """
+        created: list[Transaction] = []
+        for tx_data in transactions:
+            tx = Transaction(**tx_data)
+            self.db.add(tx)
+            created.append(tx)
+        await self.db.flush()
+        # Refresh all to get generated IDs
+        for tx in created:
+            await self.db.refresh(tx)
+        return created
+
     async def update(
         self,
         transaction: Transaction,
@@ -133,7 +156,7 @@ class TransactionRepository:
         return transaction
 
     async def soft_delete(self, transaction: Transaction) -> None:
-        transaction.deleted_at = datetime.now(timezone.utc)
+        transaction.deleted_at = datetime.now(UTC)
         transaction.version += 1
         await self.db.flush()
 

@@ -2,10 +2,12 @@ package com.aozora.app
 
 import android.app.Application
 import androidx.work.Configuration
+import com.aozora.app.ai.AiGatewayClient
 import com.aozora.app.auth.AuthClient
 import com.aozora.app.auth.TokenStore
 import com.aozora.app.db.AozoraDatabase
 import com.aozora.app.db.Repository
+import com.aozora.app.reminder.ReminderScheduler
 import com.aozora.app.sync.HttpSyncApi
 import com.aozora.app.sync.SyncEngine
 import okhttp3.OkHttpClient
@@ -18,6 +20,7 @@ import java.util.concurrent.TimeUnit
  * - [database] / [repository]：Room + Repository。
  * - [tokenStore] / [authClient]：认证层（AES/GCM + OkHttp）。
  * - [syncEngine]：编排 push/pull，依赖 [repository] 与 [syncApi]。
+ * - [reminderScheduler]：每日记账提醒调度（T-M4-05a）。
  *
  * 通过 [(AozoraApp) applicationContext] 在 Activity / Worker 中取回。
  */
@@ -66,6 +69,27 @@ class AozoraApp : Application(), Configuration.Provider {
         SyncEngine(
             repository = repository,
             syncApi = syncApi,
+            authClient = authClient
+        )
+    }
+
+    /** T-M4-05a: 提醒调度器。 */
+    val reminderScheduler: ReminderScheduler by lazy {
+        ReminderScheduler(this)
+    }
+
+    /** T-M4-03c: AI Gateway 客户端（ADR-003 通道）。
+     *  独立 OkHttpClient 实例，callTimeout = 25 s（LLM 调用预算）。 */
+    val aiGatewayClient: AiGatewayClient by lazy {
+        val aiHttpClient = OkHttpClient.Builder()
+            .callTimeout(25, TimeUnit.SECONDS)
+            .connectTimeout(10, TimeUnit.SECONDS)
+            .readTimeout(20, TimeUnit.SECONDS)
+            .followRedirects(false)
+            .build()
+        AiGatewayClient(
+            baseUrl = BuildConfig.SYNC_BASE_URL,
+            httpClient = aiHttpClient,
             authClient = authClient
         )
     }

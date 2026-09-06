@@ -1,3 +1,19 @@
 <resources>
     <string name="app_name">Aozora</string>
+
+    <!-- T-M4-05a: 提醒通知 -->
+    <string name="reminder_title">记录今天的花销</string>
+    <string name="reminder_text">别忘了记一笔，让每分钱都有迹可循 ✨</string>
+    <string name="reminder_channel_name">每日记账提醒</string>
+    <string name="reminder_channel_desc">每天定时提醒你记录当日花销</string>
+
+    <!-- T-M4-05b: 桌面小组件 -->
+    <string name="widget_description">今日支出与预算进度</string>
+    <string name="widget_label">Aozora 记账</string>
+    <string name="widget_empty_text">开始记录你的第一笔</string>
+
+    <!-- T-M4-05c: 快捷方式 -->
+    <string name="shortcut_quick_entry">快速记账</string>
+    <string name="shortcut_short_label">记账</string>
+    <string name="shortcut_long_label">快速记一笔</string>
 </resources>

@@ -1,0 +1,16 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- T-M4-05c: 静态快捷方式 — 快速记账 -->
+<shortcuts xmlns:android="http://schemas.android.com/apk/res/android">
+    <shortcut
+        android:shortcutId="quick_entry"
+        android:enabled="true"
+        android:icon="@drawable/ic_notification"
+        android:shortcutShortLabel="@string/shortcut_short_label"
+        android:shortcutLongLabel="@string/shortcut_long_label">
+        <intent
+            android:action="android.intent.action.VIEW"
+            android:data="aozora://entry"
+            android:targetClass="com.aozora.app.MainActivity"
+            android:targetPackage="com.aozora.app" />
+    </shortcut>
+</shortcuts>

@@ -8,7 +8,6 @@ from zoneinfo import available_timezones
 
 from pydantic import BaseModel, Field, field_validator
 
-
 # Cache once — available_timezones() is pure but non-trivial.
 _VALID_TIMEZONES = available_timezones()
 

@@ -60,13 +60,15 @@ class TestDefaults:
 
 class TestProperties:
     def test_is_production_true(self):
-        # Production config must also pass the safety guards (R-M2-02/03/09).
+        # Production config must also pass the safety guards (R-M2-02/03/09
+        # + T-M4-01a AI key).
         s = Settings(
             database_url="x",
             env="production",
             secret_key="super-secret-key-that-is-not-default",
             dev_auth_code="",
             cors_origins="https://aozora.example",
+            ai_provider_api_key="sk-test-not-a-real-key",
         )
         assert s.is_production is True
 

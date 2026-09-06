@@ -6,15 +6,23 @@ import hashlib
 import json
 import logging
 import uuid
-from datetime import date, datetime, timezone
+from datetime import UTC, date, datetime
 
+from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy import select
 
 from src.common.errors import AppException
 from src.models.budget import Budget, BudgetType
-from src.models.ledger import Account, Book, Category, CategoryKind, Transaction, TxSource, TxType
+from src.models.ledger import (
+    Account,
+    Book,
+    Category,
+    CategoryKind,
+    Transaction,
+    TxSource,
+    TxType,
+)
 from src.models.sync import SyncOperation
 
 from .repository import SyncRepository
@@ -405,7 +413,7 @@ class SyncService:
         if already_deleted:
             raise _Conflict(entity.version)
 
-        now = datetime.now(timezone.utc)
+        now = datetime.now(UTC)
         if entity_type in _ARCHIVED_TYPES:
             entity.archived_at = now
         else:

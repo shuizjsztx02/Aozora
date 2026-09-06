@@ -4,9 +4,9 @@ from __future__ import annotations
 
 import logging
 import uuid
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 
-from sqlalchemy import select, delete
+from sqlalchemy import delete, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -104,8 +104,8 @@ class AuthService:
         # SQLite may return naive datetimes; normalize before comparison
         expires_at = session.expires_at
         if expires_at.tzinfo is None:
-            expires_at = expires_at.replace(tzinfo=timezone.utc)
-        if expires_at < datetime.now(timezone.utc):
+            expires_at = expires_at.replace(tzinfo=UTC)
+        if expires_at < datetime.now(UTC):
             # R-M2-15: the route-level rollback would undo this delete,
             # so we just reject the token and let future lookups hit the
             # same branch — cheap (indexed) and harmless.
@@ -175,7 +175,7 @@ class AuthService:
         cfg = get_config()
         raw_refresh = generate_refresh_token()
         token_hash = hash_refresh_token(raw_refresh)
-        expires_at = datetime.now(timezone.utc) + timedelta(days=cfg.refresh_token_expire_days)
+        expires_at = datetime.now(UTC) + timedelta(days=cfg.refresh_token_expire_days)
 
         # Upsert: delete any existing session for same (user, device)
         await self.db.execute(

@@ -2,19 +2,13 @@
 
 from __future__ import annotations
 
-import uuid
-from datetime import date, datetime, timezone
-
 import pytest
-import pytest_asyncio
-from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
+from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 from sqlalchemy.pool import StaticPool
 from starlette.testclient import TestClient
 
 from src.common.database import get_db_session
 from src.models.base import Base
-from src.models.user import User, UserStatus
-
 
 # ── Fixtures ────────────────────────────────────────────────────────────
 

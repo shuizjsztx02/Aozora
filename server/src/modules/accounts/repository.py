@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import uuid
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -69,6 +69,6 @@ class AccountRepository:
         return account
 
     async def archive(self, account: Account) -> None:
-        account.archived_at = datetime.now(timezone.utc)
+        account.archived_at = datetime.now(UTC)
         account.version += 1
         await self.db.flush()

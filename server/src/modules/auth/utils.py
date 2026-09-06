@@ -9,13 +9,12 @@ from __future__ import annotations
 
 import hashlib
 import secrets
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 
 import bcrypt
 import jwt
 
 from src.common.config import get_config
-
 
 # ---------------------------------------------------------------------------
 # Refresh token hashing
@@ -50,7 +49,7 @@ def verify_password(password: str, hashed: str) -> bool:
 def create_access_token(user_id: str) -> str:
     """Create a short-lived JWT access token."""
     cfg = get_config()
-    now = datetime.now(timezone.utc)
+    now = datetime.now(UTC)
     payload = {
         "sub": user_id,
         "iat": now,

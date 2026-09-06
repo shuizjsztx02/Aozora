@@ -9,6 +9,7 @@
     "proposalId": {
       "type": "string",
       "minLength": 1,
+      "maxLength": 64,
       "description": "提案唯一标识"
     },
     "action": {

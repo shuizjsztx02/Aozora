@@ -31,6 +31,7 @@ afterEach(() => {
   vi.useRealTimers()
   delete win.AozoraBridge
   delete win.__aozoraBridgeRespond
+  delete win.__aozoraPermissionResult__
 })
 
 // ─── 类型完整性 ───
@@ -60,9 +61,27 @@ describe('Bridge types — 命令完整性', () => {
     // T-M3-02: 同步引擎
     'sync.getStatus',
     'sync.trigger',
+    // T-M4-05a: 提醒调度
+    'reminder.getStatus',
+    'reminder.set',
+    'reminder.checkPermission',
+    // T-M4-03c / T-M4-02c: AI 通道（ADR-003）
+    'ai.report',
+    'ai.interpret',
+    'ai.validate',
+    'ai.execute',
+    // T-M4-04a: 权限管理
+    'permissions.getStatus',
+    'permissions.request',
+    'permissions.openSettings',
+    // T-M4-04b 占位：语音
+    'voice.startRecording',
+    'voice.stopRecording',
+    // T-M4-04d 占位：图片
+    'image.pick',
   ]
 
-  it('BridgeCommands 包含所有 22 个命令（含 T-M3-02 同步 2 个命令）', () => {
+  it('BridgeCommands 包含所有 35 个命令（含 AI 4 个 + T-M4-04a 权限 3 个 + 语音 2 个 + 图片 1 个）', () => {
     const actualCommands = Object.values(BridgeCommands)
     expect(actualCommands).toHaveLength(expectedCommands.length)
     for (const cmd of expectedCommands) {
@@ -349,5 +368,182 @@ describe('NativeBridge — R-M1-43 写命令回归', () => {
     const payload = JSON.parse(capturedPayload)
     expect(payload.id).toBe('bgt-1')
     expect(payload.mutationId).toBe('mut-5')
+  })
+})
+
+// ─── T-M4-03c: AI 洞察桥命令 ───
+
+describe('NativeBridge — T-M4-03c AI 洞察', () => {
+  let bridge: NativeBridge
+  let mockNative: ReturnType<typeof installMockBridge>
+  let capturedCommand = ''
+  let capturedPayload = ''
+
+  beforeEach(() => {
+    bridge = new NativeBridge()
+    mockNative = installMockBridge()
+    mockNative.call.mockImplementation((_v: number, requestId: string, cmd: string, payload: string) => {
+      capturedCommand = cmd
+      capturedPayload = payload
+      setTimeout(() => simulateResponse(requestId, {
+        request_id: 'req-1',
+        book_id: 'book-1',
+        period: '2026-06',
+        data_hash: 'abc123',
+        total_income: 100000,
+        total_expense: 80000,
+        balance: 20000,
+        transaction_count: 10,
+        expense_by_category: [],
+        income_by_category: [],
+        budget: null,
+        largest_expense: null,
+        largest_income: null,
+        trend: [],
+        narrative: '本月收支良好',
+        narrative_cached: false,
+        usage: null,
+      }), 0)
+    })
+  })
+
+  it('reportAI → ai.report 命令，payload 含 bookId 和 period', async () => {
+    const result = await bridge.reportAI('book-1', '2026-06')
+    expect(capturedCommand).toBe('ai.report')
+    const payload = JSON.parse(capturedPayload)
+    expect(payload.bookId).toBe('book-1')
+    expect(payload.period).toBe('2026-06')
+    expect(result.data_hash).toBe('abc123')
+    expect(result.narrative).toBe('本月收支良好')
+  })
+})
+
+// ─── T-M4-04a: 权限管理桥命令 ───
+
+describe('NativeBridge — T-M4-04a 权限管理', () => {
+  let bridge: NativeBridge
+  let mockNative: ReturnType<typeof installMockBridge>
+  let capturedCommand = ''
+  let capturedPayload = ''
+
+  beforeEach(() => {
+    bridge = new NativeBridge()
+    mockNative = installMockBridge()
+    mockNative.call.mockImplementation((_v: number, requestId: string, cmd: string, payload: string) => {
+      capturedCommand = cmd
+      capturedPayload = payload
+      setTimeout(() => simulateResponse(requestId, {
+        permissions: { RECORD_AUDIO: 'granted', CAMERA: 'not_requested', READ_MEDIA_IMAGES: 'denied' },
+        canRecordAudio: true,
+        canUseCamera: false,
+        canAccessImages: false,
+      }), 0)
+    })
+  })
+
+  it('getPermissionStatus → permissions.getStatus', async () => {
+    const result = await bridge.getPermissionStatus()
+    expect(capturedCommand).toBe('permissions.getStatus')
+    expect(result.canRecordAudio).toBe(true)
+    expect(result.canUseCamera).toBe(false)
+    expect(result.permissions.RECORD_AUDIO).toBe('granted')
+    expect(result.permissions.CAMERA).toBe('not_requested')
+  })
+
+  it('requestPermission → permissions.request，payload 含 permission', async () => {
+    mockNative.call.mockImplementation((_v: number, requestId: string, cmd: string, payload: string) => {
+      capturedCommand = cmd
+      capturedPayload = payload
+      setTimeout(() => simulateResponse(requestId, { pending: true }), 0)
+    })
+    const result = await bridge.requestPermission('CAMERA')
+    expect(capturedCommand).toBe('permissions.request')
+    const payload = JSON.parse(capturedPayload)
+    expect(payload.permission).toBe('CAMERA')
+    expect(result.pending).toBe(true)
+  })
+
+  it('openPermissionSettings → permissions.openSettings', async () => {
+    mockNative.call.mockImplementation((_v: number, requestId: string, cmd: string) => {
+      capturedCommand = cmd
+      setTimeout(() => simulateResponse(requestId, { success: true }), 0)
+    })
+    await bridge.openPermissionSettings()
+    expect(capturedCommand).toBe('permissions.openSettings')
+  })
+
+  it('onPermissionResult 监听并取消订阅', () => {
+    const results: unknown[] = []
+    const unsubscribe = bridge.onPermissionResult(e => results.push(e))
+
+    // 模拟原生推送
+    win.__aozoraPermissionResult__(JSON.stringify({ permission: 'CAMERA', status: 'granted' }))
+    expect(results).toHaveLength(1)
+    expect((results[0] as { permission: string }).permission).toBe('CAMERA')
+
+    // 取消订阅后，handler 被移除
+    unsubscribe()
+    // 取消订阅后不再接收推送（handler 已恢复为之前的值）
+    expect(typeof win.__aozoraPermissionResult__).not.toBe('function')
+  })
+})
+
+// ─── T-M4-02c: AI 助手对话桥命令 ───
+
+describe('NativeBridge — T-M4-02c AI 助手对话', () => {
+  let bridge: NativeBridge
+  let capturedCommand = ''
+  let capturedPayload = ''
+
+  beforeEach(() => {
+    bridge = new NativeBridge()
+    installMockBridge()
+    const mockNative = (window as any).AozoraBridge
+    mockNative.call.mockImplementation((_v: number, requestId: string, cmd: string, payload: string) => {
+      capturedCommand = cmd
+      capturedPayload = payload
+      setTimeout(() => {
+        if (cmd === 'ai.interpret') {
+          simulateResponse(requestId, {
+            request_id: 'req-1', task: 'ledger_parse', model: 'qwen3.7-flash',
+            output: { type: 'expense', amountCents: 1250, category: '餐饮', note: '午饭', bizDate: '', confidence: 0.95 },
+            usage: { prompt_tokens: 100, completion_tokens: 50 },
+          })
+        } else if (cmd === 'ai.validate') {
+          simulateResponse(requestId, { valid: true, errors: [], verdict: 'accepted' })
+        } else if (cmd === 'ai.execute') {
+          simulateResponse(requestId, { transaction_ids: ['tx-1', 'tx-2'], proposal_id: 'prop-1', undo_window_seconds: 5 })
+        }
+      }, 0)
+    })
+  })
+
+  it('interpretAI → ai.interpret 命令，payload 含 input', async () => {
+    const result = await bridge.interpretAI('午饭 12.5')
+    expect(capturedCommand).toBe('ai.interpret')
+    const payload = JSON.parse(capturedPayload)
+    expect(payload.input).toBe('午饭 12.5')
+    expect(result.output).toBeDefined()
+  })
+
+  it('validateProposal → ai.validate 命令，payload 含 proposal 和 book_id', async () => {
+    const result = await bridge.validateProposal({ proposalId: 'p1', action: 'add_tx' }, 'book-1')
+    expect(capturedCommand).toBe('ai.validate')
+    const payload = JSON.parse(capturedPayload)
+    expect(payload.proposal).toBeDefined()
+    expect(payload.book_id).toBe('book-1')
+    expect(result.valid).toBe(true)
+    expect(result.verdict).toBe('accepted')
+  })
+
+  it('executeProposal → ai.execute 命令，payload 含 proposal/book_id/confirmation_token', async () => {
+    const result = await bridge.executeProposal({ proposalId: 'p1' }, 'book-1', 'token-123')
+    expect(capturedCommand).toBe('ai.execute')
+    const payload = JSON.parse(capturedPayload)
+    expect(payload.proposal).toBeDefined()
+    expect(payload.book_id).toBe('book-1')
+    expect(payload.confirmation_token).toBe('token-123')
+    expect(result.transaction_ids).toEqual(['tx-1', 'tx-2'])
+    expect(result.undo_window_seconds).toBe(5)
   })
 })

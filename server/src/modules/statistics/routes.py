@@ -9,8 +9,8 @@ from fastapi import APIRouter, Depends, Query
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from src.common.database import get_db_session
-from src.modules.auth.dependencies import get_current_user
 from src.models.user import User
+from src.modules.auth.dependencies import get_current_user
 
 from .schemas import MonthlyStats, TrendStats
 from .service import StatisticsService

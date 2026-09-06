@@ -3,22 +3,20 @@
 from __future__ import annotations
 
 import asyncio
-import json
 import os
 import time
 import uuid
-from datetime import date, datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 import pytest
 import pytest_asyncio
-from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
+from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 from sqlalchemy.pool import StaticPool
 from starlette.testclient import TestClient
 
 from src.common.database import get_db_session
 from src.models.base import Base
-
 
 # ── Fixtures ────────────────────────────────────────────────────────────
 
@@ -488,7 +486,7 @@ def _force_expire(db_factory, export_id: str) -> str | None:
         async with db_factory() as session:
             export = await session.get(Export, uuid.UUID(export_id))
             assert export is not None
-            export.expires_at = datetime.now(timezone.utc) - timedelta(hours=1)
+            export.expires_at = datetime.now(UTC) - timedelta(hours=1)
             await session.commit()
             return export.file_path
 

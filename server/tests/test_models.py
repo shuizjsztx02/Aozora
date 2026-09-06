@@ -3,20 +3,17 @@
 from __future__ import annotations
 
 import uuid
-from datetime import date, datetime, timezone
+from datetime import UTC, date, datetime
 
 import pytest
-import pytest_asyncio
-from sqlalchemy import select, text
+from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
 
 from src.models.budget import Budget, BudgetType
-from src.models.ledger import Category, CategoryKind, Transaction, TxType, TxSource
+from src.models.ledger import Category, CategoryKind, Transaction, TxSource, TxType
 from src.models.sync import SyncChange, SyncOperation
 from src.models.user import User, UserStatus
-
 from tests.fixtures_db import db_session, sample_data  # noqa: F401 — re-exported
-
 
 # ── User ──────────────────────────────────────────────────────────────
 
@@ -53,7 +50,7 @@ class TestTransaction:
             category_id=sample_data["cat_expense"].id,
             note="午餐",
             biz_date=date(2026, 9, 4),
-            occurred_at=datetime(2026, 9, 4, 12, 30, tzinfo=timezone.utc),
+            occurred_at=datetime(2026, 9, 4, 12, 30, tzinfo=UTC),
             source=TxSource.MANUAL,
         )
         db_session.add(tx)
@@ -70,7 +67,7 @@ class TestTransaction:
             amount_cents=0,
             category_id=sample_data["cat_expense"].id,
             biz_date=date(2026, 9, 4),
-            occurred_at=datetime(2026, 9, 4, 12, 0, tzinfo=timezone.utc),
+            occurred_at=datetime(2026, 9, 4, 12, 0, tzinfo=UTC),
         )
         db_session.add(tx)
         with pytest.raises(IntegrityError):
@@ -84,7 +81,7 @@ class TestTransaction:
             amount_cents=-100,
             category_id=sample_data["cat_expense"].id,
             biz_date=date(2026, 9, 4),
-            occurred_at=datetime(2026, 9, 4, 12, 0, tzinfo=timezone.utc),
+            occurred_at=datetime(2026, 9, 4, 12, 0, tzinfo=UTC),
         )
         db_session.add(tx)
         with pytest.raises(IntegrityError):
@@ -99,7 +96,7 @@ class TestTransaction:
             amount_cents=500000,
             category_id=sample_data["cat_income"].id,
             biz_date=date(2026, 9, 1),
-            occurred_at=datetime(2026, 9, 1, 9, 0, tzinfo=timezone.utc),
+            occurred_at=datetime(2026, 9, 1, 9, 0, tzinfo=UTC),
             source=TxSource.MANUAL,
         )
         db_session.add(tx)

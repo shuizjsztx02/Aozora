@@ -86,7 +86,7 @@ def check_auth_rate_limit(request: Request) -> None:
     per-(ip, path) keying multiplied the effective limit by the number
     of auth endpoints.
     """
-    global _last_cleanup  # noqa: PLW0603
+    global _last_cleanup
     client_ip = _get_client_ip(request)
     now = time.time()
     key = client_ip

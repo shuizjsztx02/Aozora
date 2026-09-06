@@ -21,13 +21,11 @@ from src.modules.ai.fact_pack import (
     TrendFact,
 )
 from src.modules.ai.narrative import (
+    _build_lookup,
+    _find_undeclared_numbers,
     build_context_dict,
     verify_narrative,
-    _find_undeclared_numbers,
-    _build_lookup,
 )
-from tests.fixtures_db import db_session
-
 
 # ── Fixtures ─────────────────────────────────────────────────────────────────
 
@@ -341,10 +339,10 @@ class TestNarrativeCache:
         self, sample_fact_pack, mock_provider, db_session,
     ):
         """Same data_hash should use cached narrative on second request."""
-        from src.modules.ai.service import AIService, _narrative_cache_clear
         from src.models.user import User, UserStatus
-        from src.modules.ai.schemas import AIReportRequest
         from src.modules.ai.fact_pack import FactPackService
+        from src.modules.ai.schemas import AIReportRequest
+        from src.modules.ai.service import AIService, _narrative_cache_clear
 
         # Clear cache before test
         _narrative_cache_clear()
@@ -400,10 +398,10 @@ class TestNarrativeCache:
         self, sample_fact_pack, mock_provider, db_session,
     ):
         """Different data_hash should call provider again."""
-        from src.modules.ai.service import AIService, _narrative_cache_clear
         from src.models.user import User, UserStatus
-        from src.modules.ai.schemas import AIReportRequest
         from src.modules.ai.fact_pack import FactPackService
+        from src.modules.ai.schemas import AIReportRequest
+        from src.modules.ai.service import AIService, _narrative_cache_clear
 
         _narrative_cache_clear()
 

@@ -3,16 +3,15 @@
 from __future__ import annotations
 
 import uuid
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 import pytest
 import pytest_asyncio
-from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
+from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
 from src.models.base import Base
-from src.models.ledger import Book, Category, Account, CategoryKind
+from src.models.ledger import Account, Book, Category, CategoryKind
 from src.models.user import User
-
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -2447,7 +2446,7 @@ class TestSoftDeleteConsistency:
         """
         ctx = auth_client
         # Soft-delete book_a by setting deleted_at.
-        ctx["book_a"].deleted_at = datetime.now(timezone.utc)
+        ctx["book_a"].deleted_at = datetime.now(UTC)
         await db_session.commit()
 
         # Try to insert a transaction referencing the soft-deleted book.
@@ -2483,7 +2482,7 @@ class TestSoftDeleteConsistency:
         multi-device scenario where device A deletes and device B's late
         update must NOT resurrect the book."""
         ctx = auth_client
-        ctx["book_a"].deleted_at = datetime.now(timezone.utc)
+        ctx["book_a"].deleted_at = datetime.now(UTC)
         await db_session.commit()
 
         resp = ctx["client"].post(
@@ -2508,7 +2507,7 @@ class TestSoftDeleteConsistency:
     async def test_update_archived_category_rejected(self, auth_client, db_session):
         """F-M3-1: sync update on an archived category returns 404."""
         ctx = auth_client
-        ctx["cat_expense_a"].archived_at = datetime.now(timezone.utc)
+        ctx["cat_expense_a"].archived_at = datetime.now(UTC)
         await db_session.commit()
 
         resp = ctx["client"].post(
@@ -2533,7 +2532,7 @@ class TestSoftDeleteConsistency:
     async def test_update_archived_account_rejected(self, auth_client, db_session):
         """F-M3-1: sync update on an archived account returns 404."""
         ctx = auth_client
-        ctx["acc_a"].archived_at = datetime.now(timezone.utc)
+        ctx["acc_a"].archived_at = datetime.now(UTC)
         await db_session.commit()
 
         resp = ctx["client"].post(
@@ -2723,7 +2722,7 @@ class TestSoftDeleteConsistency:
         tx_version = r1.json()["results"][0]["version"]
 
         # 2. Soft-delete the parent book directly (simulates another device).
-        ctx["book_a"].deleted_at = datetime.now(timezone.utc)
+        ctx["book_a"].deleted_at = datetime.now(UTC)
         await db_session.commit()
 
         # 3. Update the transaction → must be rejected (book is gone).
@@ -2777,7 +2776,7 @@ class TestSoftDeleteConsistency:
         budget_version = r1.json()["results"][0]["version"]
 
         # 2. Soft-delete the parent book.
-        ctx["book_a"].deleted_at = datetime.now(timezone.utc)
+        ctx["book_a"].deleted_at = datetime.now(UTC)
         await db_session.commit()
 
         # 3. Update the budget → must be rejected.

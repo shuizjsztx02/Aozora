@@ -2,8 +2,12 @@ package com.aozora.app.bridge
 
 import android.webkit.JavascriptInterface
 import android.webkit.WebView
+import com.aozora.app.ai.AiGatewayClient
 import com.aozora.app.db.Repository
 import com.aozora.app.db.entity.*
+import com.aozora.app.permission.PermissionManager
+import com.aozora.app.permission.PermissionStatus
+import com.aozora.app.reminder.ReminderScheduler
 import com.aozora.app.sync.SyncEngine
 import com.aozora.app.sync.SyncScheduler
 import com.aozora.app.sync.SyncState
@@ -33,7 +37,10 @@ class AozoraBridge(
     private val webView: WebView,
     private val scope: CoroutineScope = CoroutineScope(Dispatchers.Main),
     private val syncEngine: SyncEngine? = null,
-    private val syncContext: android.content.Context? = null
+    private val syncContext: android.content.Context? = null,
+    private val reminderScheduler: ReminderScheduler? = null,
+    private val aiGatewayClient: AiGatewayClient? = null,
+    private val permissionManager: PermissionManager? = null
 ) {
     @JavascriptInterface
     fun call(version: Int, requestId: String, command: String, payloadJson: String) {
@@ -113,6 +120,29 @@ class AozoraBridge(
             // T-M3-02: 同步引擎
             BridgeCommands.SYNC_GET_STATUS -> handleSyncGetStatus(requestId)
             BridgeCommands.SYNC_TRIGGER -> handleSyncTrigger(requestId, payload)
+
+            // T-M4-05a: 提醒调度
+            BridgeCommands.REMINDER_GET_STATUS -> handleReminderGetStatus(requestId)
+            BridgeCommands.REMINDER_SET -> handleReminderSet(requestId, payload)
+            BridgeCommands.REMINDER_CHECK_PERMISSION -> handleReminderCheckPermission(requestId)
+
+            // T-M4-03c: AI 洞察（ADR-003 通道）
+            BridgeCommands.AI_REPORT -> handleAiReport(requestId, payload)
+
+            // T-M4-02c: AI 助手对话流（ADR-003 通道）
+            BridgeCommands.AI_INTERPRET -> handleAiInterpret(requestId, payload)
+            BridgeCommands.AI_VALIDATE -> handleAiValidate(requestId, payload)
+            BridgeCommands.AI_EXECUTE -> handleAiExecute(requestId, payload)
+
+            // T-M4-04a: 权限管理
+            BridgeCommands.PERMISSIONS_GET_STATUS -> handlePermissionsGetStatus(requestId)
+            BridgeCommands.PERMISSIONS_REQUEST -> handlePermissionsRequest(requestId, payload)
+            BridgeCommands.PERMISSIONS_OPEN_SETTINGS -> handlePermissionsOpenSettings(requestId)
+
+            // T-M4-04b/d 占位：语音和图片（未实现，返回 unavailable）
+            BridgeCommands.VOICE_START_RECORDING -> BridgeResponse.error(requestId, "unavailable", "Voice recording not implemented (T-M4-04b)")
+            BridgeCommands.VOICE_STOP_RECORDING -> BridgeResponse.error(requestId, "unavailable", "Voice recording not implemented (T-M4-04b)")
+            BridgeCommands.IMAGE_PICK -> BridgeResponse.error(requestId, "unavailable", "Image picking not implemented (T-M4-04d)")
 
             else -> BridgeResponse.error(requestId, "unknown_command", "Unknown command: $command")
         }
@@ -383,7 +413,227 @@ class AozoraBridge(
         return BridgeResponse.success(requestId, JSONObject().put("enqueued", true).toString())
     }
 
+    // ─── T-M4-05a: 提醒调度 handlers ───
+
+    private fun handleReminderGetStatus(requestId: String): BridgeResponse {
+        val scheduler = reminderScheduler
+            ?: return BridgeResponse.error(requestId, "unavailable", "reminder scheduler not injected")
+        val ctx = syncContext
+            ?: return BridgeResponse.error(requestId, "unavailable", "context not injected")
+        val status = scheduler.getStatus()
+        val hasPermission = com.aozora.app.reminder.ReminderReceiver.hasNotificationPermission(ctx)
+        val data = JSONObject().apply {
+            put("enabled", status.enabled)
+            put("hour", status.hour)
+            put("minute", status.minute)
+            put("notificationPermission", hasPermission)
+        }
+        return BridgeResponse.success(requestId, data.toString())
+    }
+
+    private fun handleReminderSet(requestId: String, p: JSONObject): BridgeResponse {
+        val scheduler = reminderScheduler
+            ?: return BridgeResponse.error(requestId, "unavailable", "reminder scheduler not injected")
+        val enabled = p.getBoolean("enabled")
+        val hour = p.getInt("hour")
+        val minute = p.getInt("minute")
+        scheduler.setReminder(enabled, hour, minute)
+        val data = JSONObject().put("success", true)
+        return BridgeResponse.success(requestId, data.toString())
+    }
+
+    private fun handleReminderCheckPermission(requestId: String): BridgeResponse {
+        val ctx = syncContext
+            ?: return BridgeResponse.error(requestId, "unavailable", "context not injected")
+        val hasPermission = com.aozora.app.reminder.ReminderReceiver.hasNotificationPermission(ctx)
+        val data = JSONObject().put("granted", hasPermission)
+        return BridgeResponse.success(requestId, data.toString())
+    }
+
+    // ─── T-M4-03c: AI 洞察 handler ───
+
+    private suspend fun handleAiReport(requestId: String, p: JSONObject): BridgeResponse {
+        val client = aiGatewayClient
+            ?: return BridgeResponse.error(requestId, "unavailable", "AI gateway client not injected")
+        val bookId = p.getString("bookId")
+        val period = p.getString("period")
+        return try {
+            val resultJson = client.report(bookId, period)
+            BridgeResponse.success(requestId, resultJson)
+        } catch (e: AiGatewayClient.AiError.Timeout) {
+            BridgeResponse.error(requestId, "timeout", "AI report request timed out")
+        } catch (e: AiGatewayClient.AiError.Network) {
+            BridgeResponse.error(requestId, "network", e.message ?: "Network error")
+        } catch (e: AiGatewayClient.AiError.RateLimited) {
+            BridgeResponse.error(requestId, "429", "AI rate limit exceeded")
+        } catch (e: AiGatewayClient.AiError.Unavailable) {
+            BridgeResponse.error(requestId, "503", "AI service unavailable")
+        } catch (e: AiGatewayClient.AiError.AuthLost) {
+            BridgeResponse.error(requestId, "auth_lost", "Authentication required")
+        }
+    }
+
+    // ─── T-M4-02c: AI 助手对话流 handlers ───
+
+    private suspend fun handleAiInterpret(requestId: String, p: JSONObject): BridgeResponse {
+        val client = aiGatewayClient
+            ?: return BridgeResponse.error(requestId, "unavailable", "AI gateway client not injected")
+        // C-M4 fix: 缺失字段 → invalid_input，非 internal_error
+        val input = p.optString("input", null)
+            ?: return BridgeResponse.error(requestId, "invalid_input", "Missing required field: input")
+        return try {
+            val resultJson = client.interpret(input)
+            BridgeResponse.success(requestId, resultJson)
+        } catch (e: AiGatewayClient.AiError.Timeout) {
+            BridgeResponse.error(requestId, "timeout", "AI interpret request timed out")
+        } catch (e: AiGatewayClient.AiError.Network) {
+            BridgeResponse.error(requestId, "network", e.message ?: "Network error")
+        } catch (e: AiGatewayClient.AiError.RateLimited) {
+            BridgeResponse.error(requestId, "429", "AI rate limit exceeded")
+        } catch (e: AiGatewayClient.AiError.Unavailable) {
+            BridgeResponse.error(requestId, "503", "AI service unavailable")
+        } catch (e: AiGatewayClient.AiError.AuthLost) {
+            BridgeResponse.error(requestId, "auth_lost", "Authentication required")
+        }
+    }
+
+    private suspend fun handleAiValidate(requestId: String, p: JSONObject): BridgeResponse {
+        val client = aiGatewayClient
+            ?: return BridgeResponse.error(requestId, "unavailable", "AI gateway client not injected")
+        // C-M4 fix: 缺失字段 → invalid_input，非 JSONException
+        val proposalObj = p.optJSONObject("proposal")
+            ?: return BridgeResponse.error(requestId, "invalid_input", "Missing required field: proposal")
+        val proposal = proposalObj.toString()
+        val bookId = p.optString("book_id", null)
+            ?: return BridgeResponse.error(requestId, "invalid_input", "Missing required field: book_id")
+        return try {
+            val resultJson = client.validate(proposal, bookId)
+            BridgeResponse.success(requestId, resultJson)
+        } catch (e: AiGatewayClient.AiError.Timeout) {
+            BridgeResponse.error(requestId, "timeout", "AI validate request timed out")
+        } catch (e: AiGatewayClient.AiError.Network) {
+            BridgeResponse.error(requestId, "network", e.message ?: "Network error")
+        } catch (e: AiGatewayClient.AiError.RateLimited) {
+            BridgeResponse.error(requestId, "429", "AI rate limit exceeded")
+        } catch (e: AiGatewayClient.AiError.Unavailable) {
+            BridgeResponse.error(requestId, "503", "AI service unavailable")
+        } catch (e: AiGatewayClient.AiError.AuthLost) {
+            BridgeResponse.error(requestId, "auth_lost", "Authentication required")
+        }
+    }
+
+    private suspend fun handleAiExecute(requestId: String, p: JSONObject): BridgeResponse {
+        val client = aiGatewayClient
+            ?: return BridgeResponse.error(requestId, "unavailable", "AI gateway client not injected")
+        // C-M4 fix: 缺失字段 → invalid_input，非 JSONException
+        val proposalObj = p.optJSONObject("proposal")
+            ?: return BridgeResponse.error(requestId, "invalid_input", "Missing required field: proposal")
+        val proposal = proposalObj.toString()
+        val bookId = p.optString("book_id", null)
+            ?: return BridgeResponse.error(requestId, "invalid_input", "Missing required field: book_id")
+        val confirmationToken = p.optString("confirmation_token", "")
+        return try {
+            val resultJson = client.execute(proposal, bookId, confirmationToken)
+            BridgeResponse.success(requestId, resultJson)
+        } catch (e: AiGatewayClient.AiError.Timeout) {
+            BridgeResponse.error(requestId, "timeout", "AI execute request timed out")
+        } catch (e: AiGatewayClient.AiError.Network) {
+            BridgeResponse.error(requestId, "network", e.message ?: "Network error")
+        } catch (e: AiGatewayClient.AiError.RateLimited) {
+            BridgeResponse.error(requestId, "429", "AI rate limit exceeded")
+        } catch (e: AiGatewayClient.AiError.Unavailable) {
+            BridgeResponse.error(requestId, "503", "AI service unavailable")
+        } catch (e: AiGatewayClient.AiError.AuthLost) {
+            BridgeResponse.error(requestId, "auth_lost", "Authentication required")
+        }
+    }
+
     // ─── 响应发送 ───
+
+    // ─── T-M4-04a: 权限管理 handlers ───
+
+    private fun handlePermissionsGetStatus(requestId: String): BridgeResponse {
+        val manager = permissionManager
+            ?: return BridgeResponse.error(requestId, "unavailable", "permission manager not injected")
+        val statuses = manager.getAllStatuses()
+        val data = JSONObject().apply {
+            val permsObj = JSONObject()
+            for ((perm, status) in statuses) {
+                val key = permissionToKey(perm)
+                if (key != null) {
+                    permsObj.put(key, status.toJsonValue())
+                }
+            }
+            put("permissions", permsObj)
+            put("canRecordAudio", statuses[android.Manifest.permission.RECORD_AUDIO] == PermissionStatus.GRANTED)
+            put("canUseCamera", statuses[android.Manifest.permission.CAMERA] == PermissionStatus.GRANTED)
+            val imageGranted = statuses.entries.any { (k, v) ->
+                (k.endsWith("READ_MEDIA_IMAGES") || k.endsWith("READ_EXTERNAL_STORAGE")) && v == PermissionStatus.GRANTED
+            }
+            put("canAccessImages", imageGranted)
+        }
+        return BridgeResponse.success(requestId, data.toString())
+    }
+
+    private fun handlePermissionsRequest(requestId: String, p: JSONObject): BridgeResponse {
+        val manager = permissionManager
+            ?: return BridgeResponse.error(requestId, "unavailable", "permission manager not injected")
+        val permissionName = p.getString("permission")
+        val androidPerm = keyToPermission(permissionName)
+            ?: return BridgeResponse.error(requestId, "invalid_input", "Unknown permission: $permissionName")
+
+        // 异步请求：立即返回 pending，结果通过 __aozoraPermissionResult__ 推送
+        manager.requestPermission(androidPerm) { status ->
+            val result = JSONObject().apply {
+                put("permission", permissionName)
+                put("status", status.toJsonValue())
+            }
+            val js = """
+                (function(){
+                  try {
+                    if (typeof window.__aozoraPermissionResult__ === 'function') {
+                      window.__aozoraPermissionResult__(${JSONObject.quote(result.toString())});
+                    }
+                  } catch (e) {}
+                })();
+            """.trimIndent()
+            webView.post { webView.evaluateJavascript(js, null) }
+        }
+        return BridgeResponse.success(requestId, JSONObject().put("pending", true).toString())
+    }
+
+    private fun handlePermissionsOpenSettings(requestId: String): BridgeResponse {
+        val manager = permissionManager
+            ?: return BridgeResponse.error(requestId, "unavailable", "permission manager not injected")
+        manager.openAppSettings()
+        return BridgeResponse.success(requestId, JSONObject().put("success", true).toString())
+    }
+
+    private fun permissionToKey(androidPerm: String): String? = when (androidPerm) {
+        android.Manifest.permission.RECORD_AUDIO -> "RECORD_AUDIO"
+        android.Manifest.permission.CAMERA -> "CAMERA"
+        android.Manifest.permission.READ_MEDIA_IMAGES -> "READ_MEDIA_IMAGES"
+        android.Manifest.permission.READ_EXTERNAL_STORAGE -> "READ_MEDIA_IMAGES" // 低版本映射到同一 key
+        else -> null
+    }
+
+    private fun keyToPermission(key: String): String? = when (key) {
+        "RECORD_AUDIO" -> android.Manifest.permission.RECORD_AUDIO
+        "CAMERA" -> android.Manifest.permission.CAMERA
+        "READ_MEDIA_IMAGES" -> if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.TIRAMISU) {
+            android.Manifest.permission.READ_MEDIA_IMAGES
+        } else {
+            android.Manifest.permission.READ_EXTERNAL_STORAGE
+        }
+        else -> null
+    }
+
+    private fun PermissionStatus.toJsonValue(): String = when (this) {
+        PermissionStatus.NOT_REQUESTED -> "not_requested"
+        PermissionStatus.GRANTED -> "granted"
+        PermissionStatus.DENIED -> "denied"
+        PermissionStatus.PERMANENTLY_DENIED -> "permanently_denied"
+    }
 
     private fun respond(response: BridgeResponse) {
         webView.post {

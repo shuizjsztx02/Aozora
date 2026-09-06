@@ -5,6 +5,7 @@ import androidx.work.CoroutineWorker
 import androidx.work.WorkerParameters
 import com.aozora.app.BuildConfig
 import com.aozora.app.AozoraApp
+import com.aozora.app.widget.AozoraWidgetProvider
 
 /**
  * WorkManager CoroutineWorker — 同步引擎的调度包装。
@@ -29,7 +30,11 @@ class SyncWorker(
         val app = applicationContext as? AozoraApp ?: return Result.failure()
         val engine = app.syncEngine ?: return Result.failure()
         return when (engine.runOnce()) {
-            SyncEngine.SyncOutcome.OK -> Result.success()
+            SyncEngine.SyncOutcome.OK -> {
+                // T-M4-05b: 同步成功后刷新桌面小组件
+                AozoraWidgetProvider.requestUpdate(applicationContext)
+                Result.success()
+            }
             SyncEngine.SyncOutcome.RETRYABLE -> Result.retry()
             SyncEngine.SyncOutcome.AUTH_LOST -> Result.success()
         }

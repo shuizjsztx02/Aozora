@@ -16,7 +16,8 @@ import logging
 import time
 import uuid
 from collections import defaultdict
-from datetime import datetime, timezone
+from datetime import UTC, datetime
+from typing import TYPE_CHECKING
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from sqlalchemy import func, select
@@ -27,7 +28,13 @@ from src.common.errors import AppException
 from src.models.ai import AIUsage
 from src.models.user import User, UserStatus
 
-from .prompts import INTERPRET_TASK, REPORT_TASK, PromptTemplate, get_template, render_messages
+from .prompts import (
+    INTERPRET_TASK,
+    REPORT_TASK,
+    PromptTemplate,
+    get_template,
+    render_messages,
+)
 from .provider import LLMProvider, ProviderError, ProviderResult
 from .schemas import (
     AIInterpretRequest,
@@ -40,6 +47,10 @@ from .schemas import (
     TransactionFactSchema,
     TrendFactSchema,
 )
+
+if TYPE_CHECKING:
+    from .context import ProposalValidationContext
+    from .fact_pack import FactPack
 
 logger = logging.getLogger(__name__)
 
@@ -128,7 +139,7 @@ def local_day_start_utc(tz_name: str) -> datetime:
     except (ZoneInfoNotFoundError, ValueError):
         tz = ZoneInfo("UTC")
     day_start = datetime.now(tz).replace(hour=0, minute=0, second=0, microsecond=0)
-    return day_start.astimezone(timezone.utc)
+    return day_start.astimezone(UTC)
 
 
 class AIService:
@@ -215,7 +226,7 @@ class AIService:
 
     def _check_rate_limit(self, user_id: uuid.UUID) -> None:
         """Per-user burst protection (all users, guests and active alike)."""
-        global _last_cleanup  # noqa: PLW0603
+        global _last_cleanup
         now = time.time()
 
         if now - _last_cleanup > _CLEANUP_INTERVAL_SECONDS:
@@ -408,7 +419,7 @@ class AIService:
     @staticmethod
     def validate_proposal(
         proposal: object,
-        ctx: "ProposalValidationContext",
+        ctx: ProposalValidationContext,
     ) -> dict:
         """Validate an ActionProposal against schema + context.
 
@@ -507,10 +518,12 @@ class AIService:
         duplicates are resolved via the unique constraint on
         ``(user_id, proposal_id)``.
         """
-        from src.modules.transactions.service import TransactionService
-        from src.models.proposal import ProposalIdempotency
-        from sqlalchemy.exc import IntegrityError
         from datetime import date as date_type
+
+        from sqlalchemy.exc import IntegrityError
+
+        from src.models.proposal import ProposalIdempotency
+        from src.modules.transactions.service import TransactionService
 
         proposal_id = proposal.get("proposalId")
 
@@ -652,7 +665,7 @@ class AIService:
 
     async def _load_context(
         self, book_id: uuid.UUID, owner_id: uuid.UUID,
-    ) -> "ProposalValidationContext":
+    ) -> ProposalValidationContext:
         """Load validation context from DB."""
         from .context import load_validation_context
         return await load_validation_context(self._db, owner_id, book_id)
@@ -766,7 +779,7 @@ class AIService:
         self,
         user: User,
         request_id: str,
-        fact_pack: "FactPack",
+        fact_pack: FactPack,
         response: AIReportResponse,
     ) -> None:
         """Call the LLM to generate a narrative from the fact pack.

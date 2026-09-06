@@ -14,8 +14,8 @@ from sqlalchemy.ext.asyncio import async_engine_from_config
 # Ensure project root is on sys.path so ``src`` is importable.
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
-from src.common.config import get_config  # noqa: E402
-from src.models import Base  # noqa: E402
+from src.common.config import get_config
+from src.models import Base
 
 # Alembic Config object
 config = context.config

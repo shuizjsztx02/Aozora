@@ -169,4 +169,4 @@ class Transaction(Base, AuditMixin, VersionedMixin, SoftDeleteMixin):
 
 
 # Avoid circular import — Budget imported after Transaction is defined.
-from src.models.budget import Budget  # noqa: E402, F401
+from src.models.budget import Budget

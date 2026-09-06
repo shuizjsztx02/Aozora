@@ -3,20 +3,20 @@
 from __future__ import annotations
 
 import uuid
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 
 import pytest
 import pytest_asyncio
 from fastapi.testclient import TestClient
 from sqlalchemy import select
-from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
+from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 from sqlalchemy.pool import StaticPool
 
 from src.common.config import Settings
 from src.common.database import get_db_session
 from src.models.base import Base
-from src.models.user import DeviceSession, User, UserStatus
-from src.modules.auth.dependencies import _rate_limits, get_current_user
+from src.models.user import DeviceSession, UserStatus
+from src.modules.auth.dependencies import _rate_limits
 from src.modules.auth.service import AuthService
 from src.modules.auth.utils import (
     create_access_token,
@@ -24,9 +24,7 @@ from src.modules.auth.utils import (
     generate_refresh_token,
     hash_refresh_token,
 )
-
 from tests.fixtures_db import db_session, sample_data  # noqa: F401
-
 
 # ── JWT utilities ──────────────────────────────────────────────────────
 
@@ -41,10 +39,11 @@ class TestJWT:
     def test_expired_token_raises(self):
         """Tokens with past exp should be rejected."""
         import jwt as pyjwt
+
         from src.common.config import get_config
 
         cfg = get_config()
-        now = datetime.now(timezone.utc)
+        now = datetime.now(UTC)
         payload = {"sub": str(uuid.uuid4()), "exp": now - timedelta(seconds=10)}
         token = pyjwt.encode(payload, cfg.secret_key, algorithm=cfg.jwt_algorithm)
 
@@ -54,7 +53,7 @@ class TestJWT:
     def test_wrong_secret_raises(self):
         import jwt as pyjwt
 
-        now = datetime.now(timezone.utc)
+        now = datetime.now(UTC)
         token = pyjwt.encode(
             {"sub": str(uuid.uuid4()), "exp": now + timedelta(minutes=15)},
             "wrong-secret",
@@ -214,7 +213,7 @@ class TestLogout:
         session2 = DeviceSession(
             user_id=user.id, device_id="dev-2",
             refresh_token_hash=hash_refresh_token(generate_refresh_token()),
-            expires_at=datetime.now(timezone.utc) + timedelta(days=30),
+            expires_at=datetime.now(UTC) + timedelta(days=30),
         )
         db_session.add(session2)
         await db_session.flush()
@@ -234,7 +233,10 @@ class TestRateLimiter:
     @pytest.mark.asyncio
     async def test_rate_limit_enforced(self):
         """After MAX_AUTH_REQUESTS (10) in 60s, the 11th must fail."""
-        from src.modules.auth.dependencies import check_auth_rate_limit, MAX_AUTH_REQUESTS
+        from src.modules.auth.dependencies import (
+            MAX_AUTH_REQUESTS,
+            check_auth_rate_limit,
+        )
 
         class FakeClient:
             host = "1.2.3.4"
@@ -262,7 +264,10 @@ class TestRateLimiter:
     @pytest.mark.asyncio
     async def test_rate_limit_uses_x_forwarded_for(self):
         """R-M2-18: X-Forwarded-For should take precedence over client.host."""
-        from src.modules.auth.dependencies import check_auth_rate_limit, MAX_AUTH_REQUESTS
+        from src.modules.auth.dependencies import (
+            MAX_AUTH_REQUESTS,
+            check_auth_rate_limit,
+        )
 
         class FakeClient:
             host = "127.0.0.1"  # proxy IP
@@ -299,7 +304,10 @@ class TestRateLimiter:
         rotation allowed 4x the limit. The 11th request overall must fail
         even though each individual endpoint was only used 2-3 times.
         """
-        from src.modules.auth.dependencies import check_auth_rate_limit, MAX_AUTH_REQUESTS
+        from src.modules.auth.dependencies import (
+            MAX_AUTH_REQUESTS,
+            check_auth_rate_limit,
+        )
 
         def make_request(path: str):
             class FakeClient:
@@ -334,7 +342,10 @@ class TestRateLimiter:
     @pytest.mark.asyncio
     async def test_rate_limit_buckets_stay_per_ip(self):
         """N-10 guard: converging keys must not merge distinct clients."""
-        from src.modules.auth.dependencies import check_auth_rate_limit, MAX_AUTH_REQUESTS
+        from src.modules.auth.dependencies import (
+            MAX_AUTH_REQUESTS,
+            check_auth_rate_limit,
+        )
 
         def make_request(host: str):
             class FakeClient:
@@ -396,6 +407,18 @@ class TestProductionGuards:
                 dev_auth_code="",
             )
 
+    def test_ai_key_missing_rejected_in_production(self):
+        """T-M4-01a acceptance: production refuses to start without AI key."""
+        from pydantic import ValidationError
+        with pytest.raises(ValidationError, match="AI_PROVIDER_API_KEY"):
+            Settings(
+                database_url="sqlite+aiosqlite:///test.db",
+                env="production",
+                secret_key="super-secret-key-that-is-not-default",
+                dev_auth_code="",
+                cors_origins="https://aozora.example",
+            )
+
     def test_production_accepts_secure_config(self):
         s = Settings(
             database_url="sqlite+aiosqlite:///test.db",
@@ -403,6 +426,7 @@ class TestProductionGuards:
             secret_key="super-secret-key-that-is-not-default",
             dev_auth_code="",
             cors_origins="https://aozora.example",
+            ai_provider_api_key="sk-test-not-a-real-key",
         )
         assert s.is_production is True
 

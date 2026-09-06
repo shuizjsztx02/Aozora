@@ -93,9 +93,11 @@ export function validateProposal(input: unknown, context?: ProposalValidationCon
     if (!Object.hasOwn(schema.properties, key)) errors.push(err(key, 'unknown field'))
   }
 
-  // proposalId
+  // proposalId — S-H1 fix: maxLength 64 与 DB 列对齐
   if (typeof obj.proposalId !== 'string' || obj.proposalId.length === 0) {
     errors.push(err('proposalId', 'required non-empty string'))
+  } else if (obj.proposalId.length > 64) {
+    errors.push(err('proposalId', 'must be at most 64 characters'))
   }
 
   // action

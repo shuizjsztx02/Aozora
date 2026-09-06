@@ -9,8 +9,6 @@ from __future__ import annotations
 
 import importlib
 
-from sqlalchemy import MetaData
-
 from src.models.base import Base
 
 
@@ -25,7 +23,12 @@ class TestMigrationConsistency:
 
         # Collect all migration upgrade() sources
         migrations = []
-        for rev in ("0001_initial", "0002_exports", "0003_sync_idempotency"):
+        for rev in (
+            "0001_initial", "0002_exports", "0003_sync_idempotency",
+            "0004_budget_unique_constraint", "0005_note_length",
+            "0006_budget_deleted_at", "0007_ai_usage_index",
+            "0008_proposal_idempotency", "0009_attachment_user_id",
+        ):
             try:
                 m = importlib.import_module(f"src.migrations.versions.{rev}")
                 migrations.append(m)
@@ -56,7 +59,12 @@ class TestMigrationConsistency:
 
         # Aggregate all create_table calls across migrations
         all_created = set()
-        for rev in ("0001_initial", "0002_exports", "0003_sync_idempotency"):
+        for rev in (
+            "0001_initial", "0002_exports", "0003_sync_idempotency",
+            "0004_budget_unique_constraint", "0005_note_length",
+            "0006_budget_deleted_at", "0007_ai_usage_index",
+            "0008_proposal_idempotency", "0009_attachment_user_id",
+        ):
             try:
                 m = importlib.import_module(f"src.migrations.versions.{rev}")
                 if hasattr(m, "upgrade"):
@@ -118,9 +126,13 @@ class TestMigrationConsistency:
                 f"{table_name} missing CHECK constraint on amount_cents"
             )
 
-    def test_13_tables_registered(self):
-        """The schema must define exactly 13 tables."""
-        assert len(Base.metadata.tables) == 13
+    def test_14_tables_registered(self):
+        """The schema must define exactly 14 tables.
+
+        T-M4-02b added ``proposal_idempotency`` (migration 0008) for AI
+        execute dedup, bringing the total from 13 to 14.
+        """
+        assert len(Base.metadata.tables) == 14
 
     def test_transaction_note_column_bounded(self):
         """N-13: transactions.note must be bounded at the DB layer too.
@@ -154,3 +166,17 @@ class TestMigrationConsistency:
         m7 = importlib.import_module("src.migrations.versions.0007_ai_usage_index")
         assert m7.down_revision == m6.revision
         assert m7.revision == "0007_ai_usage_index"
+
+    def test_proposal_idempotency_migration_chains_onto_0007(self):
+        """T-M4-02b: 0008_proposal_idempotency must extend the migration chain."""
+        m7 = importlib.import_module("src.migrations.versions.0007_ai_usage_index")
+        m8 = importlib.import_module("src.migrations.versions.0008_proposal_idempotency")
+        assert m8.down_revision == m7.revision
+        assert m8.revision == "0008_proposal_idempotency"
+
+    def test_attachment_user_id_migration_chains_onto_0008(self):
+        """T-M4-04c: 0009_attachment_user_id must extend the migration chain."""
+        m8 = importlib.import_module("src.migrations.versions.0008_proposal_idempotency")
+        m9 = importlib.import_module("src.migrations.versions.0009_attachment_user_id")
+        assert m9.down_revision == m8.revision
+        assert m9.revision == "0009_attachment_user_id"

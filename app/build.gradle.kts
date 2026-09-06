@@ -81,6 +81,9 @@ android {
         // suppress here to unblock lint gate for T-M3-02 push.
         disable += "RemoveWorkManagerInitializer"
     }
+    testOptions {
+        unitTests.isIncludeAndroidResources = true
+    }
 }
 
 tasks.named("preBuild").configure { dependsOn(syncWebAssets) }
@@ -120,6 +123,10 @@ dependencies {
     // Unit tests
     testImplementation("junit:junit:4.13.2")
     testImplementation("org.jetbrains.kotlinx:kotlinx-coroutines-test:1.8.1")
+
+    // T-M4-05a: Robolectric for ReminderScheduler unit tests
+    testImplementation("org.robolectric:robolectric:4.11.1")
+    testImplementation("androidx.test:core:1.5.0")
 
     // Instrumented tests
     androidTestImplementation("androidx.test.ext:junit:1.2.1")

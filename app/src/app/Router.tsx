@@ -1,0 +1,65 @@
+/**
+ * Router — HashRouter 路由配置。
+ *
+ * WebView 从 index.html 加载，HashRouter 无需服务端路由。
+ * T-M4-05c: 深链路由 — 通过 window.__aozoraNavigate__ 接收原生导航指令。
+ */
+
+import { HashRouter, Routes, Route, Navigate, useNavigate } from 'react-router'
+import { useEffect } from 'react'
+import type { ReactNode } from 'react'
+import { AppLayout } from '../components/Layout'
+import { HomePage } from '../features/ledger/HomePage'
+import { DetailPage } from '../features/ledger/DetailPage'
+import { ReportsPage } from '../features/reports/ReportsPage'
+import { MePage } from '../features/settings/MePage'
+import { ReminderSettingsPage } from '../features/settings/ReminderSettingsPage'
+import { AssistantPage } from '../features/assistant/AssistantPage'
+import { OnboardingPage, isOnboardingCompleted } from '../features/onboarding/OnboardingPage'
+import { LoginPage } from '../features/auth/LoginPage'
+
+/** 路由守卫 — 未完成首启引导时重定向到 onboarding */
+function ProtectedRoute({ children }: { children: ReactNode }) {
+  if (!isOnboardingCompleted()) {
+    return <Navigate to="/onboarding" replace />
+  }
+  return <>{children}</>
+}
+
+/** T-M4-05c: 深链路由 hook — 监听原生导航指令 */
+function DeepLinkHandler() {
+  const navigate = useNavigate()
+
+  useEffect(() => {
+    // 注册全局导航回调
+    ;(window as any).__aozoraNavigate__ = (path: string) => {
+      if (path && path.startsWith('/')) {
+        navigate(path)
+      }
+    }
+    return () => {
+      delete (window as any).__aozoraNavigate__
+    }
+  }, [navigate])
+
+  return null
+}
+
+export function Router() {
+  return (
+    <HashRouter>
+      <DeepLinkHandler />
+      <Routes>
+        <Route path="/onboarding" element={<OnboardingPage />} />
+        <Route path="/login" element={<LoginPage />} />
+        <Route path="/home" element={<ProtectedRoute><AppLayout><HomePage /></AppLayout></ProtectedRoute>} />
+        <Route path="/detail" element={<ProtectedRoute><AppLayout><DetailPage /></AppLayout></ProtectedRoute>} />
+        <Route path="/reports" element={<ProtectedRoute><AppLayout><ReportsPage /></AppLayout></ProtectedRoute>} />
+        <Route path="/me" element={<ProtectedRoute><AppLayout><MePage /></AppLayout></ProtectedRoute>} />
+        <Route path="/assistant" element={<ProtectedRoute><AssistantPage /></ProtectedRoute>} />
+        <Route path="/settings/reminder" element={<ProtectedRoute><AppLayout><ReminderSettingsPage /></AppLayout></ProtectedRoute>} />
+        <Route path="*" element={<Navigate to="/home" replace />} />
+      </Routes>
+    </HashRouter>
+  )
+}

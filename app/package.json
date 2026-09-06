@@ -9,6 +9,8 @@
     "lint": "oxlint",
     "typecheck": "tsc --noEmit && tsc --noEmit -p tsconfig.node.json",
     "test": "vitest --configLoader runner",
+    "visual:test": "playwright test --config=playwright.config.ts",
+    "visual:update": "playwright test --config=playwright.config.ts --update-snapshots",
     "validate:baseline": "powershell -ExecutionPolicy Bypass -File ../tools/validate-baseline.ps1"
   },
   "dependencies": {

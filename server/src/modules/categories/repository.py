@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import uuid
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 from sqlalchemy import func, select
 from sqlalchemy.exc import IntegrityError
@@ -213,6 +213,6 @@ class CategoryRepository:
         return category
 
     async def archive(self, category: Category) -> None:
-        category.archived_at = datetime.now(timezone.utc)
+        category.archived_at = datetime.now(UTC)
         category.version += 1
         await self.db.flush()

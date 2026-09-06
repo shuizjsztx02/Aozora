@@ -20,18 +20,18 @@ from .schemas import (
 )
 
 
-class _YearMonth(FunctionElement):
+class YearMonth(FunctionElement):
     """Cross-dialect YYYY-MM extraction: strftime for SQLite, TO_CHAR for PG."""
     name = "year_month"
     inherit_cache = True
 
 
-@compiles(_YearMonth)
+@compiles(YearMonth)
 def _ym_default(element, compiler, **kw):
     return f"TO_CHAR({compiler.process(element.clauses, **kw)}, 'YYYY-MM')"
 
 
-@compiles(_YearMonth, "sqlite")
+@compiles(YearMonth, "sqlite")
 def _ym_sqlite(element, compiler, **kw):
     return f"strftime('%Y-%m', {compiler.process(element.clauses, **kw)})"
 
@@ -194,7 +194,7 @@ class StatisticsService:
         ]
 
         # Group by year-month
-        ym = _YearMonth(Transaction.biz_date).label("period")
+        ym = YearMonth(Transaction.biz_date).label("period")
         q = (
             select(
                 ym.label("period"),

@@ -6,8 +6,7 @@ import uuid
 from datetime import datetime
 from typing import Any
 
-from pydantic import BaseModel, Field, computed_field
-
+from pydantic import BaseModel, Field
 
 # ---------------------------------------------------------------------------
 # Push

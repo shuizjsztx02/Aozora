@@ -13,6 +13,20 @@ from src.models.base import AuditMixin, Base
 
 
 class AIConversation(Base, AuditMixin):
+    """Reserved for future multi-turn AI conversation context.
+
+    Current gateway flow (T-M4-01) is stateless single-shot interpret —
+    there is no conversation_id in the request schema and no consumer of
+    these rows. The table exists because T-M2-02 created the schema and
+    the 0001_initial migration owns it; deleting the model would break
+    model/migration parity.
+
+    T-M4-01c planned "AIConversation context storage and trimming" as a
+    deliverable, but the product surface (multi-turn follow-ups per
+    §6.4 "追问") is not yet built out. Wired up when T-M4-02c's
+    assistant dialog feature needs conversation state; until then, the
+    table stays empty and the row is just schema infrastructure.
+    """
     __tablename__ = "ai_conversations"
 
     id: Mapped[uuid.UUID] = mapped_column(

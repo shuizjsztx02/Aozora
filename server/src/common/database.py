@@ -22,7 +22,7 @@ _session_factory: async_sessionmaker[AsyncSession] | None = None
 
 def get_engine() -> AsyncEngine:
     """Return (or create) the async SQLAlchemy engine."""
-    global _engine  # noqa: PLW0603
+    global _engine
     if _engine is None:
         cfg = get_config()
         _engine = create_async_engine(
@@ -33,7 +33,7 @@ def get_engine() -> AsyncEngine:
 
 
 def get_session_factory() -> async_sessionmaker[AsyncSession]:
-    global _session_factory  # noqa: PLW0603
+    global _session_factory
     if _session_factory is None:
         _session_factory = async_sessionmaker(
             bind=get_engine(),
@@ -68,7 +68,7 @@ async def check_health_db() -> bool:
 
 def reset_engine() -> None:
     """Dispose engine and clear caches (used in tests)."""
-    global _engine, _session_factory  # noqa: PLW0603
+    global _engine, _session_factory
     if _engine is not None:
         # Synchronous disposal — close the sync pool if available.
         sync_pool = getattr(_engine.sync_engine.pool, "_pool", None)
