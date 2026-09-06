@@ -32,7 +32,10 @@ function FontScaleAdapter() {
     }
     check()
     window.addEventListener('resize', check)
-    return () => window.removeEventListener('resize', check)
+    return () => {
+      window.removeEventListener('resize', check)
+      root.classList.remove('text-scale-13')
+    }
   }, [])
   return null
 }

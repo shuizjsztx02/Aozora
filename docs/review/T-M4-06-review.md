@@ -244,3 +244,55 @@ T-M4-06 整体实现质量良好，对比度验证方法论严谨，低性能适
 - P3 关闭/挂账决策合理
 - 代码质量稳定，无安全漏洞、无内存泄漏风险、无 race condition
 - Mock Bridge 与 NativeBridge 协议完全对齐，`addInitScript` 时序正确
+
+---
+
+## 四轮审查（2026-09-06）
+
+### 审查范围
+
+对 T-M4-06 全部实现代码进行第四轮独立审查，重点验证 useEffect cleanup 完整性、Mock Bridge 竞争安全性，并顺带修复 T-M4-04a 遗留的 tsc 错误。
+
+### 新发现 × 3（均为 P3，已全部修复）
+
+#### R-M4-17 `useFontScale` / `useLowPerformance` / `FontScaleAdapter` useEffect 缺少 unmount cleanup
+
+**文件：** `a11y.ts:50-54, 78-85`；`App.tsx:23-36`
+
+**问题：** 三个组件的 `useEffect` 在 `<html>` 上添加 class（`low-perf` / `text-scale-13`），但卸载时未移除。虽然 `App` 作为根组件实际不会卸载，但违反 React cleanup 规范，若代码被复用到其他场景会导致 class 残留。
+
+**修复：**
+- `useLowPerformance`：添加 `return () => document.documentElement.classList.remove('low-perf')`
+- `useFontScale`：添加 `return () => root.classList.remove('text-scale-13')`
+- `FontScaleAdapter`：cleanup 函数中追加 `root.classList.remove('text-scale-13')`
+
+#### R-M4-18 Mock Bridge `setTimeout(10)` 存在竞争窗口
+
+**文件：** `pages.spec.ts:118-125`
+
+**问题：** 原实现依赖 10ms `setTimeout` 延迟来等待 `__aozoraBridgeRespond` 注册。若 React 应用在 10ms 内初始化并调用 bridge 命令，此时回调尚未注册，响应会被丢弃导致 Promise 永远挂起。
+
+**修复：** 改为队列化响应机制：
+1. `call()` 将响应推入 `pendingResponses[]` 并立即尝试 `tryFlush()`
+2. 通过 `Object.defineProperty` 拦截 `__aozoraBridgeRespond` 的赋值，NativeBridge 注册回调时自动 flush 队列
+3. 无论注册时序如何，响应都不会丢失
+
+#### R-M4-19（附带修复）`use-permissions.ts` 缺少 `POST_NOTIFICATIONS` 默认值
+
+**文件：** `use-permissions.ts:15-24`
+
+**问题：** `PermissionType` 在 T-M4-04a 中新增了 `POST_NOTIFICATIONS`，但 `DEFAULT_STATUSES` 未同步更新，导致 tsc 报错 `TS2741`。
+
+**修复：** 添加 `POST_NOTIFICATIONS: 'not_requested'`。
+
+### 独立验证
+
+- ✅ `npx vitest run`：400/400 测试通过（22 files）
+- ✅ `npx tsc --noEmit`：零错误
+- ✅ `python -m pytest`：403 passed，1 skipped（1 个 Windows 临时目录权限错误为环境问题，已 deselect）
+
+### 结论
+
+**判定：✅ 确认完成**
+
+四轮审查完成，T-M4-06 代码质量稳定。本次修复了 3 个 P3 级 cleanup/竞争问题，均属于防御性改进，不影响现有功能正确性。

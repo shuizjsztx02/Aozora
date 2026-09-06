@@ -17,6 +17,7 @@ const DEFAULT_STATUSES: PermissionStatusData = {
     RECORD_AUDIO: 'not_requested',
     CAMERA: 'not_requested',
     READ_MEDIA_IMAGES: 'not_requested',
+    POST_NOTIFICATIONS: 'not_requested',
   },
   canRecordAudio: false,
   canUseCamera: false,

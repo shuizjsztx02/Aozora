@@ -51,6 +51,7 @@ export function useLowPerformance(): boolean {
     const flag = lowPerf ? '1' : '0'
     try { localStorage.setItem('aozora-low-perf', flag) } catch { /* ignore */ }
     document.documentElement.classList.toggle('low-perf', lowPerf)
+    return () => document.documentElement.classList.remove('low-perf')
   }, [lowPerf])
 
   return lowPerf
@@ -82,6 +83,7 @@ export function useFontScale(): number {
     } else {
       root.classList.remove('text-scale-13')
     }
+    return () => root.classList.remove('text-scale-13')
   }, [])
 
   return scale

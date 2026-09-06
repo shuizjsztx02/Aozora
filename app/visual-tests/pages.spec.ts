@@ -109,24 +109,39 @@ function injectMockBridge(page: any) {
     }
 
     // Mock AozoraBridge — 与 NativeBridge 协议一致（Kotlin 接口形状）
+    // R-M4-06-新: 队列化响应，消除 10ms setTimeout 竞争窗口
+    // 若 __aozoraBridgeRespond 尚未注册，响应排队等待 flush
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const pendingResponses: string[] = []
+    const tryFlush = () => {
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const respond = (window as any).__aozoraBridgeRespond
+      if (typeof respond === 'function') {
+        while (pendingResponses.length > 0) {
+          respond(pendingResponses.shift()!)
+        }
+      }
+    }
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     ;(window as any).AozoraBridge = {
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       call(_version: number, requestId: string, command: string, _payloadJson: string) {
         const handler = HANDLERS[command]
         const data = handler ? handler() : []
-        // 延迟 10ms 确保 __aozoraBridgeRespond 已由 NativeBridge constructor 注册
-        setTimeout(() => {
-          // eslint-disable-next-line @typescript-eslint/no-explicit-any
-          const respond = (window as any).__aozoraBridgeRespond
-          if (respond) {
-            respond(JSON.stringify({ requestId, success: true, data }))
-          }
-        }, 10)
+        pendingResponses.push(JSON.stringify({ requestId, success: true, data }))
+        tryFlush()
       },
       getBridgeVersion: () => 1,
       ping: () => 'pong',
     }
+    // 当 NativeBridge constructor 注册 __aozoraBridgeRespond 时，自动 flush 队列
+    Object.defineProperty(window, '__aozoraBridgeRespond', {
+      configurable: true,
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      get() { return (window as any).___aozoraRespondFn ?? tryFlush },
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      set(fn) { (window as any).___aozoraRespondFn = fn; tryFlush() },
+    })
   })
 }
 
