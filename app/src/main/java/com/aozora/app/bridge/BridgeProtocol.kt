@@ -50,6 +50,10 @@ object BridgeCommands {
     const val PM_MARK_SYNCING = "pendingMutation.markSyncing"
     const val PM_MARK_FAILED = "pendingMutation.markFailed"
     const val PM_REMOVE = "pendingMutation.remove"
+
+    // T-M3-02: 同步引擎（可选；未注入时返回 unavailable）
+    const val SYNC_GET_STATUS = "sync.getStatus"
+    const val SYNC_TRIGGER = "sync.trigger"
 }
 
 /**

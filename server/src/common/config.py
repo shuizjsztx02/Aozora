@@ -97,6 +97,53 @@ class Settings(BaseSettings):
         validation_alias=AliasChoices("EXPORT_DIR", "export_dir"),
     )
 
+    # --- ai gateway (T-M4-01) ---
+    # D-EXEC-04 (AI account/quota/limits/rotation) is pending external
+    # confirmation; defaults below are conservative placeholders.
+    # A missing key does NOT block startup — the gateway degrades to 503
+    # at runtime so dev/staging environments run without provider access.
+    ai_provider_api_key: str | None = Field(
+        default=None,
+        validation_alias=AliasChoices("AI_PROVIDER_API_KEY", "ai_provider_api_key"),
+    )
+    ai_provider_model: str = Field(
+        default="qwen3.7-flash",
+        validation_alias=AliasChoices("AI_PROVIDER_MODEL", "ai_provider_model"),
+    )
+    ai_provider_base_url: str = Field(
+        default="https://dashscope.aliyuncs.com/compatible-mode/v1",
+        validation_alias=AliasChoices("AI_PROVIDER_BASE_URL", "ai_provider_base_url"),
+    )
+    # Per-attempt timeout. Contract (APP-CONTEXT §6.4): the client cancels
+    # at 25 s, so 2 × timeout + overhead must stay below that budget.
+    ai_timeout_seconds: float = Field(
+        default=10.0,
+        gt=0,
+        validation_alias=AliasChoices("AI_TIMEOUT_SECONDS", "ai_timeout_seconds"),
+    )
+    # Per-user burst protection — applies to ALL users (guests and active);
+    # it guards the provider against runaway loops, not a product quota.
+    ai_rate_limit_per_minute: int = Field(
+        default=10,
+        gt=0,
+        validation_alias=AliasChoices("AI_RATE_LIMIT_PER_MINUTE", "ai_rate_limit_per_minute"),
+    )
+    # Daily quota for GUEST users only; ACTIVE users have no daily cap
+    # (product decision 2026-09-06). Counted per calendar day in the
+    # user's own timezone (User.timezone).
+    ai_daily_quota_guest: int = Field(
+        default=20,
+        gt=0,
+        validation_alias=AliasChoices("AI_DAILY_QUOTA_GUEST", "ai_daily_quota_guest"),
+    )
+    # Cost accounting: price per 1M tokens in micro-CNY (1e-6 元).
+    # 0 = not priced yet (until D-EXEC-04 confirms real rates).
+    ai_price_per_1m_tokens: int = Field(
+        default=0,
+        ge=0,
+        validation_alias=AliasChoices("AI_PRICE_PER_1M_TOKENS", "ai_price_per_1m_tokens"),
+    )
+
     @property
     def is_production(self) -> bool:
         return self.env == "production"

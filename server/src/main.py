@@ -24,6 +24,7 @@ from src.modules.budgets.routes import router as budgets_router
 from src.modules.statistics.routes import router as stats_router
 from src.modules.exports.routes import router as exports_router
 from src.modules.sync.routes import router as sync_router
+from src.modules.ai.routes import router as ai_router
 
 logger = logging.getLogger(__name__)
 
@@ -48,6 +49,14 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
             logger.info("Cleaned up %d stale export files", deleted)
     except Exception:
         logger.warning("Export cleanup failed", exc_info=True)
+    # T-M4-01: a missing provider key must not block startup (dev/staging
+    # run without provider access); the gateway degrades to 503 at runtime.
+    from src.modules.ai.provider import build_provider
+    if build_provider(cfg) is None:
+        logger.warning(
+            "AI provider not configured (AI_PROVIDER_API_KEY empty) — "
+            "/ai/interpret will return 503 ai_unavailable"
+        )
     yield
     from src.common.database import get_engine
 
@@ -125,6 +134,7 @@ app.include_router(budgets_router, prefix=cfg.api_prefix)
 app.include_router(stats_router, prefix=cfg.api_prefix)
 app.include_router(exports_router, prefix=cfg.api_prefix)
 app.include_router(sync_router, prefix=cfg.api_prefix)
+app.include_router(ai_router, prefix=cfg.api_prefix)
 
 
 @app.get("/", tags=["meta"])

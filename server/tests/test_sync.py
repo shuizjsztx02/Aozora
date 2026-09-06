@@ -417,8 +417,9 @@ class TestPushUpdateDelete:
         assert resp_bs.json()["budgets"] == []
 
         # Pull must report the delete with entity=null
-        resp_pull = ctx["client"].get(
-            "/sync/pull?cursor=0",
+        resp_pull = ctx["client"].post(
+            "/sync/pull",
+            json={"cursor": 0},
             headers=_auth_header(ctx["user_a"].id),
         )
         changes = resp_pull.json()["changes"]
@@ -428,6 +429,107 @@ class TestPushUpdateDelete:
         )
         assert budget_delete_change["version"] == 2
         assert budget_delete_change["entity"] is None
+
+    @pytest.mark.asyncio
+    async def test_delete_account_archives(self, auth_client, db_session):
+        """NEW-1: client maps account.archive → sync operation "delete";
+        server's _apply_delete sets ``archived_at`` (not ``deleted_at``),
+        and pull echo returns the delete change (entity=null per contract).
+
+        This is the end-to-end contract that makes multi-device account
+        archive work: device A archives → pushes "delete" → server sets
+        archived_at → device B pulls the delete change → sets archived_at locally.
+        """
+        ctx = auth_client
+        acc_id = ctx["acc_a"].id
+
+        # Push "delete" for the account (client-mapped OP_ARCHIVE)
+        resp = ctx["client"].post(
+            "/sync/push",
+            json={
+                "mutations": [
+                    {
+                        "mutation_id": str(uuid.uuid4()),
+                        "entity_type": "account",
+                        "operation": "delete",
+                        "entity_id": str(acc_id),
+                        "version": 1,
+                        "payload": {},
+                    }
+                ],
+            },
+            headers=_auth_header(ctx["user_a"].id),
+        )
+        assert resp.status_code == 200
+        r = resp.json()["results"][0]
+        assert r["status"] == "applied"
+        assert r["version"] == 2
+
+        # Confirm the row has archived_at set (not deleted_at)
+        await db_session.refresh(ctx["acc_a"])
+        assert ctx["acc_a"].archived_at is not None
+
+        # Pull echo must report the archive as a "delete" change.
+        # Per contract, delete changes carry entity=null.
+        resp_pull = ctx["client"].post(
+            "/sync/pull",
+            json={"cursor": 0},
+            headers=_auth_header(ctx["user_a"].id),
+        )
+        changes = resp_pull.json()["changes"]
+        acc_change = next(
+            c for c in changes
+            if c["entity_type"] == "account"
+        )
+        assert acc_change["operation"] == "delete"
+        assert acc_change["version"] == 2
+        assert acc_change["entity"] is None
+
+    @pytest.mark.asyncio
+    async def test_delete_category_archives(self, auth_client, db_session):
+        """NEW-1: same as test_delete_account_archives but for category.
+        Client maps category.archive → "delete"; server sets archived_at.
+        """
+        ctx = auth_client
+        cat_id = ctx["cat_expense_a"].id
+
+        resp = ctx["client"].post(
+            "/sync/push",
+            json={
+                "mutations": [
+                    {
+                        "mutation_id": str(uuid.uuid4()),
+                        "entity_type": "category",
+                        "operation": "delete",
+                        "entity_id": str(cat_id),
+                        "version": 1,
+                        "payload": {},
+                    }
+                ],
+            },
+            headers=_auth_header(ctx["user_a"].id),
+        )
+        assert resp.status_code == 200
+        r = resp.json()["results"][0]
+        assert r["status"] == "applied"
+        assert r["version"] == 2
+
+        await db_session.refresh(ctx["cat_expense_a"])
+        assert ctx["cat_expense_a"].archived_at is not None
+
+        resp_pull = ctx["client"].post(
+            "/sync/pull",
+            json={"cursor": 0},
+            headers=_auth_header(ctx["user_a"].id),
+        )
+        changes = resp_pull.json()["changes"]
+        cat_change = next(
+            c for c in changes
+            if c["entity_type"] == "category"
+        )
+        assert cat_change["operation"] == "delete"
+        assert cat_change["version"] == 2
+        assert cat_change["entity"] is None
 
 
 # ---------------------------------------------------------------------------
@@ -685,6 +787,51 @@ class TestPushConflict:
         assert results[0]["status"] == "applied"  # first mutation committed
         assert results[1]["status"] == "conflict"  # second stopped
 
+    @pytest.mark.asyncio
+    async def test_integrity_error_preserves_prior_mutations(self, auth_client, db_session):
+        """F-M3-2: an IntegrityError on one mutation must not roll back
+        earlier successful mutations in the same batch."""
+        ctx = auth_client
+        shared_id = uuid.uuid4()
+        third_id = uuid.uuid4()
+
+        # Batch: [valid insert (A), duplicate PK insert (B), valid insert (C)]
+        resp = ctx["client"].post(
+            "/sync/push",
+            json={
+                "mutations": [
+                    {
+                        "mutation_id": str(uuid.uuid4()),
+                        "entity_type": "account",
+                        "operation": "insert",
+                        "entity_id": str(shared_id),
+                        "payload": {"name": "first"},
+                    },
+                    {
+                        "mutation_id": str(uuid.uuid4()),
+                        "entity_type": "account",
+                        "operation": "insert",
+                        "entity_id": str(shared_id),  # duplicate PK → IntegrityError
+                        "payload": {"name": "duplicate"},
+                    },
+                    {
+                        "mutation_id": str(uuid.uuid4()),
+                        "entity_type": "account",
+                        "operation": "insert",
+                        "entity_id": str(third_id),
+                        "payload": {"name": "third"},
+                    },
+                ],
+            },
+            headers=_auth_header(ctx["user_a"].id),
+        )
+        assert resp.status_code == 200
+        results = resp.json()["results"]
+        assert len(results) == 3
+        assert results[0]["status"] == "applied"
+        assert results[1]["status"] == "conflict"
+        assert results[2]["status"] == "applied"
+
 
 # ---------------------------------------------------------------------------
 # Push: Validation
@@ -814,8 +961,9 @@ class TestPull:
 
     @pytest.mark.asyncio
     async def test_pull_empty(self, auth_client):
-        resp = auth_client["client"].get(
-            "/sync/pull?cursor=0",
+        resp = auth_client["client"].post(
+            "/sync/pull",
+            json={"cursor": 0},
             headers=_auth_header(auth_client["user_a"].id),
         )
         assert resp.status_code == 200
@@ -852,8 +1000,9 @@ class TestPull:
         )
 
         # Pull all changes
-        resp = ctx["client"].get(
-            "/sync/pull?cursor=0",
+        resp = ctx["client"].post(
+            "/sync/pull",
+            json={"cursor": 0},
             headers=_auth_header(ctx["user_a"].id),
         )
         assert resp.status_code == 200
@@ -894,8 +1043,9 @@ class TestPull:
             )
 
         # Pull with limit=2
-        resp = ctx["client"].get(
-            "/sync/pull?cursor=0&limit=2",
+        resp = ctx["client"].post(
+            "/sync/pull",
+            json={"cursor": 0, "limit": 2},
             headers=_auth_header(ctx["user_a"].id),
         )
         data = resp.json()
@@ -904,8 +1054,9 @@ class TestPull:
         last_cursor = data["cursor"]
 
         # Pull remaining
-        resp2 = ctx["client"].get(
-            f"/sync/pull?cursor={last_cursor}&limit=2",
+        resp2 = ctx["client"].post(
+            "/sync/pull",
+            json={"cursor": last_cursor, "limit": 2},
             headers=_auth_header(ctx["user_a"].id),
         )
         data2 = resp2.json()
@@ -958,8 +1109,9 @@ class TestPull:
         )
 
         # Pull all
-        resp = ctx["client"].get(
-            "/sync/pull?cursor=0",
+        resp = ctx["client"].post(
+            "/sync/pull",
+            json={"cursor": 0},
             headers=_auth_header(ctx["user_a"].id),
         )
         data = resp.json()
@@ -992,8 +1144,9 @@ class TestPull:
         )
 
         # User B pulls — should see no changes
-        resp = ctx["client"].get(
-            "/sync/pull?cursor=0",
+        resp = ctx["client"].post(
+            "/sync/pull",
+            json={"cursor": 0},
             headers=_auth_header(ctx["user_b"].id),
         )
         assert resp.status_code == 200
@@ -1022,16 +1175,18 @@ class TestPull:
             )
 
         # Pull from 0
-        resp1 = ctx["client"].get(
-            "/sync/pull?cursor=0",
+        resp1 = ctx["client"].post(
+            "/sync/pull",
+            json={"cursor": 0},
             headers=_auth_header(ctx["user_a"].id),
         )
         data1 = resp1.json()
         assert len(data1["changes"]) == 2
 
         # Pull from 0 again (simulating reconnect)
-        resp2 = ctx["client"].get(
-            "/sync/pull?cursor=0",
+        resp2 = ctx["client"].post(
+            "/sync/pull",
+            json={"cursor": 0},
             headers=_auth_header(ctx["user_a"].id),
         )
         data2 = resp2.json()
@@ -1065,6 +1220,9 @@ class TestBootstrap:
         assert data["accounts"] == []
         assert data["budgets"] == []
         assert data["cursor"] == 0
+        # T-M3-03: checksum is present and non-empty
+        assert isinstance(data["checksum"], str)
+        assert len(data["checksum"]) == 64  # SHA-256 hex
 
     @pytest.mark.asyncio
     async def test_bootstrap_returns_all_data(self, auth_client):
@@ -1172,6 +1330,89 @@ class TestBootstrap:
         # User B should see nothing (book_a belongs to A)
         assert data["books"] == []
         assert data["transactions"] == []
+
+    # ─── T-M3-03: checksum tests ───
+
+    @pytest.mark.asyncio
+    async def test_bootstrap_checksum_is_deterministic(self, auth_client):
+        """Same data produces same checksum across calls."""
+        ctx = auth_client
+        resp1 = ctx["client"].post(
+            "/sync/bootstrap",
+            headers=_auth_header(ctx["user_a"].id),
+        )
+        resp2 = ctx["client"].post(
+            "/sync/bootstrap",
+            headers=_auth_header(ctx["user_a"].id),
+        )
+        data1 = resp1.json()
+        data2 = resp2.json()
+        assert data1["checksum"] == data2["checksum"]
+        assert len(data1["checksum"]) == 64
+
+    @pytest.mark.asyncio
+    async def test_bootstrap_checksum_changes_on_mutation(self, auth_client):
+        """A new mutation changes the checksum."""
+        ctx = auth_client
+        resp1 = ctx["client"].post(
+            "/sync/bootstrap",
+            headers=_auth_header(ctx["user_a"].id),
+        )
+        checksum_before = resp1.json()["checksum"]
+
+        # Push a new transaction
+        ctx["client"].post(
+            "/sync/push",
+            json={
+                "mutations": [
+                    {
+                        "mutation_id": str(uuid.uuid4()),
+                        "entity_type": "transaction",
+                        "operation": "insert",
+                        "entity_id": str(uuid.uuid4()),
+                        "payload": {
+                            "book_id": str(ctx["book_a"].id),
+                            "type": "expense",
+                            "amount_cents": 7777,
+                            "category_id": str(ctx["cat_expense_a"].id),
+                            "biz_date": "2026-09-05",
+                            "occurred_at": "2026-09-05T10:00:00+08:00",
+                        },
+                    }
+                ],
+            },
+            headers=_auth_header(ctx["user_a"].id),
+        )
+
+        resp2 = ctx["client"].post(
+            "/sync/bootstrap",
+            headers=_auth_header(ctx["user_a"].id),
+        )
+        checksum_after = resp2.json()["checksum"]
+        assert checksum_before != checksum_after
+
+    @pytest.mark.asyncio
+    async def test_bootstrap_checksum_matches_local_computation(self, auth_client):
+        """Client can recompute the same checksum from received entities."""
+        from src.modules.sync.service import compute_bootstrap_checksum
+
+        ctx = auth_client
+        resp = ctx["client"].post(
+            "/sync/bootstrap",
+            headers=_auth_header(ctx["user_a"].id),
+        )
+        data = resp.json()
+
+        # Client recomputes checksum from received data
+        recomputed = compute_bootstrap_checksum(
+            books=data["books"],
+            categories=data["categories"],
+            accounts=data["accounts"],
+            transactions=data["transactions"],
+            budgets=data["budgets"],
+            cursor=data["cursor"],
+        )
+        assert recomputed == data["checksum"]
 
 
 # ---------------------------------------------------------------------------
@@ -1313,8 +1554,9 @@ class TestIntegration:
         push_cursor = resp_push.json()["cursor"]
 
         # Pull from 0
-        resp_pull = ctx["client"].get(
-            "/sync/pull?cursor=0",
+        resp_pull = ctx["client"].post(
+            "/sync/pull",
+            json={"cursor": 0},
             headers=_auth_header(ctx["user_a"].id),
         )
         data = resp_pull.json()
@@ -1391,8 +1633,9 @@ class TestIntegration:
         assert r3.json()["results"][0]["version"] == 3
 
         # Pull all
-        r4 = ctx["client"].get(
-            "/sync/pull?cursor=0",
+        r4 = ctx["client"].post(
+            "/sync/pull",
+            json={"cursor": 0},
             headers=_auth_header(ctx["user_a"].id),
         )
         changes = r4.json()["changes"]
@@ -1676,7 +1919,8 @@ class TestPayloadValidation:
     @pytest.mark.asyncio
     async def test_insert_duplicate_entity_id_conflict(self, auth_client):
         """Inserting two mutations with the same entity_id but different
-        mutation_ids should yield 409 (PK conflict) on the second."""
+        mutation_ids: F-M3-2 fix — first is applied, second marked as
+        conflict; prior mutations in the batch are preserved (no 409)."""
         ctx = auth_client
         shared_id = uuid.uuid4()
         resp = ctx["client"].post(
@@ -1701,7 +1945,12 @@ class TestPayloadValidation:
             },
             headers=_auth_header(ctx["user_a"].id),
         )
-        assert resp.status_code == 409
+        # F-M3-2: response is 200 — first applied, second conflict.
+        assert resp.status_code == 200
+        results = resp.json()["results"]
+        assert len(results) == 2
+        assert results[0]["status"] == "applied"
+        assert results[1]["status"] == "conflict"
 
     @pytest.mark.asyncio
     async def test_push_exactly_100_mutations_accepted(self, auth_client):
@@ -1736,16 +1985,18 @@ class TestPullBoundaries:
 
     @pytest.mark.asyncio
     async def test_pull_limit_zero_rejected(self, auth_client):
-        resp = auth_client["client"].get(
-            "/sync/pull?cursor=0&limit=0",
+        resp = auth_client["client"].post(
+            "/sync/pull",
+            json={"cursor": 0, "limit": 0},
             headers=_auth_header(auth_client["user_a"].id),
         )
         assert resp.status_code == 422
 
     @pytest.mark.asyncio
     async def test_pull_limit_max_accepted(self, auth_client):
-        resp = auth_client["client"].get(
-            "/sync/pull?cursor=0&limit=500",
+        resp = auth_client["client"].post(
+            "/sync/pull",
+            json={"cursor": 0, "limit": 500},
             headers=_auth_header(auth_client["user_a"].id),
         )
         assert resp.status_code == 200
@@ -1872,8 +2123,9 @@ class TestSerialization:
             },
             headers=_auth_header(ctx["user_a"].id),
         )
-        resp = ctx["client"].get(
-            "/sync/pull?cursor=0",
+        resp = ctx["client"].post(
+            "/sync/pull",
+            json={"cursor": 0},
             headers=_auth_header(ctx["user_a"].id),
         )
         data = resp.json()
@@ -1937,8 +2189,9 @@ class TestSerialization:
         )
 
         # Pull the update change and confirm occurred_at was NOT modified.
-        resp = ctx["client"].get(
-            "/sync/pull?cursor=0",
+        resp = ctx["client"].post(
+            "/sync/pull",
+            json={"cursor": 0},
             headers=_auth_header(ctx["user_a"].id),
         )
         data = resp.json()
@@ -2221,6 +2474,330 @@ class TestSoftDeleteConsistency:
             headers=_auth_header(ctx["user_a"].id),
         )
         assert resp.status_code == 404
+
+    # ─── F-M3-1 regression: update / delete on soft-deleted entities ───
+
+    @pytest.mark.asyncio
+    async def test_update_soft_deleted_book_rejected(self, auth_client, db_session):
+        """F-M3-1: sync update on a soft-deleted book returns 404 — the
+        multi-device scenario where device A deletes and device B's late
+        update must NOT resurrect the book."""
+        ctx = auth_client
+        ctx["book_a"].deleted_at = datetime.now(timezone.utc)
+        await db_session.commit()
+
+        resp = ctx["client"].post(
+            "/sync/push",
+            json={
+                "mutations": [
+                    {
+                        "mutation_id": str(uuid.uuid4()),
+                        "entity_type": "book",
+                        "operation": "update",
+                        "entity_id": str(ctx["book_a"].id),
+                        "version": ctx["book_a"].version,
+                        "payload": {"name": "Hacked"},
+                    }
+                ],
+            },
+            headers=_auth_header(ctx["user_a"].id),
+        )
+        assert resp.status_code == 404
+
+    @pytest.mark.asyncio
+    async def test_update_archived_category_rejected(self, auth_client, db_session):
+        """F-M3-1: sync update on an archived category returns 404."""
+        ctx = auth_client
+        ctx["cat_expense_a"].archived_at = datetime.now(timezone.utc)
+        await db_session.commit()
+
+        resp = ctx["client"].post(
+            "/sync/push",
+            json={
+                "mutations": [
+                    {
+                        "mutation_id": str(uuid.uuid4()),
+                        "entity_type": "category",
+                        "operation": "update",
+                        "entity_id": str(ctx["cat_expense_a"].id),
+                        "version": ctx["cat_expense_a"].version,
+                        "payload": {"name": "HackedCat"},
+                    }
+                ],
+            },
+            headers=_auth_header(ctx["user_a"].id),
+        )
+        assert resp.status_code == 404
+
+    @pytest.mark.asyncio
+    async def test_update_archived_account_rejected(self, auth_client, db_session):
+        """F-M3-1: sync update on an archived account returns 404."""
+        ctx = auth_client
+        ctx["acc_a"].archived_at = datetime.now(timezone.utc)
+        await db_session.commit()
+
+        resp = ctx["client"].post(
+            "/sync/push",
+            json={
+                "mutations": [
+                    {
+                        "mutation_id": str(uuid.uuid4()),
+                        "entity_type": "account",
+                        "operation": "update",
+                        "entity_id": str(ctx["acc_a"].id),
+                        "version": ctx["acc_a"].version,
+                        "payload": {"name": "HackedAcc"},
+                    }
+                ],
+            },
+            headers=_auth_header(ctx["user_a"].id),
+        )
+        assert resp.status_code == 404
+
+    @pytest.mark.asyncio
+    async def test_update_soft_deleted_transaction_rejected(self, auth_client):
+        """F-M3-1: sync update on a soft-deleted transaction returns 404."""
+        ctx = auth_client
+        tx_id = uuid.uuid4()
+        # Insert then delete.
+        ctx["client"].post(
+            "/sync/push",
+            json={
+                "mutations": [
+                    {
+                        "mutation_id": str(uuid.uuid4()),
+                        "entity_type": "transaction",
+                        "operation": "insert",
+                        "entity_id": str(tx_id),
+                        "payload": {
+                            "book_id": str(ctx["book_a"].id),
+                            "type": "expense",
+                            "amount_cents": 1000,
+                            "category_id": str(ctx["cat_expense_a"].id),
+                            "biz_date": "2026-09-04",
+                            "occurred_at": "2026-09-04T12:00:00",
+                        },
+                    }
+                ],
+            },
+            headers=_auth_header(ctx["user_a"].id),
+        )
+        ctx["client"].post(
+            "/sync/push",
+            json={
+                "mutations": [
+                    {
+                        "mutation_id": str(uuid.uuid4()),
+                        "entity_type": "transaction",
+                        "operation": "delete",
+                        "entity_id": str(tx_id),
+                        "version": 1,
+                        "payload": {},
+                    }
+                ],
+            },
+            headers=_auth_header(ctx["user_a"].id),
+        )
+
+        # Late-arriving update on the deleted transaction → 404.
+        resp = ctx["client"].post(
+            "/sync/push",
+            json={
+                "mutations": [
+                    {
+                        "mutation_id": str(uuid.uuid4()),
+                        "entity_type": "transaction",
+                        "operation": "update",
+                        "entity_id": str(tx_id),
+                        "version": 2,  # version after delete
+                        "payload": {"note": "HackedNote"},
+                    }
+                ],
+            },
+            headers=_auth_header(ctx["user_a"].id),
+        )
+        assert resp.status_code == 404
+
+    @pytest.mark.asyncio
+    async def test_double_delete_book_returns_conflict(self, auth_client, db_session):
+        """F-M3-1: re-deleting an already soft-deleted book returns conflict
+        (rather than silently overwriting ``deleted_at`` and creating a
+        redundant SyncChange)."""
+        ctx = auth_client
+        # Create a fresh book so we control versioning cleanly.
+        book_id = uuid.uuid4()
+        r1 = ctx["client"].post(
+            "/sync/push",
+            json={
+                "mutations": [
+                    {
+                        "mutation_id": str(uuid.uuid4()),
+                        "entity_type": "book",
+                        "operation": "insert",
+                        "entity_id": str(book_id),
+                        "payload": {"name": "ToDelete"},
+                    }
+                ],
+            },
+            headers=_auth_header(ctx["user_a"].id),
+        )
+        v1 = r1.json()["results"][0]["version"]
+        assert v1 == 1
+
+        # First delete → applied, version 2.
+        r2 = ctx["client"].post(
+            "/sync/push",
+            json={
+                "mutations": [
+                    {
+                        "mutation_id": str(uuid.uuid4()),
+                        "entity_type": "book",
+                        "operation": "delete",
+                        "entity_id": str(book_id),
+                        "version": 1,
+                        "payload": {},
+                    }
+                ],
+            },
+            headers=_auth_header(ctx["user_a"].id),
+        )
+        assert r2.json()["results"][0]["status"] == "applied"
+        assert r2.json()["results"][0]["version"] == 2
+
+        # Second delete with same version → conflict (not another applied).
+        r3 = ctx["client"].post(
+            "/sync/push",
+            json={
+                "mutations": [
+                    {
+                        "mutation_id": str(uuid.uuid4()),
+                        "entity_type": "book",
+                        "operation": "delete",
+                        "entity_id": str(book_id),
+                        "version": 2,
+                        "payload": {},
+                    }
+                ],
+            },
+            headers=_auth_header(ctx["user_a"].id),
+        )
+        assert r3.json()["results"][0]["status"] == "conflict"
+        assert r3.json()["results"][0]["current_version"] == 2
+
+    # ─── NEW-1 regression: update on tx/budget under soft-deleted book ───
+
+    @pytest.mark.asyncio
+    async def test_update_tx_under_soft_deleted_book_rejected(self, auth_client, db_session):
+        """NEW-1: after a book is soft-deleted, sync update on a transaction
+        under that book must return 404 — otherwise multi-device scenarios
+        produce zombie mutations that bootstrap and pull disagree on."""
+        ctx = auth_client
+        # 1. Insert a transaction via sync.
+        tx_id = uuid.uuid4()
+        r1 = ctx["client"].post(
+            "/sync/push",
+            json={
+                "mutations": [
+                    {
+                        "mutation_id": str(uuid.uuid4()),
+                        "entity_type": "transaction",
+                        "operation": "insert",
+                        "entity_id": str(tx_id),
+                        "payload": {
+                            "book_id": str(ctx["book_a"].id),
+                            "type": "expense",
+                            "amount_cents": 5000,
+                            "category_id": str(ctx["cat_expense_a"].id),
+                            "account_id": str(ctx["acc_a"].id),
+                            "note": "午餐",
+                            "biz_date": "2026-09-04",
+                            "occurred_at": "2026-09-04T12:00:00+08:00",
+                        },
+                    }
+                ],
+            },
+            headers=_auth_header(ctx["user_a"].id),
+        )
+        assert r1.status_code == 200
+        assert r1.json()["results"][0]["status"] == "applied"
+        tx_version = r1.json()["results"][0]["version"]
+
+        # 2. Soft-delete the parent book directly (simulates another device).
+        ctx["book_a"].deleted_at = datetime.now(timezone.utc)
+        await db_session.commit()
+
+        # 3. Update the transaction → must be rejected (book is gone).
+        r2 = ctx["client"].post(
+            "/sync/push",
+            json={
+                "mutations": [
+                    {
+                        "mutation_id": str(uuid.uuid4()),
+                        "entity_type": "transaction",
+                        "operation": "update",
+                        "entity_id": str(tx_id),
+                        "version": tx_version,
+                        "payload": {"note": "复活尝试"},
+                    }
+                ],
+            },
+            headers=_auth_header(ctx["user_a"].id),
+        )
+        assert r2.status_code == 404
+
+    @pytest.mark.asyncio
+    async def test_update_budget_under_soft_deleted_book_rejected(self, auth_client, db_session):
+        """NEW-1: after a book is soft-deleted, sync update on a budget
+        under that book must return 404."""
+        ctx = auth_client
+        # 1. Insert a budget via sync.
+        budget_id = uuid.uuid4()
+        r1 = ctx["client"].post(
+            "/sync/push",
+            json={
+                "mutations": [
+                    {
+                        "mutation_id": str(uuid.uuid4()),
+                        "entity_type": "budget",
+                        "operation": "insert",
+                        "entity_id": str(budget_id),
+                        "payload": {
+                            "book_id": str(ctx["book_a"].id),
+                            "budget_type": "monthly",
+                            "amount_cents": 100000,
+                            "period": "2026-09",
+                        },
+                    }
+                ],
+            },
+            headers=_auth_header(ctx["user_a"].id),
+        )
+        assert r1.status_code == 200
+        assert r1.json()["results"][0]["status"] == "applied"
+        budget_version = r1.json()["results"][0]["version"]
+
+        # 2. Soft-delete the parent book.
+        ctx["book_a"].deleted_at = datetime.now(timezone.utc)
+        await db_session.commit()
+
+        # 3. Update the budget → must be rejected.
+        r2 = ctx["client"].post(
+            "/sync/push",
+            json={
+                "mutations": [
+                    {
+                        "mutation_id": str(uuid.uuid4()),
+                        "entity_type": "budget",
+                        "operation": "update",
+                        "entity_id": str(budget_id),
+                        "version": budget_version,
+                        "payload": {"amount_cents": 200000},
+                    }
+                ],
+            },
+            headers=_auth_header(ctx["user_a"].id),
+        )
+        assert r2.status_code == 404
 
 
 # ---------------------------------------------------------------------------

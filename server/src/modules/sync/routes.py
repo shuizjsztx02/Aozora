@@ -5,14 +5,14 @@ from __future__ import annotations
 import uuid
 from typing import Annotated
 
-from fastapi import APIRouter, Depends, Query
+from fastapi import APIRouter, Depends
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from src.common.database import get_db_session
 from src.modules.auth.dependencies import get_current_user
 from src.models.user import User
 
-from .schemas import BootstrapResponse, PullResponse, PushRequest, PushResponse
+from .schemas import BootstrapResponse, PullRequest, PullResponse, PushRequest, PushResponse
 from .service import SyncService
 
 router = APIRouter(prefix="/sync", tags=["sync"])
@@ -29,16 +29,15 @@ async def sync_push(
     return await service.push(current_user.id, body.mutations)
 
 
-@router.get("/pull", response_model=PullResponse)
+@router.post("/pull", response_model=PullResponse)
 async def sync_pull(
-    cursor: int = Query(default=0, ge=0),
-    limit: int = Query(default=100, ge=1, le=500),
+    body: PullRequest,
     current_user: Annotated[User, Depends(get_current_user)] = ...,
     db: Annotated[AsyncSession, Depends(get_db_session)] = ...,
 ):
     """Pull changes since the given cursor."""
     service = SyncService(db)
-    return await service.pull(current_user.id, cursor, limit)
+    return await service.pull(current_user.id, body.cursor, body.limit)
 
 
 @router.post("/bootstrap", response_model=BootstrapResponse)

@@ -1,0 +1,75 @@
+package com.aozora.app
+
+import android.app.Application
+import androidx.work.Configuration
+import com.aozora.app.auth.AuthClient
+import com.aozora.app.auth.TokenStore
+import com.aozora.app.db.AozoraDatabase
+import com.aozora.app.db.Repository
+import com.aozora.app.sync.HttpSyncApi
+import com.aozora.app.sync.SyncEngine
+import okhttp3.OkHttpClient
+import java.util.concurrent.TimeUnit
+
+/**
+ * Aozora Application — wires singletons (T-M3-02).
+ *
+ * 单例拓扑：
+ * - [database] / [repository]：Room + Repository。
+ * - [tokenStore] / [authClient]：认证层（AES/GCM + OkHttp）。
+ * - [syncEngine]：编排 push/pull，依赖 [repository] 与 [syncApi]。
+ *
+ * 通过 [(AozoraApp) applicationContext] 在 Activity / Worker 中取回。
+ */
+class AozoraApp : Application(), Configuration.Provider {
+
+    /** Lazily-built Room database singleton. */
+    val database: AozoraDatabase by lazy { AozoraDatabase.getInstance(this) }
+
+    /** Repository wrapping the database. */
+    val repository: Repository by lazy { Repository(database) }
+
+    /** TokenStore: AES/GCM 加密的令牌持久化。 */
+    val tokenStore: TokenStore by lazy { TokenStore(this) }
+
+    /** OkHttp client：同步 + 认证共用，连接池 60s。 */
+    private val httpClient: OkHttpClient by lazy {
+        OkHttpClient.Builder()
+            .connectTimeout(15, TimeUnit.SECONDS)
+            .readTimeout(30, TimeUnit.SECONDS)
+            .writeTimeout(30, TimeUnit.SECONDS)
+            // P1-1: 禁止自动跟随重定向，防止恶意/错误配置服务器将含 refresh_token 的 POST body 重发
+            .followRedirects(false)
+            .build()
+    }
+
+    /** AuthClient: token 生命周期。 */
+    val authClient: AuthClient by lazy {
+        AuthClient(
+            baseUrl = BuildConfig.SYNC_BASE_URL,
+            tokenStore = tokenStore,
+            httpClient = httpClient
+        )
+    }
+
+    /** SyncApi: HTTP 传输。 */
+    private val syncApi: HttpSyncApi by lazy {
+        HttpSyncApi(
+            baseUrl = BuildConfig.SYNC_BASE_URL,
+            httpClient = httpClient,
+            authClient = authClient
+        )
+    }
+
+    /** SyncEngine: push/pull 编排。 */
+    val syncEngine: SyncEngine by lazy {
+        SyncEngine(
+            repository = repository,
+            syncApi = syncApi,
+            authClient = authClient
+        )
+    }
+
+    override val workManagerConfiguration: Configuration
+        get() = Configuration.Builder().build()
+}

@@ -34,4 +34,23 @@ interface TransactionDao {
 
     @Query("SELECT COUNT(*) FROM transactions WHERE deletedAt IS NULL")
     suspend fun countActive(): Int
+
+    /**
+     * T-M3-02: 同步合并 upsert 路径 — REPLACE 语义。
+     * 仅由 Repository.applyServerChanges 调用，业务写入仍使用 ABORT 插入。
+     * 用于：服务端 pull/bootstrap 推送的流水实体覆盖本地副本。
+     */
+    @Insert(onConflict = OnConflictStrategy.REPLACE)
+    suspend fun upsertFromSync(transaction: TransactionEntity)
+
+    /**
+     * T-M3-02: 同步合并软删路径 — 仅更新 deletedAt 与 version，不触碰其他列。
+     * 用于：服务端 pull 的 delete 变更应用到本地。
+     */
+    @Query("UPDATE transactions SET deletedAt = :deletedAt, version = :version WHERE id = :id")
+    suspend fun applyServerDelete(id: String, deletedAt: Long, version: Int)
+
+    /** T-M3-03: 清空所有流水记录（bootstrap 重建前使用）。 */
+    @Query("DELETE FROM transactions")
+    suspend fun clearAll()
 }

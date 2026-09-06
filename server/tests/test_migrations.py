@@ -147,3 +147,10 @@ class TestMigrationConsistency:
         m6 = importlib.import_module("src.migrations.versions.0006_budget_deleted_at")
         assert m6.down_revision == m5.revision
         assert m6.revision == "0006_budget_deleted_at"
+
+    def test_ai_usage_index_migration_chains_onto_0006(self):
+        """T-M4-01: 0007_ai_usage_index must extend the migration chain."""
+        m6 = importlib.import_module("src.migrations.versions.0006_budget_deleted_at")
+        m7 = importlib.import_module("src.migrations.versions.0007_ai_usage_index")
+        assert m7.down_revision == m6.revision
+        assert m7.revision == "0007_ai_usage_index"

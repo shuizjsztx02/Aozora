@@ -109,9 +109,15 @@ class SyncRepository:
         entity_type: str,
         entity_id: uuid.UUID,
         user_id: uuid.UUID,
+        include_deleted: bool = False,
     ) -> object | None:
-        """Read a single entity, verifying ownership."""
-        return await self._read_entity(entity_type, entity_id, user_id)
+        """Read a single entity, verifying ownership.
+
+        Args:
+            include_deleted: If True, return entity even if deleted/archived.
+                Used by pull to reconstruct change history.
+        """
+        return await self._read_entity(entity_type, entity_id, user_id, include_deleted)
 
     async def get_all_entities(
         self, user_id: uuid.UUID,
@@ -174,37 +180,62 @@ class SyncRepository:
 
     # -- Entity reads (for ownership verification) -------------------------
 
-    async def get_book(self, book_id: uuid.UUID, user_id: uuid.UUID) -> Book | None:
-        result = await self.db.execute(
-            select(Book).where(Book.id == book_id, Book.owner_id == user_id)
-        )
+    async def get_book(self, book_id: uuid.UUID, user_id: uuid.UUID, include_deleted: bool = False) -> Book | None:
+        # P2-11: 过滤 deleted_at，防止对已删 book 推 update 产生 zombie 变更
+        # 但 pull 需要 include_deleted=True 来 reconstruct 历史
+        conditions = [Book.id == book_id, Book.owner_id == user_id]
+        if not include_deleted:
+            conditions.append(Book.deleted_at.is_(None))
+        result = await self.db.execute(select(Book).where(*conditions))
         return result.scalar_one_or_none()
 
-    async def get_category(self, cat_id: uuid.UUID, user_id: uuid.UUID) -> Category | None:
-        result = await self.db.execute(
-            select(Category).where(Category.id == cat_id, Category.owner_id == user_id)
-        )
+    async def get_category(self, cat_id: uuid.UUID, user_id: uuid.UUID, include_deleted: bool = False) -> Category | None:
+        # F-M3-1: filter archived_at so sync update/delete cannot touch
+        # archived categories (mirrors get_book's deleted_at filter).
+        conditions = [Category.id == cat_id, Category.owner_id == user_id]
+        if not include_deleted:
+            conditions.append(Category.archived_at.is_(None))
+        result = await self.db.execute(select(Category).where(*conditions))
         return result.scalar_one_or_none()
 
-    async def get_account(self, acc_id: uuid.UUID, user_id: uuid.UUID) -> Account | None:
-        result = await self.db.execute(
-            select(Account).where(Account.id == acc_id, Account.owner_id == user_id)
-        )
+    async def get_account(self, acc_id: uuid.UUID, user_id: uuid.UUID, include_deleted: bool = False) -> Account | None:
+        # F-M3-1: filter archived_at so sync update/delete cannot touch
+        # archived accounts (mirrors get_book's deleted_at filter).
+        conditions = [Account.id == acc_id, Account.owner_id == user_id]
+        if not include_deleted:
+            conditions.append(Account.archived_at.is_(None))
+        result = await self.db.execute(select(Account).where(*conditions))
         return result.scalar_one_or_none()
 
-    async def get_transaction(self, tx_id: uuid.UUID, user_id: uuid.UUID) -> Transaction | None:
+    async def get_transaction(self, tx_id: uuid.UUID, user_id: uuid.UUID, include_deleted: bool = False) -> Transaction | None:
+        # P2-11: 过滤 deleted_at
+        # NEW-1: 同时过滤父级 Book.deleted_at（include_deleted=False 时），
+        # 防止对软删 book 下的 tx 执行 update；pull 使用 include_deleted=True
+        # 来 reconstruct 历史，不受影响。
+        conditions = [Transaction.id == tx_id, Book.owner_id == user_id]
+        if not include_deleted:
+            conditions.append(Transaction.deleted_at.is_(None))
+            conditions.append(Book.deleted_at.is_(None))
         result = await self.db.execute(
             select(Transaction)
             .join(Book, Transaction.book_id == Book.id)
-            .where(Transaction.id == tx_id, Book.owner_id == user_id)
+            .where(*conditions)
         )
         return result.scalar_one_or_none()
 
-    async def get_budget(self, budget_id: uuid.UUID, user_id: uuid.UUID) -> Budget | None:
+    async def get_budget(self, budget_id: uuid.UUID, user_id: uuid.UUID, include_deleted: bool = False) -> Budget | None:
+        # P2-11: 过滤 deleted_at
+        # NEW-1: 同时过滤父级 Book.deleted_at（include_deleted=False 时），
+        # 防止对软删 book 下的 budget 执行 update；pull 使用
+        # include_deleted=True 来 reconstruct 历史，不受影响。
+        conditions = [Budget.id == budget_id, Book.owner_id == user_id]
+        if not include_deleted:
+            conditions.append(Budget.deleted_at.is_(None))
+            conditions.append(Book.deleted_at.is_(None))
         result = await self.db.execute(
             select(Budget)
             .join(Book, Budget.book_id == Book.id)
-            .where(Budget.id == budget_id, Book.owner_id == user_id)
+            .where(*conditions)
         )
         return result.scalar_one_or_none()
 
@@ -215,16 +246,17 @@ class SyncRepository:
         entity_type: str,
         entity_id: uuid.UUID,
         user_id: uuid.UUID,
+        include_deleted: bool = False,
     ) -> object | None:
         """Read entity by type, verifying ownership via user_id."""
         if entity_type == "book":
-            return await self.get_book(entity_id, user_id)
+            return await self.get_book(entity_id, user_id, include_deleted)
         if entity_type == "category":
-            return await self.get_category(entity_id, user_id)
+            return await self.get_category(entity_id, user_id, include_deleted)
         if entity_type == "account":
-            return await self.get_account(entity_id, user_id)
+            return await self.get_account(entity_id, user_id, include_deleted)
         if entity_type == "transaction":
-            return await self.get_transaction(entity_id, user_id)
+            return await self.get_transaction(entity_id, user_id, include_deleted)
         if entity_type == "budget":
-            return await self.get_budget(entity_id, user_id)
+            return await self.get_budget(entity_id, user_id, include_deleted)
         return None

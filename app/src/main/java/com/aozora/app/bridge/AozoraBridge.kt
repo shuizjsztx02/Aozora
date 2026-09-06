@@ -4,6 +4,9 @@ import android.webkit.JavascriptInterface
 import android.webkit.WebView
 import com.aozora.app.db.Repository
 import com.aozora.app.db.entity.*
+import com.aozora.app.sync.SyncEngine
+import com.aozora.app.sync.SyncScheduler
+import com.aozora.app.sync.SyncState
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
@@ -23,11 +26,14 @@ import org.json.JSONObject
  * 约束：
  *   - Bridge 本身不生成业务结论，只转发到 Repository
  *   - 所有写操作通过 Repository 确保原子事务（实体 + pending mutation）
+ *   - sync.* 命令可选；未注入 SyncEngine 时返回 unavailable
  */
 class AozoraBridge(
     private val repository: Repository,
     private val webView: WebView,
-    private val scope: CoroutineScope = CoroutineScope(Dispatchers.Main)
+    private val scope: CoroutineScope = CoroutineScope(Dispatchers.Main),
+    private val syncEngine: SyncEngine? = null,
+    private val syncContext: android.content.Context? = null
 ) {
     @JavascriptInterface
     fun call(version: Int, requestId: String, command: String, payloadJson: String) {
@@ -103,6 +109,10 @@ class AozoraBridge(
             BridgeCommands.PM_MARK_SYNCING -> handlePmMarkSyncing(requestId, payload)
             BridgeCommands.PM_MARK_FAILED -> handlePmMarkFailed(requestId, payload)
             BridgeCommands.PM_REMOVE -> handlePmRemove(requestId, payload)
+
+            // T-M3-02: 同步引擎
+            BridgeCommands.SYNC_GET_STATUS -> handleSyncGetStatus(requestId)
+            BridgeCommands.SYNC_TRIGGER -> handleSyncTrigger(requestId, payload)
 
             else -> BridgeResponse.error(requestId, "unknown_command", "Unknown command: $command")
         }
@@ -297,6 +307,9 @@ class AozoraBridge(
                 put("status", m.status); put("retryCount", m.retryCount)
                 put("payload", m.payload)
                 put("createdAt", m.createdAt)
+                // P2-10: 补全 expectedVersion 和 lastError 字段（TS 类型声明为 optional）
+                if (m.expectedVersion != null) put("expectedVersion", m.expectedVersion)
+                if (m.lastError != null) put("lastError", m.lastError)
             })
         }
         return BridgeResponse.success(requestId, arr.toString())
@@ -315,6 +328,59 @@ class AozoraBridge(
     private suspend fun handlePmRemove(requestId: String, p: JSONObject): BridgeResponse {
         repository.removeMutation(p.getString("mutationId"))
         return BridgeResponse.success(requestId, JSONObject().put("success", true).toString())
+    }
+
+    // ─── T-M3-02: 同步引擎 handlers ───
+
+    private suspend fun handleSyncGetStatus(requestId: String): BridgeResponse {
+        val engine = syncEngine
+            ?: return BridgeResponse.error(requestId, "unavailable", "sync engine not injected")
+        val s = engine.status.value
+        val data = JSONObject().apply {
+            put("state", when (s.state) {
+                SyncState.IDLE -> "idle"
+                SyncState.PUSHING -> "pushing"
+                SyncState.PULLING -> "pulling"
+                SyncState.REBUILDING -> "rebuilding"
+                SyncState.AUTH_LOST -> "auth-lost"
+                SyncState.ERROR -> "error"
+            })
+            put("pendingCount", s.pendingCount)
+            put("lastSyncedAt", s.lastSyncedAt)
+            if (s.lastError != null) put("lastError", s.lastError)
+            // N-M3-5 修复：failedMutations 数组，前端可据此展示冲突提示。
+            val failedArr = org.json.JSONArray()
+            for (fm in s.failedMutations) {
+                failedArr.put(JSONObject().apply {
+                    put("mutationId", fm.mutationId)
+                    put("entityType", fm.entityType)
+                    put("entityId", fm.entityId)
+                    put("operation", fm.operation)
+                    if (fm.reason != null) put("reason", fm.reason)
+                })
+            }
+            put("failedMutations", failedArr)
+        }
+        return BridgeResponse.success(requestId, data.toString())
+    }
+
+    private fun handleSyncTrigger(requestId: String, p: JSONObject): BridgeResponse {
+        val ctx = syncContext
+            ?: return BridgeResponse.error(requestId, "unavailable", "sync context not injected")
+        val engine = syncEngine
+        val forceBootstrap = p.optBoolean("forceBootstrap", false)
+        if (forceBootstrap && engine != null) {
+            // T-M3-03: 强制 bootstrap — 在协程中异步执行，立即返回 enqueued 状态。
+            scope.launch(Dispatchers.IO) {
+                engine.runBootstrapForced()
+            }
+            return BridgeResponse.success(
+                requestId,
+                JSONObject().put("enqueued", true).put("forceBootstrap", true).toString()
+            )
+        }
+        SyncScheduler.enqueue(ctx)
+        return BridgeResponse.success(requestId, JSONObject().put("enqueued", true).toString())
     }
 
     // ─── 响应发送 ───

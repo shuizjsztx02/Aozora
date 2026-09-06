@@ -1,16 +1,216 @@
+@import "tailwindcss";
+
+/* ─── 四时主题 Token（V5.2） ─── */
+/* 根节点挂 .t-dawn / .t-day / .t-dusk / .t-night 类切换 */
+
 :root {
-  font-family: system-ui, sans-serif;
-  color: #101828;
-  background: #f7fbff;
+  /* 默认昼间主题 */
+  --ink: #122031;
+  --ink2: #3C5069;
+  --ink3: #69809B;
+  --accent: #1D6CB0;
+  --glass: rgba(255, 255, 255, 0.52);
+  --glass-border: rgba(255, 255, 255, 0.3);
+  --income: #1E9E6A;
+  --expense: #D95F3B;
+  --warn: #A8730F;
+  --sky-from: #87CEEB;
+  --sky-to: #E0F4FF;
+  --nav-bg: rgba(255, 255, 255, 0.7);
+  --card-shadow: 0 4px 24px rgba(0, 0, 0, 0.06);
+  --blur-amount: 20px;
 }
+
+/* 晨 dawn (05:00-09:59) */
+.t-dawn {
+  --ink: #1E2733;
+  --ink2: #46536B;
+  --ink3: #6E7C90;
+  --accent: #D96F5A;
+  --glass: rgba(255, 253, 250, 0.6);
+  --glass-border: rgba(255, 200, 180, 0.3);
+  --income: #1E9E6A;
+  --expense: #D95F3B;
+  --warn: #A8730F;
+  --sky-from: #FFB88C;
+  --sky-to: #FFE4D6;
+  --nav-bg: rgba(255, 250, 245, 0.75);
+  --card-shadow: 0 4px 24px rgba(180, 100, 60, 0.08);
+}
+
+/* 昼 day (10:00-16:59) */
+.t-day {
+  --ink: #122031;
+  --ink2: #3C5069;
+  --ink3: #69809B;
+  --accent: #1D6CB0;
+  --glass: rgba(255, 255, 255, 0.52);
+  --glass-border: rgba(255, 255, 255, 0.3);
+  --income: #1E9E6A;
+  --expense: #D95F3B;
+  --warn: #A8730F;
+  --sky-from: #87CEEB;
+  --sky-to: #E0F4FF;
+  --nav-bg: rgba(255, 255, 255, 0.7);
+  --card-shadow: 0 4px 24px rgba(0, 0, 0, 0.06);
+}
+
+/* 暮 dusk (17:00-19:59) */
+.t-dusk {
+  --ink: #241C36;
+  --ink2: #4E4066;
+  --ink3: #7A6C92;
+  --accent: #D95F3B;
+  --glass: rgba(255, 249, 242, 0.52);
+  --glass-border: rgba(200, 150, 100, 0.25);
+  --income: #1E9E6A;
+  --expense: #D95F3B;
+  --warn: #A8730F;
+  --sky-from: #E8756A;
+  --sky-to: #2D1B4E;
+  --nav-bg: rgba(60, 40, 70, 0.65);
+  --card-shadow: 0 4px 24px rgba(80, 30, 60, 0.15);
+}
+
+/* 夜 night (20:00-04:59) */
+.t-night {
+  --ink: #EFF1F8;
+  --ink2: #B6BCCF;
+  --ink3: #7A83A3;
+  --accent: #E9C56A;
+  --glass: rgba(14, 19, 40, 0.55);
+  --glass-border: rgba(100, 120, 180, 0.2);
+  --income: #4CC38A;
+  --expense: #E8756A;
+  --warn: #E9C56A;
+  --sky-from: #0F1628;
+  --sky-to: #1A1F3A;
+  --nav-bg: rgba(14, 19, 40, 0.8);
+  --card-shadow: 0 4px 24px rgba(0, 0, 0, 0.3);
+}
+
+/* ─── 基础排版 ─── */
 
 body {
   margin: 0;
   min-width: 320px;
+  min-height: 100vh;
+  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', 'PingFang SC',
+    'Hiragino Sans GB', 'Microsoft YaHei', sans-serif;
+  color: var(--ink);
+  background: linear-gradient(180deg, var(--sky-from), var(--sky-to));
+  transition: color 0.3s, background 0.3s;
 }
 
-main {
-  display: grid;
-  min-height: 100vh;
-  place-items: center;
+/* ─── 玻璃材质基础类 ─── */
+
+.glass-card {
+  background: var(--glass);
+  backdrop-filter: blur(var(--blur-amount));
+  -webkit-backdrop-filter: blur(var(--blur-amount));
+  border: 1px solid var(--glass-border);
+  border-radius: 16px;
+  box-shadow: var(--card-shadow);
+}
+
+.sheet-glass {
+  background: var(--glass);
+  backdrop-filter: blur(var(--blur-amount));
+  -webkit-backdrop-filter: blur(var(--blur-amount));
+  border-radius: 16px 16px 0 0;
+  border-top: 1px solid var(--glass-border);
+}
+
+.nav-glass {
+  background: var(--nav-bg);
+  backdrop-filter: blur(var(--blur-amount));
+  -webkit-backdrop-filter: blur(var(--blur-amount));
+  border-top: 1px solid var(--glass-border);
+}
+
+/* ─── 数据展示类 ─── */
+
+.row-line {
+  border-bottom: 1px solid var(--glass-border);
+}
+
+.cat-cell {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 4px;
+  padding: 8px 4px;
+  border-radius: 12px;
+  cursor: pointer;
+  transition: background 0.15s;
+}
+
+.cat-cell:hover,
+.cat-cell.active {
+  background: var(--glass);
+}
+
+.key-btn {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 12px;
+  font-size: 1.25rem;
+  font-weight: 500;
+  cursor: pointer;
+  transition: background 0.1s, transform 0.1s;
+  user-select: none;
+  background: var(--glass);
+  color: var(--ink);
+  border: 1px solid var(--glass-border);
+  min-height: 48px;
+}
+
+.key-btn:active {
+  transform: scale(0.95);
+  opacity: 0.8;
+}
+
+.money-num {
+  font-variant-numeric: tabular-nums;
+  font-weight: 600;
+  letter-spacing: -0.02em;
+}
+
+.serif-date {
+  font-family: 'Noto Serif SC', serif;
+  letter-spacing: 0.2em;
+}
+
+/* ─── 天空画布 ─── */
+
+.sky-fixed {
+  position: fixed;
+  inset: 0;
+  z-index: 0;
+  pointer-events: none;
+  overflow: hidden;
+}
+
+/* ─── 辅助 ─── */
+
+.text-income { color: var(--income); }
+.text-expense { color: var(--expense); }
+.text-accent { color: var(--accent); }
+.text-ink2 { color: var(--ink2); }
+.text-ink3 { color: var(--ink3); }
+
+/* ─── 无障碍 ─── */
+
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+  }
+}
+
+/* 字体放大适配 */
+.text-lg-scale {
+  font-size: 1.3em;
 }

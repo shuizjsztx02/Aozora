@@ -115,21 +115,21 @@
 | 层 | 当前实现 | 状态 |
 |---|---|---|
 | Android | Kotlin 单 Activity + 受限 WebView，minSdk 26 / targetSdk 36 | `CURRENT`，仅生产基线空壳 |
-| Web UI | React 19、Vite 8 最小构建入口 | `CURRENT`，仅生产基线空壳 |
-| 页面、手动记账与统计 | 尚未实现 | `TARGET` |
+| Web UI | React 19、Vite 8、Tailwind v4、HashRouter、Zustand、Framer Motion、Recharts；四时主题系统、核心页面（首页/明细/报表/我的/首启/登录） | `PARTIAL`，T-M4-00 ✅ |
+| 页面、手动记账与统计 | 首页、明细、报表、快速记账 Sheet、我的、首启、登录；四时设计系统；状态组件 | `PARTIAL`，T-M4-00 ✅ |
 | AI、规则 NLU 与动作协议 | 本地 NLU 与 ActionProposal 基础已实现；服务端 AI/执行闭环未接入 | `PARTIAL` |
-| 本地数据与离线队列 | Room 6 表、完整原子写 repository 与 pending mutation 队列已实现（account/budget/transaction 写路径闭环），设备可靠性已通过（23/23 含手工 force-stop 协议）；离线同步与备份归 M3/M5 | `PARTIAL` |
-| 原生桥、语音、图片、提醒与小组件 | 版本化 Bridge 与 React 打包接线已实现；其余原生能力待做 | `PARTIAL` |
-| 服务端 | FastAPI 骨架、配置校验、健康检查、OpenAPI 3.1、Dockerfile；11 实体模型 + Alembic 迁移（0001_initial + 0002_exports + 0003_sync_idempotency）；auth 模块；账本核心 API（Books/Categories/Accounts/Transactions/Budgets CRUD）；统计与导出 API（月度/趋势聚合、JSON/CSV 导出，对账不变量）；同步模块（push/pull/bootstrap、幂等 mutation、cursor 变更流）| `PARTIAL`，T-M2-01/02/03/04/05 ✅；T-M3-01 ✅；Android 同步引擎待实施 |
-| 测试 | 前端 327 + Android JVM 8 + 设备 Room 27 + 服务端 122 项通过；Android 设备 30/30 实测（含手工 force-stop 持久化验证，杀进程与 WebView 测试已 @Ignore 避免自动化假绿/假红）；前端/Android CI 已通过，服务端 CI 门禁尚未建立 | `PARTIAL` |
+| 本地数据与离线队列 | Room v2 schema（6 实体 + `sync_meta`），`pending_mutations` 携带 `expectedVersion`/`lastError`；Repository 单事务合并路径 `applyServerChanges`；WorkManager 同步调度打通；设备可靠性已通过 | `PARTIAL`，T-M3-02 ✅ |
+| 原生桥、语音、图片、提醒与小组件 | 版本化 Bridge v1 22 命令（含 `sync.getStatus`/`sync.trigger`）与 React 打包接线已实现；其余原生能力待做 | `PARTIAL` |
+| 服务端 | FastAPI 骨架、配置校验、健康检查、OpenAPI 3.1、Dockerfile；11 实体模型 + Alembic 迁移（0001_initial → 0006_budget_deleted_at）；auth 模块；账本核心 API（Books/Categories/Accounts/Transactions/Budgets CRUD）；统计与导出 API（月度/趋势聚合、JSON/CSV 导出，对账不变量）；同步模块（push/pull/bootstrap、幂等 mutation、cursor 变更流、budget 软删支持）| `PARTIAL`，T-M2-01/02/03/04/05 ✅；T-M3-01 ✅；T-M3-02 服务端 budget 扩展 ✅ |
+| 测试 | 前端 348 + Android JVM（含 SyncPayloadMapperTest 11 + BridgeProtocolTest 22 命令检查）+ 设备 Room（含 Migration1To2 + SyncEngineTest + 手工 FlightMode）+ 服务端 184 项通过 | `PARTIAL` |
 | 发布 | 无签名材料和可分发产物 | `TARGET` |
 
 ### 3.2 当前不能视为已交付的能力
 
 - 真实 AI 调用与提案确认/业务执行闭环
 - 安全的登录、鉴权和会话管理（服务端 auth 模块已实现；SMS 供应商未接入，当前开发模式用固定验证码）
-- 云端同步与换机恢复（服务端同步 API 已实现 T-M3-01；Android 同步引擎待 T-M3-02）
-- 数据库版本迁移器（v1 → v2+ 升级路径未实现；设备持久性已通过 Room 6 表 + force-stop 协议实测；Alembic 服务端迁移流水线已就绪）
+- 云端同步与换机恢复（服务端 T-M3-01 ✅；Android 同步引擎 T-M3-02 ✅；bootstrap checksum T-M3-03 ✅）
+- 数据库版本迁移器（Room MIGRATION_1_2 已就绪，Alembic 0001 → 0006 流水线已就绪）
 - 可靠自动备份、数据库恢复和账号删除
 - 多账本、二级分类、支付渠道（Schema 已支持，业务 API 待实施）
 - 生产监控、CI/CD、灰度发布和安全审计
@@ -648,14 +648,24 @@ app/src/
 - **实施：** WorkManager、指数退避、网络约束、token refresh、Room 原子合并、前端同步状态事件。
 - **验收：** 飞行模式记账后恢复网络可同步；进程/设备重启队列不丢；连续点击不会产生重复流水。
 
-#### T-M3-03 单设备恢复与多设备兼容预留
+#### T-M3-03 单设备恢复与多设备兼容预留 ✅
 
 - **目标：** 首发支持单设备数据重建，并在协议层保留未来多设备同步能力。
 - **依赖：** T-M3-02。
 - **实施：** bootstrap checksum、Room 重建流程、deviceId/version/cursor 字段；服务端保留冲突响应，首发不开发多设备入口、实时推送和冲突 Sheet。
 - **验收：** 清空 Room 后可从服务端重建并对账一致；服务端版本冲突不会静默覆盖；首发 UI 不承诺多设备同时使用。
+- **结果：** 服务端 72 项测试 + 客户端 JVM 单元测试 + androidTest 编译通过。T-M3-03 审查闸门通过（P1-1/P1-2 已修复）。
 
 ### M4：AI、原生能力与完整产品体验
+
+> 2026-09-06 起 M4 各任务按实现工程量拆解为子任务（编号如 T-M4-00a、T-M4-01a），并新增 T-M4-00 前端骨架与核心页面。子任务范围、依赖、建议顺序与状态的权威来源为 `docs/milestones/production-execution-plan.md` M4 章节；本节维持父任务目标与验收边界。
+
+#### T-M4-00 前端骨架与核心页面
+
+- **目标：** 建立生产前端基础：应用骨架、四时设计系统与核心页面数据流，为 M4 各功能任务提供页面承载。
+- **依赖：** T-M1-03、T-M3-02。
+- **实施：** Tailwind/Zustand/Framer Motion/Recharts/路由落地与 §7.3 目录搭建；四时主题 token、状态组件与可访问性基础；首页、快速记账 Sheet、明细、我的、报表基础、首启与登录页全部经 bridge 读 Room；bridge 扩展 auth.* 命令，token 保持 Kotlin 层。
+- **验收：** 核心页面金额与 Room 一致；手动记账主链路（记账 → mutation → 同步）真机可用；WebView 存储无 token；既有前端测试不回归。视觉对比度验收与截图基线归 T-M4-06。
 
 #### T-M4-01 服务端 AI Gateway
 
@@ -667,14 +677,14 @@ app/src/
 #### T-M4-02 动作协议、校验与确认卡
 
 - **目标：** 打通 AI 理解到安全业务执行的完整闭环。
-- **依赖：** T-M1-05、T-M2-04、T-M4-01。
+- **依赖：** T-M1-05、T-M2-04、T-M4-00、T-M4-01。
 - **实施：** ActionProposal Schema、服务端/客户端契约测试、confidence 策略、确认卡、批量编辑、5 秒撤销。
 - **验收：** 非法 JSON、幻觉数字、无权限分类、低置信动作零写库；确认后通过普通业务 API 入账。
 
 #### T-M4-03 AI 查询与月度洞察
 
 - **目标：** 基于确定性数据生成“钱去哪了”的解释。
-- **依赖：** T-M2-05、T-M4-01。
+- **依赖：** T-M2-05、T-M4-00、T-M4-01。
 - **实施：** 服务端生成事实包，LLM 只生成叙述，数字引用校验，同数据缓存，离线纯统计降级。
 - **验收：** 报告数字全部可追溯；数据未变不重复计费；断网仍可查看基础报告。
 
@@ -688,14 +698,14 @@ app/src/
 #### T-M4-05 通知、快捷方式与小组件迁移
 
 - **目标：** 原生入口统一读取 Room/同步后的数据。
-- **依赖：** T-M1-03、T-M3-02。
+- **依赖：** T-M1-03、T-M3-02、T-M4-00。
 - **实施：** ReminderScheduler、Widget Provider 和 shortcuts 改用 repository；增加登录/无数据/待同步状态。
 - **验收：** 重启后提醒有效；小组件与首页金额一致；快捷入口打开正确页面；无旧 JSON 依赖。
 
 #### T-M4-06 AOZORA 全页面视觉与可访问性
 
 - **目标：** 将当前视觉原型打磨为可生产使用的四时设计系统。
-- **依赖：** 核心页面数据流稳定。
+- **依赖：** T-M4-00、T-M4-02、T-M4-03（核心页面数据流稳定由其产出）。
 - **实施：** token 化页面、状态组件、对比度修复、字体放大、reduced motion、低性能模式、截图基线。
 - **验收：** 四主题正文对比度 ≥4.5:1；Android 小屏与字体 1.3× 无遮挡；关键页面视觉回归通过。
 

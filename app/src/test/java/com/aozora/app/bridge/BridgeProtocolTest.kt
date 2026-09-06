@@ -62,22 +62,36 @@ class BridgeProtocolTest {
     fun test_allCommands_areDefined() {
         val commands = listOf(
             BridgeCommands.GET_VERSION,
+            // Transaction
             BridgeCommands.TX_INSERT,
             BridgeCommands.TX_GET,
             BridgeCommands.TX_LIST_BY_BOOK,
             BridgeCommands.TX_LIST_BY_DATE,
             BridgeCommands.TX_SOFT_DELETE,
+            // Book
             BridgeCommands.BOOK_LIST,
             BridgeCommands.BOOK_INSERT,
+            // Category
             BridgeCommands.CATEGORY_LIST,
+            // Account (R-M1-43)
             BridgeCommands.ACCOUNT_LIST,
+            BridgeCommands.ACCOUNT_INSERT,
+            BridgeCommands.ACCOUNT_ARCHIVE,
+            // Budget (R-M1-43)
             BridgeCommands.BUDGET_LIST,
+            BridgeCommands.BUDGET_INSERT,
+            BridgeCommands.BUDGET_UPDATE,
+            BridgeCommands.BUDGET_DELETE,
+            // Pending Mutations
             BridgeCommands.PM_LIST,
             BridgeCommands.PM_MARK_SYNCING,
             BridgeCommands.PM_MARK_FAILED,
             BridgeCommands.PM_REMOVE,
+            // T-M3-02: 同步引擎
+            BridgeCommands.SYNC_GET_STATUS,
+            BridgeCommands.SYNC_TRIGGER,
         )
-        assertEquals(15, commands.size)
+        assertEquals(22, commands.size)
         // 无重复
         assertEquals(commands.size, commands.toSet().size)
     }

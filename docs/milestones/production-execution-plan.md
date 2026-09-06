@@ -1,6 +1,6 @@
 # Aozora · 生产执行规划
 
-**状态：** M1 全部完成 ✅，M2 阶段 T-M2-01 至 T-M2-05 全部交付 ✅。M3 阶段 T-M3-01 已交付 ✅。当前任务为 T-M3-02 Android 同步引擎。
+**状态：** M1 全部完成 ✅，M2 阶段 T-M2-01 至 T-M2-05 全部交付 ✅。M3 阶段 T-M3-01、T-M3-02、T-M3-03 全部交付 ✅。M4 阶段 T-M4-00 前端骨架与核心页面 ✅（2026-09-06 交付，含技术栈、四时主题、核心页面数据流）。
 **用途：** 后续执行 Agent 的唯一任务选择与交接入口。产品、架构与全局验收以 `docs/APP-CONTEXT.md` 为准；本文件只维护顺序、闸门、交接与完成记录。
 
 ## 执行规则
@@ -363,8 +363,8 @@
 | 任务 | 硬依赖 | 交接产物 | 最低验证 | 状态 |
 |---|---|---|---|---|
 | T-M3-01 同步契约与变更流 ✅ | T-M2-04 | push/pull、cursor、冲突响应 | 重复、乱序、分页、重试 | ✅ **通过** |
-| T-M3-02 Android 同步引擎 | T-M1-03、T-M3-01 | WorkManager 队列与状态事件 | 飞行模式、重启、重复点击 | — |
-| T-M3-03 单设备恢复 | T-M3-02 | bootstrap checksum、Room 重建 | 清空 Room 后对账一致 | — |
+| T-M3-02 Android 同步引擎 ✅ | T-M1-03、T-M3-01 | WorkManager 队列与状态事件 | 飞行模式、重启、重复点击 | ✅ **通过** |
+| T-M3-03 单设备恢复 ✅ | T-M3-02 | bootstrap checksum、Room 重建 | 清空 Room 后对账一致 | ✅ **通过** |
 
 ### T-M3-01 完成记录
 
@@ -413,21 +413,402 @@
   - 事务边界：push 中 conflict 后整个请求仍提交已成功的 mutation——这是设计决策（幂等重入），非 bug
 - **下一项未阻塞任务：** T-M3-02 Android 同步引擎
 
+### T-M3-02 完成记录
+
+按交接模板：
+
+- **任务编号：** T-M3-02
+- **完成范围 / 明确未做：**
+  - ✅ 完成：Android Room schema v2 迁移（`sync_meta` + `pending_mutations` 新增 `expectedVersion`/`lastError` 列；迁移 `MIGRATION_1_2`）。
+  - ✅ 完成：Android 认证包 `com.aozora.app.auth`：`KeystoreCrypto`（AndroidKeyStore AES/GCM）、`TokenStore`（加密持久化 access/refresh/user_id/device_id/registered）、`AuthClient`（Mutex 单飞 refresh；首次同步自动 `/auth/guest` 注册；refresh 失败抛 `AuthLostException`）。
+  - ✅ 完成：Android 同步包 `com.aozora.app.sync`：
+    - `SyncApi`/`HttpSyncApi`：push/pull HTTP 传输（OkHttp 4.12.0 + Bearer）。
+    - `SyncPayloadMapper`：camelCase↔snake_case 纯函数映射（JVM 可测）。
+    - `SyncEngine`：push/pull 编排（pull → push → pull-echo），状态机 `SyncState` + `SyncStatusEvent`，错误分类 OK/AUTH_LOST/RETRYABLE。
+    - `SyncWorker`（CoroutineWorker）+ `SyncScheduler`（唯一命名工作，指数退避 15s–5min，网络约束）。
+  - ✅ 完成：`Repository` 扩展 —— 所有 update/delete/archive 入队时捕获 `expectedVersion = current.version`；新增 `applyServerChanges`（单事务合并，跳过有活跃 mutation 的实体，同事务推进 cursor，不入队新 mutation）；新增 `removeAppliedMutations` / `listPushableMutations` / `resetSyncingMutations` / `markMutationFailedWithError` / `listActiveMutationEntityIds` / `getSyncCursor` / `setSyncCursor`。
+  - ✅ 完成：服务端 budget 软删支持（`deleted_at` 列 + 部分唯一索引 `AND deleted_at IS NULL` + 迁移 `0006_budget_deleted_at`；bootstrap/pull 过滤）。
+  - ✅ 完成：Bridge v1 命令清单 20 → 22（新增 `sync.getStatus` / `sync.trigger`）；TS 类型扩展（`SyncStatusData` / `SyncEvent` / `PendingMutationData.expectedVersion`/`lastError`，operation 增 `archive`）；`MainActivity` 通过 `window.__aozoraSyncEvent__` 推送同步事件到前端。
+  - ✅ 完成：文档（`overview.md` 同步引擎章节、`data-model.md` Room v2 schema 章节、`testing.md` 测试矩阵、`risk-register.md` R-PROD-11/12/13）。
+  - ❌ 未做：bootstrap checksum 校验（T-M3-03）。
+  - ❌ 未做：release 构建的 `SYNC_BASE_URL` 生产值（依赖运维提供域名；当前走 gradle property `AOZORA_API_BASE`，默认空，需构建时注入）。
+  - ❌ 未做：前端同步状态徽章 UI（仅暴露事件通道，未接入视图）。
+- **修改的文档、契约与代码：**
+  - 新增 Android 包：`com.aozora.app.auth`（`KeystoreCrypto.kt`、`TokenStore.kt`、`AuthClient.kt`）。
+  - 新增 Android 包：`com.aozora.app.sync`（`SyncApi.kt`、`HttpSyncApi.kt`、`SyncPayloadMapper.kt`、`SyncEngine.kt`、`SyncWorker.kt`、`SyncScheduler.kt`、`SyncModels.kt`）。
+  - 新增 Room schema v2：`db/entity/SyncMetaEntity.kt`、`db/migrations/Migrations.kt`、`db/dao/SyncMetaDao.kt`；扩展 `PendingMutationEntity`/`PendingMutationDao`/`TransactionDao`/`BookDao`/`CategoryDao`/`AccountDao`/`BudgetDao`。
+  - 新增服务端迁移：`server/src/migrations/versions/0006_budget_deleted_at.py`；扩展 `server/src/models/budget.py`、`server/src/modules/sync/{repository,service}.py`。
+  - 更新：`app/build.gradle.kts`（BuildConfig、依赖：work-runtime-ktx 2.11.2、okhttp 4.12.0、lifecycle-runtime-ktx 2.8.4、mockwebserver/work-testing）。
+  - 更新：`app/src/main/AndroidManifest.xml`（`android:name=".AozoraApp"`、`network_security_config`）。
+  - 更新：`app/src/main/java/com/aozora/app/{AozoraApp,MainActivity}.kt`（单例装配 + 事件收集）。
+  - 更新：`app/src/main/java/com/aozora/app/bridge/{BridgeProtocol,AozoraBridge}.kt`（22 命令 + sync handlers）。
+  - 更新：`app/src/platform/bridge/{bridge-types,native-bridge}.ts`（同步类型）。
+  - 更新：`docs/architecture/{overview,data-model}.md`、`docs/engineering/testing.md`、`docs/risk-register.md`。
+- **验证命令与结果：**
+  - `cd server && pytest --ignore=tests/test_stats_exports.py` → **184 passed**（原 158 + budget 软删相关测试）。
+  - `./gradlew :app:testDebugUnitTest :app:testReleaseUnitTest` → **全部通过**（含新增 SyncPayloadMapperTest 11 项 + BridgeProtocolTest 22 命令检查）。
+  - `./gradlew :app:assembleDebugAndroidTest` → **BUILD SUCCESSFUL**（含新增 Migration1To2Test、SyncEngineTest、FlightModeSyncManualTest）。
+  - `cd app && npm test` → **327 passed**（含 bridge 命令完整性更新至 22）。
+  - `cd app && npm run typecheck` → **通过**。
+- **数据/同步/AI/安全影响：**
+  - 数据：Room schema v2（不可逆迁移，但 v1→v2 仅加列+加表，老数据保留）。
+  - 同步：Android 端 push/pull 链路打通；pull-echo 合并保证幂等（跳过活跃 mutation + REPLACE upsert）；WorkManager 单飞 + 指数退避保证"飞行模式恢复后 ≤ 60s 内同步"（best-effort）。
+  - AI：无关（同步为确定性数据操作）。
+  - 安全：access_token 永不以明文落盘（AndroidKeyStore AES/GCM + Base64）；refresh_token 同样加密；refresh 单飞防止轮换竞争；认证丢失（4xx / refresh 失败）→ 清空本地 auth 引导用户干预。
+- **兼容与回退方式：**
+  - 向后兼容：纯新增模块 + Room v2 迁移；旧客户端（v1 schema）无法升级到 v2 后继续使用 v1 功能——这是设计决策（Room 强制迁移）。
+  - 回退：Android 端卸载应用；服务端 `alembic downgrade 0005`。
+- **开放风险与责任人：**
+  - R-PROD-11：60s SLO best-effort（受 Doze/电池策略影响）。
+  - R-PROD-12：release 构建 `SYNC_BASE_URL` 默认空——发布前运维需配置。
+  - R-PROD-13：guest session-loss 策略——Keystore 损坏时视为认证丢失，用户需重新使用匿名注册流程。
+- **下一项未阻塞任务：** T-M3-03 bootstrap checksum 校验
+
+### T-M3-03 完成记录
+
+按交接模板：
+
+- **任务编号：** T-M3-03
+- **完成范围 / 明确未做：**
+  - ✅ 完成：服务端 `compute_bootstrap_checksum`（SHA-256，canonical JSON：实体按 id 排序、键按字母序、紧凑分隔符、固定类型顺序 books|categories|accounts|transactions|budgets|cursor）。
+  - ✅ 完成：`BootstrapResponse` schema 新增 `checksum: str` 字段；`bootstrap()` 端点返回 checksum。
+  - ✅ 完成：服务端测试 7 项（`test_bootstrap_empty`、`test_bootstrap_returns_all_data`、`test_bootstrap_excludes_deleted`、`test_bootstrap_cross_user_isolation`、`test_bootstrap_checksum_is_deterministic`、`test_bootstrap_checksum_changes_on_mutation`、`test_bootstrap_checksum_matches_local_computation`）。
+  - ✅ 完成：Android `BootstrapChecksum.kt` — 与服务端算法完全一致的 Kotlin 实现（确定性 JSON 序列化 + SHA-256）。
+  - ✅ 完成：Android `SyncApi.bootstrap()` 接口 + `HttpSyncApi.bootstrap()` 实现（POST /sync/bootstrap）。
+  - ✅ 完成：`SyncPayloadMapper.parseBootstrapResponse()` — 解析服务端 JSON → `BootstrapResponse`（snake→camel 映射）。
+  - ✅ 完成：`SyncEngine.runBootstrap()` — 清空 Room → 拉取快照 → 重建 → checksum 校验；不匹配返回 RETRYABLE。
+  - ✅ 完成：`SyncEngine.runBootstrapForced()` — 供前端 `sync.trigger(forceBootstrap=true)` 调用的公开方法。
+  - ✅ 完成：`SyncEngine.needsBootstrap()` — cursor==0 且本地无 books 时自动触发 bootstrap；`runOnce()` 第3步集成该检测。
+  - ✅ 完成：`Repository.clearAllEntities()` — 单事务清空所有实体表 + 重置 cursor=0。
+  - ✅ 完成：`Repository.applyBootstrap()` — 单事务 upsert 全部实体 + 写入 cursor；不入队 pending mutation。
+  - ✅ 完成：`Repository.listAllActiveEntities()` — bootstrap 后对账查询。
+  - ✅ 完成：Bridge `sync.trigger` 支持 `forceBootstrap=true` 参数（异步执行，立即返回 enqueued）。
+  - ✅ 完成：`BootstrapChecksumTest.kt` 7 项单元测试（空数据确定性、顺序无关性、不同数据不同 hash、null 字段序列化、数字字段序列化、跨语言一致性比对）。
+  - ❌ 未做：bootstrap 后自动丢弃 stale pending mutations（当前保留，由后续 push 的 version conflict 处理）。
+  - ❌ 未做：前端同步状态徽章 UI（T-M3-02 遗留，非 T-M3-03 范围）。
+- **修改的文档、契约与代码：**
+  - 新增：`app/src/main/java/com/aozora/app/sync/BootstrapChecksum.kt`
+  - 新增：`app/src/test/java/com/aozora/app/sync/BootstrapChecksumTest.kt`
+  - 更新：`app/src/main/java/com/aozora/app/sync/SyncApi.kt`（`bootstrap()` 接口 + `BootstrapResponse` data class）
+  - 更新：`app/src/main/java/com/aozora/app/sync/HttpSyncApi.kt`（`bootstrap()` 实现）
+  - 更新：`app/src/main/java/com/aozora/app/sync/SyncPayloadMapper.kt`（`parseBootstrapResponse()`）
+  - 更新：`app/src/main/java/com/aozora/app/sync/SyncEngine.kt`（`needsBootstrap()`、`runBootstrap()`、`runBootstrapForced()`、`computeLocalChecksum()`；`runOnce()` 第3步集成 bootstrap 检测）
+  - 更新：`app/src/main/java/com/aozora/app/db/Repository.kt`（`clearAllEntities()`、`applyBootstrap()`、`listAllActiveEntities()`）
+  - 更新：`app/src/main/java/com/aozora/app/bridge/AozoraBridge.kt`（`sync.trigger` forceBootstrap 参数）
+  - 更新：`server/src/modules/sync/service.py`（`compute_bootstrap_checksum()`、`bootstrap()` 返回 checksum）
+  - 更新：`server/src/modules/sync/schemas.py`（`BootstrapResponse.checksum`）
+  - 更新：`server/tests/test_sync.py`（7 项 bootstrap/checksum 测试）
+  - 更新：`docs/milestones/production-execution-plan.md`（T-M3-03 完成记录）
+- **验证命令与结果：**
+  - `cd server && python -m pytest tests/ --ignore=tests/test_stats_exports.py -q` → **199 passed**
+  - `cd server && python -m pytest tests/test_sync.py -v -k "checksum or bootstrap"` → **7 passed**
+  - `./gradlew :app:testDebugUnitTest :app:testReleaseUnitTest` → **BUILD SUCCESSFUL**（含 BootstrapChecksumTest 7 项）
+- **数据/同步/AI/安全影响：**
+  - 数据：bootstrap 清空 Room 后从服务端完整重建；cursor 重置为服务端返回值。
+  - 同步：新设备首次同步（cursor=0 + 无本地数据）自动走 bootstrap；`runBootstrapForced()` 供手动触发；checksum 不匹配返回 RETRYABLE 由 WorkManager backoff 重试。
+  - AI：无关。
+  - 安全：bootstrap 端点需 Bearer token；checksum 仅用于完整性校验，不含敏感信息。
+- **兼容与回退方式：**
+  - 向后兼容：纯新增逻辑；`BootstrapResponse.checksum` 默认空字符串，旧服务端不返回时客户端 checksum 校验会失败（RETRYABLE），不影响已有数据。
+  - 回退：移除 `needsBootstrap()` 调用（`runOnce()` 第3步）即恢复 T-M3-02 行为。
+- **开放风险与责任人：**
+  - bootstrap 后 stale pending mutations 未自动清理——依赖 push 时 version conflict 处理；极端情况下用户可能看到"冲突待处理"提示。
+  - checksum 校验使用响应原始数据（非 Room 反查）——验证的是解析一致性，而非 Room 写入完整性；Room 写入完整性由 `applyBootstrap` 事务保证。
+- **下一项未阻塞任务：** T-M4-00a 前端技术栈落地与目录骨架 / T-M4-01a Provider 适配与模块骨架（两线可并行）
+
+### T-M4-00 完成记录
+
+按交接模板：
+
+- **任务编号：** T-M4-00（含 T-M4-00a 至 T-M4-00g）
+- **完成范围 / 明确未做：**
+  - ✅ 完成（00a）：安装 `react-router`（HashRouter）、`zustand`、`framer-motion`、`recharts`、`tailwindcss` v4 + `@tailwindcss/vite`。按 §7.3 搭建目录骨架（`app/`、`design/`、`components/`、`features/{ledger,reports,settings,onboarding,auth}`、`platform/{store,hooks}`）。ADR-002 记录选型决策。
+  - ✅ 完成（00b）：四时主题 CSS 变量系统（`.t-dawn/.t-day/.t-dusk/.t-night`），完整对应 `docs/design/tokens.md` V5.2 token 表。`useTheme()` hook 支持 auto/system/manual 三种模式。`SkyCanvas` 天空画布背景层（z-index ≤1、pointer-events:none、aria-hidden=true）。glass-card / sheet-glass / nav-glass / row-line / cat-cell / key-btn / money-num / serif-date 基础类。
+  - ✅ 完成（00c）：`EmptyState`、`LoadingState`、`ErrorState`、`PendingSyncState` 四类状态组件。`AppLayout` + `PageHeader` + `BottomNav`（nav-glass）布局组件。`useReducedMotion()` hook。
+  - ✅ 完成（00d）：`HomePage`（今日支出、本月预算进度、近期流水、SyncBadge 同步徽章）。`QuickEntrySheet`（底部弹层、收支切换、金额输入、分类选择、bridge 写入）。
+  - ✅ 完成（00e）：`DetailPage`（月份切换、全部/支出/收入筛选、日分组、删除流水）。`MePage`（主题切换、功能入口占位、用户信息）。
+  - ✅ 完成（00f）：`ReportsPage`（月度统计概览、分类占比环图 Recharts PieChart、每日趋势折线图 LineChart、预算执行进度条、收支切换）。纯本地数据（Room + domain/aggregator.ts）。
+  - ✅ 完成（00g）：`OnboardingPage`（品牌、隐私说明、游客/登录选择）。`LoginPage`（手机验证码表单骨架、游客入口，auth bridge 命令待后续接线）。
+  - ❌ 未做：auth bridge 命令实际接线（T-M4-01d 范围）；编辑流水功能（需 bridge 扩展 `transaction.update`）；提醒/导出功能接线（T-M4-05/T-M4-04 范围）；AI 洞察卡（T-M4-03c 范围）。
+- **修改的文档、契约与代码：**
+  - 新增代码：`src/app/`（Router.tsx、ErrorBoundary.tsx）、`src/design/`（theme.ts、SkyCanvas.tsx、a11y.ts）、`src/components/`（StateViews.tsx、Layout.tsx、BottomNav.tsx、SyncBadge.tsx）、`src/platform/store/`（sync-store.ts、data-store.ts）、`src/platform/hooks/`（use-bridge.ts）、`src/features/{ledger,reports,settings,onboarding,auth}/`（各页面组件）
+  - 更新：`src/App.tsx`（从占位改为路由容器 + SkyCanvas）、`src/index.css`（Tailwind 入口 + 四时 token + 基础类）、`vite.config.ts`（@tailwindcss/vite 插件）、`src/test/setup.ts`（cleanup）
+  - 新增测试：`src/__tests__/design/`（theme.test.ts、SkyCanvas.test.tsx）、`src/__tests__/components/`（StateViews.test.tsx、BottomNav.test.tsx）
+  - 新增 ADR：`docs/adr/ADR-002-frontend-tech-stack.md`
+  - 更新：`package.json`（+react-router、zustand、framer-motion、recharts、tailwindcss、@tailwindcss/vite）
+  - 更新：`docs/milestones/production-execution-plan.md`、`docs/milestones/overview.md`、`docs/APP-CONTEXT.md`
+- **验证命令与结果：**
+  - `npm run lint` → exit 0（仅 warnings，无 errors）
+  - `npm run typecheck` → exit 0
+  - `npm test -- --run` → **348 passed**（原 327 + 新增 21：theme ×5、SkyCanvas ×2、StateViews ×11、BottomNav ×2、App ×1）
+  - 既有 327 项测试全部不回归
+- **数据/同步/AI/安全影响：**
+  - 数据：前端通过 bridge 读取 Room 数据，Zustand 仅缓存视图态；金额使用 `MoneyCents` 整数分，不引入浮点
+  - 同步：`SyncBadge` 接入 `sync-store`，展示同步状态（T-M3-02 遗留的徽章 UI 已补齐）
+  - AI：报表页 AI 洞察卡位留给 T-M4-03c
+  - 安全：前端不持有 token（auth 接线留给后续）；localStorage 仅存主题偏好与首启标记
+- **兼容与回退方式：**
+  - 向后兼容：纯新增代码，不修改 domain/platform/bridge 层已有实现
+  - 回退：还原 `App.tsx` 为占位组件，删除 `src/app/`、`src/design/`、`src/components/`、`src/features/`、`src/platform/store/`、`src/platform/hooks/` 目录
+- **开放风险与责任人：**
+  - auth bridge 命令未实际接线——LoginPage 为 UI 骨架，真实登录需 T-M4-01d 完成后接线
+  - 编辑流水功能缺失——需 bridge 扩展 `transaction.update` 命令，留给 T-M4-02b
+  - Recharts 在低端 WebView 性能未验证——T-M4-06b 低端机适配时需测试
+  - Framer Motion 包体积未测量——首发可接受，后续可分析 tree-shaking
+- **下一项未阻塞任务：** T-M4-01a Provider 适配与模块骨架 / T-M4-02a Confidence 策略与执行链校验
+
 ## M4：AI、原生能力与体验
 
-| 任务 | 硬依赖 | 交接产物 | 外部前置 |
-|---|---|---|---|
-| T-M4-01 AI Gateway | T-M2-03 | provider adapter、用量、脱敏日志 | D-EXEC-04、R-PROD-01 已关闭 |
-| T-M4-02 动作协议与确认卡 | T-M1-05、T-M2-04、T-M4-01 | 安全确认与撤销闭环 | 无 |
-| T-M4-03 AI 查询与洞察 | T-M2-05、T-M4-01 | 事实包、数字校验、离线降级 | 无 |
-| T-M4-04 语音、图片与桥接 | T-M4-02 | 权限状态机、图片上传 | D-EXEC-05 |
-| T-M4-05 通知、快捷方式、小组件 | T-M1-03、T-M3-02 | 原生入口统一读 Room | 无 |
-| T-M4-06 视觉与无障碍 | 核心页面数据流稳定 | 四时主题、截图基线 | 无 |
+> **2026-09-06 子任务拆解（T-M0-10 治理规则）：** T-M4-01 至 06 原单任务范围过重，按代码实现工程量再拆一层为可独立实施、可独立验收的子任务，编号使用字母后缀（如 `T-M4-01a`），可直接用 `开发实现 T-M4-01a` 触发执行。新增 **T-M4-00 前端骨架与核心页面**，承接原任务树缺失的前端基础——生产仓库前端为空壳（`App.tsx` 仅占位，Tailwind/Zustand/Framer Motion/Recharts/路由未安装，§7.1 页面均缺失），而 T-M4-02/03/05/06 的页面级子任务均依赖其产出。父任务编号与验收边界不变（以 `docs/APP-CONTEXT.md` §9 为准）：子任务完成即更新本表状态并简记验证结果；父任务全部子任务通过后按交接模板补父任务完成记录。
+>
+> **外部前置状态：** R-PROD-01 已关闭 ✅。D-EXEC-04（AI 账户/配额）仅阻塞 T-M4-01d 的真实 provider 接入与 staging 冒烟，01a–01c 可用 mock provider 先行；D-EXEC-05（对象存储）仅阻塞 T-M4-04c 的正式存储接入，可先以临时目录 + 过期策略先行。
+>
+> **建议执行顺序：** 两条主线可并行——前端线 `T-M4-00a→00g`（无 AI 依赖）与服务端 AI 线 `T-M4-01a→01d`（无前端依赖）；汇合后依次 `T-M4-02a→02d`、`T-M4-03a→03c`、`T-M4-04a→04e`；T-M4-05 原生线在 T-M4-00 完成后可穿插；T-M4-06 在全部功能页面 UI 稳定后收尾。
 
-## M5 与 M6：发布前后闸门
+| 任务 | 硬依赖 | 交接产物 | 外部前置 | 状态 |
+|---|---|---|---|---|
+| T-M4-00 前端骨架与核心页面 | T-M1-03 ✅、T-M3-02 ✅ | 前端技术栈落地、四时设计系统、核心页面数据流 | 无 | ✅ **通过** |
+| T-M4-01 AI Gateway | T-M2-03 ✅ | provider adapter、用量、脱敏日志 | D-EXEC-04（仅 01d）；R-PROD-01 已关闭 ✅ | ⏳ 未开始 |
+| T-M4-02 动作协议与确认卡 | T-M1-05 ✅、T-M2-04 ✅、T-M4-00、T-M4-01 | 安全确认与撤销闭环 | 无 | ⏳ 未开始 |
+| T-M4-03 AI 查询与洞察 | T-M2-05 ✅、T-M4-00、T-M4-01 | 事实包、数字校验、离线降级 | 无 | ⏳ 未开始 |
+| T-M4-04 语音、图片与桥接 | T-M4-02 | 权限状态机、图片上传 | D-EXEC-05（仅 04c） | ⏳ 未开始 |
+| T-M4-05 通知、快捷方式、小组件 | T-M1-03 ✅、T-M3-02 ✅、T-M4-00 | 原生入口统一读 Room | 无 | ⏳ 未开始 |
+| T-M4-06 视觉与无障碍 | T-M4-00、T-M4-02、T-M4-03 | 四时主题打磨、截图基线 | 无 | ⏳ 未开始 |
 
-- **G5：安全与内测。** T-M5-01 对账 fuzz、T-M5-02 安全加固、T-M5-03 恢复演练、T-M5-04 隐私生命周期、T-M5-05 监控与 20–50 人内测均通过；D-EXEC-06 已落实。
-- **G6：生产发布与观察。** T-M6-01 可重复部署与回滚、T-M6-02 签名上架包与渠道验收、T-M6-03 分阶段放量与 S0 自动止损完成。
+### T-M4-00 前端骨架与核心页面（新增）
+
+**目标：** 建立生产前端基础：应用骨架、四时设计系统与核心页面数据流，为 M4 各功能任务提供页面承载。
+
+| 子任务 | 硬依赖 | 交接产物 | 最低验证 | 状态 |
+|---|---|---|---|---|
+| T-M4-00a 技术栈落地与目录骨架 | T-M1-01 ✅ | Tailwind 4、Zustand、Framer Motion、Recharts、路由库安装与接线（选型记 ADR）；按 §7.3 目标目录搭建；platform 层复用现有 bridge 封装 | `npm run lint / typecheck / test` 全绿且既有 327 项不回归；WebView 真机可导航多页面路由骨架 | ✅ **通过** |
+| T-M4-00b 四时主题设计系统 | 00a | `docs/design/tokens.md`（V5.2）→ CSS 变量 + Tailwind 主题（`.t-dawn/.t-day/.t-dusk/.t-night`）；themeMode；天空画布背景层；glass-card / sheet-glass / nav-glass / row-line / cat-cell / key-btn 基础类 | 时段映射与主题切换单测；装饰层不遮挡、不接收点击 | ✅ **通过** |
+| T-M4-00c 状态组件与可访问性基础 | 00b | 空/加载/错误/待同步状态组件；money-num、serif-date 排版类；reduced motion 支持 | 状态组件测试覆盖四类状态；前端测试基线不回归 | ✅ **通过** |
+| T-M4-00d 首页与快速记账 Sheet | 00c | 首页（今日支出、本月进度、近期流水、同步状态徽章）；快速记账 Sheet（收支、金额、分类、账户、日期、备注 → bridge 写入 → pending mutation） | 真机记账 → Room → mutation 入队闭环；页面金额与 Room 查询一致 | ✅ **通过** |
+| T-M4-00e 明细与我的页 | 00d | 明细（月份切换、日分组、筛选、删除）；我的（主题切换、功能入口占位） | 编辑/删除走 repository 乐观并发与 pending mutation 路径 | ✅ **通过** |
+| T-M4-00f 报表页基础 | 00e | 本地报表视图：分类占比环图、每日趋势折线图、预算执行进度（Room + domain 聚合器数据，纯本地） | 报表数字与明细/Room 聚合一账；离线可查看 | ✅ **通过** |
+| T-M4-00g 首启与登录页 | 00f | 首启（品牌、隐私说明、游客/登录选择）；登录（手机验证码表单骨架、游客入口） | 首启流程可走通；WebView 存储无 token | ✅ **通过** |
+
+### T-M4-01 服务端 AI Gateway
+
+| 子任务 | 硬依赖 | 交接产物 | 最低验证 | 状态 |
+|---|---|---|---|---|
+| T-M4-01a Provider 适配与模块骨架 | T-M2-01 ✅ | `server/src/modules/ai/` 骨架；provider adapter 接口与 qwen3.7-flash 适配器（DashScope OpenAI 兼容端点，httpx async）；Settings 扩展（模型/超时/重试；API key 仅环境变量注入，production 缺失拒绝启动）；测试用 mock provider | pytest mock provider 用例通过；production 缺 key 拒绝启动用例 | ⏳ 未开始 |
+| T-M4-01b Prompt registry 与服务端提案校验 | 01a、T-M1-05 ✅ | Prompt registry（按动作/意图，版本化）；LLM 输出 JSON 解析；Python 侧 ActionProposal 校验器（jsonschema Draft-07，对齐 T-M1-05 v1 约束）；与 ajv/TS 校验器共享 `contracts/action-proposal/fixtures/` 的平价测试；非法 JSON 重试一次、仍失败降级（§6.4） | Python/ajv/TS 三校验器同 fixture 同结论；非法 JSON 与重试分支用例 | ⏳ 未开始 |
+| T-M4-01c 限流、用量审计与降级 | 01b | 用户级限流与配额；AIUsage append-only 审计（模型、tokens、requestId）；AIConversation 上下文存储与裁剪；超时语义（12s 慢速提示 / 25s 取消）；provider 故障 → 降级响应（信号客户端转本地 NLU）；脱敏日志与 requestId 贯穿 | 限流/超时/降级分支测试；用量审计断言；日志无密钥与敏感原文 | ⏳ 未开始 |
+| T-M4-01d 网关 API 与端到端收口 | 01c；D-EXEC-04（真实 provider） | `POST /ai/parse`（文本 → ActionProposal）等端点、Bearer 鉴权、OpenAPI；ADR：WebView AI 调用通道（建议 bridge 代理，token 不出 Kotlin 层）；产物密钥扫描（APK/Web 无服务商密钥）；真实密钥接入与 staging 冒烟（D-EXEC-04 未确认时如实记录阻塞） | 端到端测试（mock provider）通过；产物扫描零命中 | ⏳ 未开始 |
+
+### T-M4-02 动作协议与确认卡
+
+| 子任务 | 硬依赖 | 交接产物 | 最低验证 | 状态 |
+|---|---|---|---|---|
+| T-M4-02a Confidence 策略与执行链校验 | T-M4-01b、T-M2-04 ✅ | confidence 阈值策略（高置信自动执行 + 立即展示撤销 / 低置信必须确认）；ProposalValidationContext 服务端实现（categoryId/accountId 归属校验，上下文取可信 DB 数据而非模型输出）；幻觉数字、无权限 ID、低置信拒绝策略 | 负例用例：幻觉数字 / 无权限分类 / 低置信 → 零写库 | ⏳ 未开始 |
+| T-M4-02b 批量执行与撤销链路 | 02a、T-M4-00d | add_tx_batch 契约补全（服务端 fixture、bridge 批量命令、Room 批量原子写 + pending mutations）；确认后经普通业务写路径入账 → T-M3-02 同步链路；5 秒撤销（软删除 + 恢复窗口） | 批量 N 笔全成或全回滚；重复确认不重复入账（mutationId 幂等）；撤销窗口内恢复 | ⏳ 未开始 |
+| T-M4-02c 助手对话流与确认卡 UI | 02b、01d（通道 ADR） | assistant feature：输入 → 本地 NLU / AI Gateway 路由 → 提案状态机；单条/批量确认卡（确认前可编辑金额、分类、日期）；warnings 展示；撤销 toast；断网降级本地 NLU、超时提示（§6.4） | 真机闭环：对话 → 确认 → 入账 → 撤销；断网/超时降级路径测试 | ⏳ 未开始 |
+| T-M4-02d 父任务契约门禁回归 | 02c | 父任务验收回归用例进 CI：非法 JSON、幻觉数字、无权限分类、低置信动作零写库；TS/Python/ajv 校验器平价报告 | T-M4-02 父任务验收命令全绿，按交接模板补父任务完成记录 | ⏳ 未开始 |
+
+### T-M4-03 AI 查询与洞察
+
+| 子任务 | 硬依赖 | 交接产物 | 最低验证 | 状态 |
+|---|---|---|---|---|
+| T-M4-03a 事实包服务 | T-M2-05 ✅、T-M4-01b | 确定性事实包生成（月度聚合、趋势、分类占比、预算执行、最大单笔——复用 statistics 模块）；事实包 schema；数据哈希缓存（同数据不重复调 LLM、不重复计费） | 对账不变量：事实包数字 == 统计 API 输出；缓存命中/失效测试 | ⏳ 未开始 |
+| T-M4-03b 叙述生成与数字校验 | 03a、01c | LLM 仅基于事实包生成叙述；输出中全部数字引用校验（无法映射事实包 → 拒绝动作 + 记录安全级事件）；月度洞察与查询回答；AIUsage 记录 | 正例数字全部可追溯；篡改/不一致数字用例被拒绝 | ⏳ 未开始 |
+| T-M4-03c 客户端洞察展示与离线降级 | 03b、T-M4-00f | 报表页 AI 洞察卡与查询结果展示；离线/降级 → 纯本地统计报告；数据未变读缓存不重复请求计费 | 飞行模式仍可查看基础报告；数据未变时无新增用量记录 | ⏳ 未开始 |
+
+### T-M4-04 语音、图片与桥接
+
+| 子任务 | 硬依赖 | 交接产物 | 最低验证 | 状态 |
+|---|---|---|---|---|
+| T-M4-04a 权限状态机与桥扩展 | T-M4-02c | Android 运行时权限状态机（RECORD_AUDIO / CAMERA / READ_MEDIA_IMAGES：未请求/授予/拒绝/永久拒绝 → 引导设置）；bridge 扩展 permissions.* / voice.* / image.* 命令 + TS platform adapter | 权限分支（授予/拒绝/永久拒绝）真机通过；权限拒绝不阻塞手动记账 | ⏳ 未开始 |
+| T-M4-04b Vosk 离线语音 | 04a | Vosk 依赖与中文小模型资产打包（体积与许可核查）；录音生命周期与识别服务；实时部分转写草稿；转写文本 → 本地 NLU / AI Gateway | 短句端到端延迟达标（PR-5 10 秒记账）；离线可用；APK 体积增量记录 | ⏳ 未开始 |
+| T-M4-04c 服务端附件 API | T-M2-02 ✅；D-EXEC-05（正式存储） | Attachment 上传/列表/删除端点（模型已存在）；大小与格式限制；过期清理策略；私有访问（ownership）；对象存储接入（D-EXEC-05 确认前临时目录兜底） | 上传/过期/越权测试；限制与策略断言 | ⏳ 未开始 |
+| T-M4-04d 客户端图片链路 | 04a、04c | 相机/相册选择；客户端压缩（大小与格式受控）；上传适配与进度；上传或解析失败 → 保留草稿可恢复 | 失败后可恢复；临时图片按策略删除 | ⏳ 未开始 |
+| T-M4-04e 图片记账解析与批量确认 | 04d、T-M4-02b | 图片 → AI Gateway（多模态）→ add_tx_batch 提案 → 复用批量确认卡；解析失败保留草稿并提示联网后继续 | 多笔识别 → 批量确认闭环；解析失败不丢草稿 | ⏳ 未开始 |
+
+### T-M4-05 通知、快捷方式与小组件
+
+| 子任务 | 硬依赖 | 交接产物 | 最低验证 | 状态 |
+|---|---|---|---|---|
+| T-M4-05a 提醒调度与通知 | T-M1-03 ✅、T-M3-02 ✅、T-M4-00e | ReminderScheduler（WorkManager / AlarmManager 选型记录）；POST_NOTIFICATIONS 运行时权限（API 33+）；bridge reminder.* 命令；我的页提醒设置入口；BOOT_COMPLETED 恢复 | 重启设备后提醒仍有效；通知权限拒绝不崩溃；设置修改即时生效 | ⏳ 未开始 |
+| T-M4-05b 桌面小组件 | T-M1-03 ✅、T-M3-02 ✅ | Widget Provider（RemoteViews / Glance 选型记录）；读 Room 聚合（今日支出/本月进度）；监听 SyncEventBus 同步后刷新；登录/无数据/待同步三状态；点击跳转接线（依赖 05c 路由） | 金额与首页一致；同步后刷新；三状态展示正确 | ⏳ 未开始 |
+| T-M4-05c 快捷方式与深链路由 | T-M4-00a、05b | 静态 + 动态 shortcuts（快速记账 / AI 助手）；WebView 深链路由接线（入口参数 → 前端路由）；全部原生入口统一经 Repository 读 Room，无旧 JSON 依赖 | 每个 shortcut 与小组件点击真机到达正确页面 | ⏳ 未开始 |
+
+### T-M4-06 视觉与无障碍
+
+| 子任务 | 硬依赖 | 交接产物 | 最低验证 | 状态 |
+|---|---|---|---|---|
+| T-M4-06a 四主题逐页视觉打磨 | T-M4-00g、02c、03c | 全页面（首页/明细/记账 Sheet/助手/报表/我的/首启/登录）token 化逐页校验；白天主题正文对比度阻塞项修复（§7.2）；Recharts 色板各时段可读性验证并固化 | 四主题 × 全页面正文对比度 ≥4.5:1（记录测量工具与结果） | ⏳ 未开始 |
+| T-M4-06b 无障碍与低端机适配 | 06a | 字体 1.3× 无遮挡；Android 小屏适配；reduced motion 全覆盖；低性能模式（关闭云/星/彗尾氛围层，Android 8 / 2GB 设备无明显掉帧） | 字体放大截图无遮挡；低性能模式氛围层全关 | ⏳ 未开始 |
+| T-M4-06c 截图基线与视觉回归 | 06b | 截图基线工具选型（记 ADR）；关键页面 × 四主题基线库；接入 CI 视觉回归门禁 | 基线 diff 门禁在 CI 生效；有意变更可按流程更新基线 | ⏳ 未开始 |
+
+## M5：安全、质量、合规与内测
+
+> **2026-09-06 子任务拆解（T-M0-10 治理规则）：** T-M5-01 至 05 按实现工程量再拆一层为可独立实施、可独立验收的子任务，编号使用字母后缀（如 `T-M5-01a`），可直接用 `开发实现 T-M5-01a` 触发执行。父任务编号与验收边界不变（以 `docs/APP-CONTEXT.md` §9 为准）：子任务完成即更新本表状态并简记验证结果；父任务全部子任务通过后按交接模板补父任务完成记录。
+>
+> **基础设施前提（ADR-001 / R-PROD-09）：** D-EXEC-01/02（生产服务器、备份参数）最晚确认时点为 T-M6-01 前，M5 不因其阻塞——T-M5-03 备份演练与 T-M5-05 内测环境先在 docker-compose/隔离环境执行，生产参数最晚 T-M6-01a 前回填 ADR-001 并复演生产侧流程。D-EXEC-06（隐私主体、删除责任、分发账号）未确认时，技术实现与文本草案先行，正式发布/提交动作如实记录阻塞。
+>
+> **准入条件：** M5 父任务依赖 M1–M4 核心链路（APP-CONTEXT §9）。子任务在其具体 M4 前置落地后即可穿插启动（如 T-M5-02a 只待 T-M4-00a/04a），不必等 M4 全部收口；未列 M4 前置的子任务（01a/03a/04b 等）可先行。
+>
+> **建议执行顺序：** 四条线并行——质量线 `T-M5-01a→01d`、安全线 `T-M5-02a→02d`、备份线 `T-M5-03a→03c`、隐私线 `T-M5-04a→04c`；可观测栈 `T-M5-05a→05b` 仅依赖 T-M2-01/T-M4-01c，建议提前部署（为 03c 告警与内测看板提供底座）；`T-M5-05c` 种子内测在前四线 G5 收口后执行。
+>
+> **G5 闸门（M5 出口）：** T-M5-01 对账 fuzz、T-M5-02 安全加固、T-M5-03 恢复演练、T-M5-04 隐私生命周期、T-M5-05 监控与 20–50 人内测均通过；D-EXEC-06 已落实。
+
+| 任务 | 硬依赖 | 交接产物 | 外部前置 | 状态 |
+|---|---|---|---|---|
+| T-M5-01 对账不变量与端到端测试 | M1–M4 核心链路 | 三端共享 fixture、固定种子 fuzz、异常注入、E2E 进 CI | 无 | ⏳ 未开始 |
+| T-M5-02 安全加固 | T-M4-01 | 客户端/服务端安全基线、产物密钥扫描、依赖扫描 | D-EXEC-04（仅 02c 生产密钥复核） | ⏳ 未开始 |
+| T-M5-03 备份恢复与灾难演练 | T-M2-02 ✅ | 备份自动化、恢复 runbook、演练记录 | D-EXEC-02（生产参数最晚 T-M6-01a 前回填） | ⏳ 未开始 |
+| T-M5-04 隐私、权限与账号生命周期 | T-M2-03 ✅、T-M2-05 ✅ | 同意流、用户导出、删除与保留链路 | D-EXEC-06（隐私主体/删除责任） | ⏳ 未开始 |
+| T-M5-05 生产监控与种子内测 | T-M5-01 至 04（父级；05a/05b 可提前） | staging 可观测栈、六类看板、内测报告 | D-EXEC-06（内测分发渠道） | ⏳ 未开始 |
+
+### T-M5-01 对账不变量与端到端测试
+
+**目标：** 建立数据正确性一票否决门禁，覆盖 domain/API/Room 三端等价的 fixture 与断言、固定种子 fuzz、同步异常注入、真机 E2E 核心路径，并将 S0/S1 用例纳入 CI required checks。
+
+**实现要点：**
+- fixture 统一存放在 `contracts/fixtures/reconciliation/`，每个子目录一个场景（如 `cross-month/`、`tz-boundary/`、`soft-delete/`、`budget-mixed/`），内含三端共用的 JSON 种子数据
+- 四方对账断言封装为 `assertReconciliation(fixture)` 纯函数，TS/Python/Kotlin 各实现一次，共享同一 fixture JSON
+- fuzz 生成器使用固定种子（`new Random(42)`），操作序列可复现、可调试
+- 异常注入基于 MockWebServer（Android）和 httpx mock（Python），模拟网络故障/业务错误
+- E2E 使用 adb 脚本 + 真机，验证核心用户旅程的端到端数据一致性
+
+| 子任务 | 硬依赖 | 交接产物 | 最低验证 | 状态 |
+|---|---|---|---|---|
+| T-M5-01a 共享 fixture 与对账不变量基础 | T-M2-05 ✅、T-M3-01 ✅ | **fixture 集：** `contracts/fixtures/reconciliation/` 下 5 个场景子目录，每场景含 `seed.json`（三端同构）、`expected-assertions.json`（预期聚合输出）；**三端断言函数：** `app/src/__tests__/fixtures/reconciliation.ts`（vitest）、`server/tests/fixtures_reconciliation.py`（pytest）、`app/src/androidTest/java/.../ReconciliationAssertions.kt`（androidTest）；**断言覆盖：** 明细合计 = 客户端统计 = 服务端统计 = 导出文件合计（§5.2），以及金额类型正确性（均为整数分，无浮点） | 同一 fixture 导入三端后聚合输出与 `expected-assertions.json` 逐字段一致；故意篡改一笔金额后断言捕获不匹配并失败 | ⏳ 未开始 |
+| T-M5-01b 固定种子对账 fuzz | 01a | **fuzz 套件（vitest + pytest）：** 使用 `Random(42)` 固定种子生成伪随机操作序列，每次迭代包含 (1) 随机选择操作类型（`insertTx` / `updateTx` / `softDeleteTx` / `undoTx` / `createBudget` / `updateBudget` / `conflictTx` / `reorderMutations`）; (2) 执行操作并记录操作日志; (3) 四方对账断言；**迭代次数：** vitest 侧 100 轮、pytest 侧 50 轮；**负例注入：** 故意注入浮点金额、重复 `mutationId`、非法 `bizDate`，验证断言拦截 | 同种子两次运行结果完全一致（操作日志 md5 匹配）；100 轮 fuzz 全部通过；负例注入场景被断言捕获 | ⏳ 未开始 |
+| T-M5-01c 同步异常注入 | 01a、T-M3-02 ✅ | **五态注入用例（androidTest + pytest）：** (1) 断网：MockWebServer 关闭连接 → 记账 → 恢复网络 → 对账一致；(2) 重复提交：相同 `mutationId` 推送两次 → 服务端返回 `duplicate` → 客户端无重复流水；(3) 乱序到达：修改 PendingMutation 的 `createdAt` 使顺序错乱 → 同步后顺序正确；(4) 版本冲突：双端同时修改同一实体 → 服务端返回 `conflict` → 本地保留 version 标记冲突；(5) 进程被杀：Force-stop 后重启 → 队列仍在且可继续同步；**测试工具：** `MockWebServer`（Android）+ `AsyncClient` mock（pytest）+ `adb shell am force-stop`（手工协议） | 五态各一次通过：无重复流水、无静默覆盖、冲突 mutation 标记 `lastError` 且保留本地待处理版本、杀进程后 `pending_mutations` 行数不变 | ⏳ 未开始 |
+| T-M5-01d E2E 核心路径与 CI 门禁 | 01b、01c（删除账号用例随 T-M5-04c 接入） | **E2E 脚本（`tools/e2e/main.ps1`）：** 登录→首页记账→离线模式下记账→恢复网络→同步完成→编辑流水→冲突→换机恢复（bootstrap）→删除账号；**CI 配置：** `.github/workflows/ci.yml` 新增 `server-test` job（`pytest tests/ -q`，Python 3.12，依赖 PostgreSQL 18 service container）；S0/S1 用例标记为 `required`；**工具脚本：** `tools/validate-baseline.ps1` 更新为同时执行前端/Android/服务端全部门禁 | E2E 核心路径真机全绿；CI 中 `server-test` job 通过且为 required check；`validate-baseline.ps1` 三端门禁均通过；关闭 R-PROD-07 和 R-PROD-10 | ⏳ 未开始 |
+
+### T-M5-02 安全加固
+
+**目标：** 关闭已知客户端和服务端高风险项，建立密钥治理、依赖扫描与日志脱敏的持续门禁。
+
+**实现要点：**
+- 客户端安全基线涉及 `AndroidManifest.xml`、`network_security_config.xml`、`WebView` 配置三项修改，每项需有自动化断言
+- 服务端安全通过 Starlette 中间件实现，CORS 白名单细化到具体域名
+- 密钥扫描使用 `truffleHog`（Git 历史）和 `gitleaks`（CI 增量），三产物扫描使用定制脚本
+- 依赖扫描分别使用 `npm audit`、`pip audit`、`OWASP Dependency Check`（Gradle），高危项必须 48h 内处置
+
+| 子任务 | 硬依赖 | 交接产物 | 最低验证 | 状态 |
+|---|---|---|---|---|
+| T-M5-02a 客户端安全基线 | T-M4-00a、T-M4-04a | **`AndroidManifest.xml` 修改：** `android:usesCleartextTraffic="false"`、`android:allowBackup="false"`、`android:dataExtractionRules` 禁止云备份；**`network_security_config.xml`：** release 仅允许 HTTPS 域名（`*.aozora.app`），debug 允许 localhost + 10.0.2.2 明文；**WebView 配置：** `settings.javaScriptEnabled = true`、`settings.allowFileAccess = false`、`settings.allowContentAccess = false`、`settings.allowFileAccessFromFileURLs = false`、`settings.allowUniversalAccessFromFileURLs = false`、`WebViewAssetLoader` 使用虚拟 HTTPS 源；**Bridge 白名单：** 将 `AozoraBridge.kt` 中 `@JavascriptInterface` 方法列表与 `bridge-types.ts` 命令清单逐条对照，仅保留 v1 协议定义的 22 个命令；**JVM 配置断言：** `app/src/test/java/.../SecurityConfigTest.kt` 中通过 `PackageManager` 和 `WebViewSettings` 断言各配置生效 | `./gradlew :app:testDebugUnitTest` 中 SecurityConfigTest 全部通过（Manifest 标志位断言、WebView 配置断言）；release APK 抓包（`tcpdump` + Wireshark）确认无明文 HTTP 流量 | ⏳ 未开始 |
+| T-M5-02b 服务端安全加固 | T-M2-03 ✅、T-M4-01a | **安全头中间件（`server/src/common/security.py`）：** `Strict-Transport-Security: max-age=31536000; includeSubDomains`、`X-Content-Type-Options: nosniff`、`X-Frame-Options: DENY`、`Referrer-Policy: strict-origin-when-cross-origin`、`Content-Security-Policy: default-src 'self'`、`Permissions-Policy: geolocation=(), microphone=(), camera=()`；**请求体大小限制：** `max_request_size=10MB`（`server/src/main.py` 中 Starlette `Mount` 或 middleware）；**CORS 白名单：** production 仅允许 `https://*.aozora.app`，staging 允许 `http://localhost:5173` 和 `https://staging.aozora.app`；**安全测试套（`server/tests/test_security.py`）：** 安全头存在性断言、CORS 预检请求跨域验证、超大请求体返回 413、越权与限流复用现有测试 | `pytest tests/test_security.py -v` 全部通过；安全头断言（requests HEAD）全部存在；`curl -X POST -d '{"data":"x".repeat(11*1024*1024)}'` 返回 413；CORS 预检 `OPTIONS` 请求跨域头正确 | ⏳ 未开始 |
+| T-M5-02c 密钥治理与产物扫描 | T-M4-01d；D-EXEC-04（生产密钥复核） | **CI 密钥扫描：** `.github/workflows/secret-scan.yml`（使用 `gitleaks` 检测 commit 增量 + `truffleHog` 全历史扫描，每周一凌晨运行）；**三产物扫描脚本（`tools/scan-secrets.sh`）：** (1) APK 扫描——`unzip -p app.aab \| strings \| grep -iE 'sk-|api_key|secret|token'`；(2) Web 产物扫描——`grep -rE 'sk-|api_key' app/dist/`；(3) 服务端镜像扫描——`docker run ... trivy image --severity CRITICAL`；**生产密钥注入：** `server/.env` 中 `SECRET_KEY`、`AI_API_KEY` 等仅通过环境变量/secret manager 注入，配置文件持占位符；**R-PROD-01 轮换复核：** 联系账户所有者确认旧密钥已在外部控制台撤销并在 T-M4-01d 创建新密钥 | CI 密钥门禁生效（含提交前 hook 和每周全量扫描）；三产物扫描脚本在 staging 构建后运行零命中；密钥注入路径写入 `docs/runbooks/secret-management.md` | ⏳ 未开始 |
+| T-M5-02d 依赖扫描与日志脱敏 | T-M4-01c | **CI 依赖扫描：** (1) npm：`npm audit --audit-level=high` 接入 CI `frontend-test` job；(2) pip：`pip-audit` 接入 `server-test` job；(3) Gradle：OWASP DependencyCheck 插件接入 `android-test` job；**处置阈值：** 高危及以上必须 48 小时内修复或加 `allowlist` 注释（附 Jira 编号）；**日志脱敏审查：** (1) 服务端——`server/src/common/logging.py` 中 `extra` 字段过滤 `token`、`refresh_token`、`password`、`secret`、`api_key` 正则；(2) 客户端——`AozoraBridge.kt` 日志中屏蔽 `payload` 完整内容（仅输出 `mutation_id` 和 `entity_type`）；**日志审计测试：** 模拟包含敏感字段的请求，断言日志输出中该字段被 `***` 替换 | `npm audit`、`pip-audit`、OWASP DependencyCheck 在 CI 均通过且无未处置高危项；日志审计测试捕获敏感字段 → 输出 `***`；无 token、完整对话、原始票据、账本明细出现在日志抽样中 | ⏳ 未开始 |
+
+### T-M5-03 备份恢复与灾难演练
+
+**目标：** 证明生产数据可恢复，RPO ≤24h、RTO ≤4h；建立自动化备份、定期演练、备份完整性校验的闭环。
+
+**实现要点：**
+- 备份方案采用 pg_dump 定时 + 异地副本，ADR 记录选型理由
+- 恢复 runbook 包含步骤、校验、失败处置和责任人，演练后记录实测 RPO/RTO
+- 备份完整性通过恢复抽样库 + 对账断言验证，失败告警接入 Alertmanager
+
+| 子任务 | 硬依赖 | 交接产物 | 最低验证 | 状态 |
+|---|---|---|---|---|
+| T-M5-03a 备份策略与自动化 | T-M2-02 ✅ | **备份 ADR（`docs/adr/ADR-003-backup-strategy.md`）：** 选型记录（pg_dump 定时 vs WAL 归档，推荐 pg_dump 定时 + 每日差异备份），保留策略（全量 7 天、差异 30 天、异地副本 90 天），备份窗口（每日 UTC 03:00）；**自动化脚本（`infra/backup/backup.sh` + `docker-compose.backup.yml`）：** `pg_dump -Fc --no-owner --no-privileges --exclude-table-data='ai_usage'` 输出加密压缩包，`infra/backup/cleanup.sh` 按保留策略清理过期备份；**异地副本：** 备份完成后自动 `rsync`/`scp` 到异地存储点（docker-compose 环境模拟为本地另一目录） | docker-compose 环境中执行 `backup.sh` 生成 `.dump` 文件，`pg_restore --list` 列出全部 13 张业务表（User/DeviceSession/Book/Category/Account/Transaction/Budget/Attachment/AIConversation/AIUsage/SyncChange/MutationIdempotency/Export）；`cleanup.sh` 执行后旧备份按策略删除 | ⏳ 未开始 |
+| T-M5-03b 恢复 runbook 与隔离演练 | 03a、T-M5-01a | **恢复 runbook（`docs/runbooks/disaster-recovery.md`）：** 步骤——(1) 停止 API 服务；(2) 创建临时数据库 `aozora_restore`；(3) `pg_restore --dbname=aozora_restore --clean --if-exists latest.dump`；(4) 运行 Alembic 迁移到最新版本；(5) 四方对账校验——导入 T-M5-01a fixture 数据后运行三端对账断言；(6) 切换连接；(7) 恢复服务；**失败处置：** 还原失败时切回原数据库，记录失败原因；**隔离演练记录：** 在 docker-compose 隔离环境完成一次完整恢复，记录 `start_time`、`end_time`、`restore_duration`、`checksum_match`、`reconciliation_pass`、`failures` | 隔离环境恢复成功：`pg_restore` 完成且 exit code 0；四方对账一致（三端断言全部通过）；RPO ≤24h（备份时间戳到恢复时间戳差 ≤24h）、RTO ≤4h（从开始恢复到服务就绪 ≤4h）实测值记录在演练记录中 | ⏳ 未开始 |
+| T-M5-03c 备份校验与告警 | 03b、T-M5-05a | **备份完整性校验脚本（`infra/backup/verify-backup.sh`）：** 恢复抽样库 → 对账断言（复用 T-M5-01a 断言）→ 清理抽样库，运行于 cron 每日 04:00；**备份失败告警：** `infra/monitoring/alert-rules.yml` 中 `BackupFailure` 规则（`pg_dump` exit code != 0 或备份文件不存在），接入 Alertmanager 并通知维护者；**演练日历：** `docs/runbooks/disaster-recovery.md` 中记录演练节奏（季度全量演练、月度校验演练）；**D-EXEC-02 回填清单：** `infra/backup/production-params.md` 待填项列表（生产 S3 端点/密钥/地域、备份保留天数、异地副本地址、通知渠道） | 模拟 pg_dump 失败（`touch /tmp/backup_failure`）→ cron 校验脚本检测到 → Alertmanager 告警触发；`verify-backup.sh` 在正常状态下对账断言通过；`production-params.md` 回填清单就绪，标记 D-EXEC-02 待确认 | ⏳ 未开始 |
+
+### T-M5-04 隐私、权限与账号生命周期
+
+**目标：** 满足上架和真实用户数据治理要求：隐私同意流、权限按需申请、数据导出、账号删除与保留策略，全部通过审计。
+
+**实现要点：**
+- 隐私政策版本化，首启同意记录入库（`user_consents` 表），未同意前无业务数据上行
+- 权限按需申请，拒绝权限不阻塞手动记账
+- 导出入口接入我的页，下载文件合计与流水对账一致
+- 删除账号经二次确认 → 立即冻结 → 7 天物理删除，有完成证明与审计
+
+| 子任务 | 硬依赖 | 交接产物 | 最低验证 | 状态 |
+|---|---|---|---|---|
+| T-M5-04a 隐私政策与首启同意 | T-M4-00g；D-EXEC-06（隐私主体） | **隐私政策文本（`docs/legal/privacy-policy-v1.md`）：** 版本化、含数据采集范围、AI 使用说明、第三方共享、数据保留与删除、联系方式；**首启同意流（`OnboardingPage` 扩展）：** 首次启动展示隐私摘要 → 用户点击"同意并继续" → 调用 bridge `consent.record` → 写入 `UserConsent` 表（policy_version、timestamp、device_id）；**权限按需申请：** 在对应功能入口前申请（相机→拍照时、麦克风→语音时、存储→保存导出时），不在首启时批量申请，拒绝后不重复弹窗；**AI 内容标识：** AI 生成内容旁展示"AI 生成"标签（`<span class="ai-badge">AI</span>`）；**`UserConsent` 表：** Room `user_consent` 表 + 服务端 `user_consents` 表（policy_version TEXT, consented_at TIMESTAMP, device_id TEXT），Alembic 迁移 `0007_user_consents.py` | 全新安装：未同意前抓包确认无业务数据上行（`/api/v1/sync/push` 不被调用）；同意记录可查询（`UserConsent` 表有记录）；AI 内容旁显示标识；权限拒绝后手动记账正常 | ⏳ 未开始 |
+| T-M5-04b 用户数据导出 | T-M2-05 ✅、T-M4-00e | **我的页导出入口（`MePage` 扩展）：** "导出数据"按钮 → 调用 bridge `export.create` → 服务端 `POST /exports` 生成 JSON/CSV → 完成后通知下载 → 保存到 `Downloads` 目录；**导出合计对账：** 下载后前端解析导出文件，合计与本地统计一致；**`MePage` 导出状态：** 导出中（loading）、导出完成（可下载）、导出失败（重试） | 真机导出：下载文件合计与流水一致（对账不变量）；跨用户导出被拦截（服务端 ownership guard）；`MePage` 导出状态正确流转 | ⏳ 未开始 |
+| T-M5-04c 账号删除与数据保留 | T-M2-03 ✅、T-M4-04c；D-EXEC-06（删除责任） | **服务端 `DELETE /me` 端点：** 二次确认（`confirm_token` 参数）→ `User.status = 'frozen'` → 7 天后台任务（`infra/cleanup/account-deletion.py`）物理删除用户数据 → 记录删除完成证明（`deletion_audit` 表含 `user_id_hash`、`requested_at`、`completed_at`、`deleted_tables`、`rows_count`）；**冻结期行为：** `User.status='frozen'` 时 `/sync/push` 返回 403、`/sync/pull` 返回空、`/stats/*` 不参与统计；**附件生命周期：** 解析后 24h 删除原图（`infra/cleanup/attachment-expiry.py` 定时任务），用户主动关联流水时标记 `keep_after_parse=true` 长期保存；**客户端删除入口：** `MePage` 中"删除账号"按钮 → 二次确认对话框 → 调用 `DELETE /me` → 成功后清空 Room 所有表 + 清除 Keystore tokens → 跳回首启页；**客户端清理断言：** `MePage` 删除后 Room 行数为 0、`TokenStore` 中 tokens 为 null | 冻结期：`/sync/push` 返回 403、`/sync/pull` 返回空数据、`/stats/*` 不贡献；7 天后物理删除完成，`deletion_audit` 表有完成证明记录（含 `completed_at` 和 `deleted_tables` 列表）；客户端删除后 Room 遍历 count 均为 0，Keystore 中无 token | ⏳ 未开始 |
+
+### T-M5-05 生产监控与种子内测
+
+**目标：** 建立 staging 可观测栈（OTel/Prometheus/Loki/Tempo/Grafana/Alertmanager），六类看板就绪，S0/S1 告警可到达维护者；完成 20–50 人种子内测，crash-free ≥99.5%、记账成功率 ≥95%。
+
+**实现要点：**
+- staging 可观测栈全部 docker-compose 部署，不依赖生产环境
+- 服务端 OTel 埋点集成到 `common/logging.py` 和 `common/request_id.py`
+- 崩溃上报使用 Android `Thread.setDefaultUncaughtExceptionHandler`，脱敏后下次启动上报
+- 内测构建使用内测签名 + staging 基址，复用 T-M6-02a 的环境开关
+
+| 子任务 | 硬依赖 | 交接产物 | 最低验证 | 状态 |
+|---|---|---|---|---|
+| T-M5-05a staging 环境与可观测栈部署 | T-M2-01 ✅；D-PROD-07 | **staging docker-compose（`docker-compose.staging.yml`）：** API 服务 + PostgreSQL 18 + Redis（可选）+ OTel Collector + Prometheus + Loki + Tempo + Grafana + Alertmanager；**服务端 OTel 埋点：** `server/src/common/telemetry.py`——`tracer` 集成到请求中间件（`request_id` 作为 span attribute）、`meter` 记录 API 延迟/请求计数/错误率、`logger` 结构化 JSON 输出到 Loki；**保留策略：** `docker-compose.staging.yml` 中配置 Prometheus 30 天、Loki 14 天、Tempo 7 天；**部署脚本（`infra/deploy/staging-deploy.sh`）：** 从零开始 `docker compose -f docker-compose.staging.yml up -d` 一站部署 | 从干净环境（无容器、无数据卷）执行 `staging-deploy.sh` 后全部服务正常运行；`docker ps` 列出 7 个容器；通过 Grafana Explore 可查询到 traces（Tempo）、metrics（Prometheus）、logs（Loki）三类数据；保留策略在 config 中可查 | ⏳ 未开始 |
+| T-M5-05b 看板、告警与崩溃上报 | 05a、T-M4-01c | **六类看板（Grafana dashboards，`infra/monitoring/dashboards/`）：** (1) API SLO——请求量/p95 延迟/错误率/可用性；(2) PostgreSQL——连接数/活跃查询/慢查询/备份年龄；(3) 同步队列——pending mutation 数/同步延迟/冲突率/错误分类；(4) AI Gateway——请求量/延迟/Token 用量/错误率/降级率；(5) Android 版本健康度——版本分布/crash-free/ANR 率；(6) 业务漏斗——注册→记账→次日留存→7 日留存→导出；**S0/S1 告警规则（`infra/monitoring/alert-rules.yml`）：** S0——API 可用性 <99.9%、crash-free <99.5%、数据对账不一致、重复入账；S1——p95 延迟 >500ms、同步积压 >100、AI 错误率 >5%；通知渠道配置化（不硬编码）；**崩溃上报：** Android `CrashReporter.kt`——`Thread.setDefaultUncaughtExceptionHandler` 捕获崩溃 → 脱敏（过滤 `payload`、`token`、`note` 等字段）→ 本地 SQLite 存储 → 下次启动时经 `POST /telemetry/crash` 上报（需用户已同意隐私政策）；**release mapping 归档：** `tools/archive-mapping.sh` 将 `build/outputs/mapping/release/` 打时间戳存档到 `build/mapping-archive/` | 六类看板在 Grafana 中可切换且每类至少有一个面板有数据；模拟 S0（停 API）→ Alertmanager 告警通知到达维护者；崩溃上报端点收到脱敏崩溃摘要且无敏感原文；`archive-mapping.sh` 生成可符号化的 mapping 文件 | ⏳ 未开始 |
+| T-M5-05c 种子内测与反馈闭环 | 05b、T-M5-01 至 04（G5 收口）、T-M4-06；D-EXEC-06（分发渠道） | **内测构建：** `./gradlew :app:assembleRelease` + 内测签名（`keystore/internal.keystore`，不进仓库）+ staging 基址注入（`AOZORA_API_BASE=https://staging.aozora.app`）；**分发：** 20–50 人通过内测分发平台（TestFlight 或 Firebase App Distribution 或自建，取决于 D-EXEC-06）；**同意收集：** 内测用户首次启动时同意隐私政策（复用 T-M5-04a 同意流）；**反馈收集：** 应用内反馈入口（`MePage` 中"反馈"按钮 → 表单→ `POST /telemetry/feedback`）+ 外部问卷；**两轮修复：** 每轮收集反馈 → 修复 S0/S1 + 高频反馈 → 回归 → 第二轮；**内测指标报告：** 从 Grafana 看板导出 crash-free、记账成功率（`POST /transactions` 成功 / 总请求）、AI 路径占比（`POST /ai/interpret` 调用 / 总记账）、D7（次日留存 × 7 日连续）、冷启动时间/同步延迟 p95 | crash-free ≥99.5%（内测期最后 7 天滚动统计）；最终记账成功率 ≥95%；AI 路径占比/D7/性能可统计（Grafana 看板截图存档）；无开放 S0/S1；内测报告包含两轮反馈-修复-回归记录 | ⏳ 未开始 |
+
+## M6：生产发布
+
+> **2026-09-06 子任务拆解（T-M0-10 治理规则）：** T-M6-01 至 03 按实现工程量再拆一层，编号与状态维护规则同 M5。
+>
+> **外部前置：** D-EXEC-01（生产服务器/域名/证书/备案）与 D-EXEC-02（生产备份参数）必须在 T-M6-01a/01c 前回填 ADR-001 并关闭 R-PROD-09；D-EXEC-06（分发账号）阻塞 T-M6-02c 渠道提交。上述参数由账户所有者在外部控制台控制，未确认时子任务如实记录阻塞，不得在仓库内虚构参数（ADR-001 决策）。
+>
+> **建议执行顺序：** 严格串行 `T-M6-01a→01d` → `T-M6-02a→02c` → `T-M6-03a→03c`；T-M6-02a/02b 的发布构建与包体检查工具链已在 T-M5-05c 内测构建中部分演练，届时仅补商店签名与渠道材料。
+>
+> **G6 闸门（M6 出口 / 最终发布门禁）：** T-M6-01 可重复部署与回滚、T-M6-02 签名上架包与渠道验收、T-M6-03 分阶段放量与 S0 自动止损完成；发布前按 APP-CONTEXT §13 复查 §3 当前事实、§9 任务树、§10 门禁与 §12 决策。
+
+| 任务 | 硬依赖 | 交接产物 | 外部前置 | 状态 |
+|---|---|---|---|---|
+| T-M6-01 Production 基础设施与发布流水线 | M5 全部出口（G5） | 生产环境、CI/CD、迁移审批、回滚 runbook | D-EXEC-01、D-EXEC-02 | ⏳ 未开始 |
+| T-M6-02 Android 上架包与渠道验收 | T-M6-01 | 签名 AAB/APK、商店材料、真机矩阵记录 | D-EXEC-06（分发账号） | ⏳ 未开始 |
+| T-M6-03 上线观察与回滚门槛 | T-M6-02 | 分阶段放量、S0 自动止损、复盘制度 | 无 | ⏳ 未开始 |
+
+### T-M6-01 Production 基础设施与发布流水线
+
+**目标：** 可审核地部署 API、迁移数据库并回滚应用版本，完成从干净环境到生产服务的全自动化部署。
+
+**实现要点：**
+- 生产环境使用 `docker-compose.prod.yml` 与 staging 共享基础镜像，差异通过环境变量和 Compose override 控制
+- 域名/TLS 通过 Let's Encrypt + certbot 自动续期，nginx 反向代理 + 密码学安全头
+- CI/CD 流水线为 GitHub Actions，分 stage：build → test → image → sign → deploy
+- 迁移审批通过 PR 机制 + 自动备份前检查，蓝绿部署或滚动发布通过 ADR 记录选型
+- 回滚 runbook 涵盖应用版本回退和数据库回滚/前向修复，演练后记录实测 RTO
+
+| 子任务 | 硬依赖 | 交接产物 | 最低验证 | 状态 |
+|---|---|---|---|---|
+| T-M6-01a 生产环境、域名与 TLS | G5；D-EXEC-01 | **生产部署（`docker-compose.prod.yml`）：** 复用 staging 基础镜像，通过 `AOZORA_ENV=production` 和 `docker-compose.override.yml` 控制差异；**域名/TLS：** `nginx.conf` 配置 TLS 1.3 + HSTS + 安全头，Let's Encrypt certbot 自动续期脚本（`infra/deploy/cert-renew.sh`）；**`AOZORA_API_BASE` 生产值：** GitHub Actions Secrets 中 `AOZORA_API_BASE=https://api.aozora.app` 注入 release 构建（关闭 R-PROD-12）；**ADR-001 回填：** 更新 `docs/adr/ADR-001-infrastructure-baseline.md` 填入真实参数，关闭 R-PROD-09 | 生产域名 `api.aozora.app` 经 `curl -I https://api.aozora.app/health` 返回 200 + HTTPS 证书有效（`openssl s_client -connect api.aozora.app:443` 验证）；`cert-renew.sh` 模拟续期成功；release APK 中 `BuildConfig.SYNC_BASE_URL` 指向生产域名；ADR-001/R-PROD-09 状态更新为已关闭 | ⏳ 未开始 |
+| T-M6-01b CI/CD 与镜像签名 | 01a | **CI/CD 流水线（`.github/workflows/deploy.yml`）：** 手动触发 + main 分支自动触发，五个阶段——(1) build：前端 `npm ci && npm run build` + 服务端 `docker build`；(2) test：`npm test` + `pytest` + `./gradlew test`；(3) image：`docker build -t aozora-api:${GIT_SHA}`；(4) sign：`cosign sign --key=... aozora-api:${GIT_SHA}`（镜像签名）；(5) deploy：`docker compose -f docker-compose.prod.yml up -d`；**依赖锁定：** `npm ci`（而非 `npm install`）、Gradle Wrapper 校验和、`pip freeze > requirements.txt`；**密钥注入：** GitHub Secrets 映射到 Actions `env`，`docker-compose.prod.yml` 中 `${SECRET_KEY}` 等变量由 Actions 运行时注入，不进入镜像层 | 从零 clone 仓库 → `deploy.yml` 手动触发 → 五阶段全部通过；镜像签名验证：`cosign verify aozora-api:${GIT_SHA}` 通过；产物密钥扫描（复用 T-M5-02c 脚本）零命中 | ⏳ 未开始 |
+| T-M6-01c 迁移审批与发布策略 | 01b、T-M5-03a；D-EXEC-02 | **迁移审批流（`docs/engineering/migration-approval.md`）：** (1) PR 提交包含 Alembic 迁移脚本 → (2) 自动在 CI 上运行 `alembic upgrade head` 验证 → (3) 审查人确认迁移可回滚（`downgrade` 存在）→ (4) 部署前自动创建数据库备份（`infra/deploy/pre-migration-backup.sh`）；**蓝绿或滚动发布 ADR（`docs/adr/ADR-004-deployment-strategy.md`）：** 选型记录（推荐蓝绿部署，因单实例 + PostgreSQL 迁移需要在切换前完成），切开流量前运行 smoke test（`/health/ready`）；**发布窗口：** 每周二 10:00–12:00 UTC+8，通知方式（发布前 24h 邮件通知 + 发布后 1h 值守） | 迁移前自动备份脚本在 docker-compose 环境运行成功，备份文件可恢复；发布演练：新版本部署后 `smoke test` 通过，切换流量无停机；`alembic downgrade -1` 可回滚迁移；迁移审批 PR 模板存在且 CI 自动验证迁移脚本 | ⏳ 未开始 |
+| T-M6-01d 回滚 runbook 与演练 | 01c | **回滚 runbook（`docs/runbooks/rollback.md`）：** 应用版本回滚——`docker compose stop api && docker compose rm api && docker compose -f docker-compose.prod.yml up -d api` 指定上一版本 tag；数据库回滚——`alembic downgrade -1` + 数据校验；前向修复——如果 `downgrade` 不可行，则编写新迁移修复；**回滚演练记录：** 在 staging 环境注入发布失败（如故意引入错误配置），按 runbook 回退，记录 `start_time`、`rollback_duration`、`service_restored_time`、`data_loss`、`failures` | 注入发布失败（损坏的 `main.py`）→ 按 runbook 回退 → 服务在 10 分钟内恢复；`alembic downgrade -1` 成功且数据无损；回滚演练记录留档（含时长、校验、失败处置） | ⏳ 未开始 |
+
+### T-M6-02 Android 上架包与渠道验收
+
+**目标：** 产出与生产 API 配套的签名 APK/AAB 和商店材料，完成 Android 8/12/15 真机矩阵走查，至少一个渠道提交成功。
+
+**实现要点：**
+- 版本号采用 `versionCode` 递增 + `versionName` 语义化（如 `1.0.0`）
+- staging/prod 通过 `buildConfigField` 和 `resValue` 隔离，R8 混淆规则保障 mapping 可符号化
+- 包体预算包含 Vosk 模型资产，对比上一版本增量不超过 10%
+- 隐私清单与数据安全表单与 T-M5-04a 隐私政策保持一致
+- 真机矩阵覆盖 Android 8/12/15 + 深色模式 + 小屏 + 字体 1.3×
+
+| 子任务 | 硬依赖 | 交接产物 | 最低验证 | 状态 |
+|---|---|---|---|---|
+| T-M6-02a Release 构建与签名 | T-M6-01a、T-M5-02a | **版本策略（`app/build.gradle.kts`）：** `versionCode` = 构建时间戳（如 `2026090601`），`versionName` = `1.0.0`；**环境开关：** `buildConfigField("String", "AOZORA_API_BASE", ...)` 分 `debug`（`http://10.0.2.2:8000`）、`staging`（`https://staging.aozora.app`）、`release`（`https://api.aozora.app`）；**R8 混淆：** `proguard-rules.pro` 保留 `com.aozora.app.bridge.**`、`com.aozora.app.db.entity.**`、`com.aozora.app.sync.**` 的序列化路径；**mapping 归档：** 构建后自动运行 `tools/archive-mapping.sh` 将 `build/outputs/mapping/release/` 压缩为 `mapping-${versionName}-${versionCode}.zip` 存入 `build/mapping-archive/`；**签名：** keystore 由外部提供（不进仓库），`signingConfigs` 引用环境变量 `KEYSTORE_PATH`/`KEYSTORE_PASSWORD`/`KEY_ALIAS`/`KEY_PASSWORD` | 签名 AAB 可安装到真机（`adb install app.aab` 或通过 bundletool）；`BuildConfig.AOZORA_API_BASE` 在 staging 构建中指向 staging 域名、release 构建指向生产域名；`mapping-archive/` 中存在可符号化崩溃的 mapping 文件 | ⏳ 未开始 |
+| T-M6-02b 包体与隐私清单 | 02a、T-M5-04a、T-M4-04b | **包体预算检查脚本（`tools/check-apk-size.sh`）：** 对比当前 APK 与上一版本归档 APK 的未压缩大小，Vosk 模型资产单独统计并标记；**隐私清单（`app/src/main/AndroidManifest.xml` 权限声明 + `Play Console` 数据安全表单草稿）：** 相机（`CAMERA`）、麦克风（`RECORD_AUDIO`）、存储（`READ_MEDIA_IMAGES`、`POST_NOTIFICATIONS`）、网络（`INTERNET`、`ACCESS_NETWORK_STATE`）—— 每项权限用途在 T-M5-04a 隐私政策中对应说明；**AI 内容标识复核：** 所有 AI 生成内容旁 `ai-badge` 可见，无遗漏 | 包体对比：新 APK 未压缩大小 = 上一版本 × 1.1 上限内（含 Vosk 模型）；隐私清单声明权限与实际代码中 `requestPermissions` 调用一致（抓包验证无未声明权限使用）；AI 标识在助手对话、报表洞察卡中均可见 | ⏳ 未开始 |
+| T-M6-02c 真机矩阵与渠道提交 | 02b、T-M4-06；D-EXEC-06（分发账号） | **真机矩阵走查清单（`docs/testing/device-matrix.md`）：** Android 8（API 26，最低支持）、Android 12（API 31，主力）、Android 15（API 35，最新）三台真机，每台走查——深色模式/四时主题切换、小屏适配（320dp 宽度）、字体 1.3× 无遮挡、首页/明细/记账 Sheet/报表/我的/首启登录 6 页面全览；**走查记录：** 每台设备截屏存档（`docs/testing/screenshots/`），注明通过/失败/备注；**商店材料：** 截图（6 张，四时主题各 1 + 记账 Sheet 1 + 助手 1）、应用说明（`docs/store/description-zh-CN.md`）、分类（财务）、年龄分级、隐私政策 URL；**渠道提交：** 至少一个应用商店提交成功（过审或收到具体可整改反馈） | 三台真机走查清单全部通过，截图存档；商店材料完整且无违规内容；提交成功——过审或收到整改反馈（非静默拒审） | ⏳ 未开始 |
+
+### T-M6-03 上线观察与回滚门槛
+
+**目标：** 小流量上线并用明确阈值决定扩量或回滚，建立 S0 自动止损、事故复盘和客户端兼容策略。
+
+**实现要点：**
+- 分阶段放量：5% → 25% → 50% → 100%，每个阶段晋级门槛基于核心 SLO 连续达标
+- S0 判定条件自动监测，触发后自动停止扩量并告警回滚责任人
+- 客户端兼容策略覆盖放量各阶段新旧版本共存场景
+- 事故复盘模板包含时间线、根因、守护用例，发布后归档
+
+| 子任务 | 硬依赖 | 交接产物 | 最低验证 | 状态 |
+|---|---|---|---|---|
+| T-M6-03a 分阶段放量与值守 | T-M6-02c | **放量策略（`docs/operations/rollout-strategy.md`）：** 四阶梯——5%（观察 24h）→ 25%（观察 48h）→ 50%（观察 72h）→ 100%（全量），晋级门槛——API 可用性 ≥99.9%、p95 延迟 ≤500ms、crash-free ≥99.5%、同步积压 ≤50、记账成功率 ≥95%，连续达标 12h 方可晋级；**实时看板：** 复用 T-M5-05b Grafana 看板，新增放量面板（当前阶段/用户数/晋级条件进度）；**值守清单：** 发布后 72h 内安排轮值责任人（`docs/operations/oncall-roster.md`），值守期间监控 Grafana 告警 + 即时通讯群组 | 放量阶梯在 Grafana 看板中可观测（当前阶段、用户数、晋级条件进度条）；值守演练：模拟告警 → 值守人按清单响应 → 确认收到通知 | ⏳ 未开始 |
+| T-M6-03b S0 自动止损与回滚阈值 | 03a、T-M6-01d | **S0 判定条件（`docs/operations/s0-conditions.md`）：** 自动监测——(1) 重复入账：同一 `mutationId` 导致多条不同流水；(2) 金额错误：单笔金额与服务端返回不一致 > 0.1%；(3) 数据丢失：用户数据行数骤降 > 10%；(4) crash-free 从基线下降 > 1%；(5) API 可用性 < 99.5%；**自动止损链路：** 监测到 S0 → 自动停止扩量（`tools/rollout/stop-rollout.sh`）→ 通知维护者（即时通讯 + 邮件）→ 触发回滚 runbook（T-M6-01d）；**扩量门槛：** `rollout-strategy.md` 中晋级门槛不仅为放量所用，也作为持续达标条件——任一指标跌破门槛立即停止扩量但不下线，跌破 S0 阈值才触发回滚 | 模拟 S0 条件（注入 crash-free 下降）→ 自动停止扩量脚本运行成功 → 告警到达维护者；SLO 连续达标后扩量阶梯正常晋级 | ⏳ 未开始 |
+| T-M6-03c 兼容策略与事故复盘 | 03b | **兼容策略（`docs/operations/compatibility-strategy.md`）：** 放量期客户端版本共存矩阵——(1) 后端 API 新增字段使用 `optional`/`nullable`，不破坏旧客户端解析；(2) 数据库迁移仅做 `ADD COLUMN`/`CREATE INDEX`，不做 `DROP`/`ALTER COLUMN`，确保放量期新旧代码共存；(3) 旧客户端 `pending_mutations` 中的 `expectedVersion` 在新服务端仍可正常处理；**事故复盘模板（`docs/operations/postmortem-template.md`）：** 时间线（detection→response→mitigation→resolution）、根因（5 Whys）、影响范围（用户数/时长/数据损失）、守护用例（新增自动化测试防止复发）、action items（责任人+DDL）；**发布复盘：** 每次发布后 1 周内完成复盘归档（`docs/postmortems/YYYY-MM-DD-release-N.md`），M6 收口时汇总全部发布复盘 | 兼容策略在放量各阶段可验证（旧 APK 安装后 API 调用正常）；事故复盘模板有时间线/根因/守护用例三要素；M6 收口记录包含全部发布复盘归档列表 | ⏳ 未开始 |
 
 ## 实施参数确认清单
 

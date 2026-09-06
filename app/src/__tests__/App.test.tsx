@@ -9,8 +9,8 @@ describe('Test framework readiness', () => {
 })
 
 describe('App', () => {
-  it('renders the baseline message', () => {
+  it('renders the app shell with sky canvas', () => {
     render(<App />)
-    expect(screen.getByText('Aozora production baseline')).toBeInTheDocument()
+    expect(screen.getByTestId('sky-canvas')).toBeInTheDocument()
   })
 })

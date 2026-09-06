@@ -7,6 +7,8 @@
  |---|---|---|---|
  | 规则 NLU | 解析用例集（现 32 例，bug 修复同步补例） | `node tools/test_nlu.js` | 全绿才可发版 |
  | 单元测试 | parser / store 归约 / 统计聚合 / migrate / 金额与日期工具 | vitest | 全绿 |
+ | Kotlin JVM 单元 | 同步 payload 映射、错误分级与批量策略、桥协议 | JUnit4（`:app:testDebugUnitTest`） | 全绿 |
+ | Android 同步与持久化 | in-memory Room + MockWebServer 同步引擎、WorkManager worker（TestListenableWorkerBuilder）、Room migration（MigrationTestHelper）、认证轮换 | androidTest（CI 仅编译，设备执行） | 全绿；设备不稳定用例按 R-M1-44 惯例 `@Ignore` 并附手工 adb 协议 |
  | 对账不变量 fuzz | 随机操作序列后断言流水求和 ≡ 各统计页数字 ≡ 导出 CSV 汇总 | vitest（伪随机种子固定） | 全绿（一票否决项） |
  | 异常注入 | 断网/超时/非法 JSON/关闭 AI 四态演练 | 手工 checklist | 行为一致 |
  | 真机矩阵 | Android 8/12/15 + 深色模式 + 小屏字体放大 1.3× | 手工走查 | 每次发版前 |

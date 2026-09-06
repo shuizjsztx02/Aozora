@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import hashlib
+import json
 import logging
 import uuid
 from datetime import date, datetime, timezone
@@ -59,9 +61,14 @@ class SyncService:
                 ))
                 continue
 
-            # 2. Apply mutation
+            # 2. Apply mutation.
+            # F-M3-2: wrap each mutation in a savepoint so an IntegrityError
+            # (e.g. duplicate entity_id PK violation) rolls back only that
+            # mutation and lets the rest of the batch continue — mirroring
+            # how _Conflict (version mismatch) is handled per-mutation.
             try:
-                result = await self._apply_mutation(user_id, mutation)
+                async with self.db.begin_nested():
+                    result = await self._apply_mutation(user_id, mutation)
             except _Conflict as exc:
                 results.append(MutationResult(
                     mutation_id=mutation.mutation_id,
@@ -71,12 +78,19 @@ class SyncService:
                 # Stop processing remaining mutations after first conflict.
                 break
             except IntegrityError as exc:
-                # PK / UNIQUE / FK violation — most commonly a duplicate
-                # ``entity_id`` on insert. Roll back happens in the session
-                # dependency; report as 409 so the client can reconcile.
-                raise AppException(
-                    409, "conflict", "Mutation conflicts with existing data",
-                ) from exc
+                # PK / UNIQUE / FK violation within this mutation — the
+                # savepoint has already been rolled back, so the session is
+                # clean for the next iteration.  Report as conflict so the
+                # client can reconcile.
+                logger.debug(
+                    "IntegrityError on mutation %s: %s",
+                    mutation.mutation_id, exc,
+                )
+                results.append(MutationResult(
+                    mutation_id=mutation.mutation_id,
+                    status="conflict",
+                ))
+                continue
             except (KeyError, ValueError, TypeError) as exc:
                 # Missing required payload field, or unparseable UUID /
                 # date / datetime / enum. Convert to 422 rather than 500.
@@ -364,11 +378,31 @@ class SyncService:
         entity_type: str,
         expected_version: int,
     ) -> tuple[uuid.UUID, int]:
-        """Soft-delete an entity. Returns (entity_id, new_version)."""
-        entity = await self.repo.get_entity(entity_type, entity_id, user_id)
+        """Soft-delete an entity. Returns (entity_id, new_version).
+
+        F-M3-1: if the entity is already soft-deleted / archived, return a
+        ``_Conflict`` with its current version so the multi-device scenario
+        (device A deletes → device B late-arriving delete) is idempotent
+        rather than overwriting ``deleted_at`` and creating a redundant
+        ``SyncChange``.
+        """
+        # include_deleted=True so we can detect "already deleted" and return
+        # conflict rather than 404 — lets the client reconcile cleanly.
+        entity = await self.repo.get_entity(
+            entity_type, entity_id, user_id, include_deleted=True,
+        )
         if entity is None:
             raise AppException(404, "not_found", f"{entity_type} not found")
         if entity.version != expected_version:
+            raise _Conflict(entity.version)
+
+        # Already soft-deleted / archived → idempotent no-op signalled as
+        # conflict so the client re-syncs rather than re-mutates.
+        already_deleted = (
+            (entity_type in _ARCHIVED_TYPES and entity.archived_at is not None)
+            or (entity_type not in _ARCHIVED_TYPES and entity.deleted_at is not None)
+        )
+        if already_deleted:
             raise _Conflict(entity.version)
 
         now = datetime.now(timezone.utc)
@@ -427,8 +461,10 @@ class SyncService:
         for sc in changes_raw:
             entity_data = None
             if str(sc.operation) != SyncOperation.DELETE.value:
+                # P2-11 fix: pull needs include_deleted=True to reconstruct history
+                # for entities that were later deleted
                 entity = await self.repo.get_entity(
-                    sc.entity_type, sc.entity_id, user_id,
+                    sc.entity_type, sc.entity_id, user_id, include_deleted=True,
                 )
                 if entity is not None:
                     entity_data = _serialize_entity(entity)
@@ -451,16 +487,39 @@ class SyncService:
     # ------------------------------------------------------------------
 
     async def bootstrap(self, user_id: uuid.UUID) -> BootstrapResponse:
+        """Return a full data snapshot plus a deterministic checksum.
+
+        T-M3-03: the checksum is SHA-256 of the canonical JSON serialization
+        of all entity lists + cursor, computed over the same data the client
+        will receive. Clients recompute it locally after rebuild and compare;
+        mismatch triggers a retry or error state.
+        """
         entities = await self.repo.get_all_entities(user_id)
         cursor = await self.repo.get_latest_cursor(user_id)
 
-        return BootstrapResponse(
-            books=[_serialize_entity(b) for b in entities["books"]],
-            categories=[_serialize_entity(c) for c in entities["categories"]],
-            accounts=[_serialize_entity(a) for a in entities["accounts"]],
-            transactions=[_serialize_entity(t) for t in entities["transactions"]],
-            budgets=[_serialize_entity(b) for b in entities["budgets"]],
+        books = [_serialize_entity(b) for b in entities["books"]]
+        categories = [_serialize_entity(c) for c in entities["categories"]]
+        accounts = [_serialize_entity(a) for a in entities["accounts"]]
+        transactions = [_serialize_entity(t) for t in entities["transactions"]]
+        budgets = [_serialize_entity(b) for b in entities["budgets"]]
+
+        checksum = compute_bootstrap_checksum(
+            books=books,
+            categories=categories,
+            accounts=accounts,
+            transactions=transactions,
+            budgets=budgets,
             cursor=cursor,
+        )
+
+        return BootstrapResponse(
+            books=books,
+            categories=categories,
+            accounts=accounts,
+            transactions=transactions,
+            budgets=budgets,
+            cursor=cursor,
+            checksum=checksum,
         )
 
 
@@ -595,3 +654,47 @@ def _serialize_entity(entity: object) -> dict:
             "deleted_at": entity.deleted_at.isoformat() if entity.deleted_at else None,
         }
     raise TypeError(f"Cannot serialize {type(entity)}")
+
+
+# ---------------------------------------------------------------------------
+# T-M3-03: Bootstrap checksum
+# ---------------------------------------------------------------------------
+
+def compute_bootstrap_checksum(
+    *,
+    books: list[dict],
+    categories: list[dict],
+    accounts: list[dict],
+    transactions: list[dict],
+    budgets: list[dict],
+    cursor: int,
+) -> str:
+    """Compute deterministic SHA-256 over bootstrap payload.
+
+    Canonical form:
+    - Entity lists sorted by id (UUID string, stable).
+    - Keys within each entity dict sorted alphabetically.
+    - JSON serialized with separators=(",", ":") and sort_keys=True,
+      encoded as UTF-8.
+    - Concatenated in fixed order: books|categories|accounts|transactions|
+      budgets|cursor.
+
+    Returns lowercase 64-char hex string. Clients must implement the same
+    algorithm to verify.
+    """
+    parts: list[str] = []
+
+    def _append_list(items: list[dict]) -> None:
+        sorted_items = sorted(items, key=lambda x: x.get("id", ""))
+        for item in sorted_items:
+            parts.append(json.dumps(item, sort_keys=True, separators=(",", ":")))
+
+    _append_list(books)
+    _append_list(categories)
+    _append_list(accounts)
+    _append_list(transactions)
+    _append_list(budgets)
+    parts.append(f"cursor:{cursor}")
+
+    payload = "|".join(parts)
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()

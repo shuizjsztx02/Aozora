@@ -27,4 +27,12 @@ interface BudgetDao {
 
     @Query("DELETE FROM budgets WHERE id = :id")
     suspend fun delete(id: String)
+
+    /** T-M3-02: 同步合并 upsert 路径 — REPLACE 语义。仅由 Repository.applyServerChanges 调用。 */
+    @Insert(onConflict = OnConflictStrategy.REPLACE)
+    suspend fun upsertFromSync(budget: BudgetEntity)
+
+    /** T-M3-03: 清空所有预算记录（bootstrap 重建前使用）。 */
+    @Query("DELETE FROM budgets")
+    suspend fun clearAll()
 }

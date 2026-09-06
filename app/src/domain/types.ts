@@ -6,7 +6,7 @@
  * bizDate 为用户时区 YYYY-MM-DD，occurredAt 为 UTC ms timestamp。
  */
 
-import type { MoneyCents } from './money'
+import { type MoneyCents, cents } from './money'
 
 // ─── 枚举类型 ───
 
@@ -92,4 +92,17 @@ export interface CategoryBreakdown {
   categoryId: string
   amount: MoneyCents
   count: number
+}
+
+// ─── 桥数据转换 ───
+
+/**
+ * 将桥返回的 TransactionData 转换为领域 Transaction 类型。
+ * 解决 MoneyCents branded type 不兼容问题，避免使用 as never 绕过类型检查。
+ */
+export function toDomainTransaction(tx: import('../platform/bridge/bridge-types').TransactionData): Transaction {
+  return {
+    ...tx,
+    amountCents: cents(tx.amountCents),
+  }
 }

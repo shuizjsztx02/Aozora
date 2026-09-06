@@ -24,6 +24,8 @@ import {
   type AccountData,
   type BudgetData,
   type PendingMutationData,
+  type SyncStatusData,
+  type SyncEvent,
 } from './bridge-types'
 
 declare global {
@@ -228,6 +230,43 @@ export class NativeBridge {
 
   async removePendingMutation(mutationId: string): Promise<{ success: boolean }> {
     return this.call('pendingMutation.remove', { mutationId })
+  }
+
+  // ─── T-M3-02: Sync Engine ───
+
+  /** 查询当前同步状态。 */
+  async getSyncStatus(): Promise<SyncStatusData> {
+    return this.call<SyncStatusData>('sync.getStatus')
+  }
+
+  /** 触发一轮同步（幂等；多次调用仅保留一个 worker）。 */
+  async triggerSync(): Promise<{ enqueued: boolean }> {
+    return this.call('sync.trigger')
+  }
+
+  /**
+   * 注册同步事件监听（原生 → Web 推送）。
+   * 返回取消订阅函数。
+   *
+   * 原生侧通过 `window.__aozoraSyncEvent__(event)` 调用；本方法只负责订阅分发。
+   */
+  onSyncEvent(listener: (event: SyncEvent) => void): () => void {
+    if (typeof window === 'undefined') return () => {}
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const prev = (window as any).__aozoraSyncEvent__
+    const wrapped = (event: SyncEvent) => {
+      listener(event)
+      if (typeof prev === 'function') prev(event)
+    }
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    ;(window as any).__aozoraSyncEvent__ = wrapped
+    return () => {
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      if ((window as any).__aozoraSyncEvent__ === wrapped) {
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        ;(window as any).__aozoraSyncEvent__ = prev
+      }
+    }
   }
 
   // ─── 测试辅助 ───

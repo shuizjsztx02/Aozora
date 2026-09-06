@@ -57,9 +57,12 @@ describe('Bridge types — 命令完整性', () => {
     'pendingMutation.markSyncing',
     'pendingMutation.markFailed',
     'pendingMutation.remove',
+    // T-M3-02: 同步引擎
+    'sync.getStatus',
+    'sync.trigger',
   ]
 
-  it('BridgeCommands 包含所有 20 个命令（含 R-M1-43 补齐的 5 个写命令）', () => {
+  it('BridgeCommands 包含所有 22 个命令（含 T-M3-02 同步 2 个命令）', () => {
     const actualCommands = Object.values(BridgeCommands)
     expect(actualCommands).toHaveLength(expectedCommands.length)
     for (const cmd of expectedCommands) {

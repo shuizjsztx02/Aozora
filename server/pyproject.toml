@@ -18,15 +18,18 @@ dependencies = [
     "alembic>=1.14,<2",
     "pyjwt>=2.9,<3",
     "bcrypt>=4.0,<5",
+    # T-M4-01: outbound LLM provider calls (DashScope OpenAI-compatible mode).
+    "httpx>=0.27,<1",
+    # T-M4-02: ActionProposal server-side validation (Draft-07 parity with ajv/TS).
+    "jsonschema>=4.23,<5",
 ]
 
 [project.optional-dependencies]
 dev = [
     "pytest>=8,<9",
     "pytest-asyncio>=0.24,<1",
-    # R-M2-20: use the mainstream ``httpx`` (pulled transitively by
-    # fastapi's TestClient); ``httpx2`` is a non-standard fork we don't use.
-    "httpx>=0.27,<1",
+    # R-M2-20: ``httpx`` moved to main dependencies in T-M4-01 (the AI
+    # gateway needs it at runtime); TestClient keeps using the same one.
     "aiosqlite>=0.20,<1",
 ]
 

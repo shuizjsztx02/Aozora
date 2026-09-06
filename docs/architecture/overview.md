@@ -6,14 +6,12 @@
 
 ## 本地数据层（T-M1-03 ✅）
 
-- **Room 数据库：** `com.aozora.app.db.AozoraDatabase`，6 实体（Transaction/Book/Category/Account/Budget/PendingMutation），每个实体对应 DAO
-- **Repository：** 已开放的交易插入/软删除、账本插入和分类插入通过 `db.withTransaction` 包含实体与 pending mutation；其余业务写路径尚未完整交付，不能绕过 repository 直接写 DAO
-- **JS Bridge：** `AozoraBridge` 通过 `@JavascriptInterface` 暴露给 WebView，版本化协议 v1，15 个命令，`requestId + callback` 模式
+- **Room 数据库：** `com.aozora.app.db.AozoraDatabase`，7 实体（Transaction/Book/Category/Account/Budget/PendingMutation/SyncMeta），每个实体对应 DAO；schema v2（`sync_meta` 表 + `pending_mutations.expectedVersion/lastError` 列，经 `MIGRATION_1_2` 升级）
+- **Repository：** 已开放的交易插入/软删除、账本插入和分类插入通过 `db.withTransaction` 包含实体与 pending mutation；其余业务写路径尚未完整交付，不能绕过 repository 直接写 DAO。同步合并走 Repository 的 server-merge 专用路径（`applyServerChanges`），只更新实体与 cursor，不入队新 mutation
+- **JS Bridge：** `AozoraBridge` 通过 `@JavascriptInterface` 暴露给 WebView，版本化协议 v1，22 个命令（含 `sync.getStatus` / `sync.trigger`），`requestId + callback` 模式；原生→前端事件经 `__aozoraSyncEvent` 通道下发
 - **TypeScript 桥客户端：** `platform/bridge/native-bridge.ts`，Promise-based 封装，与 Kotlin 侧契约类型一一对应
 
-## 后续关注
-
-## 同步模块（T-M3-01）
+## 同步模块（T-M3-01 ✅ / T-M3-02 ✅）
 
 服务端同步采用"服务端权威 + 本地副本 + 操作队列"协议：
 
@@ -23,8 +21,20 @@
 
 幂等保证：客户端生成的 `mutationId`（UUID）写入 `mutation_idempotency` 表，重复 push 同一 mutationId 返回 `duplicate`。冲突响应返回 `409` 或 `conflict` 状态 + 服务端当前 version。
 
-- 同步引擎（T-M3-02）将通过 Bridge 消费 PendingMutation 队列
 - Room schema 变更使用 migration，不做破坏性 reset
+
+### 同步引擎（T-M3-02）
+
+Android 侧同步引擎位于 `com.aozora.app.sync`，由 WorkManager 驱动，消费 `pending_mutations` 队列：
+
+- **调度：** `SyncWorker`（CoroutineWorker，短任务有界）以 unique work `"sync"`（KEEP 策略）入队，约束 `NetworkType.CONNECTED`，指数退避（10s 起）。触发点：每次业务写入成功后、`MainActivity.onResume`、应用启动、15 分钟周期兜底。网络恢复后由 WorkManager 约束自动触发（60s SLO 为尽力而为）。
+- **认证：** 首次同步静默 `POST /auth/guest` 游客注册（无 UI）；access token 临期或 401 时用 refresh token 轮换。tokens 以 Android Keystore AES/GCM 加密存储（不使用已废弃的 `EncryptedSharedPreferences`）。refresh 失败 → `auth_failed` 状态，不静默重注册（防止数据孤儿）。
+- **Push：** 按 `createdAt` 顺序批量提交（≤100/批）。请求前 `markSyncing`；`applied`/`duplicate` 移除 mutation；`conflict` 标记 `failed` + `lastError` 为终态（保留本地待处理版本，等待用户处理，不静默覆盖），同批其余保持 `pending` 下轮继续；瞬时错误（IO/5xx/429）保持 `pending` 走 WorkManager 退避重试。每次运行开始先把残留 `syncing` 重置为 `pending`（崩溃恢复，mutationId 幂等保证安全）。
+- **Payload 映射：** Room payload 为 camelCase（Bridge 契约），服务端 wire 为 snake_case，由 `SyncPayloadMapper` 双向转换；`occurredAt` Long ms ↔ ISO-8601 UTC；客户端 `archive` 操作映射为 wire `delete`（服务端对 category/account 的 delete 即归档）。update/delete 推送携带 `expectedVersion`（变更前的版本号，入队时在同一事务内捕获）。
+- **Pull 与原子合并：** 以 `sync_meta` 表持久化 cursor，逐页拉取（≤500）并在单个 Room 事务内合并：upsert 实体、应用删除/归档、同事务推进 cursor。pull 会回放本设备自己推送的变更，合并因此必须幂等且**不入队新 mutation**；对仍有活跃（`pending`/`syncing`）mutation 的实体跳过覆盖（本地待处理版本优先）；服务端不返回 `ownerId`，合并时以当前会话用户 ID 回填。实体 upsert 使用同步专用 `upsertFromSync`（REPLACE）路径，业务写入 insert 仍保持 ABORT 语义。
+- **冲突策略（§5.3）：** 版本不一致 → 保留本地待处理版本并标记失败，经同步状态事件上报前端，等待用户处理；首发单设备场景冲突极少。
+- **前端状态事件：** 原生侧经 `SyncEventBus`（StateFlow）发布 `SyncState`，`MainActivity` 在主线程经 `__aozoraSyncEvent(...)` 推送给 WebView；Bridge 新增 `sync.getStatus`（权威状态查询，页面加载恢复用）与 `sync.trigger`（手动触发）。事件是提示，`sync.getStatus` 是真相源。首发不做状态徽章 UI。
+- **基址配置：** `BuildConfig.SYNC_BASE_URL` 分构建类型：debug 默认本机开发服务器（debug-only network-security-config 允许 localhost/10.0.2.2 明文）；release 经 gradle 属性注入 HTTPS 基址（生产链路：HTTPS → nginx 443 → FastAPI 内网端口），域名由 D-EXEC-01 确认后落地。
 
 ### T-M1-03 复审约束
 

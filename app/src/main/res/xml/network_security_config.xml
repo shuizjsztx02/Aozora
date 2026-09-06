@@ -1,0 +1,13 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  T-M3-02: debug builds reach the local dev server via emulator loopback;
+  release builds point at a production HTTPS base (via gradle property), so
+  the localhost exception is inert in production but harmless.
+  Other domains must be HTTPS (usesCleartextTraffic=false at the root).
+-->
+<network-security-config>
+    <domain-config cleartextTrafficPermitted="true">
+        <domain includeSubdomains="false">localhost</domain>
+        <domain includeSubdomains="false">10.0.2.2</domain>
+    </domain-config>
+</network-security-config>

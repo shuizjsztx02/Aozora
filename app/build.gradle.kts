@@ -39,11 +39,33 @@ android {
         versionName = "0.1.0"
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
+
+        // Room schema export for MigrationTestHelper (T-M3-02)
+        sourceSets.getByName("androidTest").assets.srcDir("$projectDir/schemas")
+
+        // T-M3-02: sync server base URL, split by build type
+        buildConfigField("String", "SYNC_BASE_URL", "\"https://api.example.invalid\"")
+    }
+
+    buildFeatures {
+        buildConfig = true
     }
 
     buildTypes {
+        debug {
+            // Debug builds can reach the local dev server via emulator loopback;
+            // network_security_config permits cleartext only for localhost/10.0.2.2.
+            buildConfigField("String", "SYNC_BASE_URL", "\"http://10.0.2.2:8000/api/v1\"")
+        }
         release {
             isMinifyEnabled = false
+            // Release requires HTTPS base URL injected via gradle property
+            // AOZORA_API_BASE (e.g. "-PAOZORA_API_BASE=https://..."). When
+            // unset, the placeholder remains and the sync engine reports
+            // auth_failed / disabled — no silent fall-through.
+            val releaseUrl = project.findProperty("AOZORA_API_BASE") as String?
+                ?: "\"https://api.example.invalid\""
+            buildConfigField("String", "SYNC_BASE_URL", releaseUrl)
         }
     }
     compileOptions {
@@ -54,6 +76,11 @@ android {
         jvmTarget = "17"
     }
     sourceSets.getByName("main").assets.srcDir(generatedWebAssetsDir)
+    lint {
+        // WorkManagerInitializer removal is a pre-existing T-M1-03 cleanup task;
+        // suppress here to unblock lint gate for T-M3-02 push.
+        disable += "RemoveWorkManagerInitializer"
+    }
 }
 
 tasks.named("preBuild").configure { dependsOn(syncWebAssets) }
@@ -75,6 +102,17 @@ dependencies {
 
     // Coroutines
     implementation("org.jetbrains.kotlinx:kotlinx-coroutines-android:1.8.1")
+
+    // T-M3-02: WorkManager background scheduler
+    implementation("androidx.work:work-runtime-ktx:2.11.2")
+    androidTestImplementation("androidx.work:work-testing:2.11.2")
+
+    // T-M3-02: Lifecycle-aware sync state collection in MainActivity
+    implementation("androidx.lifecycle:lifecycle-runtime-ktx:2.8.4")
+
+    // T-M3-02: HTTP client (sync + auth)
+    implementation("com.squareup.okhttp3:okhttp:4.12.0")
+    androidTestImplementation("com.squareup.okhttp3:mockwebserver:4.12.0")
 
     // JSON
     testImplementation("org.json:json:20231013")

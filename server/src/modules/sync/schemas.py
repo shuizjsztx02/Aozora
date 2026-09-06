@@ -6,7 +6,7 @@ import uuid
 from datetime import datetime
 from typing import Any
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, computed_field
 
 
 # ---------------------------------------------------------------------------
@@ -68,6 +68,11 @@ class ChangeItem(BaseModel):
     entity: dict[str, Any] | None = None  # null for delete operations
 
 
+class PullRequest(BaseModel):
+    cursor: int = Field(default=0, ge=0)
+    limit: int = Field(default=100, ge=1, le=500)
+
+
 class PullResponse(BaseModel):
     changes: list[ChangeItem]
     cursor: int  # latest cursor (== request cursor if no changes)
@@ -79,9 +84,17 @@ class PullResponse(BaseModel):
 # ---------------------------------------------------------------------------
 
 class BootstrapResponse(BaseModel):
+    """Full data snapshot for device rebuild.
+
+    T-M3-03: includes `checksum` — a deterministic SHA-256 of the response
+    payload (excluding the checksum itself), formatted as lowercase hex.
+    Clients recompute the same hash over the received entities and compare;
+    mismatch indicates transport corruption or incomplete rebuild.
+    """
     books: list[dict[str, Any]]
     categories: list[dict[str, Any]]
     accounts: list[dict[str, Any]]
     transactions: list[dict[str, Any]]
     budgets: list[dict[str, Any]]
     cursor: int
+    checksum: str = ""

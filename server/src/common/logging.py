@@ -25,7 +25,14 @@ class JSONFormatter(logging.Formatter):
         if record.exc_info and record.exc_info[0] is not None:
             payload["exception"] = self.formatException(record.exc_info)
         # Carry over structured extras (e.g. request_id, method, path)
-        for key in ("request_id", "method", "path", "status_code", "duration_ms"):
+        # T-M4-01: AI gateway metadata is whitelisted here so redacted
+        # usage/failure logs actually reach the JSON output. Message
+        # content (user input / model output) must NEVER be logged.
+        for key in (
+            "request_id", "method", "path", "status_code", "duration_ms",
+            "ai_task", "ai_model", "ai_provider", "prompt_tokens",
+            "completion_tokens", "attempt", "outcome",
+        ):
             value = getattr(record, key, None)
             if value is not None:
                 payload[key] = value
