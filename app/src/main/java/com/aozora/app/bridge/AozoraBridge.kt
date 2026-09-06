@@ -687,7 +687,7 @@ class AozoraBridge(
         }
     }
 
-    private fun handleVoiceStopRecording(requestId: String): BridgeResponse {
+    private suspend fun handleVoiceStopRecording(requestId: String): BridgeResponse {
         val service = voiceRecognitionService
             ?: return BridgeResponse.error(requestId, "unavailable", "Voice recognition service not injected")
 
@@ -695,7 +695,7 @@ class AozoraBridge(
             return BridgeResponse.error(requestId, "not_recording", "Not recording")
         }
 
-        // Stop recording and get final text
+        // Bug-B2 fix：stopRecording 现在是 suspend 函数，在此直接 await
         val finalText = service.stopRecording()
 
         // Dispatch final result to frontend
@@ -735,17 +735,20 @@ class AozoraBridge(
         webView.post { webView.evaluateJavascript(js, null) }
     }
 
-    /** Push voice error to frontend via `window.__aozoraVoiceError__`. */
+    /**
+     * Push voice error to frontend via `window.__aozoraVoiceError__`.
+     *
+     * Bug-B4 fix：传裸对象字面量，与 dispatchImageProgress 保持一致。
+     * 旧代码用 JSONObject.quote(data.toString()) 导致双重 JSON 编码（JS 收到的是字符串而非对象）。
+     */
     private fun dispatchVoiceError(code: String, message: String) {
-        val data = JSONObject().apply {
-            put("code", code)
-            put("message", message)
-        }
+        val safeCode = JSONObject.quote(code)
+        val safeMessage = JSONObject.quote(message)
         val js = """
             (function(){
               try {
                 if (typeof window.__aozoraVoiceError__ === 'function') {
-                  window.__aozoraVoiceError__(${JSONObject.quote(data.toString())});
+                  window.__aozoraVoiceError__({code: $safeCode, message: $safeMessage});
                 }
               } catch (e) {}
             })();

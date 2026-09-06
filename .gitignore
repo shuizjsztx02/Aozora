@@ -27,3 +27,5 @@ server/.env
 
 # Claude Code local state
 .claude/
+server/.pytest_tmp/
+app/src/main/assets/vosk-model-small-cn/

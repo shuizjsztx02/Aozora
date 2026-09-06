@@ -43,15 +43,12 @@ export function sumTransactions(txs: Transaction[]): MonthlyStats {
 
 /**
  * 计算结余（收入 - 支出）。
- * 口径（对账契约，见 docs/architecture/data-model.md）：balance = max(0, income - expense)。
- * MoneyCents 不允许负值：当支出 > 收入时 balance 为 0，赤字由 UI 层根据 totalIncome/totalExpense 自行展示。
+ * 口径（对账契约，见 docs/architecture/data-model.md）：balance = income - expense。
+ * 允许负值表示赤字（支出 > 收入），与服务端 /stats/monthly 和 /ai/report 口径一致。
  * 客户端与服务端统计必须使用同一口径，否则违反 §5.2 对账不变量。
  */
-function computeBalance(income: Money.MoneyCents, expense: Money.MoneyCents): Money.MoneyCents {
-  if (income >= expense) {
-    return Money.sub(income, expense)
-  }
-  return Money.ZERO
+function computeBalance(income: Money.MoneyCents, expense: Money.MoneyCents): number {
+  return (income as number) - (expense as number)
 }
 
 /** 按分类汇总指定类型的流水 */

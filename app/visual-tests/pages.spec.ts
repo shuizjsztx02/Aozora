@@ -84,27 +84,27 @@ function injectMockBridge(page: any) {
     }
 
     const CATEGORIES = [
-      { id: 'cat_food',   name: '餐饮', icon: '🍽️', version: 1, createdAt: 1000 },
-      { id: 'cat_trans',  name: '交通', icon: '🚇', version: 1, createdAt: 1000 },
-      { id: 'cat_shop',   name: '购物', icon: '🛍️', version: 1, createdAt: 1000 },
-      { id: 'cat_salary', name: '工资', icon: '💰', version: 1, createdAt: 1000 },
+      { id: 'cat_food',   kind: 'expense', name: '餐饮', parentId: null, version: 1 },
+      { id: 'cat_trans',  kind: 'expense', name: '交通', parentId: null, version: 1 },
+      { id: 'cat_shop',   kind: 'expense', name: '购物', parentId: null, version: 1 },
+      { id: 'cat_salary', kind: 'income',  name: '工资', parentId: null, version: 1 },
     ]
 
     const TRANSACTIONS = [
-      { id: 'tx_1', bookId: 'book_1', categoryId: 'cat_food',   amountCents: 3500,   type: 'expense', note: '午餐',   bizDate: today, occurredAt: Date.now() - 3_600_000,   deletedAt: null, version: 1, createdAt: 1000 },
-      { id: 'tx_2', bookId: 'book_1', categoryId: 'cat_trans',  amountCents: 800,    type: 'expense', note: '地铁',   bizDate: today, occurredAt: Date.now() - 7_200_000,   deletedAt: null, version: 1, createdAt: 1000 },
-      { id: 'tx_3', bookId: 'book_1', categoryId: 'cat_shop',   amountCents: 12900,  type: 'expense', note: '日用品', bizDate: today, occurredAt: Date.now() - 10_800_000,  deletedAt: null, version: 1, createdAt: 1000 },
-      { id: 'tx_4', bookId: 'book_1', categoryId: 'cat_food',   amountCents: 2800,   type: 'expense', note: '早餐',   bizDate: d(1),  occurredAt: Date.now() - 86_400_000,   deletedAt: null, version: 1, createdAt: 1000 },
-      { id: 'tx_5', bookId: 'book_1', categoryId: 'cat_salary', amountCents: 1500000, type: 'income',  note: '月薪',   bizDate: d(3),  occurredAt: Date.now() - 259_200_000,  deletedAt: null, version: 1, createdAt: 1000 },
+      { id: 'tx_1', bookId: 'book_1', categoryId: 'cat_food',   amountCents: 3500,   type: 'expense', note: '午餐',   bizDate: today, occurredAt: Date.now() - 3_600_000,   source: 'manual', deletedAt: null, version: 1 },
+      { id: 'tx_2', bookId: 'book_1', categoryId: 'cat_trans',  amountCents: 800,    type: 'expense', note: '地铁',   bizDate: today, occurredAt: Date.now() - 7_200_000,   source: 'manual', deletedAt: null, version: 1 },
+      { id: 'tx_3', bookId: 'book_1', categoryId: 'cat_shop',   amountCents: 12900,  type: 'expense', note: '日用品', bizDate: today, occurredAt: Date.now() - 10_800_000,  source: 'manual', deletedAt: null, version: 1 },
+      { id: 'tx_4', bookId: 'book_1', categoryId: 'cat_food',   amountCents: 2800,   type: 'expense', note: '早餐',   bizDate: d(1),  occurredAt: Date.now() - 86_400_000,   source: 'manual', deletedAt: null, version: 1 },
+      { id: 'tx_5', bookId: 'book_1', categoryId: 'cat_salary', amountCents: 1500000, type: 'income',  note: '月薪',   bizDate: d(3),  occurredAt: Date.now() - 259_200_000,  source: 'manual', deletedAt: null, version: 1 },
     ]
 
     const HANDLERS: Record<string, () => unknown> = {
       'bridge.getVersion':     () => ({ version: 1 }),
-      'book.list':              () => [{ id: 'book_1', name: '默认账本', currency: 'CNY', version: 1, createdAt: 1000 }],
+      'book.list':              () => [{ id: 'book_1', ownerId: 'user_1', name: '默认账本', icon: '💰', version: 1 }],
       'category.list':          () => CATEGORIES,
       'transaction.listByBook': () => TRANSACTIONS,
-      'budget.list':            () => [{ id: 'budget_1', bookId: 'book_1', budgetType: 'monthly', categoryId: null, period: month, amountCents: 200000, version: 1, createdAt: 1000 }],
-      'sync.getStatus':         () => ({ state: 'idle', lastSyncedAt: Date.now() - 60_000 }),
+      'budget.list':            () => [{ id: 'budget_1', bookId: 'book_1', budgetType: 'monthly', categoryId: null, period: month, amountCents: 200000, version: 1 }],
+      'sync.getStatus':         () => ({ state: 'idle', pendingCount: 0, lastSyncedAt: Date.now() - 60_000, failedMutations: [] }),
       'reminder.getStatus':     () => ({ enabled: false, hour: 21, minute: 0, permissionGranted: false }),
     }
 

@@ -103,3 +103,15 @@ export function formatYuan(c: MoneyCents): string {
 export function formatDisplay(c: MoneyCents): string {
   return `¥${formatYuan(c)}`
 }
+
+/**
+ * 格式化为有符号显示字符串。
+ * 用于 balance 等允许负值的场景：正数 "¥12.50"、负数 "-¥12.50"、零 "¥0.00"。
+ */
+export function formatSigned(cents: number): string {
+  const abs = Math.abs(cents)
+  const yuan = Math.floor(abs / 100)
+  const fen = abs % 100
+  const sign = cents < 0 ? '-' : ''
+  return `${sign}¥${yuan}.${String(fen).padStart(2, '0')}`
+}

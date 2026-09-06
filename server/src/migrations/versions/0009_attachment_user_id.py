@@ -12,10 +12,12 @@ is still PENDING. ``user_id`` makes ownership checkable at upload time.
 ``file_size`` records the byte count of the stored object for storage
 accounting and policy enforcement (e.g. per-user quota in the future).
 
-SQLite compatibility: both columns are added as nullable to satisfy
-SQLite's ``ALTER TABLE`` limitation (no NOT NULL without default).
-PostgreSQL production accepts the same migration; the ORM layer
-enforces NOT NULL via application logic.
+Database compatibility: this migration is **PostgreSQL only**. The
+``sa.UUID()`` column type maps to the native ``UUID`` type that exists
+in PostgreSQL but not in SQLite or MySQL. Running this migration
+against a non-PostgreSQL database will fail at the ``ALTER TABLE``
+statement. This is intentional — attachment storage requires reliable
+UUID generation and the production target is PostgreSQL.
 """
 
 from __future__ import annotations
@@ -43,9 +45,16 @@ def upgrade() -> None:
         "attachments",
         sa.Column("file_size", sa.BigInteger, nullable=True),
     )
-    # SQLite does not support NOT NULL without a server_default via
-    # ALTER TABLE; PostgreSQL accepts it but the migration is shared.
-    # Application layer enforces presence of user_id on insert.
+    # NOTE: user_id is nullable at the DDL level for ALTER TABLE simplicity.
+    # The ORM layer enforces NOT NULL via application logic on insert.
+    #
+    # TODO (Bug-C1): before production deploy with existing attachment rows:
+    #   1. Backfill: UPDATE attachments SET user_id = (
+    #        SELECT t.user_id FROM transactions t
+    #        WHERE t.id = attachments.transaction_id
+    #      ) WHERE user_id IS NULL AND transaction_id IS NOT NULL;
+    #   2. Create follow-up migration 0010 to SET NOT NULL on user_id.
+    #   3. Delete orphan PENDING rows with no user_id (pre-T-M4-04c data).
 
 
 def downgrade() -> None:

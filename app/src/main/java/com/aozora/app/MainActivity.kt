@@ -102,7 +102,8 @@ class MainActivity : AppCompatActivity() {
         webView.loadUrl("https://appassets.androidplatform.net/assets/index.html")
 
         // T-M4-04b: 异步预加载 Vosk 语音识别模型（约 1-2 秒）
-        app.voiceRecognitionService.initialize { success, error ->
+        // Bug-B3 fix：传入 scope，Activity 销毁时 scope.cancel() 会取消加载协程，防止回调泄漏
+        app.voiceRecognitionService.initialize(scope) { success, error ->
             if (success) {
                 android.util.Log.i("MainActivity", "Vosk model loaded successfully")
             } else {

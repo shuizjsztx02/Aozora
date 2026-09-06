@@ -227,5 +227,9 @@ body {
 /*
  * R-M4-12: 大字体标记 class（由 FontScaleAdapter 检测后添加到 html）。
  * 不覆盖 font-size，让浏览器自然使用用户系统字体缩放设置。
- * 如需布局适配（调整 padding/gap 避免大字体溢出），可在此处添加规则。
+ *
+ * 当前无消费此 class 的 CSS 规则——FontScaleAdapter 仅作为信号标记存在，
+ * 供未来布局适配（如调整 padding/gap 避免大字体溢出）使用。
+ * 如需启用布局适配，在此处添加规则即可，例如：
+ *   .text-scale-13 .chat-bubble { padding: 12px 16px; }
  */

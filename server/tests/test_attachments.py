@@ -2,13 +2,14 @@
 
 Coverage:
 - upload: success, rejected MIME (415), oversized (413), empty (400),
-  spoofed Content-Type sniffed via magic bytes
+  spoofed Content-Type sniffed via magic bytes → 415 (R-M4-40)
 - list / get / download / delete: ownership (404 cross-user)
 - download expired → 410
 - link: success, cross-user transaction → 404, already linked → 409,
   expired attachment → 410
 - expiry: PENDING past 24h auto-flips to EXPIRED; file deleted
-- cleanup_expired_files removes stale files from disk
+- cleanup_expired_files: DB-driven; removes only expired PENDING/EXPIRED
+  rows and their files; LINKED/PARSED rows are never touched (R-M4-39)
 """
 
 from __future__ import annotations
@@ -122,15 +123,25 @@ NOT_IMAGE = b"\x00\x00\x00\x00NOT_AN_IMAGE"
 
 
 def _upload_bytes(data: bytes, content_type: str, filename: str = "x.jpg"):
-    """Duck-typed UploadFile for service unit tests."""
+    """Duck-typed UploadFile for service unit tests.
+
+    Supports chunked ``read(size)`` (R-M4-41) as well as full ``read()``.
+    """
     class _F:
         def __init__(self, data: bytes, content_type: str, filename: str):
             self._data = data
+            self._pos = 0
             self.content_type = content_type
             self.filename = filename
 
-        async def read(self) -> bytes:
-            return self._data
+        async def read(self, size: int = -1) -> bytes:
+            if size < 0:
+                chunk = self._data[self._pos:]
+                self._pos = len(self._data)
+            else:
+                chunk = self._data[self._pos:self._pos + size]
+                self._pos += len(chunk)
+            return chunk
 
     return _F(data, content_type, filename)
 
@@ -181,20 +192,21 @@ class TestUploadValidation:
         assert excinfo.value.status_code == 400
 
     @pytest.mark.asyncio
-    async def test_unknown_magic_bytes_falls_back_to_header(
+    async def test_unknown_magic_bytes_rejected(
         self, db: AsyncSession, users: dict, upload_dir: Path, monkeypatch,
     ):
-        """When magic bytes are unrecognised, the service falls back to the
-        Content-Type header (no false-positive rejection of novel formats).
+        """R-M4-40: When magic bytes are unrecognised the upload is
+        rejected with 415 — no fallback to the Content-Type header.
         """
         from src.modules.attachments import service as svc_mod
         monkeypatch.setattr(svc_mod, "_get_upload_dir", lambda: upload_dir)
 
         svc = AttachmentService(db)
-        # Unrecognised body but header claims image/jpeg.
+        # Unrecognised body even though header claims image/jpeg.
         upload = _upload_bytes(NOT_IMAGE, "image/jpeg")
-        att = await svc.upload(users["alice"].id, upload)
-        assert att.mime_type == "image/jpeg"
+        with pytest.raises(Exception) as excinfo:
+            await svc.upload(users["alice"].id, upload)
+        assert excinfo.value.status_code == 415
 
 
 class TestUploadSuccess:
@@ -220,18 +232,17 @@ class TestUploadSuccess:
     async def test_rejects_spoofed_header_when_body_is_not_image(
         self, db: AsyncSession, users: dict, upload_dir: Path, monkeypatch,
     ):
-        """Claiming image/jpeg with an obviously-non-image body still
-        uploads (sniffer returns None → falls back to header). A stronger
-        sniffer could reject — the service is defensive, not punitive.
-        The test pins the current behaviour.
+        """R-M4-40: Claiming image/jpeg with a non-image body is rejected
+        because the sniffer returns None → 415 (no header fallback).
         """
         from src.modules.attachments import service as svc_mod
         monkeypatch.setattr(svc_mod, "_get_upload_dir", lambda: upload_dir)
 
         svc = AttachmentService(db)
         upload = _upload_bytes(NOT_IMAGE, "image/jpeg")
-        att = await svc.upload(users["alice"].id, upload)
-        assert att.mime_type == "image/jpeg"
+        with pytest.raises(Exception) as excinfo:
+            await svc.upload(users["alice"].id, upload)
+        assert excinfo.value.status_code == 415
 
     @pytest.mark.asyncio
     async def test_png_header_rejected_without_magic_match(
@@ -455,23 +466,79 @@ class TestExpiry:
 
 
 class TestCleanup:
-    def test_cleanup_removes_stale_files(self, upload_dir: Path, monkeypatch):
+    """R-M4-39: DB-driven cleanup — only expired PENDING/EXPIRED rows are
+    removed; LINKED/PARSED rows and their files are never touched.
+    """
+
+    @pytest.mark.asyncio
+    async def test_cleanup_removes_expired_rows_and_files(
+        self, db: AsyncSession, users: dict, upload_dir: Path, monkeypatch,
+    ):
         from src.modules.attachments import service as svc_mod
         monkeypatch.setattr(svc_mod, "_get_upload_dir", lambda: upload_dir)
 
-        import os as _os
-        stale = upload_dir / "stale.jpg"
-        stale.write_bytes(b"\xff\xd8\xff\xe0" + b"\x00" * 8)
-        old_time = (datetime.now() - timedelta(hours=48)).timestamp()
-        _os.utime(stale, (old_time, old_time))
+        svc = AttachmentService(db)
 
-        fresh = upload_dir / "fresh.jpg"
-        fresh.write_bytes(b"\xff\xd8\xff\xe0" + b"\x00" * 8)
+        # 1. A PENDING attachment that has expired.
+        att_expired = await svc.upload(
+            users["alice"].id, _upload_bytes(FAKE_JPEG, "image/jpeg"),
+        )
+        att_expired.expires_at = datetime.now(UTC) - timedelta(hours=25)
+        await db.flush()
+        expired_file = upload_dir / att_expired.object_key
+        assert expired_file.exists()
 
-        deleted = cleanup_expired_files()
+        # 2. A PENDING attachment still within its window — must survive.
+        att_fresh = await svc.upload(
+            users["alice"].id, _upload_bytes(FAKE_PNG, "image/png"),
+        )
+        fresh_file = upload_dir / att_fresh.object_key
+        assert fresh_file.exists()
+
+        deleted = await cleanup_expired_files(db)
         assert deleted == 1
-        assert not stale.exists()
-        assert fresh.exists()
+        assert not expired_file.exists()
+        assert fresh_file.exists()
+
+        # The expired row is gone from DB; the fresh row survives.
+        result = await db.execute(
+            select(Attachment).where(Attachment.id == att_expired.id),
+        )
+        assert result.scalar_one_or_none() is None
+        result = await db.execute(
+            select(Attachment).where(Attachment.id == att_fresh.id),
+        )
+        assert result.scalar_one_or_none() is not None
+
+    @pytest.mark.asyncio
+    async def test_cleanup_preserves_linked_files(
+        self, db: AsyncSession, users: dict, upload_dir: Path, monkeypatch,
+        alice_tx,
+    ):
+        """R-M4-39: LINKED attachments are never deleted, even if old."""
+        from src.modules.attachments import service as svc_mod
+        monkeypatch.setattr(svc_mod, "_get_upload_dir", lambda: upload_dir)
+
+        svc = AttachmentService(db)
+        att = await svc.upload(
+            users["alice"].id, _upload_bytes(FAKE_JPEG, "image/jpeg"),
+        )
+        await svc.link_attachment(att.id, users["alice"].id, alice_tx.id)
+        file_path = upload_dir / att.object_key
+        assert file_path.exists()
+
+        # Backdate created_at to simulate an old LINKED attachment.
+        att.created_at = datetime.now(UTC) - timedelta(days=30)
+        await db.flush()
+
+        deleted = await cleanup_expired_files(db)
+        assert deleted == 0
+        assert file_path.exists()
+
+        result = await db.execute(
+            select(Attachment).where(Attachment.id == att.id),
+        )
+        assert result.scalar_one_or_none() is not None
 
 
 # ---------------------------------------------------------------------------

@@ -170,7 +170,7 @@ def _compute_data_hash(
             f":{largest_income.note}:{largest_income.biz_date}"
         )
     for t in sorted(trend, key=lambda x: x.period):
-        canonical.append(f"{t.period}:{t.total_income}:{t.total_expense}:{t.balance}")
+        canonical.append(f"{t.period}:{t.total_income}:{t.total_expense}:{t.balance}:{t.transaction_count}")
     raw = "\n".join(canonical).encode("utf-8")
     return hashlib.sha256(raw).hexdigest()[:16]  # 16 hex chars is enough for cache
 

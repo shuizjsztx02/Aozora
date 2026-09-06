@@ -128,9 +128,13 @@ class Settings(BaseSettings):
     )
     # Per-attempt timeout. Contract (APP-CONTEXT §6.4): the client cancels
     # at 25 s, so 2 × timeout + overhead must stay below that budget.
+    # R-M4-42: enforce le=12 (leaves ~1 s overhead for 2 × 12 + 1 = 25 s);
+    # without the upper bound an ops misconfiguration silently breaks the
+    # degradation timing contract with the client.
     ai_timeout_seconds: float = Field(
         default=10.0,
         gt=0,
+        le=12.0,
         validation_alias=AliasChoices("AI_TIMEOUT_SECONDS", "ai_timeout_seconds"),
     )
     # Per-user burst protection — applies to ALL users (guests and active);

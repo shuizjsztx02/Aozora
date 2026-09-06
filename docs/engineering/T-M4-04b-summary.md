@@ -30,10 +30,25 @@
   - 状态：`isRecording`、`partialText`、`finalText`、`error`
   - 方法：`startRecording()`、`stopRecording()`、`reset()`
 
+- ✅ **AssistantPage 语音集成**（2026-09-06 补充）
+  - 输入区新增 🎤 麦克风按钮，点击切换录音/停止
+  - 录音中实时显示部分转写文本（`voice-partial`）
+  - 录音结束自动将最终转写填入输入框，用户可编辑后发送
+  - 完整链路：语音 → 转写文本 → 输入框 → `submitInput` → 本地 NLU / AI Gateway
+  - 语音错误（权限拒绝、模型未加载等）显示红色提示条
+  - 处理/执行阶段自动禁用麦克风按钮
+
 ### 3. 测试
 
 - ✅ **BridgeProtocolTest.kt** — 命令清单 35 → 36
-- ✅ **前端测试** — 400 tests passed
+- ✅ **前端测试** — 426 tests passed（25 文件）
+  - `use-voice.test.ts` — useVoice hook 11 个测试（生命周期、事件、错误处理、清理）
+  - `assistant-page-voice.test.tsx` — AssistantPage 语音集成 10 个测试
+    - 麦克风按钮渲染与状态切换
+    - 实时部分转写显示
+    - 转写文本 → 输入框填充
+    - 完整链路：录音 → 转写 → 发送
+    - 错误处理 + 禁用态
 - ✅ **Kotlin 测试** — BUILD SUCCESSFUL
 - ✅ **TypeScript 类型检查** — exit 0
 
@@ -45,44 +60,37 @@
 
 ## 待完成工作（需人工操作）
 
-### 🔴 阻塞项：下载 Vosk 中文小模型
+### 🟡 后续验证（需真机连接）
 
-```bash
-cd app
-./download-vosk-model.sh
-```
-
-**模型信息：**
-- 名称：`vosk-model-small-cn-0.22`
-- 大小：~42MB
-- 语言：中文（普通话）
-- 下载地址：https://alphacephei.com/vosk/models
-
-**放置位置：** `app/src/main/assets/vosk-model-small-cn/`
-
-### 🟡 后续验证
+以下步骤需在有 Android 真机或模拟器的环境下执行：
 
 1. **构建 APK**
    ```bash
    ./gradlew :app:assembleDebug
    ```
+   - 记录 APK 体积增量（预期 +42MB，实测 85MB 含其他依赖）
 
 2. **安装到真机**
    ```bash
    adb install app/build/outputs/apk/debug/app-debug.apk
    ```
 
-3. **测试语音识别**
-   - 打开应用
-   - 请求麦克风权限
-   - 点击录音按钮
-   - 说话测试转写
-   - 验证转写文本 → NLU 解析链路
+3. **端到端测试：语音 → NLU → 记账**
+   - 打开应用 → 进入「AI 助手」页面
+   - 授予麦克风权限
+   - 点击 🎤 按钮开始录音
+   - 说出记账短句，如「午饭十五块」
+   - 观察实时部分转写显示
+   - 点击 ⏹ 停止录音
+   - 确认转写文本填入输入框
+   - 点击「发送」触发 NLU 解析 → 确认卡 → 执行
+   - 验证 PR-5（10 秒记账）性能指标
 
-4. **性能指标**
-   - 记录 APK 体积增量（预期 +42MB）
-   - 测试 10 秒记账路径（PR-5）
-   - 验证实时转写延迟（< 500ms）
+4. **性能验证**
+   - 实时转写延迟（预期 < 500ms）
+   - 模型首次加载时间（预期 1-2s）
+   - 10 秒录音完整转写时间
+   - 多次录音稳定性（资源释放）
 
 ## 技术要点
 
@@ -154,6 +162,8 @@ useVoice() hook
 - `app/src/main/java/com/aozora/app/voice/VoiceRecognitionService.kt`
 - `app/src/platform/hooks/use-voice.ts`
 - `app/download-vosk-model.sh`
+- `app/src/__tests__/platform/hooks/use-voice.test.ts`
+- `app/src/__tests__/features/assistant-page-voice.test.tsx`
 - `docs/engineering/T-M4-04b-implementation-guide.md`
 
 ### 修改文件
@@ -162,6 +172,7 @@ useVoice() hook
 - `app/src/main/java/com/aozora/app/MainActivity.kt`
 - `app/src/main/java/com/aozora/app/bridge/AozoraBridge.kt`
 - `app/src/platform/bridge/native-bridge.ts`
+- `app/src/features/assistant/AssistantPage.tsx`（语音集成）
 - `app/src/test/java/com/aozora/app/bridge/BridgeProtocolTest.kt`
 - `docs/milestones/production-execution-plan.md`
 

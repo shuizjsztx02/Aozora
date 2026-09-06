@@ -59,14 +59,19 @@ class VoiceRecognitionService(private val context: Context) {
 
     /**
      * 初始化 Vosk 模型（异步，首次加载约 1-2 秒）
+     *
+     * Bug-B3 fix：接受外部 CoroutineScope，确保 Activity 销毁时回调不会泄漏到已销毁的 UI。
      */
-    fun initialize(onComplete: (success: Boolean, error: String?) -> Unit) {
+    fun initialize(
+        scope: CoroutineScope,
+        onComplete: (success: Boolean, error: String?) -> Unit
+    ) {
         if (isModelLoaded) {
             onComplete(true, null)
             return
         }
 
-        CoroutineScope(Dispatchers.IO).launch {
+        scope.launch(Dispatchers.IO) {
             try {
                 // 从 assets 复制模型到内部存储（Vosk 需要文件系统路径）
                 val modelDir = File(context.filesDir, MODEL_DIR)
@@ -191,21 +196,30 @@ class VoiceRecognitionService(private val context: Context) {
     /**
      * 停止录音并返回最终转写结果
      *
+     * Bug-B2 fix：改为 suspend 函数，在 IO 线程等待 recognitionLoop 退出，
+     * 避免 runBlocking 在主线程阻塞。
+     * 先 stop() AudioRecord 解除 recognitionLoop 的 read() 阻塞，再 cancel+join job。
+     *
      * @return 最终转写文本
      */
-    fun stopRecording(): String {
+    suspend fun stopRecording(): String = withContext(Dispatchers.IO) {
         if (!isRecording) {
             Log.w(TAG, "Not recording")
-            return ""
+            return@withContext ""
         }
 
         isRecording = false
         var finalText = ""
 
         try {
-            // 等待识别循环结束
+            // 先停止 AudioRecord，使 recognitionLoop 中的 read() 立即返回，避免阻塞
+            try {
+                audioRecord?.stop()
+            } catch (_: Exception) { /* ignore — may already be stopped */ }
+
+            // 取消并等待识别循环退出（在 IO 线程 join，不阻塞主线程）
             recognitionJob?.cancel()
-            runBlocking { recognitionJob?.join() }
+            recognitionJob?.join()
             recognitionJob = null
 
             // 获取最终结果
@@ -216,9 +230,10 @@ class VoiceRecognitionService(private val context: Context) {
                 Log.i(TAG, "Final transcription: $finalText")
             }
 
-            // 停止并释放 AudioRecord
-            audioRecord?.stop()
-            audioRecord?.release()
+            // 释放 AudioRecord
+            try {
+                audioRecord?.release()
+            } catch (_: Exception) { /* ignore */ }
             audioRecord = null
 
             // 释放 Recognizer
@@ -232,7 +247,7 @@ class VoiceRecognitionService(private val context: Context) {
             cleanup()
         }
 
-        return finalText
+        finalText
     }
 
     /**
@@ -274,16 +289,15 @@ class VoiceRecognitionService(private val context: Context) {
             }
 
             // 喂音频数据给 Vosk
-            val hasResult = rec.acceptWaveForm(buffer, bytesRead)
-            if (hasResult) {
-                // 有部分结果
-                val partialJson = rec.result
-                val partialText = extractText(partialJson, "partial")
-                if (partialText.isNotBlank()) {
-                    // 推送到主线程回调
-                    CoroutineScope(Dispatchers.Main).launch {
-                        listener?.onPartialResult(partialText)
-                    }
+            rec.acceptWaveForm(buffer, bytesRead)
+            // Bug-B1 fix：始终读取 partialResult（返回 {"partial": "..."}）。
+            // 旧代码错误地在 hasResult 时读 rec.result（返回 {"text": "..."}，无 "partial" key），
+            // 导致 partial 回调永远不会触发。
+            val partialJson = rec.partialResult
+            val partialText = extractText(partialJson, "partial")
+            if (partialText.isNotBlank()) {
+                CoroutineScope(Dispatchers.Main).launch {
+                    listener?.onPartialResult(partialText)
                 }
             }
         }

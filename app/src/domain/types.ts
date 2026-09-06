@@ -83,7 +83,7 @@ export interface User {
 export interface MonthlyStats {
   totalExpense: MoneyCents
   totalIncome: MoneyCents
-  balance: MoneyCents // max(0, income - expense)；MoneyCents 禁止负值，口径见 docs/architecture/data-model.md
+  balance: number // income - expense，允许负值表示赤字（支出 > 收入）；口径见 docs/architecture/data-model.md
   count: number
 }
 

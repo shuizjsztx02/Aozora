@@ -100,7 +100,7 @@ export function ReportsPage() {
             </div>
             <div>
               <div className="text-xs text-ink3">结余</div>
-              <div className="money-num text-sm" style={{ color: 'var(--accent)' }}>{formatCents(stats.balance as number)}</div>
+              <div className="money-num text-sm" style={{ color: 'var(--accent)' }}>{Money.formatSigned(stats.balance)}</div>
             </div>
           </div>
         </div>

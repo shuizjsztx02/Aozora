@@ -543,6 +543,79 @@ class TestUsageOnVerificationFailure:
             _narrative_cache_clear()
 
 
+    @pytest.mark.asyncio
+    async def test_usage_recorded_when_invalid_json_exhausts_retries(
+        self, sample_fact_pack, db_session,
+    ):
+        """Provider returns invalid JSON on every attempt → usage still recorded."""
+        from src.models.ai import AIUsage
+        from src.models.user import User, UserStatus
+        from src.modules.ai.fact_pack import FactPackService
+        from src.modules.ai.provider import ProviderResult
+        from src.modules.ai.schemas import AIReportRequest
+        from src.modules.ai.service import MAX_ATTEMPTS, AIService, _narrative_cache_clear
+
+        _narrative_cache_clear()
+
+        class InvalidJsonProvider:
+            name = "mock-invalid"
+            call_count = 0
+
+            async def complete(self, messages, *, model, max_tokens, timeout):
+                self.call_count += 1
+                return ProviderResult("not valid json", prompt_tokens=100, completion_tokens=50)
+
+        provider = InvalidJsonProvider()
+
+        user = User(
+            id=uuid.uuid4(),
+            phone="13800138011",
+            nickname="rm410-inj-user",
+            status=UserStatus.ACTIVE,
+            timezone="UTC",
+        )
+        db_session.add(user)
+        await db_session.flush()
+
+        original_build = FactPackService.build
+
+        async def mock_build(self_service, book_id, user_id, period):
+            return sample_fact_pack
+
+        FactPackService.build = mock_build
+
+        try:
+            service = AIService(db_session, provider)
+            request = AIReportRequest(
+                book_id=sample_fact_pack.book_id,
+                period=sample_fact_pack.period,
+            )
+
+            response = await service.generate_report(user, "req-rm410-inj", request)
+
+            # Narrative should be discarded
+            assert response.narrative is None
+            # Provider was called MAX_ATTEMPTS times
+            assert provider.call_count == MAX_ATTEMPTS
+            # Usage WAS recorded — all attempts consumed tokens (R-M4-10 fix)
+            usage_row = (await db_session.execute(
+                __import__("sqlalchemy").select(AIUsage).where(
+                    AIUsage.user_id == user.id,
+                    AIUsage.request_id == "req-rm410-inj",
+                )
+            )).scalars().first()
+            assert usage_row is not None, \
+                "AIUsage must be recorded when invalid_json retries are exhausted"
+            # Total tokens = MAX_ATTEMPTS × (100 + 50)
+            expected_tokens = MAX_ATTEMPTS * (100 + 50)
+            assert usage_row.tokens == expected_tokens, \
+                f"Expected {expected_tokens} tokens, got {usage_row.tokens}"
+
+        finally:
+            FactPackService.build = original_build
+            _narrative_cache_clear()
+
+
 # ── Test R-M4-15: rate limit → 200 with null narrative ────────────────────
 
 

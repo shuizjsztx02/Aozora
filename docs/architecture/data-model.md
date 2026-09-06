@@ -6,7 +6,24 @@
 - 可修改实体带 `version`，冲突必须显式返回，禁止静默覆盖。
 - 交易同时保存 UTC `occurredAt` 和用户业务日期 `bizDate`。
 - 统计口径：`MonthlyStats.balance = totalIncome − totalExpense`。允许负值表示赤字（支出 > 收入）。`MoneyCents` 存储层仍禁止负值，赤字通过 balance 计算结果表达而非存储。客户端统计、服务端统计与导出必须使用同一口径，保证 APP-CONTEXT §5.2 对账不变量（客户端明细合计 = 客户端统计 = 服务端统计 = 导出文件合计）。
-- 空预算语义：`Budget.categoryId` 与 `Category.bookId` 以显式 `null`（JSON 标准表达）或字段缺省表示“整体预算 / 系统分类”，客户端类型须接受 `string | null | undefined` 三种形态。
+- 空预算语义：`Budget.categoryId` 与 `Category.bookId` 以显式 `null`（JSON 标准表达）或字段缺省表示”整体预算 / 系统分类”，客户端类型须接受 `string | null | undefined` 三种形态。
+
+## attachments 表（T-M4-04c）
+
+附件上传存储receipt截图等用户文件。行级所有权由 `user_id` 强制，无需经由 transaction → book → user 链路。
+
+| 列 | 类型 | 说明 |
+|---|---|---|
+| `id` | UUID PK | 附件唯一标识 |
+| `user_id` | UUID FK → users.id NOT NULL | 上传者；上传时即强制，PENDING 阶段无需 transaction 即可做权限检查 |
+| `transaction_id` | UUID FK → transactions.id NULL | 关联交易；链接前为 NULL |
+| `object_key` | VARCHAR(512) NOT NULL | 存储路径 `<user_id>/<attachment_id>.<ext>`，兼容 S3 |
+| `mime_type` | VARCHAR(128) NOT NULL | 以 magic-byte 嗅探结果为准（非 Content-Type header） |
+| `file_size` | BIGINT NULL | 字节数，用于存储统计和配额 |
+| `status` | VARCHAR(20) NOT NULL | `pending` / `linked` / `parsed` / `expired` |
+| `expires_at` | TIMESTAMPTZ NULL | PENDING 24h 自动过期；LINKED 后清空 |
+
+**状态机**：上传即 `PENDING`（24h TTL）→ 链接交易后 `LINKED`（永久保留）→ 未来 OCR 解析后 `PARSED`。超期未链接则惰性翻转为 `EXPIRED` 并删除物理文件。启动清理（`cleanup_expired_files`）仅针对 DB 中已过期的 `PENDING`/`EXPIRED` 行，绝不触碰 `LINKED`/`PARSED` 引用的文件（R-M4-39）。
 
 ## Room schema v2（T-M3-02 同步引擎）
 

@@ -18,7 +18,7 @@ export default defineConfig({
   use: {
     baseURL: 'http://localhost:5173',
     viewport: { width: 390, height: 844 }, // iPhone 14 尺寸
-    deviceScaleFactor: 2,
+    // deviceScaleFactor 由 projects[].use.devices['iPhone 14'] 提供（值为 3），此处不重复设置
     // T-M4-06b: 禁用动画确保截图稳定
     extraHTTPHeaders: { 'Accept-Language': 'zh-CN' },
   },

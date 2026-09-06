@@ -128,6 +128,15 @@ class DashScopeProvider:
         try:
             body = resp.json()
             content = body["choices"][0]["message"]["content"]
+            # R-M4-40: OpenAI-compatible providers return ``"content": null``
+            # when a content filter fires, on refusal, or at ``finish_reason=length``.
+            # Without this check the None reaches ``_parse_json_output(None)``
+            # and crashes with ``AttributeError`` (``None.strip()``), which
+            # is neither caught by the retry loop nor mapped to the §6.4
+            # degradation contract. Treat it as a retryable bad response so
+            # the standard 1-retry-then-503 path handles it correctly.
+            if not isinstance(content, str):
+                raise ProviderError(status=200, retryable=True, reason="bad_response")
             usage = body.get("usage") or {}
             return ProviderResult(
                 content=content,

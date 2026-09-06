@@ -705,18 +705,24 @@ class AIService:
         from .fact_pack import FactPackService
 
         fp_service = FactPackService(self._db)
-        # Parse book_id
+        # Parse book_id — normalize through UUID so both cache get (below)
+        # and cache set (_generate_narrative → fact_pack.book_id) use the
+        # same lowercase canonical form regardless of how the client
+        # capitalizes the input (R-M4-41).
         try:
             book_id = uuid.UUID(req.book_id)
         except ValueError:
             raise AppException(422, "invalid_book_id", "Invalid book ID")
+        normalized_book_id = str(book_id)
 
         fact_pack = await fp_service.build(book_id, user.id, req.period)
 
         # Build the base response
         response = AIReportResponse(
             request_id=request_id,
-            book_id=req.book_id,
+            # R-M4-41: echo back the canonical lowercase form so clients
+            # that sent mixed-case get a consistent value back.
+            book_id=normalized_book_id,
             period=req.period,
             data_hash=fact_pack.data_hash,
             total_income=fact_pack.total_income,
@@ -773,7 +779,9 @@ class AIService:
         # Try to generate narrative if provider is available
         if self._provider is not None:
             # Check narrative cache first (R-M4-09 fix)
-            cache_key = _narrative_cache_key(req.book_id, req.period, fact_pack.data_hash)
+            # R-M4-41: use the canonical (lowercase) book_id for the cache
+            # key so that differently-cased inputs hit the same entry.
+            cache_key = _narrative_cache_key(normalized_book_id, req.period, fact_pack.data_hash)
             cached_narrative = _narrative_cache_get(cache_key)
             if cached_narrative is not None:
                 # Cache hit: use cached narrative, no LLM call, no billing
@@ -783,7 +791,7 @@ class AIService:
                     "AI report narrative served from cache",
                     extra={
                         "request_id": request_id,
-                        "book_id": req.book_id,
+                        "book_id": normalized_book_id,
                         "period": req.period,
                         "data_hash": fact_pack.data_hash,
                     },
@@ -846,6 +854,12 @@ class AIService:
 
         result: ProviderResult | None = None
         output: dict | None = None
+        # R-M4-43: an attempt that reached the provider but produced
+        # unusable JSON still consumed tokens — accumulate them so the
+        # audit row and response usage reflect true cost across retries
+        # (same pattern as ``interpret``, R-M4-06).
+        retry_prompt_tokens = 0
+        retry_completion_tokens = 0
         for attempt in range(1, MAX_ATTEMPTS + 1):
             try:
                 result = await self._provider.complete(
@@ -864,18 +878,34 @@ class AIService:
                 output = self._parse_json_output(result.content)
                 break
             except ValueError:
+                retry_prompt_tokens += result.prompt_tokens
+                retry_completion_tokens += result.completion_tokens
                 if attempt >= MAX_ATTEMPTS:
                     self._log_failure(
                         request_id, tpl, model, attempt, "invalid_json", started,
                     )
-                    return  # No parseable result → no usage to record
+                    # R-M4-10 fix: the provider returned a real result with
+                    # real tokens — record them before discarding the narrative.
+                    # retry_*_tokens includes this last attempt; earlier attempts
+                    # contribute (retry_* - result.*) as extras.
+                    await self._record_usage(
+                        user, result, model, request_id,
+                        extra_prompt_tokens=retry_prompt_tokens - result.prompt_tokens,
+                        extra_completion_tokens=retry_completion_tokens - result.completion_tokens,
+                    )
+                    return
                 continue
 
         assert result is not None and output is not None
 
         # R-M4-10 fix: record usage immediately after successful provider call.
         # Even if verification fails, tokens were consumed and must be tracked.
-        await self._record_usage(user, result, model, request_id)
+        # R-M4-43: extra_*_tokens carry the wasted tokens from earlier attempts.
+        await self._record_usage(
+            user, result, model, request_id,
+            extra_prompt_tokens=retry_prompt_tokens,
+            extra_completion_tokens=retry_completion_tokens,
+        )
         self._log_success(request_id, tpl, model, result, started)
         self._log_slow_if_needed(request_id, tpl, model, started)
 
@@ -901,8 +931,8 @@ class AIService:
         response.narrative = narrative
         response.narrative_cached = False
         response.usage = AIUsageInfo(
-            prompt_tokens=result.prompt_tokens,
-            completion_tokens=result.completion_tokens,
+            prompt_tokens=result.prompt_tokens + retry_prompt_tokens,
+            completion_tokens=result.completion_tokens + retry_completion_tokens,
         )
 
         # Store in narrative cache for future requests with same data (R-M4-09 fix)

@@ -71,7 +71,7 @@ export class NativeBridge {
   private pending = new Map<string, {
     resolve: (value: unknown) => void
     reject: (error: BridgeError) => void
-    timer: ReturnType<typeof setTimeout>
+    timer?: ReturnType<typeof setTimeout>
   }>()
   private version: number
 
@@ -101,10 +101,13 @@ export class NativeBridge {
 
       const requestId = generateRequestId()
       const timeout = options?.timeoutMs ?? DEFAULT_TIMEOUT
-      const timer = setTimeout(() => {
-        this.pending.delete(requestId)
-        reject(new BridgeError('timeout', `Command "${command}" timed out`, requestId))
-      }, timeout)
+      // timeoutMs === 0 表示不设超时（如 pickImage：用户可能在相机中停留很久）
+      const timer = timeout > 0
+        ? setTimeout(() => {
+            this.pending.delete(requestId)
+            reject(new BridgeError('timeout', `Command "${command}" timed out`, requestId))
+          }, timeout)
+        : undefined
 
       this.pending.set(requestId, {
         resolve: resolve as (value: unknown) => void,
@@ -391,7 +394,8 @@ export class NativeBridge {
    * 超时：无固定超时（用户可能在相机中停留很久），前端自行管理 UI 超时。
    */
   async pickImage(source: 'camera' | 'gallery', quality = 80): Promise<ImagePickResult> {
-    return this.call<ImagePickResult>('image.pick', { source, quality })
+    // 不设固定超时——用户可能在相机/相册中停留很久
+    return this.call<ImagePickResult>('image.pick', { source, quality }, { timeoutMs: 0 })
   }
 
   /** 删除服务端附件（用于清理用户放弃的草稿）。 */
@@ -494,17 +498,20 @@ export class NativeBridge {
   /**
    * 注册语音识别错误监听（Android 通过 __aozoraVoiceError__ 推送）。
    * 返回取消订阅函数。
+   *
+   * Bug-B4 fix：Android 现在传裸对象字面量 {code, message}，与 __aozoraImageProgress__ 一致，
+   * 不再需要 JSON.parse 字符串。保留 typeof === 'string' 分支以兼容旧版 Android。
    */
   onVoiceError(listener: (error: { code: string; message: string }) => void): () => void {
     if (typeof window === 'undefined') return () => {}
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     const prev = (window as any).__aozoraVoiceError__
-    const wrapped = (errorJson: string) => {
+    const wrapped = (errorOrJson: { code: string; message: string } | string) => {
       try {
-        const error = typeof errorJson === 'string' ? JSON.parse(errorJson) : errorJson
+        const error = typeof errorOrJson === 'string' ? JSON.parse(errorOrJson) : errorOrJson
         listener(error as { code: string; message: string })
       } catch { /* ignore parse errors */ }
-      if (typeof prev === 'function') prev(errorJson)
+      if (typeof prev === 'function') prev(errorOrJson)
     }
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     ;(window as any).__aozoraVoiceError__ = wrapped

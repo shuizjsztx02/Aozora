@@ -83,19 +83,20 @@ describe('sumTransactions', () => {
     expect(stats.count).toBe(0)
   })
 
-  it('balance = income - expense（非负）', () => {
+  it('balance = income - expense（允许负值表示赤字）', () => {
     const stats = sumTransactions(sampleTxs)
     // income 15000 - expense 11000 = 4000
     expect(stats.balance).toBe(4000)
   })
 
-  it('支出 > 收入时 balance 为 0', () => {
+  it('支出 > 收入时 balance 为负值（赤字）', () => {
     const deficitTxs = [
       tx({ type: 'expense', amountCents: cents(5000) }),
       tx({ type: 'income', amountCents: cents(1000) }),
     ]
     const stats = sumTransactions(deficitTxs)
-    expect(stats.balance).toBe(0)
+    // R-M4-38：与服务端口径一致，balance = income - expense = 1000 - 5000 = -4000
+    expect(stats.balance).toBe(-4000)
     expect(stats.totalExpense).toBe(5000)
     expect(stats.totalIncome).toBe(1000)
   })

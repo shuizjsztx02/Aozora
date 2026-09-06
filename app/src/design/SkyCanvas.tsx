@@ -104,6 +104,10 @@ export function SkyCanvas() {
   const lowPerf = useLowPerformance()
 
   // T-M4-06b: 低性能模式不渲染任何装饰
+  // NOTE: useLowPerformance 已将 prefers-reduced-motion 作为低性能信号（a11y.ts:46），
+  // 因此 reducedMotion=true 时 lowPerf 也为 true，会在此处提前 return。
+  // 下方 reducedMotion CSS 注入分支在当前实现中不可达，保留作防御性冗余：
+  // 若未来 lowPerf 的判定逻辑变化，此处仍能正确禁用动画。
   if (lowPerf) {
     return (
       <div className="sky-fixed" aria-hidden="true" data-testid="sky-canvas" data-low-perf="true" />

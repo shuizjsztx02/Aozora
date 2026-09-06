@@ -70,33 +70,44 @@ def _ensure_upload_dir() -> Path:
     return upload_dir
 
 
-def cleanup_expired_files() -> int:
-    """Delete files and DB rows for expired PENDING attachments.
+async def cleanup_expired_files(db: AsyncSession) -> int:
+    """Delete files and DB rows for expired PENDING/EXPIRED attachments.
+
+    R-M4-39 fix: DB-driven cleanup — queries only PENDING/EXPIRED rows
+    past their expiry timestamp, then removes the referenced files and
+    DB rows.  LINKED and PARSED rows are never touched, so their files
+    are safe regardless of age.
 
     Called at startup (and periodically in future) to reclaim disk.
     Returns the number of files deleted.
     """
     upload_dir = _get_upload_dir()
-    if not upload_dir.exists():
-        return 0
-    deleted = 0
     now = datetime.now(UTC)
-    for path in upload_dir.rglob("*"):
-        if not path.is_file():
-            continue
-        try:
-            mtime = datetime.fromtimestamp(path.stat().st_mtime, tz=UTC)
-        except OSError:
-            continue
-        if now - mtime > timedelta(hours=PENDING_EXPIRY_HOURS + 1):
+    result = await db.execute(
+        select(Attachment).where(
+            Attachment.status.in_([
+                AttachmentStatus.PENDING,
+                AttachmentStatus.EXPIRED,
+            ]),
+            Attachment.expires_at.isnot(None),
+            Attachment.expires_at < now,
+        )
+    )
+    expired_rows = list(result.scalars().all())
+    deleted = 0
+    for att in expired_rows:
+        if att.object_key:
+            path = upload_dir / att.object_key
             try:
-                path.unlink()
+                path.unlink(missing_ok=True)
                 deleted += 1
             except OSError:
                 logger.warning(
-                    "Failed to delete stale attachment file %s", path,
+                    "Failed to delete expired attachment file %s", path,
                     exc_info=True,
                 )
+        await db.delete(att)
+    await db.commit()
     return deleted
 
 
@@ -190,25 +201,35 @@ class AttachmentService:
                 f"expected one of {sorted(ALLOWED_MIME_TYPES)}",
             )
 
-        # --- Read body with size cap.
-        data = await upload.read()
-        if len(data) > MAX_UPLOAD_BYTES:
-            raise AppException(
-                413, "payload_too_large",
-                f"File size {len(data)} exceeds limit {MAX_UPLOAD_BYTES} bytes",
-            )
-        if len(data) == 0:
+        # --- Read body in chunks with size cap (R-M4-41: avoid buffering
+        # the entire upload before rejecting oversized payloads).
+        chunk_size = 64 * 1024
+        chunks: list[bytes] = []
+        total_size = 0
+        while True:
+            chunk = await upload.read(chunk_size)
+            if not chunk:
+                break
+            total_size += len(chunk)
+            if total_size > MAX_UPLOAD_BYTES:
+                raise AppException(
+                    413, "payload_too_large",
+                    f"File size exceeds limit {MAX_UPLOAD_BYTES} bytes",
+                )
+            chunks.append(chunk)
+        if total_size == 0:
             raise AppException(400, "empty_file", "Uploaded file is empty")
+        data = b"".join(chunks)
 
-        # --- Sniff MIME from magic bytes to reject spoofed headers.
+        # --- Sniff MIME from magic bytes (R-M4-40: unrecognisable magic
+        # → 415, no fallback to the easily-spoofed Content-Type header).
         sniffed = _sniff_mime(data)
-        if sniffed and sniffed not in ALLOWED_MIME_TYPES:
+        if sniffed not in ALLOWED_MIME_TYPES:
             raise AppException(
                 415, "unsupported_media_type",
-                "File content does not match an allowed image format",
+                "File content does not match any allowed image format",
             )
-        # Prefer the sniffed type when available; fall back to the header.
-        final_mime = sniffed or mime
+        final_mime = sniffed
 
         # --- Write to disk under ``<user_id>/<new_uuid>.<ext>``.
         attachment_id = uuid.uuid4()

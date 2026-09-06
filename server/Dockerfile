@@ -1,15 +1,17 @@
 # syntax=docker/dockerfile:1
 # T-M2-01: Multi-stage build — secrets and build tools stay out of runtime image.
+# R-M4-39: build context is the repo root (docker-compose ``build.context: .``)
+# so that ``contracts/`` is reachable. All COPY paths are repo-root-relative.
 
 # -- builder ---------------------------------------------------------------
 FROM python:3.12-slim AS builder
 
 WORKDIR /build
 
-COPY pyproject.toml ./
+COPY server/pyproject.toml ./
 RUN pip install --no-cache-dir --prefix=/install .
 
-COPY src/ ./src/
+COPY server/src/ ./src/
 
 # -- runtime ---------------------------------------------------------------
 FROM python:3.12-slim AS runtime
@@ -27,7 +29,10 @@ WORKDIR /app
 
 COPY --from=builder /install /usr/local
 
-COPY src/ ./src/
+COPY server/src/ ./src/
+# R-M4-39: validator.py resolves the schema via parents[4] / "contracts",
+# so the directory must exist at /app/contracts inside the container.
+COPY contracts/ ./contracts/
 
 RUN chown -R aozora:aozora /app
 USER aozora

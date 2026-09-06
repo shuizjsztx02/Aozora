@@ -35,17 +35,26 @@
    - 状态：`isRecording`、`partialText`、`finalText`、`error`
    - 方法：`startRecording()`、`stopRecording()`、`reset()`
 
-5. **测试**
+5. **AssistantPage 语音集成**（2026-09-06）
+   - 输入区新增 🎤 麦克风按钮（录音中切换为 ⏹ 红色停止按钮）
+   - 实时部分转写条显示在输入框上方
+   - 停止录音后自动将最终转写填入输入框
+   - 用户可编辑转写文本，点击「发送」走 `submitInput` → NLU/AI 链路
+   - 语音错误（权限拒绝、模型未加载等）以红色提示条展示
+   - 处理/执行阶段自动禁用麦克风按钮
+
+6. **测试**
    - BridgeProtocolTest.kt 更新命令清单（35 → 36）
+   - `use-voice.test.ts` — 11 个 hook 单元测试
+   - `assistant-page-voice.test.tsx` — 10 个页面集成测试
    - TypeScript 类型检查通过
 
 ### ⚠️ 待完成（需人工操作）
 
-1. **下载 Vosk 中文小模型**（约 50MB）
-   - 下载地址：https://alphacephei.com/vosk/models
-   - 推荐模型：`vosk-model-small-cn-0.22`（42MB）或 `vosk-model-cn-0.22`（1.3GB，更准确）
-   - 放置位置：`app/src/main/assets/vosk-model-small-cn/`
-   - **注意：** 模型文件需在首次构建前放入 assets 目录
+1. **~~下载 Vosk 中文小模型~~** ✅ 已完成（2026-09-06）
+   - ✅ 模型已下载：`vosk-model-small-cn-0.22`（42MB）
+   - ✅ 安装位置：`app/src/main/assets/vosk-model-small-cn/`
+   - ✅ 目录结构验证：am/、conf/、graph/、ivector/ 完整
 
 2. **端到端测试**
    - 真机测试录音 → 转写 → NLU 解析
@@ -240,6 +249,9 @@ npm test -- --run
 - `app/src/main/java/com/aozora/app/MainActivity.kt` — 生命周期管理
 - `app/src/platform/bridge/native-bridge.ts` — TS 桥方法
 - `app/src/platform/hooks/use-voice.ts` — React hook
+- `app/src/features/assistant/AssistantPage.tsx` — 语音集成页面
+- `app/src/__tests__/platform/hooks/use-voice.test.ts` — hook 单元测试（11 cases）
+- `app/src/__tests__/features/assistant-page-voice.test.tsx` — 页面集成测试（10 cases）
 - `app/src/main/assets/vosk-model-small-cn/` — Vosk 模型（需手动下载）
 
 ## 参考资料

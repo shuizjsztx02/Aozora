@@ -58,8 +58,9 @@ export function usePermissions(): UsePermissionsReturn {
     try {
       const data = await bridge.getPermissionStatus()
       setStatus(data)
-    } catch {
+    } catch (error) {
       // 查询失败保持默认值
+      console.warn('[usePermissions] refresh failed:', error)
     } finally {
       setLoading(false)
     }
@@ -81,19 +82,20 @@ export function usePermissions(): UsePermissionsReturn {
   const requestPermission = useCallback(async (permission: PermissionType) => {
     if (!bridge.isAvailable()) return
     try {
-      await bridge.requestPermission(permission)
-      // 结果通过 onPermissionResult 异步推送
-    } catch {
-      // 请求失败
+      const { pending } = await bridge.requestPermission(permission)
+      // pending: false（低版本 Android）时结果不走 onPermissionResult 推送，需主动刷新
+      if (!pending) refresh()
+    } catch (error) {
+      console.warn('[usePermissions] requestPermission failed:', error)
     }
-  }, [bridge])
+  }, [bridge, refresh])
 
   const openSettings = useCallback(async () => {
     if (!bridge.isAvailable()) return
     try {
       await bridge.openPermissionSettings()
-    } catch {
-      // 打开设置失败
+    } catch (error) {
+      console.warn('[usePermissions] openSettings failed:', error)
     }
   }, [bridge])
 

@@ -52,11 +52,15 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     except Exception:
         logger.warning("Export cleanup failed", exc_info=True)
     # T-M4-04c: reclaim disk from expired PENDING attachment uploads.
+    # R-M4-39 fix: now DB-driven — needs an async session.
     from src.modules.attachments.service import (
         cleanup_expired_files as cleanup_attachments,
     )
     try:
-        att_deleted = cleanup_attachments()
+        from src.common.database import get_session_factory
+        factory = get_session_factory()
+        async with factory() as att_session:
+            att_deleted = await cleanup_attachments(att_session)
         if att_deleted:
             logger.info("Cleaned up %d stale attachment files", att_deleted)
     except Exception:

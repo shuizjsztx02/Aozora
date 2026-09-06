@@ -4,9 +4,13 @@
  * 收支、金额、分类、账户、日期、备注 → bridge 写入 → pending mutation。
  */
 
-import { useState, useCallback } from 'react'
+import { useState, useCallback, useEffect } from 'react'
 import { motion, AnimatePresence } from 'framer-motion'
 import { useBridge } from '../../platform/hooks/use-bridge'
+import { useImage } from '../../platform/hooks/use-image'
+import { useImageDraftStore } from '../../platform/store/image-draft-store'
+import { ImagePickerSheet } from '../image/ImagePickerSheet'
+import { ImageUploadView } from '../image/ImageUploadView'
 import type { CategoryData } from '../../platform/bridge/bridge-types'
 import * as Money from '../../domain/money'
 import { todayBizDate } from '../../domain/date'
@@ -25,8 +29,42 @@ export function QuickEntrySheet({ categories, onClose, onSuccess }: QuickEntrySh
   const [note, setNote] = useState('')
   const [bizDate] = useState(() => todayBizDate('Asia/Shanghai'))
   const [submitting, setSubmitting] = useState(false)
+  const [showImagePicker, setShowImagePicker] = useState(false)
+  const image = useImage()
+  const { saveDraft, clearDraft } = useImageDraftStore()
 
   const filteredCats = categories.filter(c => c.kind === type)
+
+  const handleImagePick = useCallback(async (source: 'camera' | 'gallery') => {
+    setShowImagePicker(false)
+    try {
+      await image.pickImage(source)
+    } catch {
+      // pickImage 内部已设置 error 状态
+    }
+  }, [image])
+
+  // 上传失败时保存草稿（跟踪 attachmentId 以便后续清理）
+  useEffect(() => {
+    if (image.error && image.error !== 'cancelled') {
+      saveDraft({
+        attachmentId: image.attachment?.attachmentId ?? null,
+        source: image.lastSource ?? 'gallery',
+        error: image.error,
+        createdAt: Date.now(),
+      })
+    }
+  }, [image.error]) // eslint-disable-line react-hooks/exhaustive-deps
+
+  const handleImageClear = useCallback(async () => {
+    await image.clear()
+    clearDraft()
+  }, [image, clearDraft])
+
+  const handleImagePickAgain = useCallback(() => {
+    image.clear()
+    setShowImagePicker(true)
+  }, [image])
 
   const handleAmountKey = useCallback((key: string) => {
     setAmount(prev => {
@@ -162,6 +200,32 @@ export function QuickEntrySheet({ categories, onClose, onSuccess }: QuickEntrySh
             />
           </div>
 
+          {/* T-M4-04d: 附件区域 */}
+          <div className="px-4 mb-3">
+            {image.uploading || image.attachment || (image.error && image.error !== 'cancelled') ? (
+              <ImageUploadView
+                uploading={image.uploading}
+                progress={image.progress}
+                attachment={image.attachment}
+                error={image.error}
+                onRetry={image.retry}
+                onClear={handleImageClear}
+                onPickAgain={handleImagePickAgain}
+              />
+            ) : (
+              <button
+                onClick={() => setShowImagePicker(true)}
+                disabled={!bridge.isAvailable()}
+                className="flex items-center gap-2 py-2 px-3 rounded-lg text-xs transition-colors disabled:opacity-40"
+                style={{ background: 'var(--glass)', color: 'var(--ink2)', border: '1px solid var(--glass-border)' }}
+                data-testid="attach-image-btn"
+              >
+                <span>📎</span>
+                <span>添加凭证</span>
+              </button>
+            )}
+          </div>
+
           {/* 数字键盘 */}
           <div className="px-4 grid grid-cols-3 gap-2 mb-3">
             {['1','2','3','4','5','6','7','8','9','.','0','delete'].map(key => (
@@ -187,6 +251,14 @@ export function QuickEntrySheet({ categories, onClose, onSuccess }: QuickEntrySh
             </button>
           </div>
         </motion.div>
+
+        {/* T-M4-04d: 图片来源选择弹层 */}
+        {showImagePicker && (
+          <ImagePickerSheet
+            onPick={handleImagePick}
+            onClose={() => setShowImagePicker(false)}
+          />
+        )}
       </motion.div>
     </AnimatePresence>
   )

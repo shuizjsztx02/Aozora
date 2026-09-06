@@ -7,6 +7,7 @@
 import { useState, useRef, useEffect, useCallback } from 'react'
 import { PageHeader } from '../../components/Layout'
 import { useBridge } from '../../platform/hooks/use-bridge'
+import { useVoice } from '../../platform/hooks/use-voice'
 import { useAssistant } from './use-assistant'
 import { ConfirmationCard } from './ConfirmationCard'
 import { UndoToast } from './UndoToast'
@@ -15,10 +16,20 @@ import type { ActionProposal } from '../../domain/action-proposal'
 
 export function AssistantPage() {
   const bridge = useBridge()
+  const {
+    isRecording: voiceIsRecording,
+    partialText: voicePartialText,
+    finalText: voiceFinalText,
+    error: voiceError,
+    startRecording: voiceStartRecording,
+    stopRecording: voiceStopRecording,
+    reset: voiceReset,
+  } = useVoice()
   const [categories, setCategories] = useState<CategoryData[]>([])
   const [bookId, setBookId] = useState<string | null>(null)
   const [inputText, setInputText] = useState('')
   const scrollRef = useRef<HTMLDivElement>(null)
+  const prevFinalTextRef = useRef('')
 
   // 加载分类和账本
   useEffect(() => {
@@ -50,6 +61,15 @@ export function AssistantPage() {
     scrollRef.current?.scrollTo({ top: scrollRef.current.scrollHeight, behavior: 'smooth' })
   }, [messages, phase])
 
+  // T-M4-04b: 转写文本 → 填入输入框
+  useEffect(() => {
+    if (voiceFinalText && voiceFinalText !== prevFinalTextRef.current) {
+      prevFinalTextRef.current = voiceFinalText
+      setInputText(voiceFinalText)
+      voiceReset()
+    }
+  }, [voiceFinalText, voiceReset])
+
   const handleSubmit = useCallback(async () => {
     if (!inputText.trim() || phase === 'processing' || phase === 'executing') return
     const text = inputText.trim()
@@ -67,6 +87,15 @@ export function AssistantPage() {
   const handleConfirmEdited = useCallback((edited: ActionProposal) => {
     confirmEditedProposal(edited)
   }, [confirmEditedProposal])
+
+  // T-M4-04b: 语音输入控制
+  const handleMicClick = useCallback(async () => {
+    if (voiceIsRecording) {
+      await voiceStopRecording()
+    } else {
+      await voiceStartRecording()
+    }
+  }, [voiceIsRecording, voiceStartRecording, voiceStopRecording])
 
   return (
     <div className="flex flex-col h-screen" style={{ background: 'var(--bg)' }}>
@@ -188,13 +217,41 @@ export function AssistantPage() {
           borderTop: '1px solid var(--glass-border)',
         }}
       >
+        {/* T-M4-04b: 实时部分转写提示 */}
+        {voiceIsRecording && voicePartialText && (
+          <div
+            className="mb-2 px-3 py-1.5 rounded-lg text-xs truncate"
+            style={{
+              background: 'var(--glass)',
+              color: 'var(--ink2)',
+              border: '1px solid var(--glass-border)',
+            }}
+            data-testid="voice-partial"
+          >
+            🎤 {voicePartialText}
+          </div>
+        )}
+        {/* T-M4-04b: 语音错误提示 */}
+        {voiceError && !voiceIsRecording && (
+          <div
+            className="mb-2 px-3 py-1.5 rounded-lg text-xs"
+            style={{
+              background: '#fef2f2',
+              color: '#b91c1c',
+              border: '1px solid #fecaca',
+            }}
+            data-testid="voice-error"
+          >
+            {voiceError.message}
+          </div>
+        )}
         <div className="flex gap-2 items-end">
           <input
             type="text"
             value={inputText}
             onChange={e => setInputText(e.target.value)}
             onKeyDown={handleKeyDown}
-            placeholder="输入记账短句…"
+            placeholder={voiceIsRecording ? '正在聆听…' : '输入记账短句…'}
             disabled={phase === 'processing' || phase === 'executing'}
             className="flex-1 px-3 py-2 rounded-xl text-sm outline-none"
             style={{
@@ -203,6 +260,25 @@ export function AssistantPage() {
               border: '1px solid var(--glass-border)',
             }}
           />
+          {/* T-M4-04b: 语音输入按钮 */}
+          <button
+            onClick={handleMicClick}
+            disabled={phase === 'processing' || phase === 'executing'}
+            className="px-3 py-2 rounded-xl text-sm transition-all disabled:opacity-40"
+            style={{
+              background: voiceIsRecording ? '#ef4444' : 'var(--glass)',
+              color: voiceIsRecording ? 'white' : 'var(--ink2)',
+              border: voiceIsRecording
+                ? '1px solid #dc2626'
+                : '1px solid var(--glass-border)',
+              minWidth: '40px',
+            }}
+            title={voiceIsRecording ? '停止录音' : '语音输入'}
+            data-testid="voice-mic-button"
+            aria-label={voiceIsRecording ? '停止录音' : '语音输入'}
+          >
+            {voiceIsRecording ? '⏹' : '🎤'}
+          </button>
           <button
             onClick={handleSubmit}
             disabled={!inputText.trim() || phase === 'processing' || phase === 'executing'}
