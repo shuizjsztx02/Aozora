@@ -283,6 +283,25 @@ class TestUsageRecording:
         row = _fetch_usage(ai_env, user["id"])[0]
         assert row.cost == PROMPT_TOKENS + COMPLETION_TOKENS
 
+    def test_retry_accumulates_tokens_from_invalid_json_attempt(self, ai_env):
+        """R-M4-06: attempt 1 reached the provider (tokens billed) but its
+        output failed JSON parsing; the audit row and the response usage
+        must include both attempts' tokens, not just the final one."""
+        ai_env.provider.results = [
+            ProviderResult("not json", 90, 30),
+            ProviderResult(VALID_JSON, PROMPT_TOKENS, COMPLETION_TOKENS),
+        ]
+        user = _guest(ai_env)
+        resp = _interpret(ai_env, user)
+        assert resp.status_code == 200
+        assert len(ai_env.provider.calls) == MAX_ATTEMPTS
+        rows = _fetch_usage(ai_env, user["id"])
+        assert len(rows) == 1
+        assert rows[0].tokens == 90 + 30 + PROMPT_TOKENS + COMPLETION_TOKENS
+        usage = resp.json()["usage"]
+        assert usage["prompt_tokens"] == 90 + PROMPT_TOKENS
+        assert usage["completion_tokens"] == 30 + COMPLETION_TOKENS
+
 
 # ── Request tracing ─────────────────────────────────────────────────────
 

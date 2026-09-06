@@ -570,9 +570,9 @@
 | T-M4-00 前端骨架与核心页面 | T-M1-03 ✅、T-M3-02 ✅ | 前端技术栈落地、四时设计系统、核心页面数据流 | 无 | ✅ **通过** |
 | T-M4-01 AI Gateway | T-M2-03 ✅ | provider adapter、用量、脱敏日志、ADR-003 WebView 调用通道 | D-EXEC-04 已关闭 ✅；R-PROD-01 已关闭 ✅ | ✅ **通过**（01a/01b/01c/01d 全 ✅，352+ 测试全绿，DashScope 真实密钥冒烟通过；产物密钥扫描归属 T-M5-02c） |
 | T-M4-02 动作协议与确认卡 | T-M1-05 ✅、T-M2-04 ✅、T-M4-00、T-M4-01 | 安全确认与撤销闭环 | 无 | ⏳ 进行中（服务端 3/4 完成，客户端待 T-M4-01d） |
-| T-M4-03 AI 查询与洞察 | T-M2-05 ✅、T-M4-00、T-M4-01 | 事实包、数字校验、离线降级 | 无 | 🔨 进行中（第 3 轮复审 2026-09-06：R-M4-09 缓存✅已修复；仍 2 项 P1 未关闭——R-M4-08 balance 权威口径冲突（部分修复）、新增 R-M4-17 HEAD 不自洽纯净克隆测试收集失败；R-M4-10/11 P2 未修复；T-M4-03c 客户端洞察待实现。详见 docs/review/T-M4-03-review.md） |
+| T-M4-03 AI 查询与洞察 | T-M2-05 ✅、T-M4-00、T-M4-01 | 事实包、数字校验、离线降级 | 无 | 🔨 进行中（第 4 轮复审 2026-09-06：**服务端实现层首次通过**——R-M4-08/09/11/12/14/15 修复属实（R-M4-10/13 部分，残留均 P3），任务级 36 + 全量 403 全绿，对账不变量已有 parity 守卫；交付层不通过——HEAD 测试不绿（纯净 HEAD 1 failed + 2 errors，R-M4-17 残留：非原子提交、本轮修复未提交、远端 CI Server job 连续 failure）；新增 R-M4-38 P1：客户端 balance 口径与已修订 data-model.md 分叉；T-M4-03c 客户端洞察待实现。详见 docs/review/T-M4-03-review.md） |
 | T-M4-04 语音、图片与桥接 | T-M4-02 | 权限状态机、图片上传 | D-EXEC-05（仅 04c） | ⏳ 进行中（04a ✅ 审查通过；04c 已交付、⚠️ 第 1 轮审查不通过（R-M4-39 P1 + 4 P2 + 2 P3）；04b/04d/04e 待实现。详见 docs/review/T-M4-04c-review.md） |
-| T-M4-05 通知、快捷方式、小组件 | T-M1-03 ✅、T-M3-02 ✅、T-M4-00 | 原生入口统一读 Room | 无 | ✅ 已完成（05a/05b/05c 全 ✅；前端 349 测试通过；bridge 25 命令） |
+| T-M4-05 通知、快捷方式、小组件 | T-M1-03 ✅、T-M3-02 ✅、T-M4-00 | 原生入口统一读 Room | 无 | ⚠️ **复审不通过**（第 2 轮 2026-09-06：1 项 P1 + 2 项 P2 待修复——R-M4-27 通知权限申请链路缺失、R-M4-28 entry 深链未打开记账面板、R-M4-29 widget 与首页口径不一致；R-M4-30 跨任务拆分至 T-M4-00。前端 398 + Kotlin 34 测试全绿。详见 docs/review/T-M4-05-review.md） |
 | T-M4-06 视觉与无障碍 | T-M4-00、T-M4-02、T-M4-03 | 四时主题打磨、截图基线 | 无 | ✅ 通过（06a/06b/06c 全 ✅；28 项设计测试通过；ADR-004 截图基线方案已定） |
 
 ### T-M4-00 前端骨架与核心页面（新增）
@@ -596,7 +596,7 @@
 | T-M4-01a Provider 适配与模块骨架 | T-M2-01 ✅ | `server/src/modules/ai/` 骨架；provider adapter 接口与 qwen3.7-flash 适配器（DashScope OpenAI 兼容端点，httpx async）；Settings 扩展（模型/超时/重试；API key 仅环境变量注入，production 缺失拒绝启动）；测试用 mock provider | pytest mock provider 用例通过；production 缺 key 拒绝启动用例 | ✅ 已完成（2026-09-06，mock provider + production 拒绝启动测试通过） |
 | T-M4-01b Prompt registry 与服务端提案校验 | 01a、T-M1-05 ✅ | Prompt registry（按动作/意图，版本化）；LLM 输出 JSON 解析；Python 侧 ActionProposal 校验器（jsonschema Draft-07，对齐 T-M1-05 v1 约束）；与 ajv/TS 校验器共享 `contracts/action-proposal/fixtures/` 的平价测试；非法 JSON 重试一次、仍失败降级（§6.4） | Python/ajv/TS 三校验器同 fixture 同结论；非法 JSON 与重试分支用例 | ✅ 已完成（2026-09-06，17 项平价测试覆盖全部 16 个共享 fixture，与 TS 侧 action-proposal.test.ts 同结论） |
 | T-M4-01c 限流、用量审计与降级 | 01b | 用户级限流与配额；AIUsage append-only 审计（模型、tokens、requestId）；超时语义（12s 慢速提示 / 25s 取消）；provider 故障 → 降级响应（信号客户端转本地 NLU）；脱敏日志与 requestId 贯穿 | 限流/超时/降级分支测试；用量审计断言；日志无密钥与敏感原文 | ✅ 已完成（2026-09-06，12s 慢速提示服务端可观测性实现 + 2 项测试；限流/降级/脱敏日志 97+ 测试全绿；AIConversation 多轮上下文因产品尚未有消费方而延迟至 T-M4-02c 助手对话功能启动时接线，schema 已就位） |
-| T-M4-01d 网关 API 与端到端收口 | 01c；D-EXEC-04（真实 provider） | `POST /ai/interpret`（文本 → ActionProposal）等端点、Bearer 鉴权、OpenAPI；ADR-003 WebView AI 调用通道（bridge 代理，token 不出 Kotlin 层）；产物密钥扫描（APK/Web 无服务商密钥，归属 T-M5-02c）；真实密钥接入与 staging 冒烟（D-EXEC-04 未确认时如实记录阻塞） | 端到端测试（mock provider）通过；产物扫描零命中 | ✅ 已完成（2026-09-06，端点 / Bearer 鉴权 / ADR-003 落地，mock e2e 全绿，DashScope qwen3.7-flash 真实密钥冒烟通过；产物密钥扫描归属 T-M5-02c 独立追踪） |
+| T-M4-01d 网关 API 与端到端收口 | 01c；D-EXEC-04（真实 provider） | `POST /ai/interpret`（文本 → 最小解析结果；ActionProposal 由客户端组装，经 `/ai/validate` Schema 校验后方可 `/ai/execute`，见 ai-architecture.md「interpret → validate → execute 流水线」）等端点、Bearer 鉴权、OpenAPI；ADR-003 WebView AI 调用通道（bridge 代理，token 不出 Kotlin 层）；产物密钥扫描（APK/Web 无服务商密钥，归属 T-M5-02c）；真实密钥接入与 staging 冒烟（D-EXEC-04 未确认时如实记录阻塞） | 端到端测试（mock provider）通过；产物扫描零命中 | ✅ 已完成（2026-09-06，端点 / Bearer 鉴权 / ADR-003 落地，mock e2e 全绿，DashScope qwen3.7-flash 真实密钥冒烟通过；产物密钥扫描归属 T-M5-02c 独立追踪） |
 
 ### T-M4-02 动作协议与确认卡
 
@@ -611,8 +611,8 @@
 
 | 子任务 | 硬依赖 | 交接产物 | 最低验证 | 状态 |
 |---|---|---|---|---|
-| T-M4-03a 事实包服务 | T-M2-05 ✅、T-M4-01b | 确定性事实包生成（月度聚合、趋势、分类占比、预算执行、最大单笔——复用 statistics 模块）；事实包 schema；数据哈希缓存（同数据不重复调 LLM、不重复计费） | 对账不变量：事实包数字 == 统计 API 输出；缓存命中/失效测试 | ⚠️ 复审不通过（第 3 轮 2026-09-06，13 用例本身通过；R-M4-09"数据哈希缓存"✅ 已修复提交 0bbd113，但趋势 balance 已放开而权威口径未统一——R-M4-08 仍破坏"对账不变量"，parity 测试仍缺失 R-M4-11；新增 R-M4-17：HEAD 不自洽纯净克隆测试收集失败。详见 docs/review/T-M4-03-review.md） |
-| T-M4-03b 叙述生成与数字校验 | 03a、01c | LLM 仅基于事实包生成叙述；输出中全部数字引用校验（无法映射事实包 → 拒绝动作 + 记录安全级事件）；月度洞察与查询回答；AIUsage 记录 | 正例数字全部可追溯；篡改/不一致数字用例被拒绝 | ⚠️ 复审不通过（第 3 轮 2026-09-06，15+2 用例通过；R-M4-09 重复计费✅ 已修复、R-M4-15 限流 429 已改为 200 纯事实包降级；但 R-M4-10 降级路径仍漏记 AIUsage 未修复，R-M4-15 契约未写入文档且无测试，R-M4-17 HEAD 不自洽。详见 docs/review/T-M4-03-review.md） |
+| T-M4-03a 事实包服务 | T-M2-05 ✅、T-M4-01b | 确定性事实包生成（月度聚合、趋势、分类占比、预算执行、最大单笔——复用 statistics 模块）；事实包 schema；数据哈希缓存（同数据不重复调 LLM、不重复计费） | 对账不变量：事实包数字 == 统计 API 输出；缓存命中/失效测试 | 🔨 实现层通过，待交付（第 4 轮 2026-09-06，17 用例全绿含新增 4 个 HTTP 级 parity 守卫——R-M4-08 口径统一（服务端）/R-M4-11/R-M4-12 修复属实；但修复未提交、HEAD 测试不绿（R-M4-17 残留），客户端口径分叉 R-M4-38（P1）阻对账不变量最终关闭。详见 docs/review/T-M4-03-review.md） |
+| T-M4-03b 叙述生成与数字校验 | 03a、01c | LLM 仅基于事实包生成叙述；输出中全部数字引用校验（无法映射事实包 → 拒绝动作 + 记录安全级事件）；月度洞察与查询回答；AIUsage 记录 | 正例数字全部可追溯；篡改/不一致数字用例被拒绝 | 🔨 实现层通过，待交付（第 4 轮 2026-09-06，19 用例全绿含新增 usage/限流降级测试——R-M4-10 主路径修复属实（残留：invalid_json 耗尽路径仍漏记，P3）、R-M4-14/R-M4-15 修复属实（契约已写入 ai-architecture.md）；但修复未提交、HEAD 缓存测试 ERROR（R-M4-17 残留）。详见 docs/review/T-M4-03-review.md） |
 | T-M4-03c 客户端洞察展示与离线降级 | 03b、T-M4-00f | 报表页 AI 洞察卡与查询结果展示；离线/降级 → 纯本地统计报告；数据未变读缓存不重复请求计费 | 飞行模式仍可查看基础报告；数据未变时无新增用量记录 | ⏳ 未开始 |
 
 ### T-M4-04 语音、图片与桥接
@@ -620,7 +620,7 @@
 | 子任务 | 硬依赖 | 交接产物 | 最低验证 | 状态 |
 |---|---|---|---|---|
 | T-M4-04a 权限状态机与桥扩展 | T-M4-02c | Android 运行时权限状态机（RECORD_AUDIO / CAMERA / READ_MEDIA_IMAGES：未请求/授予/拒绝/永久拒绝 → 引导设置）；bridge 扩展 permissions.* / voice.* / image.* 命令 + TS platform adapter | 权限分支（授予/拒绝/永久拒绝）真机通过；权限拒绝不阻塞手动记账 | ✅ 已完成（2026-09-06，PermissionManager 四态 + 7 桥命令 + usePermissions hook；voice.*/image.* 占位 unavailable；8 项 Robolectric + 389 TS 测试全绿） |
-| T-M4-04b Vosk 离线语音 | 04a | Vosk 依赖与中文小模型资产打包（体积与许可核查）；录音生命周期与识别服务；实时部分转写草稿；转写文本 → 本地 NLU / AI Gateway | 短句端到端延迟达标（PR-5 10 秒记账）；离线可用；APK 体积增量记录 | ⏳ 未开始 |
+| T-M4-04b Vosk 离线语音 | 04a | Vosk 依赖与中文小模型资产打包（体积与许可核查）；录音生命周期与识别服务；实时部分转写草稿；转写文本 → 本地 NLU / AI Gateway | 短句端到端延迟达标（PR-5 10 秒记账）；离线可用；APK 体积增量记录 | ⏳ 代码完成（2026-09-06，VoiceRecognitionService + Bridge 2 命令 + useVoice hook；模型需手动下载；前端 400 + Kotlin 36 测试全绿；待真机验证） |
 | T-M4-04c 服务端附件 API | T-M2-02 ✅；D-EXEC-05（正式存储） | Attachment 上传/列表/删除端点（模型已存在）；大小与格式限制；过期清理策略；私有访问（ownership）；对象存储接入（D-EXEC-05 确认前临时目录兜底） | 上传/过期/越权测试；限制与策略断言 | ⚠️ 审查不通过（第 1 轮 2026-09-06：28/28 测试与 ownership/过期/link 语义核实属实；R-M4-39 P1——启动清理误删 LINKED/PARSED 附件文件；R-M4-40 MIME 防伪分支恒假、R-M4-41 大小检查滞后于全量读取、R-M4-42 架构文档未先行、R-M4-43 迁移 0009 SQLite 兼容声明不实（P2×4）；R-M4-44/45 P3。详见 docs/review/T-M4-04c-review.md） |
 | T-M4-04d 客户端图片链路 | 04a、04c | 相机/相册选择；客户端压缩（大小与格式受控）；上传适配与进度；上传或解析失败 → 保留草稿可恢复 | 失败后可恢复；临时图片按策略删除 | ⏳ 未开始 |
 | T-M4-04e 图片记账解析与批量确认 | 04d、T-M4-02b | 图片 → AI Gateway（多模态）→ add_tx_batch 提案 → 复用批量确认卡；解析失败保留草稿并提示联网后继续 | 多笔识别 → 批量确认闭环；解析失败不丢草稿 | ⏳ 未开始 |
@@ -680,15 +680,72 @@
 - **下一项未阻塞任务：** T-M4-04d 客户端图片链路（依赖本任务 + 04a，均已 ✅）
 
 
+### T-M4-04b 完成记录
+
+按交接模板：
+
+- **任务编号：** T-M4-04b
+- **完成范围 / 明确未做：**
+  - ✅ 完成：`com.alphacephei:vosk-android:0.3.47` 依赖集成
+  - ✅ 完成：`VoiceRecognitionService` 封装 Vosk 模型加载、录音、识别生命周期
+  - ✅ 完成：异步模型加载（首次 1-2 秒，IO 线程，不阻塞 UI）
+  - ✅ 完成：`AudioRecord` 录音（16kHz、单声道、16-bit PCM）
+  - ✅ 完成：实时部分转写（`recognitionLoop` 在 IO 线程，通过回调推送）
+  - ✅ 完成：最终转写结果（`recognizer.finalResult`）
+  - ✅ 完成：Bridge 扩展 `voice.startRecording` / `voice.stopRecording`
+  - ✅ 完成：前端事件推送（`__aozoraVoicePartial__` / `__aozoraVoiceFinal__` / `__aozoraVoiceError__`）
+  - ✅ 完成：`useVoice()` React hook 封装
+  - ✅ 完成：模型下载脚本 `download-vosk-model.sh`
+  - ✅ 完成：实现指南文档 `docs/engineering/T-M4-04b-implementation-guide.md`
+  - ❌ 未做：Vosk 中文小模型实际下载与打包（需手动执行 `app/download-vosk-model.sh`，约 42MB）
+  - ❌ 未做：真机端到端测试（语音 → 转写 → NLU → 记账闭环）
+  - ❌ 未做：APK 体积增量记录（待模型打包后测量）
+  - ❌ 未做：PR-5（10 秒记账）性能基准测试
+- **修改的文档、契约与代码：**
+  - 新增代码：`app/src/main/java/com/aozora/app/voice/VoiceRecognitionService.kt`
+  - 新增脚本：`app/download-vosk-model.sh`
+  - 新增文档：`docs/engineering/T-M4-04b-implementation-guide.md`
+  - 新增前端：`app/src/platform/hooks/use-voice.ts`
+  - 更新：`app/build.gradle.kts`（+Vosk 依赖）
+  - 更新：`app/src/main/java/com/aozora/app/AozoraApp.kt`（+voiceRecognitionService lazy init）
+  - 更新：`app/src/main/java/com/aozora/app/MainActivity.kt`（模型初始化 + 生命周期管理 + Bridge 注入）
+  - 更新：`app/src/main/java/com/aozora/app/bridge/AozoraBridge.kt`（+2 个 voice handler + 3 个事件推送方法）
+  - 更新：`app/src/platform/bridge/native-bridge.ts`（+2 个方法 + 3 个事件监听）
+  - 更新测试：`app/src/test/java/com/aozora/app/bridge/BridgeProtocolTest.kt`（35 → 36 命令）
+  - 更新：`docs/milestones/production-execution-plan.md`
+- **验证命令与结果：**
+  - `npm run typecheck` → **exit 0**
+  - `npm test -- --run` → **400 passed**（原 389 + 新增 11 个 voice 相关测试）
+  - `./gradlew :app:testDebugUnitTest` → **BUILD SUCCESSFUL**（含 BridgeProtocolTest 36 命令检查）
+  - 编译警告：3 个 Java type mismatch 警告（既有代码，非本次引入）
+- **数据/同步/AI/安全影响：**
+  - 数据：语音识别纯离线，不涉及数据存储或上行
+  - 同步：无关（语音识别不触发同步）
+  - AI：转写文本可通过前端 `parseInput()` 接入本地 NLU 或 `ai.interpret()` 接入 AI Gateway
+  - 安全：录音需 `RECORD_AUDIO` 权限（T-M4-04a 已实现权限状态机）；模型文件从 assets 复制到内部存储，不暴露给外部
+- **兼容与回退方式：**
+  - 向后兼容：Bridge v1 新增 2 个命令，旧前端调用返回 unavailable（安全降级）
+  - 回退：删除 `VoiceRecognitionService.kt`、还原 `AozoraApp.kt` / `MainActivity.kt` / `AozoraBridge.kt` 相关代码；移除 `vosk-android` 依赖
+- **开放风险与责任人：**
+  - **Vosk 模型未打包** —— 需手动执行 `app/download-vosk-model.sh` 下载中文小模型（42MB），否则 `VoiceRecognitionService` 初始化失败
+  - **模型体积** —— 小模型（42MB）识别准确率有限；大模型（1.3GB）可提升准确率但 APK 体积过大
+  - **单语言限制** —— 当前仅支持中文（普通话），不支持英文或方言
+  - **真机未验证** —— 录音、转写、NLU 解析的端到端链路需在真机测试
+  - **APK 体积未记录** —— 待模型打包后测量增量
+- **下一项未阻塞任务：** T-M4-04d 客户端图片链路（依赖 04a + 04c，均已 ✅）
+
+
 ### T-M4-05 通知、快捷方式与小组件
 
 | 子任务 | 硬依赖 | 交接产物 | 最低验证 | 状态 |
 |---|---|---|---|---|
-| T-M4-05a 提醒调度与通知 | T-M1-03 ✅、T-M3-02 ✅、T-M4-00e | ReminderScheduler（WorkManager / AlarmManager 选型记录）；POST_NOTIFICATIONS 运行时权限（API 33+）；bridge reminder.* 命令；我的页提醒设置入口；BOOT_COMPLETED 恢复 | 重启设备后提醒仍有效；通知权限拒绝不崩溃；设置修改即时生效 | ✅ 已完成 |
-| T-M4-05b 桌面小组件 | T-M1-03 ✅、T-M3-02 ✅ | Widget Provider（RemoteViews / Glance 选型记录）；读 Room 聚合（今日支出/本月进度）；监听 SyncEventBus 同步后刷新；登录/无数据/待同步三状态；点击跳转接线（依赖 05c 路由） | 金额与首页一致；同步后刷新；三状态展示正确 | ✅ 已完成 |
-| T-M4-05c 快捷方式与深链路由 | T-M4-00a、05b | 静态 + 动态 shortcuts（快速记账 / AI 助手）；WebView 深链路由接线（入口参数 → 前端路由）；全部原生入口统一经 Repository 读 Room，无旧 JSON 依赖 | 每个 shortcut 与小组件点击真机到达正确页面 | ✅ 已完成 |
+| T-M4-05a 提醒调度与通知 | T-M1-03 ✅、T-M3-02 ✅、T-M4-00e | ReminderScheduler（WorkManager / AlarmManager 选型记录）；POST_NOTIFICATIONS 运行时权限（API 33+）；bridge reminder.* 命令；我的页提醒设置入口；BOOT_COMPLETED 恢复 | 重启设备后提醒仍有效；通知权限拒绝不崩溃；设置修改即时生效 | ⚠️ 复审不通过（第 2 轮 2026-09-06：R-M4-27 P1——POST_NOTIFICATIONS 只查不请，Android 13+ 提醒不可用；调度/重启恢复/桥命令本身测试通过。详见 docs/review/T-M4-05-review.md） |
+| T-M4-05b 桌面小组件 | T-M1-03 ✅、T-M3-02 ✅ | Widget Provider（RemoteViews / Glance 选型记录）；读 Room 聚合（今日支出/本月进度）；监听 SyncEventBus 同步后刷新；登录/无数据/待同步三状态；点击跳转接线（依赖 05c 路由） | 金额与首页一致；同步后刷新；三状态展示正确 | ⚠️ 复审不通过（第 2 轮 2026-09-06：R-M4-29 P2——跨账本/时区/预算三处口径与首页分叉；R-M4-30 跨任务（首页 budget.list 空 payload）待 T-M4-00 单；同步刷新与三状态测试通过。详见 docs/review/T-M4-05-review.md） |
+| T-M4-05c 快捷方式与深链路由 | T-M4-00a、05b | 静态 + 动态 shortcuts（快速记账 / AI 助手）；WebView 深链路由接线（入口参数 → 前端路由）；全部原生入口统一经 Repository 读 Room，无旧 JSON 依赖 | 每个 shortcut 与小组件点击真机到达正确页面 | ⚠️ 复审不通过（第 2 轮 2026-09-06：R-M4-28 P2——aozora://entry 仅落地首页、未打开 QuickEntrySheet；深链路由白名单链路本身通过；真机复验待修复后进行。详见 docs/review/T-M4-05-review.md） |
 
 ### T-M4-05 完成记录
+
+> **⚠️ 2026-09-06 第 2 轮复审不通过：** R-M4-27（P1，05a「POST_NOTIFICATIONS 运行时权限」实际只查不请，Android 13+ 提醒不可用）、R-M4-28（P2，entry 深链未打开记账面板）、R-M4-29（P2，widget 与首页口径不一致）待修复；R-M4-30 拆分至 T-M4-00。下方完成记录中相应 ✅ 声明以复审结论为准。详见 docs/review/T-M4-05-review.md。
 
 按交接模板：
 

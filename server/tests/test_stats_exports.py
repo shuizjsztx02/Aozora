@@ -164,8 +164,8 @@ class TestMonthlyStats:
         assert data["balance"] == 0
         assert data["transaction_count"] == 0
 
-    def test_monthly_stats_balance_non_negative(self, auth_client, user):
-        """Balance = max(0, income - expense), never negative."""
+    def test_monthly_stats_balance_can_be_negative(self, auth_client, user):
+        """Balance = income - expense, negative when expense > income (deficit)."""
         book_resp = auth_client.post("/books", json={"name": "Deficit"}, headers=_auth(user))
         book_id = book_resp.json()["id"]
 
@@ -186,7 +186,7 @@ class TestMonthlyStats:
         data = resp.json()
         assert data["total_income"] == 0
         assert data["total_expense"] == 10000
-        assert data["balance"] == 0  # max(0, 0 - 10000) = 0
+        assert data["balance"] == -10000  # 0 - 10000 = deficit
 
     def test_stats_excludes_deleted_transactions(self, auth_client, user, book_data):
         """Deleted transactions should not be counted."""

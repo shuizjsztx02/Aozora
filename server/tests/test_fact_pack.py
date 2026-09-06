@@ -376,3 +376,177 @@ class TestTrend:
         periods = [t["period"] for t in data["trend"]]
         assert periods == ["2025-08", "2025-09", "2025-10",
                            "2025-11", "2025-12", "2026-01"]
+
+
+# ── Parity with StatisticsService (R-M4-11) ─────────────────────────────
+
+
+class TestStatisticsParity:
+    """Assert fact pack numbers match /statistics output for the same data.
+
+    R-M4-11 fix: the on-account invariant "fact pack digits == stats API
+    output" previously had no automated guard. These tests ensure that any
+    future drift between the two aggregation implementations is caught.
+    """
+
+    def test_monthly_totals_parity(self, fp_env):
+        """/ai/report and /stats/monthly must agree on totals + balance."""
+        c, factory = fp_env
+        user = _guest(fp_env)
+
+        resp = c.post("/books", json={"name": "Parity Book"}, headers=_auth(user))
+        book_id = uuid.UUID(resp.json()["id"])
+
+        cat_food = uuid.uuid4()
+        cat_salary = uuid.uuid4()
+        _seed_data(
+            factory, book_id, uuid.UUID(user["id"]),
+            {cat_food: "餐饮", cat_salary: "工资"},
+            txs=[
+                {"type": "expense", "amount_cents": 30000, "category_id": cat_food,
+                 "note": "聚餐", "biz_date": "2026-09-10"},
+                {"type": "expense", "amount_cents": 15000, "category_id": cat_food,
+                 "note": "午饭", "biz_date": "2026-09-15"},
+                {"type": "income", "amount_cents": 200000, "category_id": cat_salary,
+                 "note": "工资", "biz_date": "2026-09-01"},
+            ],
+        )
+
+        # Fact pack
+        resp_fp = c.post("/ai/report", json={
+            "book_id": str(book_id),
+            "period": "2026-09",
+        }, headers=_auth(user))
+        assert resp_fp.status_code == 200
+        fp = resp_fp.json()
+
+        # Statistics monthly
+        resp_stats = c.get("/stats/monthly", params={
+            "book_id": str(book_id),
+            "period": "2026-09",
+        }, headers=_auth(user))
+        assert resp_stats.status_code == 200
+        stats = resp_stats.json()
+
+        # Core invariant: same numbers
+        assert fp["total_income"] == stats["total_income"]
+        assert fp["total_expense"] == stats["total_expense"]
+        assert fp["balance"] == stats["balance"]
+        assert fp["transaction_count"] == stats["transaction_count"]
+
+    def test_deficit_balance_parity(self, fp_env):
+        """When expense > income, both APIs must report the same negative balance."""
+        c, factory = fp_env
+        user = _guest(fp_env)
+
+        resp = c.post("/books", json={"name": "Deficit Book"}, headers=_auth(user))
+        book_id = uuid.UUID(resp.json()["id"])
+
+        cat_id = uuid.uuid4()
+        _seed_data(
+            factory, book_id, uuid.UUID(user["id"]),
+            {cat_id: "餐饮"},
+            txs=[
+                {"type": "expense", "amount_cents": 500000, "category_id": cat_id,
+                 "note": "大件", "biz_date": "2026-09-10"},
+                {"type": "income", "amount_cents": 100000, "category_id": cat_id,
+                 "note": "零工", "biz_date": "2026-09-01"},
+            ],
+        )
+
+        resp_fp = c.post("/ai/report", json={
+            "book_id": str(book_id),
+            "period": "2026-09",
+        }, headers=_auth(user))
+        fp = resp_fp.json()
+
+        resp_stats = c.get("/stats/monthly", params={
+            "book_id": str(book_id),
+            "period": "2026-09",
+        }, headers=_auth(user))
+        stats = resp_stats.json()
+
+        # Both must show the same deficit
+        assert fp["balance"] == -400000
+        assert stats["balance"] == -400000
+        assert fp["balance"] == stats["balance"]
+
+    def test_trend_parity(self, fp_env):
+        """Trend points in /ai/report must match /stats/trends for the same period."""
+        c, factory = fp_env
+        user = _guest(fp_env)
+
+        resp = c.post("/books", json={"name": "Trend Parity Book"}, headers=_auth(user))
+        book_id = uuid.UUID(resp.json()["id"])
+
+        cat_id = uuid.uuid4()
+        _seed_data(
+            factory, book_id, uuid.UUID(user["id"]),
+            {cat_id: "餐饮"},
+            txs=[
+                {"type": "expense", "amount_cents": 10000, "category_id": cat_id,
+                 "biz_date": "2026-07-10"},
+                {"type": "expense", "amount_cents": 20000, "category_id": cat_id,
+                 "biz_date": "2026-08-15"},
+                {"type": "income", "amount_cents": 300000, "category_id": cat_id,
+                 "biz_date": "2026-09-01"},
+            ],
+        )
+
+        # Fact pack trend (6 months ending 2026-09)
+        resp_fp = c.post("/ai/report", json={
+            "book_id": str(book_id),
+            "period": "2026-09",
+        }, headers=_auth(user))
+        fp_trend = {t["period"]: t for t in resp_fp.json()["trend"]}
+
+        # Statistics trend (same 6-month range)
+        resp_stats = c.get("/stats/trends", params={
+            "book_id": str(book_id),
+            "period_from": "2026-04",
+            "period_to": "2026-09",
+        }, headers=_auth(user))
+        stats_trend = {p["period"]: p for p in resp_stats.json()["points"]}
+
+        # For each month in the fact pack trend, the corresponding stats
+        # point must agree on income, expense, and balance
+        for period, fp_point in fp_trend.items():
+            assert period in stats_trend, f"Missing trend period {period}"
+            sp = stats_trend[period]
+            assert fp_point["total_income"] == sp["total_income"]
+            assert fp_point["total_expense"] == sp["total_expense"]
+            assert fp_point["balance"] == sp["balance"]
+
+    def test_category_totals_sum(self, fp_env):
+        """Sum of category totals must equal total_expense / total_income."""
+        c, factory = fp_env
+        user = _guest(fp_env)
+
+        resp = c.post("/books", json={"name": "Category Sum Book"}, headers=_auth(user))
+        book_id = uuid.UUID(resp.json()["id"])
+
+        cat_a = uuid.uuid4()
+        cat_b = uuid.uuid4()
+        _seed_data(
+            factory, book_id, uuid.UUID(user["id"]),
+            {cat_a: "餐饮", cat_b: "工资"},
+            txs=[
+                {"type": "expense", "amount_cents": 10000, "category_id": cat_a,
+                 "biz_date": "2026-09-01"},
+                {"type": "expense", "amount_cents": 20000, "category_id": cat_a,
+                 "biz_date": "2026-09-05"},
+                {"type": "income", "amount_cents": 300000, "category_id": cat_b,
+                 "biz_date": "2026-09-01"},
+            ],
+        )
+
+        resp = c.post("/ai/report", json={
+            "book_id": str(book_id),
+            "period": "2026-09",
+        }, headers=_auth(user))
+        data = resp.json()
+
+        expense_sum = sum(c["total_cents"] for c in data["expense_by_category"])
+        income_sum = sum(c["total_cents"] for c in data["income_by_category"])
+        assert expense_sum == data["total_expense"]
+        assert income_sum == data["total_income"]

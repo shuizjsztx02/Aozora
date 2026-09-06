@@ -5,7 +5,7 @@
  */
 
 import { useState, useEffect, useCallback } from 'react'
-import { useNavigate } from 'react-router'
+import { useNavigate, useSearchParams } from 'react-router'
 import { PageHeader } from '../../components/Layout'
 import { SyncBadge } from '../../components/SyncBadge'
 import { EmptyState } from '../../components/StateViews'
@@ -29,6 +29,17 @@ export function HomePage() {
   const [budget, setBudget] = useState<{ amountCents: number } | null>(null)
   const bridge = useBridge()
   const navigate = useNavigate()
+  const [searchParams, setSearchParams] = useSearchParams()
+
+  // R-M4-28 修复：深链 entry=1 时自动打开快速记账面板
+  useEffect(() => {
+    if (searchParams.get('entry') === '1') {
+      setShowSheet(true)
+      // 清除参数避免重复触发
+      searchParams.delete('entry')
+      setSearchParams(searchParams, { replace: true })
+    }
+  }, [searchParams, setSearchParams])
 
   const loadData = useCallback(async () => {
     try {
@@ -42,7 +53,8 @@ export function HomePage() {
       const [allTxs, cats, budgets] = await Promise.all([
         bridge.call('transaction.listByBook', { bookId }) as Promise<TransactionData[]>,
         bridge.call('category.list', {}) as Promise<CategoryData[]>,
-        bridge.call('budget.list', {}) as Promise<{ amountCents: number; period: string }[]>,
+        // R-M4-30 修复：传递 bookId，与 Kotlin 侧 budget.list 契约一致
+        bridge.call('budget.list', { bookId }) as Promise<{ amountCents: number; period: string }[]>,
       ])
 
       const todayExpenses = allTxs.filter(tx => tx.bizDate === today && tx.type === 'expense' && tx.deletedAt === null)

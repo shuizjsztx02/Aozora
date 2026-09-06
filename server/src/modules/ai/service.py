@@ -174,6 +174,11 @@ class AIService:
 
         result: ProviderResult | None = None
         output: object = None
+        # R-M4-06: an attempt that reached the provider but returned unusable
+        # output still consumed (and was billed for) tokens — accumulate them
+        # so the audit row and response usage reflect true cost across retries.
+        retry_prompt_tokens = 0
+        retry_completion_tokens = 0
         for attempt in range(1, MAX_ATTEMPTS + 1):
             try:
                 result = await self._provider.complete(
@@ -197,6 +202,8 @@ class AIService:
                 output = self._parse_json_output(result.content)
                 break
             except ValueError:
+                retry_prompt_tokens += result.prompt_tokens
+                retry_completion_tokens += result.completion_tokens
                 if attempt >= MAX_ATTEMPTS:
                     self._log_failure(
                         request_id, tpl, model, attempt, "invalid_json", started,
@@ -208,7 +215,11 @@ class AIService:
 
         assert result is not None  # loop always breaks with a result or raises
 
-        await self._record_usage(user, result, model, request_id)
+        await self._record_usage(
+            user, result, model, request_id,
+            extra_prompt_tokens=retry_prompt_tokens,
+            extra_completion_tokens=retry_completion_tokens,
+        )
         self._log_success(request_id, tpl, model, result, started)
         self._log_slow_if_needed(request_id, tpl, model, started)
         return AIInterpretResponse(
@@ -217,8 +228,8 @@ class AIService:
             model=model,
             output=output,
             usage=AIUsageInfo(
-                prompt_tokens=result.prompt_tokens,
-                completion_tokens=result.completion_tokens,
+                prompt_tokens=result.prompt_tokens + retry_prompt_tokens,
+                completion_tokens=result.completion_tokens + retry_completion_tokens,
             ),
         )
 
@@ -308,8 +319,13 @@ class AIService:
 
     async def _record_usage(
         self, user: User, result: ProviderResult, model: str, request_id: str,
+        *, extra_prompt_tokens: int = 0, extra_completion_tokens: int = 0,
     ) -> None:
         """Append one AIUsage row for the successful provider call.
+
+        ``extra_*_tokens`` carry tokens consumed by earlier attempts that
+        reached the provider but produced unusable output (R-M4-06) — the
+        provider bills them, so the audit row must include them.
 
         Only recorded on the success path: ``get_db_session`` rolls the
         session back when the request raises, so failure-path rows would
@@ -317,7 +333,10 @@ class AIService:
         structured WARNING log (``attempt`` / ``outcome`` fields).
         """
         assert self._provider is not None
-        total_tokens = result.prompt_tokens + result.completion_tokens
+        total_tokens = (
+            result.prompt_tokens + result.completion_tokens
+            + extra_prompt_tokens + extra_completion_tokens
+        )
         price = self._cfg.ai_price_per_1m_tokens
         cost = total_tokens * price // 1_000_000 if price else 0
         self._db.add(

@@ -1,14 +1,78 @@
 # T-M4-03 审查报告：AI 查询与洞察
 
-- **审查日期：** 2026-09-06（第 3 轮复审）
-- **范围：** T-M4-03a（事实包服务）+ T-M4-03b（叙述生成与数字校验）。T-M4-03c 仍未开始，不在范围。重点核验第 2 轮登记的 R-M4-08 ~ R-M4-15 修复状态与 R-M4-09 修复提交（`0bbd113`）的交付质量。
-- **基线：** HEAD `0bbd113` + 工作树未提交改动（`server/src/modules/ai/` 除 service.py 外仍 untracked）。
+- **审查日期：** 2026-09-06（第 4 轮复审）
+- **范围：** T-M4-03a（事实包服务）+ T-M4-03b（叙述生成与数字校验）。T-M4-03c 仍未开始，不在范围。重点核验第 3 轮登记的 R-M4-08 ~ R-M4-15、R-M4-17 修复状态；修复分散于提交 `c101afb`、`435342b` 与工作树未提交改动三处。
+- **基线：** HEAD `435342b` + 工作树未提交改动（`fact_pack.py` 哈希扩展、`prompts.py`、`test_fact_pack.py`、`test_narrative_report.py`、`test_stats_exports.py`、`ai-architecture.md`、交付文档）。远端 main 已领先本地（`fix(T-M4-06)` 提交，网络原因未能拉取，不影响本轮结论——其 CI Server job 同样 failure）。**注：** 审查期间另一会话在工作树并发修改了 `ai/service.py`（interpret 路径 R-M4-06 重试 tokens 修复）、`validator.py`、`test_ai_gateway.py` 并推进了本地 HEAD（`f716cdd`/`7228493`/`3b73dd5`，均为 CI/客户端修复，不触及本轮核验的 /ai/report 链路）；本文 `service.py` 行号以撰写时工作树为准，`_generate_narrative` 的核验结论不受并发修改影响（该修复未覆盖 /ai/report 路径）。
 - **模式：** 只读 Review（未修改任何代码/测试/配置；仅更新本审查文档与任务状态文档）。
-- **编号说明：** 沿用 M4 连续编号。R-M4-16 已被 `T-M4-06-review.md` 使用，本轮新增问题编号为 **R-M4-17**。
+- **编号说明：** 沿用 M4 连续编号。R-M4-16 ~ R-M4-37 已被其他审查文档（T-M4-05/T-M4-06 等）使用，本轮新增问题编号为 **R-M4-38**。
 
 ---
 
-## 一、实测结果（第 3 轮实际运行）
+## 一、实测结果（第 4 轮实际运行）
+
+| 检查项 | 命令 | 结果 |
+|---|---|---|
+| 任务级测试 | `pytest tests/test_fact_pack.py tests/test_narrative_report.py -q` | **36 passed**（上轮 30 + 4 parity + 1 usage + 1 rate limit，与修复方声称一致） |
+| 全量服务端测试（工作树） | `pytest tests/ --tb=line -q` | **403 passed, 1 skipped, 1 error**；error 仍为 `test_stats_exports.py` Windows 临时目录 `PermissionError`（已知环境问题）；上轮 4 个 test_attachments 失败已消失（相关工作树改动已随提交入库） |
+| Lint（CI 门禁） | `ruff check src/ tests/` | **1 error**（I001 import 排序，`test_narrative_report.py:10`，未提交的工作树版本）。ruff 0.16.6 本机已可用、`pyproject.toml` 已声明 `[tool.ruff]`、CI server job（ruff+pytest）已提交并实际运行——R-M4-04 的工具缺口已消除；但当前工作树提交后 lint 门禁将红 |
+| HEAD 收集自洽性 | `git worktree add <tmp> HEAD` + `pytest tests/ --collect-only -q` | **399 collected, 0 errors** ✅——R-M4-17 的"收集失败/无法启动"已修复。裸 `import src.main` 报 `DATABASE_URL` 缺失属预期环境配置（`.env` 为 gitignore，`server/README.md:8` 明文要求配置），非 HEAD 缺陷 |
+| HEAD 全量测试（纯净 worktree） | 同上 + `pytest tests/ -q --tb=no` | ❌ **1 failed, 394 passed, 1 skipped, 3 errors**——`test_stats_exports.py::test_monthly_stats_balance_non_negative` FAILED（HEAD 代码返回 -10000，HEAD 测试仍断言 0：测试更新未随 `435342b` 提交）；`TestNarrativeCache` 2 ERROR（`0bbd113` 提交的测试所用 `db_session` fixture import 仅存在于工作树）；另 1 error 为已知 Windows 环境问题。详见核验表 R-M4-17 行 |
+| 远端 CI | `gh run view 34035608951`（`435342b`）/ `34036580072`（远端最新） | **Server Lint & Test: failure** ×2——与纯净 HEAD 实测一致（失败为上述红测试，平台无关）。`435342b` 的 Client job success、Android failure 为既存问题；远端最新提交的 Client 亦转红（归属 T-M4-06，非本轮范围） |
+
+## 二、上一轮（第 3 轮 R-M4-08 ~ R-M4-17）问题修复核验
+
+| 原问题 | 第 4 轮核验结果 |
+|---|---|
+| **R-M4-08**（P1）balance 口径与权威数据模型冲突 | ✅ **服务端修复属实**——采用方案 (b) 且文档先行：`data-model.md:8` 已修订为 `balance = totalIncome − totalExpense`（允许负值，`MoneyCents` 存储层仍非负，赤字由计算结果表达）；`statistics/service.py:156,226` 改 `income - expense`、`statistics/schemas.py:27,38` balance 移除 `ge=0`（income/expense 保留 `ge=0`，正确）；`test_stats_exports.py` 赤字月断言 -10000；事实包顶层与 trend 均不 clamp；新增赤字 parity 测试锁死口径。⚠️ 但修复止步于服务端边界：客户端 `aggregator.ts` 仍 clamp 0 → 新立 **R-M4-38**；且 `test_stats_exports.py` 更新未提交 → HEAD 红（归 R-M4-17 残留） |
+| **R-M4-09**（P1）同数据不重复调 LLM | ✅ 保持关闭（第 3 轮已核验，本轮 36 用例中缓存 2 用例仍绿）。但其提交（`0bbd113`）的测试所依赖的 `from tests.fixtures_db import db_session` 仅存在于未提交工作树，纯净 HEAD 上两测试 ERROR——"提交可独立复验"仍未达成，归入 R-M4-17 残留 |
+| **R-M4-10**（P2）校验失败/降级路径漏记 tokens | ⚠️ **部分修复**——主路径已修：`_record_usage` 提前至 provider 返回并解析成功后立即执行（`service.py:876-878`，随 `435342b` 提交），数字校验失败仅丢弃叙述、保留计费（`service.py:897-898`），新增 `TestUsageOnVerificationFailure` 断言 AIUsage 行 ✅。**残留**：`invalid_json` 重试耗尽 return（`service.py:867-871`）仍漏记——此时 `result` 非空、tokens 已实际消耗，违反原修复建议"只要 provider 实际返回过 result 就必须记录"；该行注释 "No parseable result → no usage to record" 与事实不符。另重试路径首次 attempt 消耗的 tokens 依旧不记（R-M4-06 同族；工作树内另一会话的在途修复仅覆盖 interpret 路径，未覆盖 `_generate_narrative`） |
+| **R-M4-11**（P2）对账不变量无自动化守卫 | ✅ **修复属实**——`TestStatisticsParity` 4 个测试为真实 HTTP 级对账：月度总计（`/ai/report` vs `/stats/monthly` 四项逐项相等）、赤字口径（两侧均 -400000）、趋势（vs `/stats/trends` 6 个月逐月三项对比）、分类求和恒等式。任一侧口径改动即红，满足"人为改动任一侧口径应使测试变红"的复验标准。**未提交**（工作树改动） |
+| **R-M4-12**（P3）事实包缓存 TTL 内返回陈旧非哈希字段 | ✅ **修复属实（未提交）**——`_compute_data_hash` 已纳入 `tx_count`、费用/收入分类名、最大单笔的 `id/note/biz_date`（`fact_pack.py:141-176`）；最大单笔的 `category_name` 经分类列表传递覆盖。**微小残留**：`trend.transaction_count`（历史月份）未入 hash——TTL 内历史月份发生金额不变的结构变化（如一笔拆二）时，缓存旧 FactPack 的 trend count 会被返回；影响极小 |
+| **R-M4-13**（P3）交付文档失真 | ⚠️ **部分修复**——① 缓存条目 1000→500 ✅；② 297→"393+（第 3 轮实测，伴随 4 个 test_attachments 失败）" ✅ 如实标注，但本轮实测已 403 且 attachments 失败已消失，数字再度滞后，且"全部通过…伴随 4 个失败"措辞自相矛盾；③ `T-M4-03b:58` 改为"口径已统一（statistics 同步放开、data-model.md 已修订）" ✅ 现已属实；⑤ `test_narrative_report.py` 文件头已改为与实际范围一致 ✅（新增两类测试未列入，微瑕）。**新滞后**：`final-summary.md:210,374` 仍写"28 个单元测试"（现为 36）。文档数字反复滞后的根因是"先写文档后跑测试"，建议提交前以可复跑命令刷新 |
+| **R-M4-14**（P3）highlights 被丢弃；"本月"措辞 | ✅ **基本修复**——REPORT 模板已移除 highlights 输出要求（`prompts.py:61`）、系统提示改"指定月份"、`user_input` 改"我{period}月度"（`service.py:841`，随 `435342b` 提交）、balance 说明加"可能为负表示赤字" ✅。**残留**：`prompts.py:69-72` 事实键名描述仍为四处"本月总收入/本月总支出/本月结余/本月交易笔数"，历史期间提示词仍含"本月"字样，轻微 |
+| **R-M4-15**（P3）限流命中整个 /ai/report 返回 429 | ✅ **修复属实**——代码第 3 轮已核验（429→INFO 日志+return，非 429 仍抛出，`service.py:820-834`）；本轮契约文档与测试补齐：`ai-architecture.md` 新增"/ai/report 限流降级契约"节（200+纯事实包、理由、interpret 保留 429 的边界均明确）✅；新增 `TestRateLimitDegradation` 断言事实包返回、narrative=null、provider 零调用 ✅。契约文档与测试均**未提交** |
+| **R-M4-17**（P1）HEAD 不自洽 | ⚠️ **部分修复**——`c101afb` 已将 `server/src/modules/ai/` 全目录 10 文件与 `test_fact_pack.py` 等入库，纯净 HEAD **收集零 error（399 collected）** ✅。**但 HEAD 测试不绿**：纯净 HEAD 全量 **1 failed + 2 errors**（第一节）——根因仍是非原子提交：`435342b` 提交了 statistics 负余额代码却未提交配套测试更新；`0bbd113` 的缓存测试依赖未提交的 fixture import。远端 CI Server job 连续 2 次 failure 实证。另 **`435342b` 标称 docs 提交失实**：夹带 R-M4-08/R-M4-10 代码修复（statistics schemas/service、ai/service.py 19 行行为改动），提交信息仅称"修复 TYPE_CHECKING 导入"，其声称的 CI 验证（pytest 93 passed）只覆盖 T-M4-02 测试 |
+
+## 三、本轮新登记问题
+
+### 🔴 R-M4-38（P1 · 契约一致性/跨端）— 权威口径已修订为允许负余额，客户端仍 clamp 0，对账不变量跨端破坏
+
+- **ID：** R-M4-38
+- **级别：** P1
+- **类别：** 契约一致性 / 跨端口径
+- **状态：** 未修复
+- **文件与位置：** `app/src/domain/aggregator.ts:44-55`（`computeBalance` 在 income < expense 时返回 `Money.ZERO`，docstring 声称口径为 "balance = max(0, income - expense)" 并引用 data-model.md）；`app/src/domain/types.ts:86`（`balance: MoneyCents // max(0, income - expense)`）；对照 `docs/architecture/data-model.md:8`（已修订：允许负值，"客户端统计、服务端统计与导出必须使用同一口径"）
+- **问题与触发条件：** R-M4-08 修复采用方案 (b)，修订权威文档并统一服务端，但客户端未同步。客户端 `computeBalance` 与 types 注释现在**引用同一份文档却描述相反口径**。赤字月：客户端统计 balance=0，`/stats/monthly` 与 `/ai/report` balance=负值 → APP-CONTEXT §5.2 对账不变量（客户端明细合计 = 客户端统计 = 服务端统计 = 导出）跨端破坏；T-M4-03c 实现后洞察卡与本地统计同屏时用户直接可见矛盾。
+- **证据或复现命令：** 代码对照即可确认（上行文件:行号）；或在客户端测试中构造赤字月，对比 `computeBalance` 结果与服务端 `/stats/monthly` 响应（-400000 vs 0）。
+- **影响：** R-M4-08 的口径统一目前只覆盖服务端一半；客户端离线统计与服务端在赤字月数字不一致，且客户端注释引用的权威文档已与其实现相反——后续维护者会被误导。
+- **修复建议：** 客户端 `computeBalance` 移除 clamp；类型层 `MoneyCents`（非负存储类型）不宜继续承载 balance，需为 balance 引入有符号 cents 表达（如 `SignedCents` 品牌类型或普通整数+注释），UI 同步适配赤字展示（负号/超支措辞）；更新客户端统计测试并增加跨端口径用例（客户端聚合 == 服务端响应 fixture）。归属客户端任务线（T-M2-05 客户端统计/T-M4-00 前端），可独立立单，但应在 T-M4-03c 实现前完成。
+- **复验方法：** 赤字月（expense>income）下客户端聚合 balance == 服务端 `/stats/monthly.balance`（同一负值）；客户端 vitest 通过。
+
+### 关联既有问题（不重复建项）
+
+- **R-M4-01（P1 · 流程）：** 持续——本轮修复（R-M4-11/12/14/15 的代码、测试、契约文档与 R-M4-13 文档更正）**全部未提交**；R-M4-17 残留（HEAD 1 failed + 2 errors）与 `435342b` docs 提交夹带代码且信息失实，均为同源后果。
+- **R-M4-04（P2 · CI）：** 工具缺口已消除（ruff 本机可用、pyproject 已声明、CI server job 已提交且远端实际运行）；剩余动作：工作树 I001 需在提交前修复，否则 lint 门禁红。
+- **R-M4-06（P3 · 审计）：** 与 R-M4-10 残留同族。审查期间工作树出现在途修复（interpret 路径重试 tokens 累计入 `_record_usage`，未提交、不属本轮核验范围）；`_generate_narrative` 的同族残留（重试首次 attempt tokens、invalid_json 耗尽路径漏记）仍未覆盖。
+
+## 四、门禁结论（第 4 轮）
+
+**实现层（服务端 T-M4-03a/03b）：通过（首次）。** 第 3 轮 8 项问题修复全部属实落地（R-M4-10/13/17 部分修复，残留均为 P3 级小项）：口径统一且文档先行、对账不变量有 HTTP 级自动守卫、校验失败计费漏洞已堵、限流降级契约文档化并有测试、哈希覆盖非数值字段。任务级 36 passed、工作树全量 403 passed 全绿（1 个已知 Windows 环境 error）。
+
+**跨端契约：不通过。** 新登记 R-M4-38（P1）：客户端 balance 口径与已修订的权威文档分叉，对账不变量跨端破坏，R-M4-08 的最终关闭受阻。
+
+**交付层：不通过。** HEAD 测试不绿（R-M4-17 残留：纯净 HEAD 1 failed + 2 errors，远端 CI Server job 连续 failure 实证）；本轮修复全部未提交（R-M4-01 持续）；`435342b` docs 提交夹带代码且信息失实；工作树 ruff I001 待修。
+
+**状态处置：** `production-execution-plan.md` 中 T-M4-03 及 03a/03b 状态行已按本轮证据更新（工作区内更新，不随本审查文档提交，避免夹带实现方未提交改动）。
+
+**建议承接顺序：** ① 修 I001 → 单次原子提交全部工作树修复（含 `test_stats_exports.py`、`test_narrative_report.py` fixture import、fact_pack/prompts/测试/契约文档/交付文档）→ 纯净 worktree 全绿 + 远端 CI Server job 转绿（同时关闭 R-M4-17 与 R-M4-01 在本任务范围的形态）→ ② R-M4-38 客户端口径修复（独立客户端任务，T-M4-03c 之前完成）→ ③ P3 残留（invalid_json 漏记、prompts 四处"本月"、trend tx_count 入 hash、交付文档数字刷新）随 T-M4-03c 一并处理，R-M4-06 同族审计问题可随 ③ 统一清理。
+
+---
+
+## 五、第 3 轮审查（历史保留，2026-09-06）
+
+> 以下为第 3 轮审查原文。其核验的问题（R-M4-08 ~ R-M4-17）最新状态以本文件第二节（第 4 轮核验）为准；文中"本轮"均指第 3 轮，"上一轮/第 2 轮"指本文件第六节。
+
+### 5.1 实测结果（第 3 轮实际运行）
 
 | 检查项 | 命令 | 结果 |
 |---|---|---|
@@ -17,7 +81,7 @@
 | Lint（CI 门禁） | `ruff check src/ tests/` | 仍无法执行——本机无 ruff 且 `pyproject.toml` 未声明（R-M4-04 持续） |
 | HEAD 自洽性 | `git worktree add` 纯净 HEAD + `pytest tests/test_narrative_report.py -q` | **collection error**——HEAD 上已提交的测试 import 不到未提交的 `src.modules.ai.fact_pack`；且 HEAD `main.py:27,54` import 的 `ai.routes`/`ai.provider` 也不在 HEAD（`conftest.py:40` import `src.main` → 全套件连带失败）。详见 **R-M4-17** |
 
-## 二、上一轮（第 2 轮 R-M4-08 ~ R-M4-15）问题修复核验
+### 5.2 第 2 轮问题修复核验（第 3 轮核验）
 
 | 原问题 | 第 3 轮核验结果 |
 |---|---|
@@ -30,9 +94,9 @@
 | **R-M4-14**（P3）prompt 输出 highlights 被丢弃；"本月"措辞 | ❌ **未修复**——`prompts.py:58,64` 仍要求 highlights 且系统提示称"本月"；`service.py:809` 用户输入仍为"我本月（{period}）"，历史期间叙述时间指代错位依旧 |
 | **R-M4-15**（P3）限流命中整个 /ai/report 返回 429 | ⚠️ **代码已修复，契约与测试缺失**——`service.py:788-802`：限流/配额命中改为记 INFO 日志并 return，响应 200 纯事实包（narrative=null）；interpret 保留 429（`service.py:151-152`），与上轮建议方向一致。但修复建议中"写入 APP-CONTEXT/ai-architecture 后再实现 03c"未做——两文档均无该降级行为描述（grep 无命中）；`test_narrative_report.py` 亦无 rate limit/quota 降级分支的任何用例 |
 
-## 三、本轮新登记问题
+### 5.3 第 3 轮新登记问题（R-M4-17）
 
-### 🔴 R-M4-17（P1 · 交付）— HEAD 不自洽：纯净克隆下服务端整套测试收集失败、应用无法启动
+#### 🔴 R-M4-17（P1 · 交付）— HEAD 不自洽：纯净克隆下服务端整套测试收集失败、应用无法启动
 
 - **ID：** R-M4-17
 - **级别：** P1
@@ -45,13 +109,13 @@
 - **修复建议：** 单次原子提交补齐：`server/src/modules/ai/` 全目录、`test_fact_pack.py`、`statistics` 的 `YearMonth` 更名、`models/`/`migrations/`/`config`/`main.py` 相关改动；提交前在纯净 worktree（或 clone）中跑通 `pytest tests/` 全量收集。若短期内无法整树入库，应先 revert `main.py` 的 ai import 恢复 HEAD 自洽。
 - **复验方法：** 全新 clone HEAD → `pytest tests/` 收集零 error；`uvicorn src.main:app` 可启动。
 
-### 关联既有问题（不重复建项）
+#### 关联既有问题（不重复建项）
 
 - **R-M4-01（P1 · 流程）：** 未提交问题持续且已具体恶化为 R-M4-17；本轮 `test_attachments` 4 个失败同样源于工作树内未提交的其他任务改动，佐证"未原子提交"对全量门禁的系统性干扰。
 - **R-M4-04（P2 · CI）：** ruff 依赖缺口持续，lint 门禁仍无法本地执行；远端 CI 的 server job 仍只存在于未提交的 `ci.yml` 工作树改动中。
 - **R-M4-06（P3 · 审计）：** 与 R-M4-10 同族，均未修复。
 
-## 四、门禁结论（第 3 轮）
+### 5.4 门禁结论（第 3 轮）
 
 **实现层：不通过（较第 2 轮有实质进展）。** R-M4-09（P1）已真实关闭并有测试；R-M4-15 代码行为已按建议修正。但 R-M4-08（P1）只修了半程——响应内部口径统一了，与 `data-model.md`/statistics 的权威冲突和对账不变量破坏原样存在，且修复决策（允许负余额 vs 回滚 clamp）仍未按"文档前置"落定；R-M4-10/11（P2）无任何动作。
 
@@ -63,11 +127,11 @@
 
 ---
 
-## 五、第 2 轮审查（历史保留，2026-09-06）
+## 六、第 2 轮审查（历史保留，2026-09-06）
 
-> 以下为第 2 轮审查原文。其登记问题（R-M4-08 ~ R-M4-15）的最新状态以本文件第二节为准；文中"本轮"均指第 2 轮。
+> 以下为第 2 轮审查原文。其登记问题（R-M4-08 ~ R-M4-15）的最新状态以本文件第二节（第 4 轮核验）为准；文中"本轮"均指第 2 轮。
 
-### 5.1 实测结果（第 2 轮）
+### 6.1 实测结果（第 2 轮）
 
 | 检查项 | 命令 | 结果 |
 |---|---|---|
@@ -78,9 +142,9 @@
 
 > 注：`T-M4-03-final-summary.md` 写"297 个集成测试全部通过"，实测当前为 366 passed（数字过期，见 R-M4-13）。
 
-### 5.2 第一轮审查问题的修复核验（第 2 轮核验）
+### 6.2 第一轮审查问题的修复核验（第 2 轮核验）
 
-第一轮审查（本文档第六节，历史保留）提出 5 项问题；实现方在 `T-M4-03b-code-review-improvements.md` 中声称处置如下。第 2 轮逐项对照代码核验：
+第一轮审查（本文档第七节，历史保留）提出 5 项问题；实现方在 `T-M4-03b-code-review-improvements.md` 中声称处置如下。第 2 轮逐项对照代码核验：
 
 | 原问题 | 声称处置 | 核验结果 |
 |---|---|---|
@@ -90,7 +154,7 @@
 | P3 缺 mock provider 端到端叙述测试 | 🚫 取消（复杂度高） | ❌ **风险已兑现**——正因没有 mock provider 测试，"同数据不重复调 LLM"的验收缺口（R-M4-09）与降级路径漏计费用（R-M4-10）未被任何测试暴露；现有"缓存行为"测试在无 provider 下恒过（第 3 轮：R-M4-09 修复时已补 2 个 mock provider 缓存测试） |
 | P3 年份误报 | 已文档化 | ✅ **属实**——同第 2 项 docstring |
 
-### 5.3 第 2 轮登记问题原文（R-M4-08 ~ R-M4-15）
+### 6.3 第 2 轮登记问题原文（R-M4-08 ~ R-M4-15）
 
 > 各项最新状态见本文件第二节核验表。以下为第 2 轮登记原文（其中 R-M4-09 状态字段为第 2 轮文档提交后补记的"已修复"）。
 
@@ -183,7 +247,7 @@
   1. `T-M4-03-final-summary.md`"性能优化"节：缓存"最大缓存条目：1000"——代码为 `_MAX_CACHE_ENTRIES = 500`（`fact_pack.py:98`）；
   2. `T-M4-03-final-summary.md`：297 个集成测试——实测 366 passed（第 2 轮第一节）；
   3. `T-M4-03b-code-review-improvements.md` 第 3 节："与 StatisticsService 的设计保持一致（该服务也使用相同口径）"——不实（statistics 仍 clamp，见 R-M4-08）；
-  4. 第一轮审查文档（本文件第六节）"缓存策略 … LRU 淘汰"——实际按插入时间 FIFO 淘汰，读取不刷新时间戳（`fact_pack.py:116-121`）；
+  4. 第一轮审查文档（本文件第七节）"缓存策略 … LRU 淘汰"——实际按插入时间 FIFO 淘汰，读取不刷新时间戳（`fact_pack.py:116-121`）；
   5. `test_narrative_report.py` 文件头声称含"POST /ai/report — 端到端测试"——该文件中不存在任何 HTTP 测试；
   6. `T-M4-03-final-summary.md` 验证清单将"同数据不重复计费"相关的缓存机制勾选为通过——与 R-M4-09 冲突。
 - **影响：** 与 R-M4-02（closure 报告失真）同类：交付文档可信度受损，后续任务依据失真状态决策。
@@ -214,7 +278,7 @@
 - **修复建议：** 倾向：限流命中时仍返回 200 纯事实包（narrative=null），把 429 保留给 interpret 这类纯 LLM 端点；无论采用哪种，写入 APP-CONTEXT/ai-architecture 后再实现 03c。
 - **复验方法：** 打满限流后请求 /ai/report，断言行为与最终契约一致。
 
-### 5.4 门禁结论（第 2 轮）
+### 6.4 门禁结论（第 2 轮）
 
 **实现层：不通过。** T-M4-03a/03b 的核心安全链路（事实包隔离、data_references 校验、未声明数字检测、失败降级、所有权校验）代码与测试属实且 28 用例全绿；但存在 2 项 P1：R-M4-08 破坏权威口径与对账不变量（且修复声明不实）、R-M4-09 使"数据未变不重复计费"验收落空（docstring 声称了不存在的行为）。另有 P2 两项（R-M4-10/11）。
 
@@ -226,9 +290,9 @@
 
 ---
 
-## 六、第一轮审查（历史保留，2026-09-06 早于第 2 轮）
+## 七、第一轮审查（历史保留，2026-09-06 早于第 2 轮）
 
-> 以下为第一轮审查原文。其 5 项问题的处置核验见本文件第 5.2 节；其中"缓存策略 LRU"表述有误（实为 FIFO，见 R-M4-13）。
+> 以下为第一轮审查原文。其 5 项问题的处置核验见本文件第 6.2 节；其中"缓存策略 LRU"表述有误（实为 FIFO，见 R-M4-13）。
 
 ### 总体评价
 

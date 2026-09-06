@@ -34,6 +34,8 @@ import {
   type PermissionStatusData,
   type PermissionType,
   type PermissionResultEvent,
+  type ImagePickResult,
+  type ImageProgressEvent,
 } from './bridge-types'
 
 declare global {
@@ -370,6 +372,147 @@ export class NativeBridge {
       if ((window as any).__aozoraPermissionResult__ === wrapped) {
         // eslint-disable-next-line @typescript-eslint/no-explicit-any
         ;(window as any).__aozoraPermissionResult__ = prev
+      }
+    }
+  }
+
+  // ─── T-M4-04d: 图片链路 ───
+
+  /**
+   * 打开系统图片选择器（相机或相册），压缩并上传到服务端。
+   *
+   * 整个流程在 Android 侧完成：
+   * 1. 打开系统相机/相册 Activity（bridge 请求挂起等待用户返回）
+   * 2. 客户端压缩为 JPEG（质量由 quality 参数控制）
+   * 3. 上传到 POST /attachments/upload（Bearer token 由 Kotlin 注入）
+   * 4. 上传进度通过 onImageProgress 推送
+   * 5. 返回服务端生成的 attachmentId
+   *
+   * 超时：无固定超时（用户可能在相机中停留很久），前端自行管理 UI 超时。
+   */
+  async pickImage(source: 'camera' | 'gallery', quality = 80): Promise<ImagePickResult> {
+    return this.call<ImagePickResult>('image.pick', { source, quality })
+  }
+
+  /** 删除服务端附件（用于清理用户放弃的草稿）。 */
+  async deleteImage(attachmentId: string): Promise<{ success: boolean }> {
+    return this.call('image.delete', { attachmentId })
+  }
+
+  /**
+   * 注册上传进度监听（Android 压缩上传过程中通过 __aozoraImageProgress__ 推送）。
+   * 返回取消订阅函数。
+   */
+  onImageProgress(listener: (event: ImageProgressEvent) => void): () => void {
+    if (typeof window === 'undefined') return () => {}
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const prev = (window as any).__aozoraImageProgress__
+    const wrapped = (event: ImageProgressEvent) => {
+      listener(event)
+      if (typeof prev === 'function') prev(event)
+    }
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    ;(window as any).__aozoraImageProgress__ = wrapped
+    return () => {
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      if ((window as any).__aozoraImageProgress__ === wrapped) {
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        ;(window as any).__aozoraImageProgress__ = prev
+      }
+    }
+  }
+
+  // ─── T-M4-04b: 语音识别 ───
+
+  /**
+   * 开始语音录音和实时转写。
+   *
+   * 录音过程中通过 onVoicePartial 推送实时部分转写结果；
+   * 停止录音后通过 onVoiceFinal 推送最终转写文本。
+   *
+   * @returns { started: true } 表示录音已启动
+   */
+  async startVoiceRecording(): Promise<{ started: boolean }> {
+    return this.call('voice.startRecording')
+  }
+
+  /**
+   * 停止语音录音并返回最终转写结果。
+   *
+   * @returns { stopped: true, text: string } 最终转写文本
+   */
+  async stopVoiceRecording(): Promise<{ stopped: boolean; text: string }> {
+    return this.call('voice.stopRecording')
+  }
+
+  /**
+   * 注册部分转写结果监听（Android 录音过程中通过 __aozoraVoicePartial__ 推送）。
+   * 返回取消订阅函数。
+   */
+  onVoicePartial(listener: (text: string) => void): () => void {
+    if (typeof window === 'undefined') return () => {}
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const prev = (window as any).__aozoraVoicePartial__
+    const wrapped = (text: string) => {
+      listener(text)
+      if (typeof prev === 'function') prev(text)
+    }
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    ;(window as any).__aozoraVoicePartial__ = wrapped
+    return () => {
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      if ((window as any).__aozoraVoicePartial__ === wrapped) {
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        ;(window as any).__aozoraVoicePartial__ = prev
+      }
+    }
+  }
+
+  /**
+   * 注册最终转写结果监听（Android 停止录音后通过 __aozoraVoiceFinal__ 推送）。
+   * 返回取消订阅函数。
+   */
+  onVoiceFinal(listener: (text: string) => void): () => void {
+    if (typeof window === 'undefined') return () => {}
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const prev = (window as any).__aozoraVoiceFinal__
+    const wrapped = (text: string) => {
+      listener(text)
+      if (typeof prev === 'function') prev(text)
+    }
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    ;(window as any).__aozoraVoiceFinal__ = wrapped
+    return () => {
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      if ((window as any).__aozoraVoiceFinal__ === wrapped) {
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        ;(window as any).__aozoraVoiceFinal__ = prev
+      }
+    }
+  }
+
+  /**
+   * 注册语音识别错误监听（Android 通过 __aozoraVoiceError__ 推送）。
+   * 返回取消订阅函数。
+   */
+  onVoiceError(listener: (error: { code: string; message: string }) => void): () => void {
+    if (typeof window === 'undefined') return () => {}
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const prev = (window as any).__aozoraVoiceError__
+    const wrapped = (errorJson: string) => {
+      try {
+        const error = typeof errorJson === 'string' ? JSON.parse(errorJson) : errorJson
+        listener(error as { code: string; message: string })
+      } catch { /* ignore parse errors */ }
+      if (typeof prev === 'function') prev(errorJson)
+    }
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    ;(window as any).__aozoraVoiceError__ = wrapped
+    return () => {
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      if ((window as any).__aozoraVoiceError__ === wrapped) {
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        ;(window as any).__aozoraVoiceError__ = prev
       }
     }
   }

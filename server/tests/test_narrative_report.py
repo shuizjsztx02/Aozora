@@ -4,7 +4,7 @@
 1. verify_narrative() — 校验 LLM 输出的 data_references 是否与 FactPack 一致
 2. build_context_dict() — 从 FactPack 构建 LLM 上下文
 3. _find_undeclared_numbers() — 检测叙述中未声明的数字
-4. POST /ai/report — 端到端测试（复用 test_fact_pack.py 的 fixture）
+4. 叙述缓存行为 — 同数据不重复调 LLM、不重复计费（R-M4-09）
 """
 
 from __future__ import annotations
@@ -26,6 +26,9 @@ from src.modules.ai.narrative import (
     build_context_dict,
     verify_narrative,
 )
+# TestNarrativeCache (R-M4-09) uses the shared async ``db_session`` fixture;
+# it must be imported to be in scope (mirrors tests/test_models.py).
+from tests.fixtures_db import db_session  # noqa: F401 — re-exported as a fixture
 
 # ── Fixtures ─────────────────────────────────────────────────────────────────
 
@@ -465,5 +468,152 @@ class TestNarrativeCache:
             _narrative_cache_clear()
 
 
-if __name__ == "__main__":
-    pytest.main([__file__, "-v"])
+# ── Test R-M4-10: usage recorded on verification failure ───────────────────
+
+
+class TestUsageOnVerificationFailure:
+    """R-M4-10: tokens consumed must be recorded even when narrative fails verification."""
+
+    @pytest.mark.asyncio
+    async def test_usage_recorded_when_verification_fails(
+        self, sample_fact_pack, db_session,
+    ):
+        """Provider returns bad numbers → narrative discarded but AIUsage still recorded."""
+        from src.models.ai import AIUsage
+        from src.models.user import User, UserStatus
+        from src.modules.ai.fact_pack import FactPackService
+        from src.modules.ai.schemas import AIReportRequest
+        from src.modules.ai.service import AIService, _narrative_cache_clear
+
+        _narrative_cache_clear()
+
+        # Provider returns wrong numbers → verification will fail
+        bad_response = {
+            "narrative": "本月收入高达9999元",
+            "data_references": [
+                {"fact": "total_income", "value": 9999},  # Wrong!
+            ],
+        }
+        import json
+        bad_provider = MockProvider(json.dumps(bad_response, ensure_ascii=False))
+
+        user = User(
+            id=uuid.uuid4(),
+            phone="13800138010",
+            nickname="rm410-user",
+            status=UserStatus.ACTIVE,
+            timezone="UTC",
+        )
+        db_session.add(user)
+        await db_session.flush()
+
+        original_build = FactPackService.build
+
+        async def mock_build(self_service, book_id, user_id, period):
+            return sample_fact_pack
+
+        FactPackService.build = mock_build
+
+        try:
+            service = AIService(db_session, bad_provider)
+            request = AIReportRequest(
+                book_id=sample_fact_pack.book_id,
+                period=sample_fact_pack.period,
+            )
+
+            response = await service.generate_report(user, "req-rm410", request)
+
+            # Narrative should be discarded (verification failed)
+            assert response.narrative is None
+            # But provider WAS called
+            assert bad_provider.call_count == 1
+            # And usage WAS recorded (R-M4-10 fix)
+            usage_rows = await db_session.execute(
+                __import__("sqlalchemy").select(AIUsage).where(
+                    AIUsage.user_id == user.id,
+                    AIUsage.request_id == "req-rm410",
+                )
+            )
+            assert usage_rows.scalars().first() is not None, \
+                "AIUsage must be recorded even when verification fails"
+
+        finally:
+            FactPackService.build = original_build
+            _narrative_cache_clear()
+
+
+# ── Test R-M4-15: rate limit → 200 with null narrative ────────────────────
+
+
+class TestRateLimitDegradation:
+    """R-M4-15: rate limit hit returns 200 with null narrative, not 429."""
+
+    @pytest.mark.asyncio
+    async def test_rate_limit_returns_200_with_null_narrative(
+        self, sample_fact_pack, db_session,
+    ):
+        """When rate limit triggers, response is 200 fact-pack-only (narrative=null)."""
+        from src.models.user import User, UserStatus
+        from src.modules.ai.fact_pack import FactPackService
+        from src.modules.ai.schemas import AIReportRequest
+        from src.modules.ai.service import (
+            AIService,
+            _ai_rate_limits,
+            _narrative_cache_clear,
+        )
+
+        _narrative_cache_clear()
+        _ai_rate_limits.clear()
+
+        user = User(
+            id=uuid.uuid4(),
+            phone="13800138015",
+            nickname="rm415-user",
+            status=UserStatus.ACTIVE,
+            timezone="UTC",
+        )
+        db_session.add(user)
+        await db_session.flush()
+
+        original_build = FactPackService.build
+
+        async def mock_build(self_service, book_id, user_id, period):
+            return sample_fact_pack
+
+        FactPackService.build = mock_build
+
+        # Use a provider that should NOT be called (rate limit blocks it)
+        should_not_call_provider = MockProvider("{}")
+
+        try:
+            from src.common.config import get_config
+            cfg = get_config()
+
+            service = AIService(db_session, should_not_call_provider, cfg)
+            request = AIReportRequest(
+                book_id=sample_fact_pack.book_id,
+                period=sample_fact_pack.period,
+            )
+
+            # Pre-fill the rate limit bucket to trigger limit
+            import time as _time
+            _ai_rate_limits[user.id] = [
+                _time.time() for _ in range(cfg.ai_rate_limit_per_minute + 1)
+            ]
+
+            response = await service.generate_report(user, "req-rm415", request)
+
+            # Must return fact pack data (not 429)
+            assert response.total_income == sample_fact_pack.total_income
+            assert response.total_expense == sample_fact_pack.total_expense
+            # Narrative must be null (rate limit skipped LLM call)
+            assert response.narrative is None
+            assert response.narrative_cached is False
+            assert response.usage is None
+            # Provider was NOT called
+            assert should_not_call_provider.call_count == 0
+
+        finally:
+            FactPackService.build = original_build
+            _ai_rate_limits.clear()
+            _narrative_cache_clear()

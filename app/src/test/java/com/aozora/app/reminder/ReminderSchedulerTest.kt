@@ -106,7 +106,6 @@ class ReminderSchedulerTest {
     fun hasNotificationPermission_api33_returnsBoolean() {
         // Robolectric API 33 默认未授予 POST_NOTIFICATIONS
         val result = ReminderReceiver.hasNotificationPermission(context)
-        // 结果取决于 Robolectric 模拟的权限状态，只验证不崩溃
-        assertTrue(result || !result)
+        assertFalse(result)
     }
 }

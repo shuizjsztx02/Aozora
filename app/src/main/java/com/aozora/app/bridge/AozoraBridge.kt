@@ -5,12 +5,15 @@ import android.webkit.WebView
 import com.aozora.app.ai.AiGatewayClient
 import com.aozora.app.db.Repository
 import com.aozora.app.db.entity.*
+import com.aozora.app.image.ImageClient
+import com.aozora.app.image.ImagePicker
 import com.aozora.app.permission.PermissionManager
 import com.aozora.app.permission.PermissionStatus
 import com.aozora.app.reminder.ReminderScheduler
 import com.aozora.app.sync.SyncEngine
 import com.aozora.app.sync.SyncScheduler
 import com.aozora.app.sync.SyncState
+import com.aozora.app.voice.VoiceRecognitionService
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
@@ -40,7 +43,10 @@ class AozoraBridge(
     private val syncContext: android.content.Context? = null,
     private val reminderScheduler: ReminderScheduler? = null,
     private val aiGatewayClient: AiGatewayClient? = null,
-    private val permissionManager: PermissionManager? = null
+    private val permissionManager: PermissionManager? = null,
+    private val imagePicker: ImagePicker? = null,
+    private val imageClient: ImageClient? = null,
+    private val voiceRecognitionService: VoiceRecognitionService? = null
 ) {
     @JavascriptInterface
     fun call(version: Int, requestId: String, command: String, payloadJson: String) {
@@ -139,10 +145,13 @@ class AozoraBridge(
             BridgeCommands.PERMISSIONS_REQUEST -> handlePermissionsRequest(requestId, payload)
             BridgeCommands.PERMISSIONS_OPEN_SETTINGS -> handlePermissionsOpenSettings(requestId)
 
-            // T-M4-04b/d 占位：语音和图片（未实现，返回 unavailable）
-            BridgeCommands.VOICE_START_RECORDING -> BridgeResponse.error(requestId, "unavailable", "Voice recording not implemented (T-M4-04b)")
-            BridgeCommands.VOICE_STOP_RECORDING -> BridgeResponse.error(requestId, "unavailable", "Voice recording not implemented (T-M4-04b)")
-            BridgeCommands.IMAGE_PICK -> BridgeResponse.error(requestId, "unavailable", "Image picking not implemented (T-M4-04d)")
+            // T-M4-04b: 语音识别
+            BridgeCommands.VOICE_START_RECORDING -> handleVoiceStartRecording(requestId)
+            BridgeCommands.VOICE_STOP_RECORDING -> handleVoiceStopRecording(requestId)
+
+            // T-M4-04d: 图片链路
+            BridgeCommands.IMAGE_PICK -> handleImagePick(requestId, payload)
+            BridgeCommands.IMAGE_DELETE -> handleImageDelete(requestId, payload)
 
             else -> BridgeResponse.error(requestId, "unknown_command", "Unknown command: $command")
         }
@@ -614,6 +623,7 @@ class AozoraBridge(
         android.Manifest.permission.CAMERA -> "CAMERA"
         android.Manifest.permission.READ_MEDIA_IMAGES -> "READ_MEDIA_IMAGES"
         android.Manifest.permission.READ_EXTERNAL_STORAGE -> "READ_MEDIA_IMAGES" // 低版本映射到同一 key
+        android.Manifest.permission.POST_NOTIFICATIONS -> "POST_NOTIFICATIONS"
         else -> null
     }
 
@@ -625,6 +635,11 @@ class AozoraBridge(
         } else {
             android.Manifest.permission.READ_EXTERNAL_STORAGE
         }
+        "POST_NOTIFICATIONS" -> if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.TIRAMISU) {
+            android.Manifest.permission.POST_NOTIFICATIONS
+        } else {
+            null // Android 12 及以下不需要运行时通知权限
+        }
         else -> null
     }
 
@@ -633,6 +648,192 @@ class AozoraBridge(
         PermissionStatus.GRANTED -> "granted"
         PermissionStatus.DENIED -> "denied"
         PermissionStatus.PERMANENTLY_DENIED -> "permanently_denied"
+    }
+
+    // ─── T-M4-04d: 图片链路 handlers ───
+
+    // ─── T-M4-04b: 语音识别 handlers ───
+
+    private fun handleVoiceStartRecording(requestId: String): BridgeResponse {
+        val service = voiceRecognitionService
+            ?: return BridgeResponse.error(requestId, "unavailable", "Voice recognition service not injected")
+
+        if (!service.isModelLoaded()) {
+            return BridgeResponse.error(requestId, "model_not_loaded", "Vosk model not loaded")
+        }
+
+        if (service.isRecording()) {
+            return BridgeResponse.error(requestId, "already_recording", "Already recording")
+        }
+
+        val started = service.startRecording(object : VoiceRecognitionService.VoiceRecognitionListener {
+            override fun onPartialResult(text: String) {
+                dispatchVoicePartial(text)
+            }
+
+            override fun onFinalResult(text: String) {
+                // Final result is returned via the stopRecording response
+            }
+
+            override fun onError(code: String, message: String) {
+                dispatchVoiceError(code, message)
+            }
+        })
+
+        return if (started) {
+            BridgeResponse.success(requestId, JSONObject().put("started", true).toString())
+        } else {
+            BridgeResponse.error(requestId, "start_failed", "Failed to start recording")
+        }
+    }
+
+    private fun handleVoiceStopRecording(requestId: String): BridgeResponse {
+        val service = voiceRecognitionService
+            ?: return BridgeResponse.error(requestId, "unavailable", "Voice recognition service not injected")
+
+        if (!service.isRecording()) {
+            return BridgeResponse.error(requestId, "not_recording", "Not recording")
+        }
+
+        // Stop recording and get final text
+        val finalText = service.stopRecording()
+
+        // Dispatch final result to frontend
+        dispatchVoiceFinal(finalText)
+
+        return BridgeResponse.success(requestId, JSONObject().apply {
+            put("stopped", true)
+            put("text", finalText)
+        }.toString())
+    }
+
+    /** Push partial transcription to frontend via `window.__aozoraVoicePartial__`. */
+    private fun dispatchVoicePartial(text: String) {
+        val js = """
+            (function(){
+              try {
+                if (typeof window.__aozoraVoicePartial__ === 'function') {
+                  window.__aozoraVoicePartial__(${JSONObject.quote(text)});
+                }
+              } catch (e) {}
+            })();
+        """.trimIndent()
+        webView.post { webView.evaluateJavascript(js, null) }
+    }
+
+    /** Push final transcription to frontend via `window.__aozoraVoiceFinal__`. */
+    private fun dispatchVoiceFinal(text: String) {
+        val js = """
+            (function(){
+              try {
+                if (typeof window.__aozoraVoiceFinal__ === 'function') {
+                  window.__aozoraVoiceFinal__(${JSONObject.quote(text)});
+                }
+              } catch (e) {}
+            })();
+        """.trimIndent()
+        webView.post { webView.evaluateJavascript(js, null) }
+    }
+
+    /** Push voice error to frontend via `window.__aozoraVoiceError__`. */
+    private fun dispatchVoiceError(code: String, message: String) {
+        val data = JSONObject().apply {
+            put("code", code)
+            put("message", message)
+        }
+        val js = """
+            (function(){
+              try {
+                if (typeof window.__aozoraVoiceError__ === 'function') {
+                  window.__aozoraVoiceError__(${JSONObject.quote(data.toString())});
+                }
+              } catch (e) {}
+            })();
+        """.trimIndent()
+        webView.post { webView.evaluateJavascript(js, null) }
+    }
+
+    private suspend fun handleImagePick(requestId: String, p: JSONObject): BridgeResponse {
+        val picker = imagePicker
+            ?: return BridgeResponse.error(requestId, "unavailable", "image picker not injected")
+        val client = imageClient
+            ?: return BridgeResponse.error(requestId, "unavailable", "image client not injected")
+        val ctx = syncContext
+            ?: return BridgeResponse.error(requestId, "unavailable", "context not injected")
+
+        val sourceStr = p.optString("source", "gallery")
+        val quality = p.optInt("quality", 80)
+        val source = when (sourceStr) {
+            "camera" -> ImagePicker.Source.CAMERA
+            "gallery" -> ImagePicker.Source.GALLERY
+            else -> return BridgeResponse.error(requestId, "invalid_input", "Unknown source: $sourceStr")
+        }
+
+        // Launch picker (suspends until user returns from camera/gallery Activity)
+        val uri = try {
+            picker.pickImage(source)
+        } catch (e: ImagePicker.PickerCancelled) {
+            return BridgeResponse.error(requestId, "cancelled", "Image picker cancelled")
+        }
+
+        // Compress + upload; progress events are pushed via dispatchImageProgress.
+        return try {
+            val result = client.uploadImage(
+                imageUri = uri.toString(),
+                context = ctx,
+                quality = quality,
+                onProgress = { sent, total -> dispatchImageProgress(sent, total) }
+            )
+            // Send final 100% progress
+            dispatchImageProgress(result.fileSize, result.fileSize)
+
+            val data = JSONObject().apply {
+                put("attachmentId", result.attachmentId)
+                put("mimeType", result.mimeType)
+                put("fileSize", result.fileSize)
+            }
+            BridgeResponse.success(requestId, data.toString())
+        } catch (e: ImageClient.ImageError.CompressFailed) {
+            BridgeResponse.error(requestId, "compress_failed", "Image compression failed")
+        } catch (e: ImageClient.ImageError.Timeout) {
+            BridgeResponse.error(requestId, "timeout", "Upload timed out")
+        } catch (e: ImageClient.ImageError.AuthLost) {
+            BridgeResponse.error(requestId, "auth_lost", "Authentication required")
+        } catch (e: ImageClient.ImageError.FileTooLarge) {
+            BridgeResponse.error(requestId, "file_too_large", e.message ?: "File too large")
+        } catch (e: ImageClient.ImageError.ServerError) {
+            BridgeResponse.error(requestId, "server_error", "Server error: HTTP ${e.httpCode}")
+        } catch (e: ImageClient.ImageError.Network) {
+            BridgeResponse.error(requestId, "network", e.message ?: "Network error")
+        }
+    }
+
+    private suspend fun handleImageDelete(requestId: String, p: JSONObject): BridgeResponse {
+        val client = imageClient
+            ?: return BridgeResponse.error(requestId, "unavailable", "image client not injected")
+        val attachmentId = p.optString("attachmentId", "")
+        if (attachmentId.isBlank()) {
+            return BridgeResponse.error(requestId, "invalid_input", "Missing attachmentId")
+        }
+        client.deleteAttachment(attachmentId)
+        return BridgeResponse.success(requestId, JSONObject().put("success", true).toString())
+    }
+
+    /** Push upload progress to frontend via `window.__aozoraImageProgress__`. */
+    private fun dispatchImageProgress(sent: Long, total: Long) {
+        val js = """
+            (function(){
+              try {
+                if (typeof window.__aozoraImageProgress__ === 'function') {
+                  window.__aozoraImageProgress__({
+                    sent: $sent,
+                    total: $total
+                  });
+                }
+              } catch (e) {}
+            })();
+        """.trimIndent()
+        webView.post { webView.evaluateJavascript(js, null) }
     }
 
     private fun respond(response: BridgeResponse) {

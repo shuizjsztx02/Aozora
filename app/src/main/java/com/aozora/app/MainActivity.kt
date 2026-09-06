@@ -16,6 +16,7 @@ import androidx.webkit.WebViewAssetLoader
 import com.aozora.app.bridge.AozoraBridge
 import com.aozora.app.db.AozoraDatabase
 import com.aozora.app.db.Repository
+import com.aozora.app.image.ImagePicker
 import com.aozora.app.permission.PermissionManager
 import com.aozora.app.sync.SyncScheduler
 import com.aozora.app.sync.SyncState
@@ -37,6 +38,7 @@ class MainActivity : AppCompatActivity() {
     private lateinit var repository: Repository
     private lateinit var bridge: AozoraBridge
     private lateinit var permissionManager: PermissionManager
+    private lateinit var imagePicker: ImagePicker
     private val scope = MainScope()
     private var webViewReady = false
 
@@ -51,6 +53,10 @@ class MainActivity : AppCompatActivity() {
         // T-M4-04a: 权限状态机（必须在 setContentView 前注册 launcher）
         permissionManager = PermissionManager(this)
         permissionManager.registerLaunchers()
+
+        // T-M4-04d: 图片选择器（必须在 setContentView 前注册 launcher）
+        imagePicker = ImagePicker(this)
+        imagePicker.registerLaunchers()
 
         webView = WebView(this).apply {
             settings.javaScriptEnabled = true
@@ -85,12 +91,24 @@ class MainActivity : AppCompatActivity() {
             syncContext = this,
             reminderScheduler = app.reminderScheduler,
             aiGatewayClient = app.aiGatewayClient,
-            permissionManager = permissionManager
+            permissionManager = permissionManager,
+            imagePicker = imagePicker,
+            imageClient = app.imageClient,
+            voiceRecognitionService = app.voiceRecognitionService
         )
         webView.addJavascriptInterface(bridge, "AozoraBridge")
 
         setContentView(webView)
         webView.loadUrl("https://appassets.androidplatform.net/assets/index.html")
+
+        // T-M4-04b: 异步预加载 Vosk 语音识别模型（约 1-2 秒）
+        app.voiceRecognitionService.initialize { success, error ->
+            if (success) {
+                android.util.Log.i("MainActivity", "Vosk model loaded successfully")
+            } else {
+                android.util.Log.w("MainActivity", "Vosk model load failed: $error")
+            }
+        }
 
         // T-M3-02: 启动时收集同步状态事件 → 桥接到前端；同时触发一轮同步。
         observeSyncStatus()
@@ -120,6 +138,8 @@ class MainActivity : AppCompatActivity() {
         scope.cancel()
         webView.removeJavascriptInterface("AozoraBridge")
         webView.destroy()
+        // T-M4-04b: 释放语音识别资源
+        app.voiceRecognitionService.shutdown()
     }
 
     /**
@@ -156,7 +176,8 @@ class MainActivity : AppCompatActivity() {
         if (uri != null && uri.scheme == "aozora") {
             return when (uri.host) {
                 "home" -> "/home"
-                "entry" -> "/home"  // 前端收到后打开 QuickEntrySheet
+                // R-M4-28 修复：entry 通过 query 参数传递，前端据此打开 QuickEntrySheet
+                "entry" -> "/home?entry=1"
                 "detail" -> "/detail"
                 "reports" -> "/reports"
                 "me" -> "/me"

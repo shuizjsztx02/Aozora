@@ -6,7 +6,7 @@
  * - 禁用时隐藏时间选择器，启用时显示并保持当前值
  * - 开关切换调用 setReminder
  * - 时间滚轮（小时 wrap、分钟调整）
- * - 通知权限未开启时显示横幅 + 点击「去开启」调用 checkReminderPermission
+ * - 通知权限未开启时显示横幅 + 点击「去开启」调用 requestPermission（R-M4-27 修复）
  * - setReminder 失败时开关回滚
  */
 import { describe, it, expect, vi, beforeEach } from 'vitest'
@@ -19,6 +19,9 @@ const mockBridge = vi.hoisted(() => ({
   getReminderStatus: vi.fn(),
   setReminder: vi.fn(),
   checkReminderPermission: vi.fn(),
+  requestPermission: vi.fn(),
+  openPermissionSettings: vi.fn(),
+  onPermissionResult: vi.fn(),
 }))
 
 vi.mock('../../platform/hooks/use-bridge', () => ({
@@ -43,7 +46,9 @@ describe('ReminderSettingsPage', () => {
     })
     mockBridge.setReminder.mockResolvedValue({ success: true })
     mockBridge.checkReminderPermission.mockResolvedValue({ granted: true })
-    vi.spyOn(window, 'alert').mockImplementation(() => {})
+    mockBridge.requestPermission.mockResolvedValue({ pending: true })
+    mockBridge.openPermissionSettings.mockResolvedValue({ success: true })
+    mockBridge.onPermissionResult.mockReturnValue(() => {})
   })
 
   it('shows loading then status', async () => {
@@ -128,19 +133,63 @@ describe('ReminderSettingsPage', () => {
     )
   })
 
-  it('clicking 去开启 triggers permission check and alert when denied', async () => {
+  // R-M4-27 修复：点击「去开启」应调用 requestPermission 而非仅 checkReminderPermission
+  it('clicking 去开启 triggers requestPermission for POST_NOTIFICATIONS', async () => {
     mockBridge.getReminderStatus.mockResolvedValue({
       enabled: false,
       hour: 21,
       minute: 0,
       notificationPermission: false,
     })
-    mockBridge.checkReminderPermission.mockResolvedValue({ granted: false })
     renderPage()
     await waitFor(() => expect(screen.getByText('去开启')).toBeInTheDocument())
     await userEvent.setup().click(screen.getByText('去开启'))
-    expect(mockBridge.checkReminderPermission).toHaveBeenCalledTimes(1)
-    expect(window.alert).toHaveBeenCalledTimes(1)
+    expect(mockBridge.requestPermission).toHaveBeenCalledWith('POST_NOTIFICATIONS')
+  })
+
+  // R-M4-27: 权限结果回调处理 - granted 时更新状态
+  it('updates hasPermission when onPermissionResult callback fires with granted', async () => {
+    let permissionCallback: ((event: { permission: string; status: string }) => void) | null = null
+    mockBridge.onPermissionResult.mockImplementation((cb) => {
+      permissionCallback = cb
+      return () => {}
+    })
+    mockBridge.getReminderStatus.mockResolvedValue({
+      enabled: false,
+      hour: 21,
+      minute: 0,
+      notificationPermission: false,
+    })
+    renderPage()
+    await waitFor(() => expect(screen.getByText('去开启')).toBeInTheDocument())
+    // 模拟权限授予回调
+    expect(permissionCallback).not.toBeNull()
+    permissionCallback!({ permission: 'POST_NOTIFICATIONS', status: 'granted' })
+    await waitFor(() =>
+      expect(screen.queryByText('去开启')).not.toBeInTheDocument(),
+    )
+  })
+
+  // R-M4-27: 权限永久拒绝时引导到系统设置
+  it('opens app settings when permission is permanently denied', async () => {
+    let permissionCallback: ((event: { permission: string; status: string }) => void) | null = null
+    mockBridge.onPermissionResult.mockImplementation((cb) => {
+      permissionCallback = cb
+      return () => {}
+    })
+    mockBridge.getReminderStatus.mockResolvedValue({
+      enabled: false,
+      hour: 21,
+      minute: 0,
+      notificationPermission: false,
+    })
+    renderPage()
+    await waitFor(() => expect(screen.getByText('去开启')).toBeInTheDocument())
+    // 模拟永久拒绝回调
+    permissionCallback!({ permission: 'POST_NOTIFICATIONS', status: 'permanently_denied' })
+    await waitFor(() =>
+      expect(mockBridge.openPermissionSettings).toHaveBeenCalled(),
+    )
   })
 
   it('toggle reverts when setReminder fails', async () => {

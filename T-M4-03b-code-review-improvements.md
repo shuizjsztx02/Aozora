@@ -55,7 +55,7 @@
 **改进效果**：
 - 事实包现在能准确反映财务状况（包括赤字）
 - LLM 可以生成更有价值的财务建议（如"本月支出超过收入，建议控制开支"）
-- 与 StatisticsService 的设计保持一致（该服务也使用相同口径）
+- 与 StatisticsService 口径已统一（第 3 轮修复：statistics 同步放开负余额，data-model.md 已修订）
 
 ---
 

@@ -7,9 +7,11 @@ import com.aozora.app.auth.AuthClient
 import com.aozora.app.auth.TokenStore
 import com.aozora.app.db.AozoraDatabase
 import com.aozora.app.db.Repository
+import com.aozora.app.image.ImageClient
 import com.aozora.app.reminder.ReminderScheduler
 import com.aozora.app.sync.HttpSyncApi
 import com.aozora.app.sync.SyncEngine
+import com.aozora.app.voice.VoiceRecognitionService
 import okhttp3.OkHttpClient
 import java.util.concurrent.TimeUnit
 
@@ -92,6 +94,21 @@ class AozoraApp : Application(), Configuration.Provider {
             httpClient = aiHttpClient,
             authClient = authClient
         )
+    }
+
+    /** T-M4-04d: 图片上传客户端（与 sync 共用连接池，writeTimeout 30s）。 */
+    val imageClient: ImageClient by lazy {
+        ImageClient(
+            baseUrl = BuildConfig.SYNC_BASE_URL,
+            httpClient = httpClient,
+            authClient = authClient
+        )
+    }
+
+    /** T-M4-04b: Vosk 离线语音识别服务。
+     *  首次使用时需调用 initialize() 加载模型（约 1-2 秒）。 */
+    val voiceRecognitionService: VoiceRecognitionService by lazy {
+        VoiceRecognitionService(this)
     }
 
     override val workManagerConfiguration: Configuration

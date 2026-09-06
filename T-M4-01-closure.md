@@ -3,7 +3,7 @@
 **任务：** AI Gateway 基建收口（01a/01b/01c 全量验收 + 01d 全量收口）
 **状态：** ✅ 完成（01a/01b/01c/01d 全 ✅）
 **完成时间：** 2026-09-06
-**基线：** 依据 T-M4-01 评审报告（97 项测试基线）执行剩余缺口
+**基线：** 依据 T-M4-01 评审报告（97 项测试基线）执行剩余缺口（**R-M4-07 注：** 该轮评审报告未落盘 `docs/review/`，"97 项基线"无法回溯核对；已落盘的重新审查见 `docs/review/T-M4-01-review.md`）
 
 ## 前置背景（评审结论）
 
@@ -41,20 +41,22 @@
 
 ## 测试结果
 
-### 我修改/新增文件相关测试：139 项全绿
+> **⚠️ 2026-09-06 订正（R-M4-02，依据 docs/review/T-M4-01-review.md 实测）：** 本节原数字失真——原称完整套件 "352 passed, 1 skipped"、`test_ai_gateway.py` "66 passed"、`test_auth.py` "32"、`test_config.py` "12"，且明细自求和（149）与标题（139）矛盾；"未处理项"中 `test_migrations.py` "2 项失败需独立 PR" 在复核实测为 **12 passed**（已由 T-M4-02b 的提交解决：`test_14_tables_registered` 断言 14 表、迁移列表含 0004–0008）。以下按实测订正。
+
+### 我修改/新增文件相关测试：142 项全绿（第 2 轮修复后 2026-09-06 复测）
 
 ```
-tests/test_config.py                12 passed
-tests/test_auth.py                  32 passed（含新增 test_ai_key_missing_rejected_in_production）
+tests/test_config.py                14 passed
+tests/test_auth.py                  40 passed（含新增 test_ai_key_missing_rejected_in_production）
 tests/test_main.py                   6 passed
-tests/test_ai_gateway.py            66 passed（含新增 TestSlowHint 2 项）
+tests/test_ai_gateway.py            49 passed（首轮回审基线 46；T-M4-02 提交 +2；R-M4-06 修复新增 test_retry_accumulates_tokens_from_invalid_json_attempt +1）
 tests/test_ai_proposal_parity.py    17 passed（新增）
 tests/test_ai_proposal_validation.py 16 passed
 ```
 
-### 完整测试套件：352 passed，1 skipped
+### 完整测试套件：364 passed，1 skipped，1 error（首轮回审基线 HEAD f71e771 + M4 工作树实测）
 
-排除 2 项预存失败（详见下方"未处理项"）。
+error 为 `test_stats_exports.py::test_startup_cleanup_removes_stale_files` 的 Windows Temp 目录 `PermissionError`（环境限制、exports 模块、与 AI Gateway 无关，ubuntu CI 不复现）；skip 为同文件 POSIX 权限位用例。原"排除 2 项预存失败"的说法不成立：`test_migrations.py` 实测 12 passed，无失败。
 
 ### 新增测试明细（共 20 项）
 
@@ -81,7 +83,7 @@ tests/test_ai_proposal_validation.py 16 passed
 | 项 | 归属 | 理由 |
 |---|---|---|
 | `tools/scan-secrets.sh` 产物密钥扫描 | T-M5-02c | 评审清单已将其归属到 T-M5-02c，01d 验收已明确"归属 T-M5-02c 独立追踪" |
-| `test_migrations.py` 两项失败 | 预存工作树问题 | 来自预先存在的 `ProposalIdempotency` 模型导入（`server/src/models/__init__.py` 的未提交修改），不在 M4-01 范围；需独立提交修复迁移表计数（13→14）与 migration 文件 |
+| `test_migrations.py` 两项失败 | 预存工作树问题 | ~~需独立提交修复迁移表计数（13→14）与 migration 文件~~ **已解决（R-M4-02 订正）：** 复核实测 `test_migrations.py` 12 passed——14 表断言、0004–0008 迁移与 `0008_proposal_idempotency.py` 已随 T-M4-02b 提交入库，无需独立 PR |
 | `test_stats_exports.py::test_startup_cleanup_removes_stale_files` | Windows 环境问题 | `C:\Users\admin\AppData\Local\Temp\pytest-of-admin` 权限错误；与代码无关 |
 
 ## DashScope 真实密钥冒烟测试（01d 收口）
@@ -115,4 +117,4 @@ tests/test_ai_proposal_validation.py 16 passed
 
 1. **近期**：T-M5-02c 完成产物扫描（`tools/scan-secrets.sh`）→ 安全线收口
 2. **下游解锁**：ADR-003 已就绪 → T-M4-02c（助手对话流 + 确认卡 UI）与 T-M4-03c（客户端洞察展示）可并行启动
-3. **清理**：`ProposalIdempotency` 工作树残留建议独立 PR 修复 migration 测试（非 M4-01 职责）
+3. ~~**清理**：`ProposalIdempotency` 工作树残留建议独立 PR 修复 migration 测试（非 M4-01 职责）~~ **已解决：** migration 测试随 T-M4-02b 提交修复（12 passed），无需独立 PR

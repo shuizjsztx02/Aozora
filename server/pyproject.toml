@@ -43,6 +43,7 @@ testpaths = ["tests"]
 filterwarnings = [
     "error",
     "ignore::DeprecationWarning:httpx",
+    "ignore::DeprecationWarning:starlette",
     # asyncio.run() on Windows ProactorEventLoop leaves unclosed loop warnings
     "ignore::ResourceWarning",
 ]

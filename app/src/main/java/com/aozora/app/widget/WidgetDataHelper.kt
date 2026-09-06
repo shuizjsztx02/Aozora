@@ -5,6 +5,7 @@ import com.aozora.app.db.AozoraDatabase
 import com.aozora.app.db.Repository
 import kotlinx.coroutines.runBlocking
 import java.time.LocalDate
+import java.time.ZoneId
 import java.time.format.DateTimeFormatter
 
 /**
@@ -13,7 +14,12 @@ import java.time.format.DateTimeFormatter
  * 设计约束：
  * - 小组件运行在独立进程/上下文，不依赖 MainActivity 的 WebView
  * - 直接通过 Repository 读 Room，不经过 Bridge
- * - 金额使用 Long（整数分），与前端保持一致
+ * - 金额使用 Long（整数分），避免 Double 精度丢失
+ *
+ * R-M4-29 修复：与首页聚合口径对齐
+ * - 使用 bookId 过滤（单账本，与首页一致）
+ * - 使用 Asia/Shanghai 时区（与首页 todayBizDate 一致）
+ * - 预算筛选仅按 period 匹配（与首页一致，不额外检查 budgetType）
  */
 object WidgetDataHelper {
 
@@ -61,21 +67,24 @@ object WidgetDataHelper {
         }
 
         val bookId = books[0].id
-        val today = LocalDate.now().format(DateTimeFormatter.ISO_LOCAL_DATE)
+        // R-M4-29 修复：使用 Asia/Shanghai 时区，与前端 todayBizDate 一致
+        val shanghaiZone = ZoneId.of("Asia/Shanghai")
+        val today = LocalDate.now(shanghaiZone).format(DateTimeFormatter.ISO_LOCAL_DATE)
         val month = today.slice(0..6) // "YYYY-MM"
 
-        // 查询今日流水
-        val todayTxs = repository.listTransactionsByDateRange(today, today)
+        // R-M4-29 修复：按 bookId 过滤，与首页单账本口径一致
+        val todayTxs = repository.listTransactionsByBookAndDateRange(bookId, today, today)
         val todayExpenses = todayTxs.filter { it.type == "expense" && it.deletedAt == null }
         val todayExpenseCents = todayExpenses.sumOf { it.amountCents }
 
         // 查询本月预算
         val budgets = repository.listBudgets(bookId)
-        val monthBudget = budgets.find { it.period == month && it.budgetType == "monthly" }
+        // R-M4-29 修复：仅按 period 匹配，不额外检查 budgetType，与首页一致
+        val monthBudget = budgets.find { it.period == month }
         val budgetCents = monthBudget?.amountCents
 
-        // 本月支出
-        val monthTxs = repository.listTransactionsByDateRange("$month-01", "$month-31")
+        // 本月支出（按 bookId 过滤）
+        val monthTxs = repository.listTransactionsByBookAndDateRange(bookId, "$month-01", "$month-31")
         val monthExpenses = monthTxs.filter { it.type == "expense" && it.deletedAt == null }
         val monthExpenseCents = monthExpenses.sumOf { it.amountCents }
 

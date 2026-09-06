@@ -77,8 +77,9 @@ object BridgeCommands {
     const val VOICE_START_RECORDING = "voice.startRecording"
     const val VOICE_STOP_RECORDING = "voice.stopRecording"
 
-    // T-M4-04d 占位：图片（04a 仅声明命令，handler 返回 unavailable）
+    // T-M4-04d: 图片链路
     const val IMAGE_PICK = "image.pick"
+    const val IMAGE_DELETE = "image.delete"
 }
 
 /**

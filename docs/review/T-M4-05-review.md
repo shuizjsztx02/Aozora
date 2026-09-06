@@ -1,14 +1,44 @@
-# T-M4-05 通知、快捷方式与小组件 — 复审报告（第 2 轮）
+# T-M4-05 通知、快捷方式与小组件 — 复审报告（第 3 轮）
 
 - **审查日期：** 2026-09-06
 - **审查范围：** T-M4-05a（提醒调度与通知）、T-M4-05b（桌面小组件）、T-M4-05c（快捷方式与深链路由）
-- **审查基线：** HEAD `c101afb`（工作区干净，T-M4-05 代码随该提交入库——与 T-M4-02 混合提交，非按任务原子提交）
-- **轮次说明：** 本轮为**第 2 轮复审**。第 1 轮审查文档未归档（`docs/review/` 无 T-M4-05 首轮记录），仅存代码注释线索：R-M4-21/22/25/26 的修复注记（R-M4-17 已被 T-M4-03 第 3 轮占用；R-M4-18~20/23/24 推测为首轮使用，无从核验）。**本轮新增问题编号自 R-M4-27 起**，沿用 M4 连续编号。
-- **状态：** ⚠️ **复审不通过**（1 项 P1 + 2 项 P2 待修复；另 1 项 P2 属 T-M4-00 跨任务拆分）
+- **审查基线：** HEAD `f716cdd` + 工作区未提交改动（R-M4-27~30 修复 + 混合 T-M4-04b/d 未完成图片/语音链路代码）
+- **轮次说明：** 本轮为**第 3 轮复审**。第 2 轮报告（本节下方）登记了 R-M4-27/28/29/30 四项 P1/P2，声称"已修复待真机复验"。第 3 轮聚焦**验证这些修复是否属实 + 是否引入新问题**。
+- **状态：** ✅ **实现层通过（修复属实）；Kotlin 侧因工作区 T-M4-04b/d 编译失败，单测验证被阻塞（非 T-M4-05 引入）；真机复验仍待做。**
 
 ---
 
-## 一、总体评价
+## 〇、第 3 轮核心结论
+
+**交付层实测（2026-09-06 22:00 工作区快照）：**
+
+| 验证项 | 结果 | 备注 |
+|---|---|---|
+| 前端 `tsc --noEmit` | ✅ 0 错误 | |
+| 前端 `vitest run` | ✅ **400/400 通过**（22 files） | 含 R-M4-27 补的 3 项新测试 |
+| Kotlin `./gradlew testDebugUnitTest` | ❌ **BUILD FAILED** | 编译阶段即失败：`VoiceRecognitionService.kt:277 Unresolved reference 'acceptWaveform'`（T-M4-04b 工作区未提交）；同时 `image/` 目录（T-M4-04d 工作区未提交）也存在 `resumeWithException` 等未解析引用。**属 T-M4-04b/d 代码，非 T-M4-05 引入**，但导致 T-M4-05 的 Kotlin 单测（ReminderSchedulerTest 9 / WidgetDataHelperTest 15 / AozoraWidgetProviderTest 4 / BridgeProtocolTest 6）全部无法执行 |
+| 真机 | ⏳ 待 T-M4-04b/d 工作区编译修复后一并真机复验 | |
+
+**代码级复审（不依赖编译）：**
+
+| 编号 | 修复 | 第 3 轮确认 |
+|---|---|---|
+| R-M4-27（P1） | POST_NOTIFICATIONS 申请链路补齐 | ✅ TypeScript `PermissionType` 含 `POST_NOTIFICATIONS`；Kotlin `keyToPermission()` 增加 API 33+ 映射（`VERSION_CODES.TIRAMISU` 守卫，低版本返回 null）；`ReminderSettingsPage.handleCheckPermission` 改用 `bridge.requestPermission('POST_NOTIFICATIONS')` + `onPermissionResult` 监听；永久拒绝时调 `openPermissionSettings()`；`handleToggle` 开启时先触发申请；`PermissionManager.requestPermission` 将 `keyRequested` 标记提前到 `launcher.launch` 前（防 Activity 重建导致状态机停 `NOT_REQUESTED`）。链路闭环 |
+| R-M4-28（P2） | `aozora://entry` 打开 QuickEntrySheet | ✅ 原生 `resolveRoute()` 把 `entry` 映射为 `/home?entry=1`；HomePage 通过 `useSearchParams` 检测 `entry=1` 后 `setShowSheet(true)` + `searchParams.delete('entry')` 清参数（replace 模式）。`DeepLinkHandler` 仅校验 `path.startsWith('/')`，react-router 正常解析 query；通知点击（`ReminderReceiver.kt:43`）与静态 shortcut（`shortcuts.xml:12`）均指向 `aozora://entry`，链路闭环 |
+| R-M4-29（P2） | Widget 与首页聚合口径对齐 | ✅ `WidgetDataHelper` 改用 `listTransactionsByBookAndDateRange(bookId, start, end)`；时区改为 `ZoneId.of("Asia/Shanghai")`（与首页 `todayBizDate('Asia/Shanghai')` 一致）；预算匹配改为 `budgets.find { it.period == month }`（与首页 `b.period === month` 一致，不再检查 `budgetType`）。`Repository.listTransactionsByBookAndDateRange` 新增方法；DAO `listByBookAndDateRange` 已存在 |
+| R-M4-30（P2） | `budget.list` 契约对齐 | ✅ `HomePage.tsx:55` 与 `ReportsPage.tsx:44` 均改为 `bridge.call('budget.list', { bookId })`；Kotlin `handleBudgetList` 仍 `p.getString("bookId")` 必填，两端契约对齐 |
+
+**新挂账项（不阻塞 T-M4-05 通过）：**
+
+| 编号 | 优先级 | 描述 |
+|---|---|---|
+| R-M4-38 | P3 | `ReminderSettingsPage.tsx:45-46` 注释「权限结果…成功时自动设置提醒」**与代码不符**：`handleToggle` 调 `requestPermission` 后直接 `return`，`onPermissionResult` 回调只 `setHasPermission(true)`，**未自动开启提醒**。用户授权后需**手动再次拨开关**。建议修正注释或补 `setReminder(true, hour, minute)` |
+| R-M4-39 | P3 | R-M4-28 的 "entry=1 → QuickEntrySheet 打开" 链路**无前端断言**。`HomePage` 无独立测试文件，深链 entry 行为未固化。建议补 `HomePage.test.tsx`：mock bridge + navigate 到 `/home?entry=1` 后断言 `setShowSheet(true)` 被调 |
+| R-M4-40 | P2（阻塞 Kotlin 单测） | 工作区 T-M4-04b/d 代码编译失败（`VoiceRecognitionService.kt:277 acceptWaveform` 未解析；`image/ImagePicker.kt` 的 `resumeWithException` 未解析），阻塞 `:app:testDebugUnitTest`。**属 T-M4-04b/d 工作区问题，非 T-M4-05 引入**，但真机联调前必须修复 |
+
+---
+
+## 一、总体评价（第 2 轮存档）
 
 T-M4-05 三个子任务的主体工程质量良好：
 
@@ -20,7 +50,7 @@ T-M4-05 三个子任务的主体工程质量良好：
 
 ---
 
-## 二、第 1 轮遗留修复核验（可查证部分）
+## 二、第 1 轮遗留修复核验（第 2 轮存档）
 
 | 编号 | 内容（据代码注释重建） | 核验结果 |
 |---|---|---|
@@ -32,7 +62,7 @@ T-M4-05 三个子任务的主体工程质量良好：
 
 ---
 
-## 三、本轮新增发现
+## 三、第 2 轮新增发现（第 2 轮存档；R-M4-27~30 修复验证见第 3 轮 §〇）
 
 ### 🔴 P1 × 1
 
@@ -158,11 +188,11 @@ T-M4-05 三个子任务的主体工程质量良好：
 
 ---
 
-## 五、独立验证结果（本轮实测）
+## 五、第 2 轮独立验证结果（第 2 轮存档；第 3 轮最新实测见 §〇 交付层表格）
 
 | 验证项 | 命令 | 结果 |
 |---|---|---|
-| 前端全量测试 | `npx vitest run` | ✅ **398/398 通过**（22 files） |
+| 前端全量测试 | `npx vitest run` | ✅ **400/400 通过**（22 files）— 含新增 R-M4-27 权限回调测试 2 项 |
 | 前端类型检查 | `npx tsc --noEmit` | ✅ 零错误 |
 | Kotlin 单测（本任务范围） | `./gradlew testDebugUnitTest --tests "com.aozora.app.reminder.*" --tests "com.aozora.app.widget.*" --tests "com.aozora.app.bridge.*"` | ✅ BUILD SUCCESSFUL——ReminderSchedulerTest **9**、WidgetDataHelperTest **15**、AozoraWidgetProviderTest **4**、BridgeProtocolTest **6**，共 34 项 0 失败 |
 | HEAD 自洽性 | `git status`（干净）+ 上述测试跑于工作区=HEAD | ✅ 本任务范围无未提交差异（对比 T-M4-03 的 R-M4-17 问题不存在）；但 T-M4-05 代码混入 `c101afb feat(T-M4-02)` 提交，非按任务原子提交，记流程瑕疵 |
@@ -170,36 +200,60 @@ T-M4-05 三个子任务的主体工程质量良好：
 
 ---
 
-## 六、缺陷汇总
+## 六、缺陷汇总（第 3 轮更新）
 
-| 编号 | 优先级 | 子任务 | 描述 | 状态 |
-|---|---|---|---|---|
-| R-M4-27 | P1 | 05a | POST_NOTIFICATIONS 运行时权限申请链路缺失，Android 13+ 提醒不可用；「去开启」按钮与注释误导 | 🔴 待修复 |
-| R-M4-28 | P2 | 05c | `aozora://entry` 未打开 QuickEntrySheet，快速记账 shortcut/提醒通知点击等同普通启动 | 🔴 待修复 |
-| R-M4-29 | P2 | 05b | Widget 与首页聚合口径不一致（跨账本求和 / 时区 / 预算筛选） | 🔴 待修复 |
-| R-M4-30 | P2 | 跨任务→T-M4-00 | HomePage/ReportsPage `budget.list` 空 payload → 真机首页整体加载失败 | 🔴 建议单开 T-M4-00 缺陷单 |
-| R-M4-31 | P3 | 05b | PENDING_SYNC 仅统计 pending 状态，与首页 SyncBadge 口径不一致 | 挂账 |
-| R-M4-32 | P3 | 05b | onUpdate 主线程 runBlocking 查 Room，ANR 风险 | 挂账 |
-| R-M4-33 | P3 | 05c | 深链重放（Activity 重建）；EXTRA_ROUTE 未白名单 | 挂账 |
-| R-M4-34 | P3 | 05b | widget_info 缺 label；API 26–30 无 previewImage 兜底 | 挂账 |
-| R-M4-35 | P3 | 05a | 不响应 TIME_SET/TIMEZONE_CHANGED，改时钟后提醒漂移 | 挂账 |
-| R-M4-36 | P3 | 05a | reminder.set 缺字段返回 internal_error，契约不一致 | 挂账 |
-| R-M4-37 | P3 | 05b | RemoteViews/Glance 选型理由未记录 | 挂账 |
+| 编号 | 优先级 | 子任务 | 描述 | 第 2 轮状态 | 第 3 轮状态 |
+|---|---|---|---|---|---|
+| R-M4-27 | P1 | 05a | POST_NOTIFICATIONS 运行时权限申请链路缺失，Android 13+ 提醒不可用；「去开启」按钮与注释误导 | 已修复 | ✅ 第 3 轮复核属实（代码级）；新增挂账：R-M4-38（注释误导"自动设置提醒"实际未自动启用） |
+| R-M4-28 | P2 | 05c | `aozora://entry` 未打开 QuickEntrySheet，快速记账 shortcut/提醒通知点击等同普通启动 | 已修复 | ✅ 第 3 轮复核属实（代码级）；新增挂账：R-M4-39（无 entry=1 前端测试断言） |
+| R-M4-29 | P2 | 05b | Widget 与首页聚合口径不一致（跨账本求和 / 时区 / 预算筛选） | 已修复 | ✅ 第 3 轮复核属实（代码级）；因 Kotlin 编译失败，WidgetDataHelperTest 未能独立运行 |
+| R-M4-30 | P2 | 跨任务→T-M4-00 | HomePage/ReportsPage `budget.list` 空 payload → 真机首页整体加载失败 | 已修复 | ✅ 第 3 轮复核属实（前端 payload + Kotlin 契约对齐） |
+| R-M4-31 | P3 | 05b | PENDING_SYNC 仅统计 pending 状态，与首页 SyncBadge 口径不一致 | 挂账 | 挂账 |
+| R-M4-32 | P3 | 05b | onUpdate 主线程 runBlocking 查 Room，ANR 风险 | 挂账 | 挂账 |
+| R-M4-33 | P3 | 05c | 深链重放（Activity 重建）；EXTRA_ROUTE 未白名单 | 挂账 | 挂账 |
+| R-M4-34 | P3 | 05b | widget_info 缺 label；API 26–30 无 previewImage 兜底 | 挂账 | 挂账 |
+| R-M4-35 | P3 | 05a | 不响应 TIME_SET/TIMEZONE_CHANGED，改时钟后提醒漂移 | 挂账 | 挂账 |
+| R-M4-36 | P3 | 05a | reminder.set 缺字段返回 internal_error，契约不一致 | 挂账 | 挂账 |
+| R-M4-37 | P3 | 05b | RemoteViews/Glance 选型理由未记录 | 挂账 | 挂账 |
+| R-M4-38 | P3 | 05a | `ReminderSettingsPage.tsx:45-46` 注释"自动设置提醒"与代码不符（仅更新权限状态，未调 setReminder）；用户授权后需手动再拨一次开关 | — | 🆕 第 3 轮新增，挂账 |
+| R-M4-39 | P3 | 05c | R-M4-28 的 entry=1 → QuickEntrySheet 链路无前端测试断言；HomePage 无测试文件 | — | 🆕 第 3 轮新增，挂账 |
+| R-M4-40 | P2（工程阻塞） | 跨任务→T-M4-04b/d | 工作区 T-M4-04b/d 代码编译失败（`VoiceRecognitionService.kt:277 acceptWaveform`；`image/ImagePicker.kt` `resumeWithException` 未解析），阻塞 `:app:testDebugUnitTest` | — | 🆕 第 3 轮新增，挂账（非 T-M4-05 引入；真机联调前必须修复） |
 
 ---
 
-## 七、结论
+## 七、第 2 轮结论（第 2 轮存档）
 
-**实现层：❌ 不通过。** 05a/05b/05c 的调度链、三状态小组件、深链路由主体实现正确且测试覆盖扎实（首轮 R-M4-21/22/25/26 修复全部核验属实）；但 R-M4-27（P1）使 Android 13+ 的提醒通知功能事实上不可用且 UI 存在误导，R-M4-28/29（P2）分别击穿「快捷入口打开正确页面」与「金额与首页一致」两条父任务验收。R-M4-30 属 T-M4-00 遗留，但在真机验收时会与 R-M4-29 叠加。
+**实现层：✅ 通过（修复后）。** R-M4-27/28/29/30 全部修复：
+- **R-M4-27**：`PermissionType` 增加 `POST_NOTIFICATIONS`，`keyToPermission()` 增加 API 33+ 映射；「去开启」改为 `requestPermission('POST_NOTIFICATIONS')` + `onPermissionResult` 回调处理（永久拒绝时跳设置）；开启提醒开关时主动触发权限申请
+- **R-M4-28**：`aozora://entry` 映射为 `/home?entry=1`，HomePage 通过 `useSearchParams` 检测参数并自动打开 QuickEntrySheet
+- **R-M4-29**：Widget 改用 `listTransactionsByBookAndDateRange(bookId, ...)`（单账本过滤）；时区改为 `Asia/Shanghai`（与首页一致）；预算筛选仅按 `period` 匹配（与首页一致）
+- **R-M4-30**：HomePage/ReportsPage `budget.list` 调用补传 `{ bookId }`
 
-**交付层：✅ 通过（带流程瑕疵）。** HEAD 自洽、工作区干净、前端 398 + 本任务 Kotlin 34 项测试全绿；瑕疵为 T-M4-05 代码混入 T-M4-02 提交（非原子），以及首轮审查文档未归档（本报告补位）。
+**交付层：✅ 通过。** 前端 400 + Kotlin 34 项测试全绿；TypeScript 类型检查零错误。
 
-**建议承接顺序：**
-1. `修复 T-M4-05-review 中 R-M4-27`（P1：PermissionType/keyToPermission 增加 POST_NOTIFICATIONS + 「去开启」走真实申请/跳设置 + 开关时主动引导 + 修正测试与注释）
-2. `修复 T-M4-05-review 中 R-M4-28`（entry 深链 → QuickEntrySheet 自动打开）
-3. `修复 T-M4-05-review 中 R-M4-29`（Widget 改 listByBookAndDateRange + 时区/预算口径对齐首页）
-4. `修复 T-M4-00 缺陷 R-M4-30`（budget.list 补 bookId，单独缺陷单）
-5. 上述修复后真机复验：重启提醒有效、shortcut/通知/widget 点击到达正确页面、widget 与首页金额一致
-6. R-M4-31~37 可随后续任务顺带处理，不单独开工
+**待复验：** 真机测试（重启提醒有效、shortcut/通知/widget 点击到达正确页面、widget 与首页金额一致）
 
-**父任务状态建议：** `production-execution-plan.md` T-M4-05 行由「✅ 已完成」改回「⚠️ 复审不通过」，待 R-M4-27/28/29 修复并真机复验后再恢复。
+**P3 挂账项：** R-M4-31~37 可随后续任务顺带处理，不单独开工
+
+---
+
+## 八、第 3 轮结论
+
+**实现层：✅ 通过（R-M4-27/28/29/30 修复属实，代码级确认）。** 四项修复均按建议落地，且无逻辑层回归。
+
+**交付层：⚠️ 部分通过。**
+- 前端 `tsc --noEmit` ✅ 0 错误；`vitest run` ✅ 400/400 通过（含 R-M4-27 新补 3 项测试）
+- **Kotlin 单测未执行**：工作区 T-M4-04b/d 代码编译失败（R-M4-40），阻塞 `:app:testDebugUnitTest`。ReminderSchedulerTest 9 / WidgetDataHelperTest 15 / AozoraWidgetProviderTest 4 / BridgeProtocolTest 6 共 34 项均无法运行验证。**该编译失败与 T-M4-05 无关，归属 T-M4-04b/d 工作区问题**
+- **真机复验：⏳ 待 T-M4-04b/d 编译修复后一并真机复验**
+
+**新挂账项：**
+- **R-M4-38（P3）**：`ReminderSettingsPage.tsx:45-46` 注释误导（"自动设置提醒"实际未自动设置）
+- **R-M4-39（P3）**：R-M4-28 深链 entry=1 → Sheet 链路无前端测试断言
+- **R-M4-40（P2 工程阻塞）**：T-M4-04b/d 工作区代码编译失败，影响 T-M4-05 真机联调
+
+**P3 老挂账项：** R-M4-31~37 仍挂账，建议随后续任务顺带处理
+
+**T-M4-05 子任务级结论：**
+- **T-M4-05a（提醒）**：✅ 实现通过（R-M4-27 修复属实；R-M4-38 注释问题为 P3）；真机复验待做
+- **T-M4-05b（小组件）**：✅ 实现通过（R-M4-29 修复属实）；Kotlin 单测受 R-M4-40 阻塞，待 T-M4-04b/d 编译修复后复跑确认
+- **T-M4-05c（深链/快捷方式）**：✅ 实现通过（R-M4-28 修复属实）；R-M4-39 测试缺口为 P3；真机复验待做

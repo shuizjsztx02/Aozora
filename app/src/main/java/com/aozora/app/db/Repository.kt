@@ -91,6 +91,10 @@ class Repository(private val db: AozoraDatabase) {
     suspend fun listTransactionsByDateRange(start: String, end: String): List<TransactionEntity> =
         db.transactionDao().listByDateRange(start, end)
 
+    // R-M4-29 修复：按账本 + 日期范围查询，与首页聚合口径一致
+    suspend fun listTransactionsByBookAndDateRange(bookId: String, start: String, end: String): List<TransactionEntity> =
+        db.transactionDao().listByBookAndDateRange(bookId, start, end)
+
     // ─── Book ───
 
     suspend fun insertBook(book: BookEntity, mutationId: String) {

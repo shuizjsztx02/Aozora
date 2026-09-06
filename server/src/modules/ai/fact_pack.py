@@ -138,26 +138,37 @@ def _compute_data_hash(
     largest_expense: TransactionFact | None,
     largest_income: TransactionFact | None,
     trend: list[TrendFact],
+    tx_count: int = 0,
 ) -> str:
-    """Deterministic SHA-256 of the numerical content.
+    """Deterministic SHA-256 of all data fields.
 
-    The hash covers all financial numbers so that an identical data snapshot
-    produces the same hash — enabling the LLM-call cache.
+    The hash covers all financial numbers AND non-numerical fields
+    (transaction_count, largest-tx id/note/biz_date, category names)
+    so that any data change — including note edits or category renames
+    that leave amounts unchanged — produces a different hash, preventing
+    stale FactPack cache hits (R-M4-12 fix).
     """
     canonical: list[str] = [
         str(total_income),
         str(total_expense),
+        f"txcount:{tx_count}",
     ]
     for c in sorted(expense_cats, key=lambda x: x.category_id):
-        canonical.append(f"{c.category_id}:{c.total_cents}:{c.count}")
+        canonical.append(f"{c.category_id}:{c.category_name}:{c.total_cents}:{c.count}")
     for c in sorted(income_cats, key=lambda x: x.category_id):
-        canonical.append(f"{c.category_id}:{c.total_cents}:{c.count}")
+        canonical.append(f"{c.category_id}:{c.category_name}:{c.total_cents}:{c.count}")
     if budget:
         canonical.append(f"budget:{budget.amount_cents}:{budget.spent_cents}")
     if largest_expense:
-        canonical.append(f"maxexp:{largest_expense.amount_cents}")
+        canonical.append(
+            f"maxexp:{largest_expense.id}:{largest_expense.amount_cents}"
+            f":{largest_expense.note}:{largest_expense.biz_date}"
+        )
     if largest_income:
-        canonical.append(f"maxinc:{largest_income.amount_cents}")
+        canonical.append(
+            f"maxinc:{largest_income.id}:{largest_income.amount_cents}"
+            f":{largest_income.note}:{largest_income.biz_date}"
+        )
     for t in sorted(trend, key=lambda x: x.period):
         canonical.append(f"{t.period}:{t.total_income}:{t.total_expense}:{t.balance}")
     raw = "\n".join(canonical).encode("utf-8")
@@ -228,7 +239,7 @@ class FactPackService:
             total_income, total_expense,
             expense_cats, income_cats,
             budget, largest_expense, largest_income,
-            trend,
+            trend, tx_count=tx_count,
         )
 
         # 7. Check cache

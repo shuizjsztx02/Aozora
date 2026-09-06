@@ -41,7 +41,8 @@ export function ReportsPage() {
       const [allTxs, cats, budgets] = await Promise.all([
         bridge.call('transaction.listByBook', { bookId: id }) as Promise<TransactionData[]>,
         bridge.call('category.list', {}) as Promise<CategoryData[]>,
-        bridge.call('budget.list', {}) as Promise<{ amountCents: number; period: string; budgetType: string; categoryId: string | null }[]>,
+        // R-M4-30 修复：传递 bookId，与 Kotlin 侧 budget.list 契约一致
+        bridge.call('budget.list', { bookId: id }) as Promise<{ amountCents: number; period: string; budgetType: string; categoryId: string | null }[]>,
       ])
 
       const monthTxs = allTxs.filter(tx => tx.bizDate.startsWith(period) && tx.deletedAt === null)

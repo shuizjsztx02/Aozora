@@ -40,6 +40,18 @@ export function ReminderSettingsPage() {
   }, [loadStatus])
 
   const handleToggle = async (value: boolean) => {
+    // R-M4-27: 开启提醒时先检查/请求通知权限
+    if (value && !hasPermission) {
+      try {
+        await bridge.requestPermission('POST_NOTIFICATIONS')
+        // 权限结果会通过 onPermissionResult 回调返回，成功时自动设置提醒
+        // 为避免复杂状态同步，先提示用户开启权限后再开启提醒
+        return
+      } catch (err) {
+        console.error('Failed to request permission:', err)
+      }
+    }
+
     setEnabled(value)
     try {
       await bridge.setReminder(value, hour, minute)
@@ -61,16 +73,35 @@ export function ReminderSettingsPage() {
 
   const handleCheckPermission = async () => {
     try {
-      const result = await bridge.checkReminderPermission()
-      setHasPermission(result.granted)
-      if (!result.granted) {
-        // Android 系统会弹出权限请求（首次）；若已永久拒绝需引导到设置
-        alert('请在系统设置中允许 Aozora 发送通知')
+      // R-M4-27 修复：主动请求权限，而非仅检查
+      const result = await bridge.requestPermission('POST_NOTIFICATIONS')
+      if (!result.pending) {
+        // 低版本 Android 或不支持的情况，直接检查
+        const checkResult = await bridge.checkReminderPermission()
+        setHasPermission(checkResult.granted)
       }
+      // 权限结果会通过 onPermissionResult 回调异步返回
     } catch (err) {
-      console.error('Failed to check permission:', err)
+      console.error('Failed to request permission:', err)
     }
   }
+
+  // R-M4-27: 监听权限结果回调
+  useEffect(() => {
+    const unsubscribe = bridge.onPermissionResult((event) => {
+      if (event.permission === 'POST_NOTIFICATIONS') {
+        if (event.status === 'granted') {
+          setHasPermission(true)
+        } else if (event.status === 'permanently_denied') {
+          // 永久拒绝 → 引导到系统设置
+          bridge.openPermissionSettings()
+        } else {
+          setHasPermission(false)
+        }
+      }
+    })
+    return unsubscribe
+  }, [bridge])
 
   if (loading) {
     return (

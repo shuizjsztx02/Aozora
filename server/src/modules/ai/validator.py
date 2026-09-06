@@ -10,9 +10,10 @@ Design notes
   would accept ``2025-02-30``; the round-trip rejects it.
 - ``additionalProperties: false`` at both root and TransactionItem is
   enforced by the schema; ``jsonschema`` honours it out of the box.
-- The validator is intentionally separate from the assembly logic
-  (``assembly.py``) — validation is pure schema + format checking,
-  assembly brings in DB context (category/account IDs).
+- The validator is intentionally separate from proposal assembly —
+  validation is pure schema + format checking. Assembly happens on the
+  client (see ADR-003); DB context (category/account IDs) is applied
+  server-side via ``context.py`` when ``/ai/validate`` runs.
 """
 
 from __future__ import annotations

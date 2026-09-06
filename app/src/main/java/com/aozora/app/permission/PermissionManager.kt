@@ -48,11 +48,6 @@ class PermissionManager(private val activity: ComponentActivity) {
             pendingPermission = null
             pendingCallback = null
 
-            if (permission != null) {
-                // 标记已请求
-                prefs.edit().putBoolean(keyRequested(permission), true).apply()
-            }
-
             val status = when {
                 granted -> PermissionStatus.GRANTED
                 permission != null && !activity.shouldShowRequestPermissionRationale(permission) ->
@@ -106,21 +101,23 @@ class PermissionManager(private val activity: ComponentActivity) {
             return
         }
 
-        if (pendingCallback != null) {
-            // 已有请求在处理中
-            callback(PermissionStatus.DENIED)
-            return
-        }
-
-        // 先检查是否已授予
+        // 先检查是否已授予（在 pending 检查之前，避免已授予的权限被错误 DENIED）
         val currentStatus = getStatus(permission)
         if (currentStatus == PermissionStatus.GRANTED) {
             callback(PermissionStatus.GRANTED)
             return
         }
 
+        if (pendingCallback != null) {
+            // 已有请求在处理中
+            callback(PermissionStatus.DENIED)
+            return
+        }
+
         pendingPermission = permission
         pendingCallback = callback
+        // P2-2: launch 时即写「已请求」标记，防止 Activity 重建导致回调丢失、状态机停在 NOT_REQUESTED
+        prefs.edit().putBoolean(keyRequested(permission), true).apply()
         launcher.launch(permission)
     }
 
