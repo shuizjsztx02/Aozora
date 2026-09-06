@@ -3,6 +3,21 @@
 from __future__ import annotations
 
 import os
+import warnings
+
+# R-M4-38: starlette ≥1.6.0 emits StarletteDeprecationWarning at TestClient
+# import time (httpx → httpx2 migration). Filter before the import to ensure
+# deterministic ordering on CI (ubuntu-latest exits with code 4 otherwise).
+warnings.filterwarnings(
+    "ignore",
+    message=r".*httpx.*",
+    category=DeprecationWarning,
+)
+warnings.filterwarnings(
+    "ignore",
+    category=DeprecationWarning,
+    module=r"starlette\..*",
+)
 
 import pytest
 from starlette.testclient import TestClient
