@@ -77,11 +77,12 @@ describe('Bridge types — 命令完整性', () => {
     // T-M4-04b 占位：语音
     'voice.startRecording',
     'voice.stopRecording',
-    // T-M4-04d 占位：图片
+    // T-M4-04d: 图片链路
     'image.pick',
+    'image.delete',
   ]
 
-  it('BridgeCommands 包含所有 35 个命令（含 AI 4 个 + T-M4-04a 权限 3 个 + 语音 2 个 + 图片 1 个）', () => {
+  it('BridgeCommands 包含所有 36 个命令（含 AI 4 个 + T-M4-04a 权限 3 个 + 语音 2 个 + 图片 2 个）', () => {
     const actualCommands = Object.values(BridgeCommands)
     expect(actualCommands).toHaveLength(expectedCommands.length)
     for (const cmd of expectedCommands) {
