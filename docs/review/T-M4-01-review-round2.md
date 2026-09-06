@@ -62,3 +62,13 @@
 **门禁：** 本地模块 01 pytest ✅ 142/142；本地 ruff ✅（纯净 HEAD 全树 + 本轮改动文件）；远端 CI：server job 的 ruff 步骤预期转绿（run 34037172838 起），**pytest 步骤受 N-1（T-M4-03 HEAD 破损）阻塞仍红**——非 01 模块缺陷，关闭条件与归属已在 N-1 记录。
 
 **本轮提交内容（Task: T-M4-01 第 2 轮收口）：** `server/src/modules/ai/service.py`、`server/src/modules/ai/validator.py`、`server/tests/test_ai_gateway.py`、`T-M4-01-closure.md`、`docs/architecture/ai-architecture.md`（仅本轮澄清 hunk）、`docs/milestones/production-execution-plan.md`（仅 01d 行 hunk）、本文档。
+
+---
+
+## 五、补记（2026-09-06 晚 · 提交归属与门禁终态）
+
+1. **提交归属：** 本轮修复完成并精确暂存后、独立提交前，并行会话以 `3e1607b`（T-M4-05 主任务的批量混合提交）将工作树全量入库，本轮 7 个文件的修复被并入该提交并已随其推送远端。共享分支上不做历史重写，接受现状并在此记录归属：`3e1607b` 中属于 T-M4-01 第 2 轮的内容为 service.py（R-M4-06）、validator.py（R-M4-05）、test_ai_gateway.py（+1 回归测试）、T-M4-01-closure.md（R-M4-02）、ai-architecture.md（「interpret → validate → execute 流水线」节，R-M4-03）、production-execution-plan.md（01d 行，R-M4-03）、本文档。上文"本轮提交内容"原计划的独立提交因该批量提交而不再存在。
+2. **N-1 已关闭：** `3e1607b` 同时并入了 T-M4-03 的测试修复（`db_session` import、balance 负值断言）与 starlette DeprecationWarning 过滤（pyproject `filterwarnings`）。纯净 HEAD 实测 `pytest tests/` = **404 passed, 1 skipped, 1 error**（error 为 N-3 Windows 环境项，ubuntu CI 不复现）。
+3. **N-4（本轮新增，已关闭）：** `3e1607b` 引入 `tests/test_narrative_report.py` 一处 ruff I001（import 块未排序），远端 run `34038958115` server job ruff 步骤因此失败（同 run 的 client、android job 均已转绿）。并行会话 `a5d8507` 已修复（import 块后补空行，零语义改动）；纯净 `a5d8507` 实测 `ruff check src/ tests/` All checks passed、`test_narrative_report.py + test_ai_gateway.py` 68 passed。
+4. **门禁终态：** 本地纯净 HEAD（`a5d8507`）ruff ✅ + pytest ✅（404/1/1，仅环境 error）；模块 01 六文件 142/142 ✅。远端 CI 以 `a5d8507` 推送后的 run 为准——该 run 同时将首次实测 pytest 步骤（此前各 run 均死在 ruff/lint 步骤），验证 starlette 过滤是否彻底解决 CI 依赖漂移下的 exit 4（另一并行只读审查登记的 R-M4-38）。
+5. **命名注记：** 另一只读并行会话产出未跟踪文档 `docs/review/T-M4-01-review-2.md`（自称"第 3 轮"，基线 `3b73dd5`），与本文档（round2，已随 `3e1607b` 入库）存在轮次编号交叉；两份文档的发现归属以各自文内基线与时间戳为准。
