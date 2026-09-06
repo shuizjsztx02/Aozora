@@ -19,6 +19,8 @@ from .schemas import (
     AIExecuteProposalResponse,
     AIInterpretRequest,
     AIInterpretResponse,
+    AIParseImageRequest,
+    AIParseImageResponse,
     AIReportRequest,
     AIReportResponse,
     AIValidateProposalRequest,
@@ -141,3 +143,37 @@ async def report(
     """
     service = AIService(db, provider)
     return await service.generate_report(current_user, request.state.request_id, body)
+
+
+@router.post("/parse-image", response_model=AIParseImageResponse)
+async def parse_image(
+    body: AIParseImageRequest,
+    request: Request,
+    current_user: Annotated[User, Depends(get_current_user)] = ...,
+    db: Annotated[AsyncSession, Depends(get_db_session)] = ...,
+    provider: Annotated[LLMProvider | None, Depends(get_llm_provider)] = ...,
+):
+    """T-M4-04e: Parse a receipt/bill image into an ActionProposal.
+
+    The client first uploads the image via ``POST /attachments/upload``,
+    receives an ``attachment_id``, then calls this endpoint. The server
+    reads the stored image, sends it to a vision model, resolves category
+    names to authorised IDs, and returns a complete ActionProposal
+    (``add_tx_batch``) ready for ``/ai/validate`` → ``/ai/execute``.
+
+    Degradation: 503 on provider failure / invalid output — the client
+    preserves the draft and prompts retry when connectivity resumes.
+    """
+    try:
+        book_uuid = uuid.UUID(body.book_id)
+    except ValueError:
+        from src.common.errors import AppException
+        raise AppException(422, "invalid_book_id", "Invalid book ID")
+
+    service = AIService(db, provider)
+    return await service.parse_image(
+        user=current_user,
+        request_id=request.state.request_id,
+        attachment_id=body.attachment_id,
+        book_id=book_uuid,
+    )

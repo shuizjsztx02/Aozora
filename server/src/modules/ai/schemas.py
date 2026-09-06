@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import uuid
 from typing import Any, Literal
 
 from pydantic import BaseModel, Field
@@ -172,3 +173,35 @@ class AIReportResponse(BaseModel):
     # Whether the narrative was served from cache (no new LLM call).
     narrative_cached: bool = False
     usage: AIUsageInfo | None = None
+
+
+# ─── T-M4-04e: Image receipt parsing ────────────────────────────────────
+
+class AIParseImageRequest(BaseModel):
+    """Parse a receipt/bill image into an ActionProposal.
+
+    The client uploads the image via ``POST /attachments/upload`` first,
+    receives an ``attachment_id``, then calls this endpoint to invoke the
+    vision model. The server reads the stored file, sends it to the
+    multimodal LLM, and returns a pre-assembled ActionProposal with
+    category IDs resolved against the user's book.
+    """
+
+    attachment_id: uuid.UUID
+    book_id: str = Field(min_length=1)
+
+
+class AIParseImageResponse(BaseModel):
+    """Result of image receipt parsing.
+
+    ``proposal`` is a complete ActionProposal (action: ``add_tx_batch``)
+    ready for ``/ai/validate`` → ``/ai/execute``. ``confidence`` reflects
+    the vision model's overall certainty; the client uses it to decide
+    whether to show the confirmation card (low confidence) or auto-execute.
+    """
+
+    request_id: str
+    proposal: dict[str, Any]
+    attachment_id: str
+    confidence: float
+    usage: AIUsageInfo

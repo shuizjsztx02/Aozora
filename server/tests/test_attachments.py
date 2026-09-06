@@ -425,10 +425,10 @@ class TestLink:
         att.expires_at = datetime.now(UTC) - timedelta(hours=25)
         await db.flush()
 
-        # _mark_expired_if_needed runs inside link_attachment's get_owned,
-        # but link's own expired check is against the *loaded* row state
-        # before the expiry flip (which happens on the download path).
-        # Trigger the flip via get_attachment_file first.
+        # _get_owned (called inside link_attachment) lazily flips
+        # PENDING → EXPIRED via _mark_expired_if_needed, so the link
+        # call below sees EXPIRED and raises 410.  The download path
+        # also flips, so we exercise it first to verify independently.
         with pytest.raises(Exception) as excinfo:
             await svc.get_attachment_file(att.id, users["alice"].id)
         assert excinfo.value.status_code == 410

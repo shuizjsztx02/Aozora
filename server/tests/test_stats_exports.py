@@ -555,26 +555,32 @@ class TestExportExpiration:
 
 
 class TestExportFileLifecycle:
-    def test_startup_cleanup_removes_stale_files(self, tmp_path, monkeypatch):
+    def test_startup_cleanup_removes_stale_files(self, monkeypatch):
         """N-05: cleanup_expired_files deletes only old export files."""
+        import shutil
+        import tempfile
         from src.modules.exports import service as exports_service
 
-        monkeypatch.setattr(exports_service, "_get_export_dir", lambda: tmp_path)
+        tmp_path = Path(tempfile.mkdtemp(prefix="aozora_test_lifecycle_"))
+        try:
+            monkeypatch.setattr(exports_service, "_get_export_dir", lambda: tmp_path)
 
-        stale = tmp_path / f"{uuid.uuid4()}.json"
-        fresh = tmp_path / f"{uuid.uuid4()}.csv"
-        unrelated = tmp_path / "notes.txt"
-        for p in (stale, fresh, unrelated):
-            p.write_text("x")
-        past = time.time() - 26 * 3600
-        os.utime(stale, (past, past))
+            stale = tmp_path / f"{uuid.uuid4()}.json"
+            fresh = tmp_path / f"{uuid.uuid4()}.csv"
+            unrelated = tmp_path / "notes.txt"
+            for p in (stale, fresh, unrelated):
+                p.write_text("x")
+            past = time.time() - 26 * 3600
+            os.utime(stale, (past, past))
 
-        deleted = exports_service.cleanup_expired_files()
+            deleted = exports_service.cleanup_expired_files()
 
-        assert deleted == 1
-        assert not stale.exists()
-        assert fresh.exists()
-        assert unrelated.exists()
+            assert deleted == 1
+            assert not stale.exists()
+            assert fresh.exists()
+            assert unrelated.exists()
+        finally:
+            shutil.rmtree(tmp_path, ignore_errors=True)
 
     @pytest.mark.skipif(os.name != "posix", reason="POSIX permission bits only")
     def test_export_dir_forced_owner_only(self, tmp_path, monkeypatch):

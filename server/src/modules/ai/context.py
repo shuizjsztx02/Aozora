@@ -32,10 +32,14 @@ class ProposalValidationContext:
     Both sets are stringified UUIDs to match the ActionProposal contract
     (``categoryId: string`` / ``accountId: string``). Empty sets are
     legal — they reject any ID (useful when no book is selected yet).
+
+    ``category_names`` maps category name → ID for T-M4-04e image parsing
+    (resolving LLM output category strings to authorised IDs).
     """
 
     category_ids: frozenset[str] = field(default_factory=frozenset)
     account_ids: frozenset[str] = field(default_factory=frozenset)
+    category_names: dict[str, str] = field(default_factory=dict)
 
 
 async def load_validation_context(
@@ -48,18 +52,20 @@ async def load_validation_context(
     Categories: owned by user AND (book-scoped to this book OR global).
     Accounts: owned by user (accounts are not book-scoped).
     """
-    cat_rows = await db.scalars(
-        select(Category.id).where(
+    cat_rows = await db.execute(
+        select(Category.id, Category.name).where(
             Category.owner_id == owner_id,
             (Category.book_id == book_id) | (Category.book_id.is_(None)),
         ),
     )
+    categories = cat_rows.all()
     acc_rows = await db.scalars(
         select(Account.id).where(Account.owner_id == owner_id),
     )
     return ProposalValidationContext(
-        category_ids=frozenset(str(cid) for cid in cat_rows.all()),
+        category_ids=frozenset(str(cid) for cid, _cname in categories),
         account_ids=frozenset(str(aid) for aid in acc_rows.all()),
+        category_names={cname: str(cid) for cid, cname in categories},
     )
 
 

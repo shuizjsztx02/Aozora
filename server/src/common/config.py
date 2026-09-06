@@ -152,6 +152,19 @@ class Settings(BaseSettings):
         gt=0,
         validation_alias=AliasChoices("AI_DAILY_QUOTA_GUEST", "ai_daily_quota_guest"),
     )
+    # T-M4-04e: vision model for image receipt parsing. Separate from the
+    # text model because VL models have different cost/latency profiles.
+    ai_vision_model: str = Field(
+        default="qwen-vl-max",
+        validation_alias=AliasChoices("AI_VISION_MODEL", "ai_vision_model"),
+    )
+    # Maximum image bytes to send to the vision model (4 MB). Larger images
+    # are downscaled before encoding. 0 = skip image parsing entirely.
+    ai_image_max_bytes: int = Field(
+        default=4 * 1024 * 1024,
+        ge=0,
+        validation_alias=AliasChoices("AI_IMAGE_MAX_BYTES", "ai_image_max_bytes"),
+    )
     # Cost accounting: price per 1M tokens in micro-CNY (1e-6 元).
     # 0 = not priced yet (until D-EXEC-04 confirms real rates).
     ai_price_per_1m_tokens: int = Field(

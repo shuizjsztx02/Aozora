@@ -62,6 +62,15 @@ class LLMProvider(Protocol):
         timeout: float,
     ) -> ProviderResult: ...
 
+    async def complete_with_images(
+        self,
+        messages: list[dict],
+        *,
+        model: str,
+        max_tokens: int,
+        timeout: float,
+    ) -> ProviderResult: ...
+
 
 class DashScopeProvider:
     """OpenAI-compatible ``POST {base_url}/chat/completions``."""
@@ -145,6 +154,63 @@ class DashScopeProvider:
             )
         except (ValueError, KeyError, IndexError, TypeError):
             # Malformed 200 body — treat as retryable provider fault.
+            raise ProviderError(status=200, retryable=True, reason="bad_response")
+
+    async def complete_with_images(
+        self,
+        messages: list[dict],
+        *,
+        model: str,
+        max_tokens: int,
+        timeout: float,
+    ) -> ProviderResult:
+        """Multimodal completion — messages may contain image_url content parts.
+
+        T-M4-04e: receipt/bill image parsing uses a vision model. The
+        OpenAI-compatible format accepts ``content`` as a list of parts::
+
+            [{"type": "text", "text": "..."},
+             {"type": "image_url", "image_url": {"url": "data:image/jpeg;base64,..."}}]
+
+        Same endpoint (``/chat/completions``), same error handling as
+        text ``complete()``.
+        """
+        payload = {"model": model, "messages": messages, "max_tokens": max_tokens}
+        try:
+            resp = await self._client.post(
+                self._url,
+                json=payload,
+                headers={"Authorization": f"Bearer {self._api_key}"},
+                timeout=timeout,
+            )
+        except httpx.TimeoutException:
+            raise ProviderError(status=None, retryable=False, reason="timeout")
+        except httpx.HTTPError:
+            raise ProviderError(status=None, retryable=True, reason="transport")
+
+        if resp.status_code != 200:
+            if resp.status_code == 429:
+                raise ProviderError(status=429, retryable=True, reason="http_429")
+            if resp.status_code >= 500:
+                raise ProviderError(
+                    status=resp.status_code, retryable=True, reason="http_5xx",
+                )
+            raise ProviderError(
+                status=resp.status_code, retryable=False, reason="http_4xx",
+            )
+
+        try:
+            body = resp.json()
+            content = body["choices"][0]["message"]["content"]
+            if not isinstance(content, str):
+                raise ProviderError(status=200, retryable=True, reason="bad_response")
+            usage = body.get("usage") or {}
+            return ProviderResult(
+                content=content,
+                prompt_tokens=int(usage.get("prompt_tokens", 0)),
+                completion_tokens=int(usage.get("completion_tokens", 0)),
+            )
+        except (ValueError, KeyError, IndexError, TypeError):
             raise ProviderError(status=200, retryable=True, reason="bad_response")
 
 

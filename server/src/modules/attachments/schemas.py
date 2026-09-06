@@ -4,16 +4,8 @@ from __future__ import annotations
 
 import uuid
 from datetime import datetime
-from enum import Enum
 
 from pydantic import BaseModel
-
-
-class AttachmentStatus(str, Enum):
-    PENDING = "pending"
-    PARSED = "parsed"
-    EXPIRED = "expired"
-    LINKED = "linked"
 
 
 class AttachmentResponse(BaseModel):

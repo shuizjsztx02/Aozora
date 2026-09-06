@@ -11,6 +11,7 @@ from sqlalchemy.ext.asyncio import (
     async_sessionmaker,
     create_async_engine,
 )
+from sqlalchemy.pool import StaticPool
 
 from src.common.config import get_config
 
@@ -25,10 +26,13 @@ def get_engine() -> AsyncEngine:
     global _engine
     if _engine is None:
         cfg = get_config()
-        _engine = create_async_engine(
-            cfg.database_url,
-            pool_pre_ping=True,
-        )
+        kwargs: dict = {"pool_pre_ping": True}
+        # In-memory SQLite needs StaticPool so every connection sees the
+        # same database (each new connection to :memory: would otherwise
+        # get a fresh, empty database).
+        if "sqlite" in cfg.database_url and ":memory:" in cfg.database_url:
+            kwargs["poolclass"] = StaticPool
+        _engine = create_async_engine(cfg.database_url, **kwargs)
     return _engine
 
 

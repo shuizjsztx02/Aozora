@@ -52,9 +52,9 @@ def _test_config():
 @pytest.fixture()
 async def client():
     """Return a ``TestClient`` wired to the test config."""
+    from src.common.database import get_engine
     from src.main import app
     from src.models.base import Base
-    from src.common.database import get_engine
 
     # Create all tables before starting the app to avoid "no such table" errors
     # during lifespan startup (e.g., attachment cleanup)

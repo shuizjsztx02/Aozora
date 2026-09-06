@@ -89,13 +89,53 @@ REPORT = PromptTemplate(
     max_tokens=1024,
 )
 
-REGISTRY: dict[str, PromptTemplate] = {t.task_id: t for t in (LEDGER_PARSE, REPORT)}
+# ── T-M4-04e: image receipt / bill parsing ──────────────────────────────
+
+IMAGE_RECEIPT_PARSE = PromptTemplate(
+    task_id="image_receipt_parse",
+    system_prompt=(
+        "你是记账应用的图片识别引擎。分析用户提供的小票、发票或账单图片，"
+        "识别其中的消费记录并解析为 JSON。\n"
+        "只输出 JSON 对象本身，不要输出解释、前后缀或 markdown 代码块。\n\n"
+        "输出格式（ActionProposal）：\n"
+        "{\n"
+        '  "action": "add_tx_batch",\n'
+        '  "proposalId": "img-<uuid4>",\n'
+        '  "confidence": 0.0到1.0的小数,\n'
+        '  "transactions": [\n'
+        "    {\n"
+        '      "type": "expense"或"income",\n'
+        '      "amountCents": 整数（分），\n'
+        '      "category": "分类名（如餐饮/交通/购物/娱乐/医疗/教育/日用/住房/通讯/服饰）",\n'
+        '      "note": "备注（商品名或商户名，无法识别时为空字符串）",\n'
+        '      "bizDate": "YYYY-MM-DD"（无法识别时为空字符串）\n'
+        "    }\n"
+        "  ]\n"
+        "}\n\n"
+        "规则：\n"
+        "1. 每笔消费/收入作为 transactions 数组中的一项\n"
+        "2. amountCents 必须是正整数（单位：分，1元=100分）\n"
+        "3. 如果图片中没有可识别的消费记录，返回 "
+        '{"action": "add_tx_batch", "proposalId": "", "confidence": 0, "transactions": []}\n'
+        "4. confidence 反映整体识别信心：清晰完整的小票 ≥0.9，模糊/部分遮挡 0.5-0.8，"
+        "无法识别 <0.3\n"
+        "5. 日期优先使用图片上的日期；无日期时留空字符串\n"
+        "6. 分类名使用中文，从常见分类中选择最匹配的"
+    ),
+    output_format="json",
+    max_tokens=2048,
+)
+
+REGISTRY: dict[str, PromptTemplate] = {t.task_id: t for t in (LEDGER_PARSE, REPORT, IMAGE_RECEIPT_PARSE)}
 
 # v1 public endpoint maps to exactly one task.
 INTERPRET_TASK = "ledger_parse"
 
 # v1 report task
 REPORT_TASK = "monthly_report"
+
+# T-M4-04e: image receipt parse task
+IMAGE_PARSE_TASK = "image_receipt_parse"
 
 
 def get_template(task_id: str) -> PromptTemplate:
@@ -107,4 +147,27 @@ def render_messages(tpl: PromptTemplate, user_input: str) -> list[dict[str, str]
     return [
         {"role": "system", "content": tpl.system_prompt},
         {"role": "user", "content": user_input},
+    ]
+
+
+def render_image_messages(
+    tpl: PromptTemplate,
+    image_data_url: str,
+    user_text: str = "",
+) -> list[dict]:
+    """Build multimodal messages with an image + optional text.
+
+    T-M4-04e: the user turn contains both an image (base64 data URL) and
+    an optional text instruction. The system turn remains text-only.
+    """
+    user_content: list[dict] = [
+        {"type": "image_url", "image_url": {"url": image_data_url}},
+    ]
+    if user_text:
+        user_content.append({"type": "text", "text": user_text})
+    else:
+        user_content.append({"type": "text", "text": "请识别这张图片中的消费记录。"})
+    return [
+        {"role": "system", "content": tpl.system_prompt},
+        {"role": "user", "content": user_content},
     ]

@@ -39,6 +39,7 @@ from .provider import LLMProvider, ProviderError, ProviderResult
 from .schemas import (
     AIInterpretRequest,
     AIInterpretResponse,
+    AIParseImageResponse,
     AIReportRequest,
     AIReportResponse,
     AIUsageInfo,
@@ -294,15 +295,20 @@ class AIService:
         # Fallback: JSON wrapped in a markdown fence, with optional preamble.
         fence = text.find("```")
         if fence != -1:
-            after_open = text.find("\n", fence)
-            if after_open != -1:
-                inner = text[after_open + 1:]
-                close = inner.find("```")
-                if close != -1:
-                    inner = inner[:close]
-                parsed = AIService._loads_json_object(inner.strip())
-                if parsed is not None:
-                    return parsed
+            # Skip opening fence + optional language tag.
+            after_fence = fence + 3
+            nl = text.find("\n", after_fence)
+            if nl != -1:
+                inner = text[nl + 1:]
+            else:
+                # N-4: fence and content on the same line (no newline after ```)
+                inner = text[after_fence:]
+            close = inner.find("```")
+            if close != -1:
+                inner = inner[:close]
+            parsed = AIService._loads_json_object(inner.strip())
+            if parsed is not None:
+                return parsed
 
         raise ValueError("model output is not a JSON object")
 
@@ -338,7 +344,7 @@ class AIService:
             + extra_prompt_tokens + extra_completion_tokens
         )
         price = self._cfg.ai_price_per_1m_tokens
-        cost = total_tokens * price // 1_000_000 if price else 0
+        cost = round(total_tokens * price / 1_000_000) if price else 0
         self._db.add(
             AIUsage(
                 user_id=user.id,
@@ -665,6 +671,41 @@ class AIService:
                     }
                 raise  # Should not happen — unique constraint fired but no row found
 
+        # ── T-M4-04e: Auto-link attachment to first transaction ────────
+        # If the proposal originated from image parsing, meta.attachmentId
+        # is set. Link the attachment to the first created transaction so
+        # the receipt is associated with the batch.
+        meta = proposal.get("meta") or {}
+        attachment_id_str = meta.get("attachmentId") if isinstance(meta, dict) else None
+        if attachment_id_str and transaction_ids:
+            try:
+                from src.modules.attachments.service import AttachmentService
+                att_service = AttachmentService(self._db)
+                await att_service.link_attachment(
+                    uuid.UUID(attachment_id_str),
+                    user.id,
+                    uuid.UUID(transaction_ids[0]),
+                )
+                logger.info(
+                    "Auto-linked attachment to transaction",
+                    extra={
+                        "request_id": request_id,
+                        "attachment_id": attachment_id_str,
+                        "transaction_id": transaction_ids[0],
+                    },
+                )
+            except Exception as exc:
+                # Best-effort: don't fail the batch if linking fails.
+                # Server cleanup will expire the attachment after 24h.
+                logger.warning(
+                    "Auto-link failed (non-fatal)",
+                    extra={
+                        "request_id": request_id,
+                        "attachment_id": attachment_id_str,
+                        "error": str(exc),
+                    },
+                )
+
         logger.info(
             "AI proposal executed",
             extra={
@@ -938,3 +979,230 @@ class AIService:
         # Store in narrative cache for future requests with same data (R-M4-09 fix)
         cache_key = _narrative_cache_key(fact_pack.book_id, fact_pack.period, fact_pack.data_hash)
         _narrative_cache_set(cache_key, narrative)
+
+    # -- T-M4-04e: image receipt parsing ------------------------------------
+
+    async def parse_image(
+        self,
+        user: User,
+        request_id: str,
+        attachment_id: uuid.UUID,
+        book_id: uuid.UUID,
+    ) -> AIParseImageResponse:
+        """Parse a receipt/bill image into an ActionProposal.
+
+        Flow:
+        1. Verify attachment ownership + status = PENDING.
+        2. Read image file → base64 data URL.
+        3. Send to vision model with IMAGE_RECEIPT_PARSE prompt.
+        4. Parse LLM output → resolve category names to IDs.
+        5. Update attachment status → PARSED.
+        6. Return complete ActionProposal.
+        """
+        import base64
+
+        from src.models.attachment import AttachmentStatus
+        from src.modules.attachments.service import AttachmentService, _get_upload_dir
+
+        from .prompts import IMAGE_PARSE_TASK, get_template, render_image_messages
+
+        tpl = get_template(IMAGE_PARSE_TASK)
+        self._check_rate_limit(user.id)
+        await self._check_daily_quota(user)
+
+        if self._provider is None:
+            self._log_failure(request_id, tpl, None, 0, "no_provider", None)
+            raise AppException(
+                503, "ai_unavailable", "AI service is temporarily unavailable",
+            )
+
+        # -- Load & verify attachment --
+        att_service = AttachmentService(self._db)
+        attachment = await att_service.get_attachment(attachment_id, user.id)
+        if attachment.status == AttachmentStatus.EXPIRED:
+            raise AppException(410, "attachment_expired", "Attachment has expired")
+        if attachment.status != AttachmentStatus.PENDING:
+            status_str = attachment.status.value if hasattr(attachment.status, 'value') else str(attachment.status)
+            raise AppException(
+                409, "attachment_not_pending",
+                f"Attachment status is '{status_str}', expected 'pending'",
+            )
+
+        # -- Read image file --
+        upload_dir = _get_upload_dir()
+        file_path = upload_dir / attachment.object_key
+        if not file_path.exists():
+            raise AppException(404, "file_missing", "Attachment file is missing on disk")
+
+        image_bytes = file_path.read_bytes()
+        max_bytes = self._cfg.ai_image_max_bytes
+        if max_bytes > 0 and len(image_bytes) > max_bytes:
+            # Skip vision call for oversized images — the model would
+            # reject or downscale anyway; better to fail fast.
+            raise AppException(
+                413, "image_too_large",
+                f"Image {len(image_bytes)} bytes exceeds vision limit {max_bytes}",
+            )
+        if max_bytes == 0:
+            raise AppException(
+                503, "image_parsing_disabled",
+                "Image parsing is disabled (ai_image_max_bytes=0)",
+            )
+
+        # -- Build data URL --
+        mime = attachment.mime_type or "image/jpeg"
+        b64 = base64.b64encode(image_bytes).decode("ascii")
+        data_url = f"data:{mime};base64,{b64}"
+
+        # -- Call vision model --
+        model = self._cfg.ai_vision_model
+        messages = render_image_messages(tpl, data_url)
+        started = time.perf_counter()
+
+        result: ProviderResult | None = None
+        output: dict | None = None
+        retry_prompt_tokens = 0
+        retry_completion_tokens = 0
+
+        for attempt in range(1, MAX_ATTEMPTS + 1):
+            try:
+                result = await self._provider.complete_with_images(
+                    messages,
+                    model=model,
+                    max_tokens=tpl.max_tokens,
+                    timeout=self._cfg.ai_timeout_seconds,
+                )
+            except ProviderError as exc:
+                if not exc.retryable or attempt >= MAX_ATTEMPTS:
+                    self._log_failure(request_id, tpl, model, attempt, exc.reason, started)
+                    raise AppException(
+                        503, "ai_unavailable", "AI service is temporarily unavailable",
+                    )
+                continue
+
+            try:
+                output = self._parse_json_output(result.content)
+                break
+            except ValueError:
+                retry_prompt_tokens += result.prompt_tokens
+                retry_completion_tokens += result.completion_tokens
+                if attempt >= MAX_ATTEMPTS:
+                    self._log_failure(request_id, tpl, model, attempt, "invalid_json", started)
+                    raise AppException(
+                        503, "ai_invalid_output",
+                        "AI service is temporarily unavailable",
+                    )
+                continue
+
+        assert result is not None and output is not None
+
+        # -- Record usage --
+        await self._record_usage(
+            user, result, model, request_id,
+            extra_prompt_tokens=retry_prompt_tokens,
+            extra_completion_tokens=retry_completion_tokens,
+        )
+        self._log_success(request_id, tpl, model, result, started)
+        self._log_slow_if_needed(request_id, tpl, model, started)
+
+        # -- Extract transactions from LLM output --
+        raw_transactions = output.get("transactions") or []
+        confidence = output.get("confidence", 0)
+        proposal_id = output.get("proposalId", "") or f"img-{uuid.uuid4()}"
+
+        if not isinstance(confidence, (int, float)):
+            confidence = 0
+        confidence = float(max(0, min(1, confidence)))
+
+        # -- Resolve category names to IDs --
+        from .context import load_validation_context
+        ctx = await load_validation_context(self._db, user.id, book_id)
+        resolved_txs = self._resolve_categories(raw_transactions, ctx)
+
+        # -- Build complete ActionProposal --
+        # T-M4-04e: meta.attachmentId lets the client link transactions
+        # to this attachment after executing the batch.
+        proposal = {
+            "action": "add_tx_batch",
+            "proposalId": proposal_id,
+            "message": f"图片识别到 {len(resolved_txs)} 笔交易",
+            "confidence": confidence,
+            "transactions": resolved_txs,
+            "warnings": [],
+            "requiresConfirmation": True,
+            "meta": {
+                "source": "image_parse",
+                "attachmentId": str(attachment_id),
+            },
+        }
+
+        # -- Update attachment status → PARSED --
+        attachment.status = AttachmentStatus.PARSED
+        attachment.expires_at = None  # parsed attachments don't expire
+        await self._db.flush()
+
+        logger.info(
+            "AI image parse ok",
+            extra={
+                "request_id": request_id,
+                "attachment_id": str(attachment_id),
+                "transaction_count": len(resolved_txs),
+                "confidence": confidence,
+            },
+        )
+
+        return AIParseImageResponse(
+            request_id=request_id,
+            proposal=proposal,
+            attachment_id=str(attachment_id),
+            confidence=confidence,
+            usage=AIUsageInfo(
+                prompt_tokens=result.prompt_tokens + retry_prompt_tokens,
+                completion_tokens=result.completion_tokens + retry_completion_tokens,
+            ),
+        )
+
+    @staticmethod
+    def _resolve_categories(
+        raw_transactions: list,
+        ctx: "ProposalValidationContext",
+    ) -> list[dict]:
+        """Resolve category names from LLM output to category IDs.
+
+        Uses fuzzy matching: the LLM may output "餐饮" while the user's
+        category is named "餐饮" (exact) or "餐饮食谱" (prefix match).
+        Unresolved categories fall back to the first expense category
+        in the context (if any), or empty string.
+        """
+        if not raw_transactions:
+            return []
+
+        # Build name→id lookup (exact match first)
+        name_to_id: dict[str, str] = {}
+        for cat_name, cat_id in ctx.category_names.items():
+            name_to_id[cat_name] = cat_id
+            # Also add common aliases (strip whitespace)
+            name_to_id[cat_name.strip()] = cat_id
+
+        resolved = []
+        for tx in raw_transactions:
+            if not isinstance(tx, dict):
+                continue
+            cat_name = str(tx.get("category", "")).strip()
+            cat_id = name_to_id.get(cat_name, "")
+
+            # Fuzzy fallback: prefix match
+            if not cat_id and cat_name:
+                for name, cid in name_to_id.items():
+                    if name.startswith(cat_name) or cat_name.startswith(name):
+                        cat_id = cid
+                        break
+
+            resolved.append({
+                "type": tx.get("type", "expense"),
+                "amountCents": int(tx.get("amountCents", 0)),
+                "categoryId": cat_id,
+                "note": str(tx.get("note", "")),
+                "bizDate": str(tx.get("bizDate", "")),
+            })
+        return resolved

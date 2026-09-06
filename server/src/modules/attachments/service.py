@@ -145,6 +145,7 @@ class AttachmentService:
             select(Transaction).join(Book, Transaction.book_id == Book.id).where(
                 Transaction.id == transaction_id,
                 Book.owner_id == user_id,
+                Book.deleted_at.is_(None),
                 Transaction.deleted_at.is_(None),
             )
         )
@@ -264,11 +265,14 @@ class AttachmentService:
     # List / get / download
     # ------------------------------------------------------------------
 
-    async def list_attachments(self, user_id: uuid.UUID) -> list[Attachment]:
+    async def list_attachments(
+        self, user_id: uuid.UUID, *, limit: int = 100,
+    ) -> list[Attachment]:
         result = await self.db.execute(
             select(Attachment)
             .where(Attachment.user_id == user_id)
             .order_by(Attachment.created_at.desc())
+            .limit(limit)
         )
         rows = list(result.scalars().all())
         for row in rows:
@@ -278,9 +282,9 @@ class AttachmentService:
     async def get_attachment(
         self, attachment_id: uuid.UUID, user_id: uuid.UUID,
     ) -> Attachment:
-        attachment = await self._get_owned(attachment_id, user_id)
-        await self._mark_expired_if_needed(attachment)
-        return attachment
+        # _get_owned already calls _mark_expired_if_needed, so no
+        # redundant flip is needed here (R-M4-45 fix).
+        return await self._get_owned(attachment_id, user_id)
 
     async def get_attachment_file(
         self, attachment_id: uuid.UUID, user_id: uuid.UUID,

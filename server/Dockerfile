@@ -30,9 +30,11 @@ WORKDIR /app
 COPY --from=builder /install /usr/local
 
 COPY server/src/ ./src/
-# R-M4-39: validator.py resolves the schema via parents[4] / "contracts",
-# so the directory must exist at /app/contracts inside the container.
-COPY contracts/ ./contracts/
+# R-M4-39: validator.py resolves the schema via parents[4] / "contracts".
+# With WORKDIR /app, parents[4] == "/", so contracts must live at /contracts
+# (absolute path). Using ./contracts/ would place them at /app/contracts and
+# cause FileNotFoundError on the first /ai/validate call.
+COPY contracts/ /contracts/
 
 RUN chown -R aozora:aozora /app
 USER aozora
