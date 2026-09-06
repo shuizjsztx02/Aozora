@@ -3,7 +3,7 @@
  */
 
 import { describe, it, expect, beforeEach } from 'vitest'
-import { renderHook, act } from '@testing-library/react'
+import { renderHook } from '@testing-library/react'
 import { useReducedMotion, useLowPerformance } from '../../design/a11y'
 
 describe('useReducedMotion', () => {
@@ -28,7 +28,8 @@ describe('useLowPerformance', () => {
   })
 
   it('returns true when hardwareConcurrency <= 2', () => {
-    const nav = navigator as Record<string, unknown>
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const nav = navigator as any
     const originalConcurrency = nav.hardwareConcurrency
     Object.defineProperty(nav, 'hardwareConcurrency', { value: 2, configurable: true })
     try {
@@ -41,7 +42,8 @@ describe('useLowPerformance', () => {
   })
 
   it('returns true when deviceMemory <= 2', () => {
-    const nav = navigator as Record<string, unknown>
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const nav = navigator as any
     const originalMemory = nav.deviceMemory
     Object.defineProperty(nav, 'deviceMemory', { value: 2, configurable: true })
     try {
