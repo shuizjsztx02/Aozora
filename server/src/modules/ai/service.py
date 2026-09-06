@@ -819,7 +819,7 @@ class AIService:
         context = build_context_dict(fact_pack)
         context_str = json.dumps(context, ensure_ascii=False, indent=2)
         user_input = (
-            f"请根据以下我本月（{fact_pack.period}）的财务数据生成月度总结。\n\n"
+            f"请根据以下我{fact_pack.period}月度的财务数据生成月度总结。\n\n"
             f"事实数据：\n```json\n{context_str}\n```"
         )
         messages = render_messages(tpl, user_input)
@@ -838,7 +838,7 @@ class AIService:
             except ProviderError as exc:
                 if not exc.retryable or attempt >= MAX_ATTEMPTS:
                     self._log_failure(request_id, tpl, model, attempt, exc.reason, started)
-                    return  # No narrative, but fact pack is still returned
+                    return  # No narrative, no provider result → no usage to record
                 continue
 
             try:
@@ -849,10 +849,16 @@ class AIService:
                     self._log_failure(
                         request_id, tpl, model, attempt, "invalid_json", started,
                     )
-                    return
+                    return  # No parseable result → no usage to record
                 continue
 
         assert result is not None and output is not None
+
+        # R-M4-10 fix: record usage immediately after successful provider call.
+        # Even if verification fails, tokens were consumed and must be tracked.
+        await self._record_usage(user, result, model, request_id)
+        self._log_success(request_id, tpl, model, result, started)
+        self._log_slow_if_needed(request_id, tpl, model, started)
 
         # Number verification
         errors = verify_narrative(output, fact_pack)
@@ -869,13 +875,8 @@ class AIService:
                     "duration_ms": round((time.perf_counter() - started) * 1000, 2),
                 },
             )
-            # Security event: numbers don't match, discard narrative
+            # Usage already recorded above; discard narrative only
             return
-
-        # Success path
-        await self._record_usage(user, result, model, request_id)
-        self._log_success(request_id, tpl, model, result, started)
-        self._log_slow_if_needed(request_id, tpl, model, started)
 
         narrative = output.get("narrative", "")
         response.narrative = narrative

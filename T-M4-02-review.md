@@ -428,3 +428,176 @@ val input = p.optString("input", null)
 建议后续迭代中优先补充：
 1. use-assistant.ts 状态机测试（T-3，最复杂的新代码）
 2. 低置信无 token 拒绝测试（S-M2，最关键的安全门控）
+
+---
+
+## 📜 审查与修复历史
+
+### 第一轮审查 — 初次代码审查
+
+**日期**: 2026-09-06
+**范围**: T-M4-02a（服务端验证链）+ T-M4-02b（批量执行）+ T-M4-02c（客户端助手 UI）
+**审查方式**: 逐文件代码走读 + 契约一致性交叉比对
+
+**发现 19 个问题**:
+
+| 级别 | 数量 | 问题 ID |
+|------|------|---------|
+| 🔴 Critical | 3 | S-C1, C-C1, C-C2 |
+| 🟠 High | 4 | S-C2, S-H1, C-B1, C-B2 |
+| 🟡 Medium | 7 | S-M1, S-M3, S-M4, C-M1, C-M2, C-M3, C-M4 |
+| 🔵 Test | 5 | T-1, T-2, T-3, T-4, S-M2 |
+
+**关键发现**:
+- **S-C1**（最严重）: Python 对缺失 categoryId 放行 vs TS 拒绝 → 零写库承诺破裂
+- **C-C1**: undo_window 期间新提交不清理 timer → 状态机竞争，phase 在 idle/confirming 间抖动
+- **C-C2**: setInterval/setTimeout 无 useEffect 清理 → 组件卸载后内存泄漏
+- **S-H1**: proposalId 无 maxLength → DB String(64) 溢出 → 幂等性失效
+- **T-1**: 测试期望 31 个 Bridge 命令，Kotlin 实际 35 个（缺 ai.interpret/validate/execute + ai.report）
+
+**审查结论**: 需修复所有 Critical 和 High 后方可合入
+
+---
+
+### 修复阶段 — 13 项修复实施
+
+**日期**: 2026-09-06
+**修复人**: 开发团队
+**修复范围**: Critical 3 项 + High 4 项 + Medium 5 项 + Test 1 项 = 13 项
+
+**服务端修复（6 项）**:
+
+| ID | 修复内容 | 文件 | 行号 |
+|----|----------|------|------|
+| S-C1 | categoryId 缺失视为幻觉，与 TS 对齐 | `service.py` | 452-456 |
+| S-C2 | confirmation_token 改为 `default=""` | `schemas.py` | 87 |
+| S-H1 | proposalId 增加 `maxLength: 64` | `schema.json` | 12 |
+| S-M1 | `_count_transactions` 用 `func.count()` 替代 `scalar()` | `test_ai_proposal_execution.py` | 99-111 |
+| C-M1 | 分类子串匹配按长度降序排序 | `ai-proposal-builder.ts` | 125-128 |
+| C-M4 | 缺失字段返回 `invalid_input` 而非 `internal_error` | `AozoraBridge.kt` | 482-483, 503-508 |
+
+**客户端修复（7 项）**:
+
+| ID | 修复内容 | 文件 | 行号 |
+|----|----------|------|------|
+| C-C1 | submitInput 开头清理旧 undo timer | `use-assistant.ts` | 109-112 |
+| C-C2 | useEffect 清理 undoTimerRef + slowTimerRef | `use-assistant.ts` | 76-80 |
+| C-B1 | undo 失败时展示错误消息 | `use-assistant.ts` | 326-332 |
+| C-B2 | 无效金额显示行内校验错误 | `ConfirmationCard.tsx` | 45, 51-53 |
+| C-M2 | `Math.round(parseFloat * 100)` 避免浮点精度 | `ConfirmationCard.tsx` | 49 |
+| C-M3 | "Xs 后可撤销" → "Xs 内可撤销" | `UndoToast.tsx` | 33 |
+| C-B3 | isSubmittingRef 互斥防并发提交 | `use-assistant.ts` | 105-106 |
+
+**测试修复（1 项）**:
+
+| ID | 修复内容 | 文件 | 行号 |
+|----|----------|------|------|
+| T-1 | 期望命令数从 31 更新为 35 | `native-bridge.test.ts` | 40-82 |
+
+---
+
+### 第二轮审查 — 修复验证
+
+**日期**: 2026-09-06
+**范围**: 逐项验证 13 项修复的正确性
+**审查方式**: 阅读修复代码 + 运行测试 + 契约一致性重检
+
+**验证结果**:
+
+| 级别 | 总数 | 已验证 | 验证方式 |
+|------|------|--------|----------|
+| Critical | 3 | 3 ✅ | 代码走读 + 测试通过 |
+| High | 4 | 4 ✅ | 代码走读 + 测试通过 |
+| Medium | 7 | 5 ✅ | 代码走读 + 测试通过 |
+| Test | 5 | 1 ✅ | 测试通过 |
+
+**契约一致性重检**:
+- ✅ categoryId: Python/TS/Service 三方对齐（有 context 时均拒绝缺失）
+- ✅ proposalId: schema maxLength: 64 = DB String(64)
+- ✅ confirmation_token: schema default="" + 低置信时逻辑校验
+- ✅ AI bridge 命令: TS 35 个 = Kotlin 35 个
+
+**审查结论**: 所有 Critical/High 已修复，测试全部通过，可以合入
+
+---
+
+### CI 检查 — 合入前验证
+
+**日期**: 2026-09-06
+
+**服务端**:
+```
+$ ruff check src/ tests/
+All checks passed!
+
+$ pytest tests/ -q
+93 passed (含 T-M4-02 相关 45 个)
+```
+
+**客户端**:
+```
+$ npx tsc --noEmit
+(no errors)
+
+$ npx vitest run
+Test Files  22 passed (22)
+Tests       398 passed (398)
+```
+
+**ruff 配置调整**:
+- 添加 `[tool.ruff]` 到 `pyproject.toml`
+- 忽略 E402（循环依赖延迟导入）、F811（pytest fixture 重定义）
+- 自动修复 223 个 lint 问题（import 排序、未使用导入、类型注解引号等）
+- 修复 `service.py` 中 `ProposalValidationContext` 和 `FactPack` 类型导入（TYPE_CHECKING 块）
+
+---
+
+### Git 提交
+
+**日期**: 2026-09-06
+**提交哈希**: `c101afb`
+**提交信息**: `feat(T-M4-02): AI 助手安全执行链路完整实现 + 审查通过`
+
+**变更统计**:
+- 170 files changed
+- 15,855 insertions(+)
+- 266 deletions(-)
+
+**提交内容**:
+- T-M4-02 审查文档（review + summary）
+- T-M4-02a/02b/02c/02d 完成文档
+- 服务端 AI 模块（validator, context, service, routes, schemas, fact_pack, narrative）
+- 客户端助手功能（use-assistant, AssistantPage, ConfirmationCard, UndoToast）
+- Kotlin Bridge（AiGatewayClient + 3 个 AI handler）
+- TypeScript Bridge（3 个 AI 命令 + 25s 超时）
+- 测试文件（validation/execution/parity/builder/bridge）
+- 数据库迁移（0007/0008/0009）
+- CI 配置 + ruff 配置
+
+**推送状态**: 本地已提交，待网络恢复后推送至 GitHub
+
+---
+
+### 时间线汇总
+
+```
+2026-09-06  ──  子任务实现完成（T-M4-02a/02b/02c/02d）
+    │
+    ▼
+2026-09-06  ──  第一轮审查：发现 19 个问题（3 Critical + 4 High + 7 Medium + 5 Test）
+    │
+    ▼
+2026-09-06  ──  修复阶段：实施 13 项修复（3C + 4H + 5M + 1T）
+    │
+    ▼
+2026-09-06  ──  第二轮审查：逐项验证修复，契约一致性重检
+    │
+    ▼
+2026-09-06  ──  CI 检查：ruff ✅ / pytest 93 ✅ / tsc ✅ / vitest 398 ✅
+    │
+    ▼
+2026-09-06  ──  Git 提交：c101afb（170 files, +15855/-266）
+    │
+    ▼
+    待推送至 GitHub
+```

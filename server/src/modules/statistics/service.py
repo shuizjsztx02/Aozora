@@ -40,7 +40,7 @@ class StatisticsService:
     """Authoritative aggregation from Transaction table.
 
     Statistics口径：只统计 deleted_at IS NULL 的交易。
-    balance = max(0, totalIncome - totalExpense)。
+    balance = totalIncome - totalExpense（允许负值，表示赤字）。
     """
 
     def __init__(self, db: AsyncSession):
@@ -153,7 +153,7 @@ class StatisticsService:
             period=period,
             total_income=total_income,
             total_expense=total_expense,
-            balance=max(0, total_income - total_expense),
+            balance=total_income - total_expense,
             transaction_count=int(totals.transaction_count),
             expense_by_category=expense_by_category,
             income_by_category=income_by_category,
@@ -223,7 +223,7 @@ class StatisticsService:
                 period=row.period,
                 total_income=int(row.total_income),
                 total_expense=int(row.total_expense),
-                balance=max(0, int(row.total_income) - int(row.total_expense)),
+                balance=int(row.total_income) - int(row.total_expense),
                 transaction_count=int(row.transaction_count),
             )
             for row in rows

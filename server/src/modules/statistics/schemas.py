@@ -18,13 +18,13 @@ class CategoryStats(BaseModel):
 class MonthlyStats(BaseModel):
     """Monthly statistics for a book.
 
-    balance = max(0, total_income - total_expense) per data-model.md.
+    balance = total_income - total_expense（允许负值表示赤字）。
     """
     book_id: uuid.UUID
     period: str  # YYYY-MM
     total_income: int = Field(ge=0)
     total_expense: int = Field(ge=0)
-    balance: int = Field(ge=0)
+    balance: int  # can be negative (deficit)
     transaction_count: int
     expense_by_category: list[CategoryStats]
     income_by_category: list[CategoryStats]
@@ -35,7 +35,7 @@ class TrendPoint(BaseModel):
     period: str
     total_income: int = Field(ge=0)
     total_expense: int = Field(ge=0)
-    balance: int = Field(ge=0)
+    balance: int  # can be negative (deficit)
     transaction_count: int
 
 
