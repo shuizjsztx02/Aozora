@@ -1,5 +1,6 @@
 package com.aozora.app.reminder
 
+import android.annotation.SuppressLint
 import android.app.NotificationChannel
 import android.app.NotificationManager
 import android.app.PendingIntent
@@ -25,6 +26,7 @@ import com.aozora.app.R
  */
 class ReminderReceiver : BroadcastReceiver() {
 
+    @SuppressLint("MissingPermission") // hasNotificationPermission 已在上方检查
     override fun onReceive(context: Context, intent: Intent) {
         // AlarmManager 为单次闹钟：先登记下一次触发。
         // 直接以 applicationContext 重建调度器（状态在 SharedPreferences），

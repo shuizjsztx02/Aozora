@@ -69,8 +69,9 @@ export const BridgeCommands = {
   VOICE_START_RECORDING: 'voice.startRecording',
   VOICE_STOP_RECORDING: 'voice.stopRecording',
 
-  // T-M4-04d 占位：图片
+  // T-M4-04d: 图片链路
   IMAGE_PICK: 'image.pick',
+  IMAGE_DELETE: 'image.delete',
 } as const
 
 export type BridgeCommandName = typeof BridgeCommands[keyof typeof BridgeCommands]
@@ -308,7 +309,7 @@ export interface AiReportResponse {
 
 // ─── T-M4-04a: 权限管理类型 ───
 
-export type PermissionType = 'RECORD_AUDIO' | 'CAMERA' | 'READ_MEDIA_IMAGES'
+export type PermissionType = 'RECORD_AUDIO' | 'CAMERA' | 'READ_MEDIA_IMAGES' | 'POST_NOTIFICATIONS'
 
 export type PermissionStatus = 'not_requested' | 'granted' | 'denied' | 'permanently_denied'
 
@@ -323,4 +324,26 @@ export interface PermissionStatusData {
 export interface PermissionResultEvent {
   permission: PermissionType
   status: PermissionStatus
+}
+
+// ─── T-M4-04d: 图片链路类型 ───
+
+export type ImageSource = 'camera' | 'gallery'
+
+export interface ImagePickOptions {
+  source: ImageSource
+  /** 压缩质量 1-100（默认 80）。 */
+  quality?: number
+}
+
+export interface ImagePickResult {
+  attachmentId: string
+  mimeType: string
+  fileSize: number
+}
+
+/** 上传进度推送（Android 通过 window.__aozoraImageProgress__ 推送）。 */
+export interface ImageProgressEvent {
+  sent: number
+  total: number
 }
