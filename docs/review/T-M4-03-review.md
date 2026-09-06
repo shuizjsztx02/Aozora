@@ -1,0 +1,196 @@
+# T-M4-03 审查报告：AI 查询与洞察
+
+- **审查日期：** 2026-09-06（第 2 轮复审）
+- **范围：** T-M4-03a（事实包服务）+ T-M4-03b（叙述生成与数字校验）的服务端实现、测试与交付声称。T-M4-03c 未开始，不在本轮范围。
+- **基线：** HEAD `3e511ed` + 工作树未提交的 M4 改动（`server/src/modules/ai/` 整目录 untracked，与 R-M4-01 所述状态一致）。
+- **模式：** 只读 Review（未修改任何代码/测试/配置；仅更新本审查文档与任务状态文档）。
+- **编号说明：** 沿用 M4 连续编号，本轮新增 R-M4-08 ~ R-M4-15（R-M4-01~07 见 `T-M4-01-review.md`）。
+
+---
+
+## 一、实测结果（本轮实际运行）
+
+| 检查项 | 命令 | 结果 |
+|---|---|---|
+| 任务级测试 | `pytest tests/test_fact_pack.py tests/test_narrative_report.py -q` | **28 passed**（13+15，与实现总结声称一致） |
+| 全量服务端测试 | `pytest tests/ --tb=short -q` | **366 passed, 1 skipped, 1 error**；error 为 `test_stats_exports.py::test_startup_cleanup_removes_stale_files` 的 Windows 临时目录 `PermissionError`（fixture setup 阶段，环境问题，与 T-M4-03 无关，单独重跑同样 error） |
+| Lint（CI 门禁） | `ruff check src/ tests/` | **无法执行**——本机未安装 ruff 且 `pyproject.toml` 未声明（沿用 R-M4-04，未重复建项） |
+| 远端 CI | — | 本轮未推送代码，无对应远端运行；审查文档提交后单独确认 |
+
+> 注：`T-M4-03-final-summary.md` 写"297 个集成测试全部通过"，实测当前为 366 passed（数字过期，见 R-M4-13）。
+
+## 二、第一轮审查问题的修复核验
+
+第一轮审查（本文档第五节，历史保留）提出 5 项问题；实现方在 `T-M4-03b-code-review-improvements.md` 中声称处置如下。本轮逐项对照代码核验：
+
+| 原问题 | 声称处置 | 核验结果 |
+|---|---|---|
+| P2 `build_context_dict`/`_build_lookup` 代码重复 | 已重构复用 | ✅ **属实**——`narrative.py:151-168` `_build_lookup` 复用 `build_context_dict` 后过滤数值字段 |
+| P2 `_find_undeclared_numbers` 将 lookup 值全部视为已声明 | 已文档化 | ✅ **属实**——`narrative.py:180-190` docstring 明确说明设计意图与年份误报局限 |
+| P3 `balance = max(0, ...)` 掩盖赤字 | 已修复为允许负余额 | ⚠️ **部分修复，且引入新 P1**——顶层 balance 已放开（`fact_pack.py:205-206`），但 `trend` 内 balance 仍 `max(0, ...)`（`fact_pack.py:497`）；且与权威口径 `data-model.md` 冲突 → 立为 **R-M4-08** |
+| P3 缺 mock provider 端到端叙述测试 | 🚫 取消（复杂度高） | ❌ **风险已兑现**——正因没有 mock provider 测试，"同数据不重复调 LLM"的验收缺口（R-M4-09）与降级路径漏计费用（R-M4-10）未被任何测试暴露；现有"缓存行为"测试在无 provider 下恒过 |
+| P3 年份误报 | 已文档化 | ✅ **属实**——同第 2 项 docstring |
+
+## 三、本轮新登记问题
+
+### 🔴 R-M4-08（P1 · 正确性/契约）— balance 口径与权威数据模型冲突，破坏对账不变量
+
+- **ID：** R-M4-08
+- **级别：** P1
+- **类别：** 正确性 / 契约一致性
+- **状态：** 未修复
+- **文件与位置：** `server/src/modules/ai/fact_pack.py:205-206`（顶层 balance 未 clamp）、`fact_pack.py:497`（trend balance 仍 clamp）、对照 `server/src/modules/statistics/service.py:156`、`statistics/schemas.py:27,38`（`Field(ge=0)`）、`docs/architecture/data-model.md:8`
+- **问题与触发条件：** `data-model.md` 明文规定："`MonthlyStats.balance = max(0, totalIncome − totalExpense)`。`MoneyCents` 禁止负值，赤字不存入 balance，由展示层推导。客户端统计、服务端统计与导出必须使用同一口径"。第一轮审查后，实现方将事实包顶层 balance 改为允许负值（`balance = total_income - total_expense`），但：① 未先修改 `data-model.md` 与 statistics 口径（违反"文档前置"）；② statistics API 仍返回 clamp 后余额，赤字月份 `/ai/report.balance ≠ /statistics/monthly.balance`，直接破坏 T-M4-03a 验收标准"对账不变量：事实包数字 == 统计 API 输出"；③ 同一响应内 `trend[-1].balance`（clamp）与顶层 `balance`（不 clamp）在赤字月互相矛盾。
+- **证据或复现命令：** 代码对照即可确认（上行文件:行号）。另：`T-M4-03b-code-review-improvements.md` 第 3 节声称"与 StatisticsService 的设计保持一致（该服务也使用相同口径）"——**该声明不实**，statistics 从未移除 `max(0, ...)`。
+- **影响：** 客户端报表页若同时消费统计 API 与 /ai/report，赤字月份两处余额数字不一致，用户可见矛盾；对账不变量失守。
+- **修复建议：** 二选一，且必须文档先行：(a) 回滚为 `max(0, ...)`，与 data-model.md/statistics 对齐，赤字信息由 LLM 通过 `total_income/total_expense` 对比表达；(b) 若产品确认放开负余额，先修订 `data-model.md`、`statistics`（含 `Field(ge=0)` 约束）与导出，再统一事实包顶层与 trend 两处口径。
+- **复验方法：** 构造支出>收入的赤字月数据，断言 `/ai/report` 的 `balance`、`trend[-1].balance` 与 `/statistics/monthly` 的 `balance` 三者口径一致；新增回归测试。
+
+### 🔴 R-M4-09（P1 · 正确性/成本）— "同数据不重复调 LLM、不重复计费"未实现，文档声称已实现
+
+- **ID：** R-M4-09
+- **级别：** P1
+- **类别：** 正确性 / 成本控制 / 文档失真
+- **状态：** 未修复
+- **文件与位置：** `server/src/modules/ai/service.py:595-678`（`generate_report` 无任何叙述缓存判断）、`service.py:765`（`narrative_cached` 硬编码 False）、对照 `routes.py:138-139`（docstring 声称 "same data_hash returns cached narrative"）、`schemas.py:169-172`
+- **问题与触发条件：** T-M4-03a 交接产物明确要求"数据哈希缓存（同数据不重复调 LLM、不重复计费）"，APP-CONTEXT T-M4-03 验收要求"数据未变不重复计费"。实际实现：只要 provider 存在，每次 `POST /ai/report` 都会调用 LLM 并产生计费；`data_hash` 仅用于事实包对象缓存，而该缓存在**全部 DB 查询完成之后**才检查（`fact_pack.py:236-240`），只节省 dataclass 构造。`narrative_cached` 恒为 False，routes/schemas 的 docstring 描述了不存在的行为。全仓库 grep 确认无其他叙述缓存实现。
+- **证据或复现命令：** `grep -rn "narrative_cached" server/src server/tests` → 仅 schema 默认值与 service 恒 False 赋值两处；配置 provider 后对同一 book/period 连续两次 `POST /ai/report`，两次均产生 provider 调用与 AIUsage 记录（现有测试无 provider，无法暴露——见第二节第 4 行）。
+- **影响：** 直接违反验收标准；每次报表页刷新都重复计费，guest 日配额被同一份未变数据快速耗尽。
+- **修复建议：** 在 `generate_report` 中以 `(book_id, data_hash)` 为键缓存已验证通过的 narrative（内存 TTL 即可，与事实包缓存同规格）；命中时直接填充 `response.narrative` 并置 `narrative_cached=True`，不调用 provider、不记 AIUsage。同步补 mock provider 测试：同 hash 第二次请求 `provider.complete` 调用数为 0。
+- **复验方法：** mock provider 下连续两次同数据请求，断言第二次 `complete` 未被调用、`narrative_cached == True`、AIUsage 仅 1 行。
+
+### 🟡 R-M4-10（P2 · 可靠性/审计）— 校验失败与降级路径不记录已消耗的 tokens，guest 配额可被绕过
+
+- **ID：** R-M4-10
+- **级别：** P2
+- **类别：** 可靠性 / 成本审计
+- **状态：** 未修复
+- **文件与位置：** `server/src/modules/ai/service.py:722-757`（ProviderError 降级 return、校验失败 return 均不经过 `_record_usage`；仅 760 行成功路径记录）
+- **问题与触发条件：** `_generate_narrative` 中 LLM 已被真实调用并消耗 tokens 后，若数字校验失败（`number_verification_failed`）或重试后仍 ProviderError，函数直接 return，响应仍以 200 提交（会话不回滚）。`interpret()` 的"失败路径不记录（会话回滚丢弃）"理由（`service.py:240-246` docstring）在此不成立。
+- **证据或复现命令：** 代码路径分析；mock provider 返回篡改数字的输出，断言 AIUsage 行数——当前实现为 0 行。
+- **影响：** ① provider 成本黑洞：校验失败率越高，账外消耗越大，且 T-M4-03b 交接产物明确要求"AIUsage 记录"；② `_check_daily_quota` 以 AIUsage 行计数，反复触发校验失败的 guest 用户可无限消耗 tokens 而不耗尽配额（与 R-M4-06 同族但路径不同：R-M4-06 是重试成功路径漏计首次 tokens，本项是降级路径整体不计）。
+- **修复建议：** 只要 provider 实际返回过 result，无论校验是否通过都调用 `_record_usage`；校验失败时可另加标记字段/日志区分。
+- **复验方法：** mock provider 输出篡改数字 → 断言 AIUsage 新增 1 行且响应 narrative 为 null。
+
+### 🟡 R-M4-11（P2 · 测试）— 对账不变量"事实包数字 == 统计 API 输出"无自动化守卫
+
+- **ID：** R-M4-11
+- **级别：** P2
+- **类别：** 测试 / 可维护性
+- **状态：** 未修复
+- **文件与位置：** `server/tests/test_fact_pack.py`（全文无与 /statistics 的对比断言）；`fact_pack.py:432`（仅从 statistics 导入 `_YearMonth`，聚合逻辑为独立重实现）
+- **问题与触发条件：** T-M4-03a 最低验证明确要求"对账不变量：事实包数字 == 统计 API 输出"。事实包没有复用 `StatisticsService`（交接产物写"复用 statistics 模块"，实际只复用了 `_YearMonth` SQL 函数），月度聚合/趋势/分类占比均为平行实现，且没有任何测试将两者输出对账。R-M4-08 的口径漂移正是该守卫缺失的直接实例。
+- **证据或复现命令：** `grep -n "statistics\|/stats" server/tests/test_fact_pack.py` → 无结果。
+- **影响：** 两套聚合实现随时间漂移无人发现；对账不变量仅存在于文档。
+- **修复建议：** 新增 parity 测试：同一账本同一 period 下 `/ai/report` 的 total_income/total_expense/balance/分类合计/趋势与 `/statistics` 对应端点逐项相等（参照 `test_ai_proposal_parity.py` 的模式）；或让 FactPackService 直接调用 StatisticsService。
+- **复验方法：** parity 测试入 CI 并通过；人为改动任一侧口径应使测试变红。
+
+### 🟢 R-M4-12（P3 · 正确性）— 事实包缓存在 TTL 内可返回陈旧的非哈希字段
+
+- **ID：** R-M4-12
+- **级别：** P3
+- **类别：** 正确性
+- **状态：** 未修复
+- **文件与位置：** `server/src/modules/ai/fact_pack.py:134-166`（hash 覆盖范围）、`fact_pack.py:236-240`（缓存检查在全部查询之后）
+- **问题与触发条件：** `data_hash` 不覆盖 `transaction_count`、最大单笔的 `id/note/biz_date`、分类名称。TTL（300s）内用户仅修改交易备注/分类名（金额不变）或发生"总额不变的拆分合并"时，hash 相同 → `build()` 丢弃刚查出的新数据，返回缓存中的旧 FactPack，LLM 与响应看到陈旧 note/count。
+- **证据或复现命令：** 代码路径分析；复现需两次请求间改备注不改金额（现有测试未覆盖）。
+- **影响：** 5 分钟窗口内的小概率数据陈旧；金额类字段不受影响（均入 hash）。
+- **修复建议：** 缓存命中仅用于"是否跳过 LLM 调用"的判定（配合 R-M4-09 的叙述缓存），FactPack 本身始终用当次查询结果构造；或将全部字段纳入 hash。
+- **复验方法：** 同数据改备注后再次请求，断言响应中 note 为新值。
+
+### 🟢 R-M4-13（P3 · 文档）— 交付文档与实现多处不符
+
+- **ID：** R-M4-13
+- **级别：** P3
+- **类别：** 文档
+- **状态：** 未修复
+- **文件与位置与逐条事实：**
+  1. `T-M4-03-final-summary.md`"性能优化"节：缓存"最大缓存条目：1000"——代码为 `_MAX_CACHE_ENTRIES = 500`（`fact_pack.py:98`）；
+  2. `T-M4-03-final-summary.md`：297 个集成测试——实测 366 passed（本文件第一节）；
+  3. `T-M4-03b-code-review-improvements.md` 第 3 节："与 StatisticsService 的设计保持一致（该服务也使用相同口径）"——不实（statistics 仍 clamp，见 R-M4-08）；
+  4. 第一轮审查文档（本文件第五节）"缓存策略 … LRU 淘汰"——实际按插入时间 FIFO 淘汰，读取不刷新时间戳（`fact_pack.py:116-121`）；
+  5. `test_narrative_report.py` 文件头声称含"POST /ai/report — 端到端测试"——该文件中不存在任何 HTTP 测试；
+  6. `T-M4-03-final-summary.md` 验证清单将"同数据不重复计费"相关的缓存机制勾选为通过——与 R-M4-09 冲突。
+- **影响：** 与 R-M4-02（closure 报告失真）同类：交付文档可信度受损，后续任务依据失真状态决策。
+- **修复建议：** 随 R-M4-08/09 修复一并更正上述条目；数字类声称以可复跑命令为准。
+- **复验方法：** 逐条对照代码与测试输出。
+
+### 🟢 R-M4-14（P3 · 效率/提示词）— prompt 要求输出 `highlights` 但服务端丢弃；"本月"措辞对历史期间不准确
+
+- **ID：** R-M4-14
+- **级别：** P3
+- **类别：** 效率 / 提示词设计
+- **状态：** 未修复
+- **文件与位置：** `server/src/modules/ai/prompts.py:64`（要求输出 highlights 数组）、`service.py:764`（仅取 narrative）；`prompts.py:58` 与 `service.py:706`（"本月"/"我本月（{period}）"措辞）
+- **问题与触发条件：** ① LLM 按模板生成的 `highlights` 被服务端丢弃，白白消耗 completion tokens；且 `_find_undeclared_numbers` 只扫描 `narrative` 字段，若未来把 highlights 透出将处于校验盲区。② 请求历史月份（如 2026-08 在 9 月请求）时，系统提示与用户输入均称"本月"，叙述可能产生错误时间指代。
+- **影响：** token 浪费（小）；历史期间叙述措辞错位（体验问题）。
+- **修复建议：** 要么从模板删除 highlights，要么纳入响应与校验；用户输入措辞改为"{period} 月度"。
+- **复验方法：** 请求上月报表，检查叙述时间指代；观察 completion_tokens 下降。
+
+### 🟢 R-M4-15（P3 · 可靠性/契约）— 限流触发时整个 /ai/report 返回 429，而非降级为纯事实包；无 provider 时事实包查询不限流
+
+- **ID：** R-M4-15
+- **级别：** P3
+- **类别：** 可靠性 / 契约
+- **状态：** 未修复
+- **文件与位置：** `server/src/modules/ai/service.py:697-699`（`_check_rate_limit`/`_check_daily_quota` 在 `_generate_narrative` 内、事实包构建之后抛出 AppException）
+- **问题与触发条件：** 响应契约定义了"无 LLM 或校验失败 → narrative null 的 200 降级"，但限流/配额命中时整个请求 429，事实包数据（不产生 LLM 成本）也被扣留。另：provider 未配置时限流检查不会执行，事实包的 6+ 次 DB 聚合查询可被无限刷（与 /statistics 负载相当，风险低）。
+- **影响：** 客户端需要同时处理"429 → 本地降级"与"200 + narrative null"两条降级路径；T-M4-03c 实现前契约应明确统一。
+- **修复建议：** 倾向：限流命中时仍返回 200 纯事实包（narrative=null），把 429 保留给 interpret 这类纯 LLM 端点；无论采用哪种，写入 APP-CONTEXT/ai-architecture 后再实现 03c。
+- **复验方法：** 打满限流后请求 /ai/report，断言行为与最终契约一致。
+
+### 关联既有问题（不重复建项）
+
+- **R-M4-01（P1 · 流程，未修复）：** T-M4-03 全部产物同样处于未提交状态（`server/src/modules/ai/` untracked 等），交付门禁未达成——沿用原编号，本轮范围再次受其影响。
+- **R-M4-04（P2 · CI，未修复）：** ruff 依赖缺口，本轮 lint 门禁仍无法本地执行。
+- **R-M4-06（P3 · 审计，未修复）：** 与 R-M4-10 同族（tokens 漏计），路径不同，分别保留。
+
+## 四、门禁结论
+
+**实现层：不通过。** T-M4-03a/03b 的核心安全链路（事实包隔离、data_references 校验、未声明数字检测、失败降级、所有权校验）代码与测试属实且 28 用例全绿；但存在 2 项 P1：R-M4-08 破坏权威口径与对账不变量（且修复声明不实）、R-M4-09 使"数据未变不重复计费"验收落空（docstring 声称了不存在的行为）。另有 P2 两项（R-M4-10/11）。
+
+**交付层：不通过。** R-M4-01（产物未提交、无远端 CI）同样适用于本任务；交付文档存在 R-M4-13 所列失真。
+
+**状态处置：** `production-execution-plan.md` 中 T-M4-03a/03b 的"✅ 已完成"已依据本轮证据改为复审不通过标记（工作区内更新；该文件含实现方未提交改动，不随本审查文档提交，避免夹带）。
+
+**建议承接：** `修复 T-M4-review 中 R-M4-08 ~ R-M4-11`（P1/P2 四项），R-M4-12~15 可随 T-M4-03c 一并处理。
+
+---
+
+## 五、第一轮审查（历史保留，2026-09-06 早于本轮）
+
+> 以下为第一轮审查原文。其 5 项问题的处置核验见本文件第二节；其中"缓存策略 LRU"表述有误（实为 FIFO，见 R-M4-13）。
+
+### 总体评价
+
+架构设计清晰：事实包模式（Fact Pack）作为 LLM 的**唯一数据源**，数字校验 + 安全降级构成完整的安全链路。三层防护（事实包隔离 → `data_references` 校验 → 未声明数字检测）设计合理，测试覆盖了核心路径。
+
+### 架构优点
+
+| 维度 | 评价 |
+|---|---|
+| **安全设计** | 三层防护链完整：LLM 只接触事实包 → 每个数字必须声明引用 → 校验失败丢弃叙述。安全降级不暴露内部错误。 |
+| **数据溯源** | SHA-256 哈希 + 确定性重建，确保相同数据产生相同哈希，避免重复的 LLM 调用。 |
+| **缓存策略** | 内存缓存 TTL 300s + 500 条目上限 + LRU 淘汰，首次发布够用。 |
+| **跨数据库兼容** | 复用 `_YearMonth` 自定义 SQL 函数，SQLite 和 PostgreSQL 均支持。 |
+| **测试质量** | 28 个测试覆盖了哈希稳定性、事实包生成、缓存行为、趋势跨年、校验逻辑、上下文构建。 |
+
+### 发现问题（原始编号未使用 R-M4 序列）
+
+1. 🟡 P2 — `build_context_dict` 和 `_build_lookup` 存在代码重复（`narrative.py`）→ 第二轮核验：已修复。
+2. 🟡 P2 — `_find_undeclared_numbers` 将 lookup 全部值加入"已声明"集合，次级检查有效性降低 → 第二轮核验：已文档化（有意设计）。
+3. 🟡 P3 — 余额计算 `max(0, ...)` 掩盖赤字场景（`fact_pack.py`）→ 第二轮核验：部分修复且引入 R-M4-08。
+4. 🟢 P3 — 缺少 mock provider 的端到端叙述生成测试 → 处置：实现方取消；第二轮核验：风险兑现（R-M4-09/10 未被暴露）。
+5. 🟢 P3 — 年数字误报可能性（正则 `\d{3,}` 匹配年份）→ 第二轮核验：已文档化。
+
+### 安全审计（第一轮，第二轮未推翻）
+
+| 检查项 | 结果 |
+|---|---|
+| LLM 数据隔离 | ✅ 只看到事实包，不接触原始 DB |
+| 数字溯源验证 | ✅ `data_references` 逐一比对 |
+| 校验失败降级 | ✅ 丢弃叙述，不返回部分数据 |
+| 所有权校验 | ✅ `FactPackService.build()` 验证 book 所有权 |
+| 速率限制 | ✅ 叙述生成路径受 `_check_rate_limit` 和 `_check_daily_quota` 保护（429 行为契约问题另见 R-M4-15） |
+| SQL 注入 | ✅ 所有查询使用 SQLAlchemy ORM 参数化查询 |
+| 安全事件日志 | ✅ 校验失败记录 `WARNING` 级别日志，含 `number_verification_failed` 标签 |
