@@ -26,6 +26,7 @@ from src.modules.ai.narrative import (
     build_context_dict,
     verify_narrative,
 )
+
 # TestNarrativeCache (R-M4-09) uses the shared async ``db_session`` fixture;
 # it must be imported to be in scope (mirrors tests/test_models.py).
 from tests.fixtures_db import db_session  # noqa: F401 — re-exported as a fixture
