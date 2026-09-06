@@ -21,7 +21,7 @@ ownership 隔离、过期翻转、link 语义等核心实现与测试覆盖扎�
 | `pytest tests/` 全量 | 397 passed + 1 项环境 error | ⚠️ 403–404 passed、1 skipped（POSIX-only 用例）、1 error（`test_stats_exports` Windows tmp 权限，与完成记录披露同类的环境问题）。两次运行数字不同：工作区含并行会话未提交改动，全量数字与交付时点不可比；04c 范围文件未受影响 |
 | `ruff check`（CI 等价） | 未声称 | ✅ 04c 文件集 0 违规；全仓 `src/ tests/` 现有 1 处 I001 位于 `tests/test_narrative_report.py`（并行 T-M4-03 未提交改动，非 04c 范围） |
 | alembic 迁移执行 | 未声称（仅声称链接续） | ❌ 全仓测试/CI 从不执行 `alembic upgrade`（仅静态源码检查）。探针实测：SQLite 全链在 0004 失败（既有、与 04c 无关）；**0009 自身 DDL 在 SQLite 亦不兼容**（见 R-M4-43）。PostgreSQL 执行未演练（审查环境无 PG 实例，环境限制，与 T-M2 审查披露一致） |
-| 远端 CI | 未声称 | 未能确认：审查时 github.com 连接被重置（网络受限）；且本地 HEAD 领先 origin/main 1 个提交（并行会话产物），远端 CI 状态无法归属到本审查基线 |
+| 远端 CI | 未声称 | ❌ 推送后已确认失败（本审查提交 `563e0d6` 触发 run 34038442528）：**Server job 在 conftest import 阶段即挂、0 个测试被执行**——CI 全新安装拉到新版 starlette，其 testclient 弃用警告（"install httpx2 instead"）被 `pyproject.toml` 的 `filterwarnings=["error"]` 升级为错误，pytest exit 4。属依赖漂移的 CI 基础设施问题（starlette 仅经 `fastapi>=0.115,<1` 间接约束、未锁定；本地 starlette 1.6.0 无此警告，故本地 41/41 通过），先于且独立于 04c 交付。Android job 亦失败（并行会话 CI 修复进行中，非 04c 范围）；Client job ✅。04c 的「28 测试全绿」仅本地可复核，远端验证被基础设施失败阻断 |
 
 ## 问题清单
 
@@ -184,5 +184,6 @@ ownership 隔离、过期翻转、link 语义等核心实现与测试覆盖扎�
 ## 下一步建议
 
 - **Bug-fix 模式**处理 R-M4-39（P1）与 R-M4-40/41（P2，安全面），R-M4-42 文档补齐可同轮；R-M4-43 最小改 docstring、PG 演练挂账 staging；R-M4-44/45 随手修或挂账 04d。
-- 修复后复审重点：清扫回归测试（LINKED 不删）、sniff 拒绝分支真实生效、分块读取上限、CI 全量绿（当前远端 CI 状态因网络受限未能确认，修复轮需补看）。
+- 修复后复审重点：清扫回归测试（LINKED 不删）、sniff 拒绝分支真实生效、分块读取上限、CI 全量绿。
+- **远端 CI 前置阻塞**：server job 的 starlette 弃用警告失败（依赖漂移）需先由 CI 修复线处理（锁定 starlette 版本或调整警告过滤），否则 04c 修复复审的远端门禁无从运行。归属并行 CI 修复会话/独立 bug-fix 任务，不在本审查只读边界内实施。
 - 04b（Vosk 离线语音）仍为 04a 占位（`voice.*` 返回 unavailable），未实现、未在本次范围。
