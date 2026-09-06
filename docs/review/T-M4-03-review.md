@@ -51,13 +51,27 @@
 - **ID：** R-M4-09
 - **级别：** P1
 - **类别：** 正确性 / 成本控制 / 文档失真
-- **状态：** 未修复
-- **文件与位置：** `server/src/modules/ai/service.py:595-678`（`generate_report` 无任何叙述缓存判断）、`service.py:765`（`narrative_cached` 硬编码 False）、对照 `routes.py:138-139`（docstring 声称 "same data_hash returns cached narrative"）、`schemas.py:169-172`
+- **状态：** ✅ 已修复（2026-09-06）
+- **文件与位置：** `server/src/modules/ai/service.py:55-58`（叙述缓存模块变量）、`service.py:92-116`（缓存辅助函数）、`service.py:735-755`（缓存检查逻辑）、`service.py:868-874`（缓存存储逻辑）、`server/tests/test_narrative_report.py:301-464`（缓存行为测试）
 - **问题与触发条件：** T-M4-03a 交接产物明确要求"数据哈希缓存（同数据不重复调 LLM、不重复计费）"，APP-CONTEXT T-M4-03 验收要求"数据未变不重复计费"。实际实现：只要 provider 存在，每次 `POST /ai/report` 都会调用 LLM 并产生计费；`data_hash` 仅用于事实包对象缓存，而该缓存在**全部 DB 查询完成之后**才检查（`fact_pack.py:236-240`），只节省 dataclass 构造。`narrative_cached` 恒为 False，routes/schemas 的 docstring 描述了不存在的行为。全仓库 grep 确认无其他叙述缓存实现。
-- **证据或复现命令：** `grep -rn "narrative_cached" server/src server/tests` → 仅 schema 默认值与 service 恒 False 赋值两处；配置 provider 后对同一 book/period 连续两次 `POST /ai/report`，两次均产生 provider 调用与 AIUsage 记录（现有测试无 provider，无法暴露——见第二节第 4 行）。
-- **影响：** 直接违反验收标准；每次报表页刷新都重复计费，guest 日配额被同一份未变数据快速耗尽。
-- **修复建议：** 在 `generate_report` 中以 `(book_id, data_hash)` 为键缓存已验证通过的 narrative（内存 TTL 即可，与事实包缓存同规格）；命中时直接填充 `response.narrative` 并置 `narrative_cached=True`，不调用 provider、不记 AIUsage。同步补 mock provider 测试：同 hash 第二次请求 `provider.complete` 调用数为 0。
-- **复验方法：** mock provider 下连续两次同数据请求，断言第二次 `complete` 未被调用、`narrative_cached == True`、AIUsage 仅 1 行。
+- **修复方案：** 在 `service.py` 中添加叙述缓存机制（内存缓存，TTL 300s，最大 500 条目，与 FactPack 缓存同规格）。缓存键为 `(book_id, period, data_hash)`。缓存命中时：
+  - 直接填充 `response.narrative`
+  - 设置 `response.narrative_cached = True`
+  - 不调用 provider、不记录 AIUsage
+  - 记录 INFO 日志以便运维监控
+  
+  缓存未命中时：
+  - 正常调用 provider 生成 narrative
+  - 数字校验通过后，将 narrative 存入缓存
+  - 设置 `response.narrative_cached = False`
+  - 记录 AIUsage
+  
+  新增 mock provider 测试验证：
+  - 同数据第二次请求 `provider.complete` 调用数为 0
+  - `narrative_cached == True`
+  - AIUsage 仅首次记录
+  - 不同数据触发新的 provider 调用
+- **复验方法：** ✅ 已通过（`pytest tests/test_narrative_report.py::TestNarrativeCache -v` → 2 passed）
 
 ### 🟡 R-M4-10（P2 · 可靠性/审计）— 校验失败与降级路径不记录已消耗的 tokens，guest 配额可被绕过
 
