@@ -94,5 +94,5 @@ jobs:
       - run: pip install -e ".[dev]"
       - run: ruff check src/ tests/
       # T-M5-02d: dependency vulnerability scan.
-      - run: pip install pip-audit && pip-audit -r pyproject.toml
+      - run: pip install pip-audit && pip-audit
       - run: pytest tests/ --tb=short -q
