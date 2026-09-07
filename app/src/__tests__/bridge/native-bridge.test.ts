@@ -891,3 +891,78 @@ describe('NativeBridge — T-M5-04b 数据导出', () => {
     await expect(freshBridge.downloadExport('exp-1')).rejects.toThrow(BridgeError)
   })
 })
+
+// ─── T-M5-04c: 账号删除桥命令 ───
+
+describe('NativeBridge — T-M5-04c 账号删除', () => {
+  let bridge: NativeBridge
+  let capturedCommand = ''
+  let capturedPayload = ''
+
+  beforeEach(() => {
+    bridge = new NativeBridge()
+    installMockBridge().call.mockImplementation((_v: number, requestId: string, cmd: string, payload: string) => {
+      capturedCommand = cmd
+      capturedPayload = payload
+      setTimeout(() => simulateResponse(requestId, {
+        confirmToken: 'tok-abc',
+        expiresAt: '2026-09-07T10:05:00Z',
+      }), 0)
+    })
+  })
+
+  it('requestAccountDeletionToken 发送 account.requestDeletionToken 命令', async () => {
+    const result = await bridge.requestAccountDeletionToken()
+    expect(capturedCommand).toBe('account.requestDeletionToken')
+    expect(capturedPayload).toBe('{}')
+    expect(result.confirmToken).toBe('tok-abc')
+    expect(result.expiresAt).toContain('2026-09-07')
+  })
+
+  it('deleteAccount 发送 account.delete 命令并序列化 confirmToken', async () => {
+    installMockBridge().call.mockImplementation((_v: number, requestId: string, cmd: string, payload: string) => {
+      capturedCommand = cmd
+      capturedPayload = payload
+      setTimeout(() => simulateResponse(requestId, {
+        status: 'frozen',
+        frozenAt: '2026-09-07T10:00:00Z',
+        message: 'Account frozen; data will be deleted in 7 days.',
+      }), 0)
+    })
+    const freshBridge = new NativeBridge()
+    const result = await freshBridge.deleteAccount('confirm-xyz')
+    expect(capturedCommand).toBe('account.delete')
+    const payload = JSON.parse(capturedPayload)
+    expect(payload.confirmToken).toBe('confirm-xyz')
+    expect(result.status).toBe('frozen')
+    expect(result.frozenAt).toContain('2026-09-07')
+  })
+
+  it('deleteAccount 桥错误（invalid_confirm_token）抛出 BridgeError', async () => {
+    installMockBridge().call.mockImplementation((_v: number, requestId: string) => {
+      setTimeout(() => simulateResponse(requestId, null, false, 'invalid_confirm_token', 'Invalid confirmation token'), 0)
+    })
+    const freshBridge = new NativeBridge()
+    await expect(freshBridge.deleteAccount('bogus')).rejects.toThrow(BridgeError)
+    try {
+      await freshBridge.deleteAccount('bogus')
+    } catch (err) {
+      expect(err).toBeInstanceOf(BridgeError)
+      expect((err as BridgeError).code).toBe('invalid_confirm_token')
+    }
+  })
+
+  it('deleteAccount 桥错误（confirm_token_expired）抛出 BridgeError', async () => {
+    installMockBridge().call.mockImplementation((_v: number, requestId: string) => {
+      setTimeout(() => simulateResponse(requestId, null, false, 'confirm_token_expired', 'Token has expired'), 0)
+    })
+    const freshBridge = new NativeBridge()
+    try {
+      await freshBridge.deleteAccount('stale-token')
+      expect.unreachable('should have thrown')
+    } catch (err) {
+      expect(err).toBeInstanceOf(BridgeError)
+      expect((err as BridgeError).code).toBe('confirm_token_expired')
+    }
+  })
+})

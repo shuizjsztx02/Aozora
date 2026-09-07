@@ -17,7 +17,7 @@ from __future__ import annotations
 import uuid
 from datetime import datetime
 
-from sqlalchemy import BigInteger, DateTime, String, Text
+from sqlalchemy import BigInteger, DateTime, Index, String, Text, text
 from sqlalchemy.dialects.postgresql import UUID
 from sqlalchemy.orm import Mapped, mapped_column
 
@@ -32,6 +32,23 @@ class DeactivationToken(Base):
     """
 
     __tablename__ = "deletion_tokens"
+
+    # T-M5-04c review P2: partial unique index — at most one unused token
+    # per user. Closes the race where two concurrent ``request_deletion``
+    # calls each ``DELETE``-old-row then ``INSERT``-new-row and leave two
+    # valid tokens in the table. A partial (``used_at IS NULL``) index is
+    # preferred over a plain ``UNIQUE(user_id)`` because we keep used
+    # tokens around for audit — their ``used_at`` column already prevents
+    # replay; the index only guards the unused slot.
+    __table_args__ = (
+        Index(
+            "uq_deletion_tokens_user_active",
+            "user_id",
+            unique=True,
+            postgresql_where=text("used_at IS NULL"),
+            sqlite_where=text("used_at IS NULL"),
+        ),
+    )
 
     id: Mapped[uuid.UUID] = mapped_column(
         UUID(as_uuid=True),

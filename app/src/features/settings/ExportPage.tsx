@@ -27,7 +27,7 @@ type ViewState =
   | { kind: 'creating' }
   | { kind: 'ready'; exportData: ExportData }
   | { kind: 'downloading'; exportData: ExportData }
-  | { kind: 'downloaded'; exportData: ExportData; localPath: string; filename: string; reconciliation: ReconciliationResult | null }
+  | { kind: 'downloaded'; exportData: ExportData; localPath: string; filename: string; reconciliation: ReconciliationResult | null; contentTruncated?: boolean }
   | { kind: 'failed'; error: string; exportData?: ExportData }
 
 interface ReconciliationResult {
@@ -109,7 +109,9 @@ export function ExportPage() {
     try {
       const result = await bridge.downloadExport(exportData.id)
       let reconciliation: ReconciliationResult | null = null
-      if (exportData.format === 'json' && result.content) {
+      // F-M5-04b-F3: > 20MB 文件内容被截断，不做对账（解析必然不完整）
+      const truncated = result.contentTruncated === true
+      if (exportData.format === 'json' && result.content && !truncated) {
         reconciliation = await reconcile(bridge, selectedBookId, result.content)
       }
       setViewState({
@@ -118,6 +120,7 @@ export function ExportPage() {
         localPath: result.localPath,
         filename: result.filename,
         reconciliation,
+        contentTruncated: truncated,
       })
     } catch (err) {
       setViewState({ kind: 'failed', error: errorMessage(err), exportData })
@@ -297,8 +300,13 @@ function StatusCard({
               <div className="text-xs text-ink3 truncate">{state.localPath}</div>
             </div>
           </div>
+          {state.contentTruncated && (
+            <div className="text-xs text-ink3 mt-2 py-1.5 px-2 rounded" style={{ background: 'var(--glass)' }}>
+              ⚠️ 文件较大（超过 20MB），对账已跳过。文件已完整保存，可通过文件管理器查看。
+            </div>
+          )}
           {state.reconciliation && <ReconciliationView result={state.reconciliation} />}
-          {state.exportData.format === 'csv' && (
+          {state.exportData.format === 'csv' && !state.contentTruncated && (
             <div className="text-xs text-ink3 mt-2">
               CSV 文件已下载，可通过文件管理器查看
             </div>

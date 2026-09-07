@@ -377,6 +377,13 @@ class AttachmentService:
         attachment.transaction_id = transaction_id
         attachment.status = AttachmentStatus.LINKED
         attachment.expires_at = None
+        # T-M5-04c: mark the row as explicitly retained so the parsed-
+        # attachment expiry sweep (infra/cleanup/attachment-expiry.py)
+        # skips it even if its status were ever to revert to PARSED.
+        # The status=LINKED flip is itself sufficient today (the sweep
+        # only targets PARSED rows), but setting the flag documents the
+        # user's intent and keeps the two signals aligned.
+        attachment.keep_after_parse = True
         await self.db.flush()
         await self.db.refresh(attachment)
         return attachment

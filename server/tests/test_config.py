@@ -67,7 +67,7 @@ class TestProperties:
             env="production",
             secret_key="super-secret-key-that-is-not-default",
             dev_auth_code="",
-            cors_origins="https://aozora.example",
+            cors_origins="https://app.aozora.app",
             ai_provider_api_key="sk-test-not-a-real-key",
         )
         assert s.is_production is True

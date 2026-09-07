@@ -23,6 +23,7 @@ import asyncio
 import logging
 import os
 import sys
+import tempfile
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
@@ -54,9 +55,6 @@ def _get_upload_dir() -> Path:
         return Path(raw)
     # Default matches the attachments service fallback.
     return Path(tempfile.gettempdir()) / "aozora_uploads"
-
-
-import tempfile  # noqa: E402  (imported late to keep module top-light)
 
 
 async def expire_parsed_attachments(session: AsyncSession) -> int:

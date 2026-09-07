@@ -6,6 +6,8 @@ import com.aozora.app.ai.AiGatewayClient
 import com.aozora.app.auth.AuthClient
 import com.aozora.app.auth.TokenStore
 import com.aozora.app.consent.ConsentStore
+import com.aozora.app.crashlytics.CrashReportDatabase
+import com.aozora.app.crashlytics.CrashReporter
 import com.aozora.app.db.AozoraDatabase
 import com.aozora.app.db.Repository
 import com.aozora.app.export.ExportClient
@@ -134,6 +136,33 @@ class AozoraApp : Application(), Configuration.Provider {
     /** T-M5-04a: 隐私同意快速检查。 */
     val consentStore: ConsentStore by lazy {
         ConsentStore(this)
+    }
+
+    /** T-M5-05b: 崩溃报告本地库（独立于业务库）。 */
+    val crashDb: CrashReportDatabase by lazy {
+        CrashReportDatabase.getInstance(this)
+    }
+
+    /** T-M5-05b: 全局崩溃捕获 + 下次启动上报。 */
+    val crashReporter: CrashReporter by lazy {
+        CrashReporter(
+            context = this,
+            crashDb = crashDb,
+            consentStore = consentStore,
+        )
+    }
+
+    override fun onCreate() {
+        super.onCreate()
+        // T-M5-05b: 立即安装全局 UncaughtExceptionHandler —— 越早越好，
+        // 任何依赖（auth、sync）尚未初始化时也可能崩溃。
+        crashReporter.install()
+        // 上传上一次运行遗留的崩溃报告（仅在用户已同意隐私政策后）。
+        crashReporter.uploadPending(
+            authClient = authClient,
+            httpClient = httpClient,
+            baseUrl = BuildConfig.SYNC_BASE_URL,
+        )
     }
 
     override val workManagerConfiguration: Configuration

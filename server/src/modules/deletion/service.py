@@ -23,6 +23,7 @@ import uuid
 from datetime import UTC, datetime, timedelta
 
 from sqlalchemy import delete, select
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from src.common.errors import AppException
@@ -79,7 +80,19 @@ class DeletionService:
             expires_at=now + timedelta(minutes=TOKEN_TTL_MINUTES),
         )
         self.db.add(token)
-        await self.db.flush()
+        try:
+            await self.db.flush()
+        except IntegrityError:
+            # Lost the race with a concurrent request from the same user
+            # (double-tap, client retry). The other request's token is
+            # valid; tell the client to retry instead of returning a 500.
+            # Partial unique index is on (user_id) WHERE used_at IS NULL.
+            await self.db.rollback()
+            raise AppException(
+                409,
+                "deletion_request_conflict",
+                "A confirmation token was just issued; please retry",
+            ) from None
         return token_str
 
     # ------------------------------------------------------------------
@@ -105,15 +118,39 @@ class DeletionService:
         )
         token = result.scalar_one_or_none()
 
+        # Log every failed attempt with the user hash — makes post-incident
+        # analysis possible without putting raw UUIDs in the access logs.
+        user_hash = _hash_user_id(user.id)
         if token is None:
+            logger.warning(
+                "DELETE /me rejected: invalid_confirm_token (user=%s…)",
+                user_hash[:16],
+            )
             raise AppException(400, "invalid_confirm_token", "Invalid confirmation token")
         if token.user_id != user.id:
+            logger.warning(
+                "DELETE /me rejected: token belongs to different user (user=%s…)",
+                user_hash[:16],
+            )
             raise AppException(400, "invalid_confirm_token", "Invalid confirmation token")
         if token.used_at is not None:
+            logger.warning(
+                "DELETE /me rejected: confirm_token_used (user=%s…)",
+                user_hash[:16],
+            )
             raise AppException(400, "confirm_token_used", "Confirmation token already used")
 
         now = datetime.now(UTC)
-        if token.expires_at < now:
+        # SQLite returns naive datetimes even for timezone-aware columns;
+        # normalize to UTC-aware for consistent comparison.
+        expires = token.expires_at
+        if expires.tzinfo is None:
+            expires = expires.replace(tzinfo=UTC)
+        if expires < now:
+            logger.warning(
+                "DELETE /me rejected: confirm_token_expired (user=%s…)",
+                user_hash[:16],
+            )
             raise AppException(400, "confirm_token_expired", "Confirmation token has expired")
 
         # Mark token consumed.
@@ -154,7 +191,7 @@ class DeletionService:
             )
         )
 
-        user.status = UserStatus.ACTIVE if user.phone else UserStatus.GUEST
+        user.status = UserStatus.ACTIVE
         user.frozen_at = None
         user.deletion_requested_at = None
         await self.db.flush()

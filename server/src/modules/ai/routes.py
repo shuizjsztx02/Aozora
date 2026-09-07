@@ -11,6 +11,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from src.common.database import get_db_session
 from src.models.user import User
 from src.modules.auth.dependencies import get_current_user
+from src.modules.auth.frozen import require_active as _require_active
 
 from .context import load_validation_context
 from .provider import LLMProvider, get_llm_provider
@@ -46,6 +47,7 @@ async def interpret(
     and 429 ``ai_rate_limited`` / ``ai_quota_exceeded`` all signal the
     client to fall back to its local rule NLU (APP-CONTEXT §6.4).
     """
+    _require_active(current_user)
     service = AIService(db, provider)
     return await service.interpret(current_user, request.state.request_id, body)
 
@@ -65,6 +67,7 @@ async def validate_proposal(
     schema violation, a hallucinated/unauthorised ID, or a low-
     confidence result that needs explicit user confirmation.
     """
+    _require_active(current_user)
     try:
         book_uuid = uuid.UUID(body.book_id)
     except ValueError:
@@ -105,6 +108,7 @@ async def execute_proposal(
     The response includes transaction IDs and an undo window (5 seconds).
     The client should show an "Undo" toast during this window.
     """
+    _require_active(current_user)
     try:
         book_uuid = uuid.UUID(body.book_id)
     except ValueError:
@@ -141,6 +145,7 @@ async def report(
     returns cached narrative). If the LLM output fails number verification,
     only the fact pack is returned (no narrative).
     """
+    _require_active(current_user)
     service = AIService(db, provider)
     return await service.generate_report(current_user, request.state.request_id, body)
 
@@ -164,6 +169,7 @@ async def parse_image(
     Degradation: 503 on provider failure / invalid output — the client
     preserves the draft and prompts retry when connectivity resumes.
     """
+    _require_active(current_user)
     try:
         book_uuid = uuid.UUID(body.book_id)
     except ValueError:

@@ -439,6 +439,8 @@ export interface ExportDownloadResult {
   filename: string
   /** 文件文本内容（≤ 20MB 时返回）；用于前端对账。 */
   content?: string
+  /** F-M5-04b-F3: > 20MB 时为 true，前端应跳过对账并提示用户。 */
+  contentTruncated?: boolean
 }
 
 /** export.download 桥错误码。 */

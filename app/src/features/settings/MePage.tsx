@@ -42,7 +42,12 @@ export function MePage() {
       const { confirmToken } = await bridge.requestAccountDeletionToken()
       // 2. 消费 token，服务端将账号置为 frozen
       await bridge.deleteAccount(confirmToken)
-      // 成功后 Kotlin 侧已清空本地状态并触发 /onboarding 导航
+      // 成功：不依赖 Kotlin 侧跳转 —— 关闭对话框并回到首启页，
+      // 避免 Kotlin navigate 失败时对话框卡死。
+      setShowDeleteDialog(false)
+      setDeleteConfirmation('')
+      setDeleteInProgress(false)
+      navigate('/onboarding', { replace: true })
     } catch (e) {
       const message =
         e instanceof BridgeError

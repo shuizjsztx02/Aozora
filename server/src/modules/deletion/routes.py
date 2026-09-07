@@ -9,6 +9,7 @@ Two-phase deletion flow:
 
 from __future__ import annotations
 
+from datetime import UTC, datetime, timedelta
 from typing import Annotated
 
 from fastapi import APIRouter, Depends, Query
@@ -40,7 +41,6 @@ async def request_deletion_token(
     """
     service = DeletionService(db)
     token = await service.request_deletion_token(current_user)
-    from datetime import UTC, datetime, timedelta
     return DeletionTokenResponse(
         confirm_token=token,
         expires_at=datetime.now(UTC) + timedelta(minutes=5),

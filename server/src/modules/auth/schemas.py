@@ -68,6 +68,8 @@ class PhoneLoginResponse(BaseModel):
 
 
 # R-M2-27: profile of the authenticated user, served by GET /me.
+# T-M5-04c: frozen_at / deletion_requested_at are exposed so clients can
+# render the 7-day grace-window countdown during the deletion grace period.
 class MeResponse(BaseModel):
     model_config = {"from_attributes": True}
 
@@ -78,6 +80,8 @@ class MeResponse(BaseModel):
     timezone: str
     created_at: datetime
     updated_at: datetime
+    frozen_at: datetime | None = None
+    deletion_requested_at: datetime | None = None
 
 
 # R-M2-21: DeviceSessionResponse previously defined here was unused; removed.

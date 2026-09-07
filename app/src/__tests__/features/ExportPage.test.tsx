@@ -200,4 +200,24 @@ describe('ExportPage', () => {
 
     await waitFor(() => expect(screen.getByText('✓ 对账一致')).toBeInTheDocument())
   })
+
+  it('F-M5-04b-F3: skips reconciliation and shows hint when content is truncated', async () => {
+    mockBridge.downloadExport.mockResolvedValue({
+      localPath: '/Download/Aozora/export-book-1.json',
+      filename: 'export-book-1.json',
+      contentTruncated: true,
+    })
+
+    const user = userEvent.setup()
+    renderPage()
+    await waitFor(() => expect(screen.queryByText('加载中...')).not.toBeInTheDocument())
+    await user.click(screen.getByText('生成导出'))
+    await waitFor(() => expect(screen.getByText('导出已就绪')).toBeInTheDocument())
+    await user.click(screen.getByText('下载文件'))
+
+    await waitFor(() => expect(screen.getByText(/文件较大/)).toBeInTheDocument())
+    // 对账 UI 不应出现
+    expect(screen.queryByText('对账一致')).not.toBeInTheDocument()
+    expect(screen.queryByText('对账不一致')).not.toBeInTheDocument()
+  })
 })

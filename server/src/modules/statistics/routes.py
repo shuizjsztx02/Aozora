@@ -14,17 +14,14 @@ from fastapi import APIRouter, Depends, Query
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from src.common.database import get_db_session
-from src.models.user import User, UserStatus
+from src.models.user import User
 from src.modules.auth.dependencies import get_current_user
+from src.modules.auth.frozen import is_frozen as _is_frozen
 
 from .schemas import MonthlyStats, TrendStats
 from .service import StatisticsService
 
 router = APIRouter(prefix="/stats", tags=["statistics"])
-
-
-def _is_frozen(user: User) -> bool:
-    return user.status == UserStatus.FROZEN
 
 
 @router.get("/monthly", response_model=MonthlyStats)

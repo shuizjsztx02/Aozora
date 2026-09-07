@@ -12,6 +12,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from src.common.database import get_db_session
 from src.models.user import User
 from src.modules.auth.dependencies import get_current_user
+from src.modules.auth.frozen import require_active as _require_active
 
 from .schemas import AttachmentLinkRequest, AttachmentResponse
 from .service import AttachmentService
@@ -25,6 +26,7 @@ async def upload_attachment(
     current_user: Annotated[User, Depends(get_current_user)] = ...,
     db: Annotated[AsyncSession, Depends(get_db_session)] = ...,
 ):
+    _require_active(current_user)
     service = AttachmentService(db)
     attachment = await service.upload(current_user.id, file)
     return AttachmentResponse.model_validate(attachment)
@@ -35,6 +37,7 @@ async def list_attachments(
     current_user: Annotated[User, Depends(get_current_user)] = ...,
     db: Annotated[AsyncSession, Depends(get_db_session)] = ...,
 ):
+    _require_active(current_user)
     service = AttachmentService(db)
     attachments = await service.list_attachments(current_user.id)
     return [AttachmentResponse.model_validate(a) for a in attachments]
@@ -46,6 +49,7 @@ async def get_attachment(
     current_user: Annotated[User, Depends(get_current_user)] = ...,
     db: Annotated[AsyncSession, Depends(get_db_session)] = ...,
 ):
+    _require_active(current_user)
     service = AttachmentService(db)
     attachment = await service.get_attachment(attachment_id, current_user.id)
     return AttachmentResponse.model_validate(attachment)
@@ -57,6 +61,7 @@ async def download_attachment(
     current_user: Annotated[User, Depends(get_current_user)] = ...,
     db: Annotated[AsyncSession, Depends(get_db_session)] = ...,
 ):
+    _require_active(current_user)
     service = AttachmentService(db)
     file_path, filename = await service.get_attachment_file(
         attachment_id, current_user.id,
@@ -74,6 +79,7 @@ async def delete_attachment(
     current_user: Annotated[User, Depends(get_current_user)] = ...,
     db: Annotated[AsyncSession, Depends(get_db_session)] = ...,
 ):
+    _require_active(current_user)
     service = AttachmentService(db)
     await service.delete_attachment(attachment_id, current_user.id)
 
@@ -88,6 +94,7 @@ async def link_attachment(
     current_user: Annotated[User, Depends(get_current_user)] = ...,
     db: Annotated[AsyncSession, Depends(get_db_session)] = ...,
 ):
+    _require_active(current_user)
     service = AttachmentService(db)
     attachment = await service.link_attachment(
         attachment_id, current_user.id, body.transaction_id,

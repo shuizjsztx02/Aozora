@@ -42,6 +42,11 @@ export function AssistantMessage({
           ...(isUser ? { borderBottomRightRadius: '4px' } : { borderBottomLeftRadius: '4px' }),
         }}
       >
+        {!isUser && (
+          <div className="flex items-center gap-1 mb-1">
+            <span className="ai-badge text-[10px] px-1 py-0.5 rounded" style={{ background: 'rgba(255,255,255,0.4)', color: 'var(--accent)', border: '1px solid var(--glass-border)' }}>AI 生成</span>
+          </div>
+        )}
         <p className="text-sm leading-relaxed whitespace-pre-wrap">{message.text}</p>
 
         {message.proposalStatus === 'executing' && (

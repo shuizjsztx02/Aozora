@@ -10,8 +10,9 @@ import pytest_asyncio
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
 from src.models.base import Base
+from src.models.consent import UserConsent
 from src.models.ledger import Account, Book, Category, CategoryKind
-from src.models.user import User
+from src.models.user import DeviceSession, User
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -52,6 +53,28 @@ async def auth_client(client, db_session):
     user_b = User(id=uuid.uuid4(), nickname="bob", status="active")
     db_session.add_all([user_a, user_b])
     await db_session.flush()
+
+    # F-M5-04a-F1: server-side consent gate requires each pushing user
+    # to have a device session whose device_id has a matching consent
+    # record. Seed one device + one consent row per user so the existing
+    # push-based tests keep exercising their original assertions rather
+    # than tripping on the new 403.
+    device_a = "test-device-alice"
+    device_b = "test-device-bob"
+    db_session.add_all([
+        DeviceSession(
+            id=uuid.uuid4(), user_id=user_a.id, device_id=device_a,
+            refresh_token_hash="x", expires_at=datetime(2099, 1, 1, tzinfo=UTC),
+        ),
+        DeviceSession(
+            id=uuid.uuid4(), user_id=user_b.id, device_id=device_b,
+            refresh_token_hash="x", expires_at=datetime(2099, 1, 1, tzinfo=UTC),
+        ),
+        UserConsent(device_id=device_a, policy_version="v1",
+                    consented_at=datetime(2026, 1, 1, tzinfo=UTC)),
+        UserConsent(device_id=device_b, policy_version="v1",
+                    consented_at=datetime(2026, 1, 1, tzinfo=UTC)),
+    ])
 
     # Create book for user A
     book_a = Book(id=uuid.uuid4(), owner_id=user_a.id, name="Alice Book")
@@ -950,6 +973,39 @@ class TestPushAuth:
             ]},
         )
         assert resp.status_code == 401
+
+    @pytest.mark.asyncio
+    async def test_push_without_consent_returns_403(self, client, db_session):
+        """F-M5-04a-F1: server-side defense-in-depth — a user whose
+        device(s) have no recorded consent must be rejected from push,
+        even with a valid bearer token.
+        """
+        user = User(id=uuid.uuid4(), nickname="no-consent", status="active")
+        db_session.add(user)
+        await db_session.flush()
+
+        from src.common.database import get_db_session
+
+        async def _override():
+            yield db_session
+
+        client.app.dependency_overrides[get_db_session] = _override
+        try:
+            resp = client.post(
+                "/sync/push",
+                json={"mutations": [{
+                    "mutation_id": str(uuid.uuid4()),
+                    "entity_type": "book",
+                    "operation": "insert",
+                    "entity_id": str(uuid.uuid4()),
+                    "payload": {"name": "x"},
+                }]},
+                headers=_auth_header(user.id),
+            )
+            assert resp.status_code == 403
+            assert resp.json()["code"] == "consent_required"
+        finally:
+            client.app.dependency_overrides.clear()
 
 
 # ---------------------------------------------------------------------------

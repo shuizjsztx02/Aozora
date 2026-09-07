@@ -1069,9 +1069,12 @@ class AozoraBridge(
             val data = JSONObject().apply {
                 put("localPath", result.localPath)
                 put("filename", result.filename)
-                // 大文件（> 20MB）跳过内容返回，避免 OOM
+                // 大文件（> 20MB）跳过内容返回，避免 OOM。
+                // 同时标记 contentTruncated 让前端跳过对账并给出提示。
                 if (result.content.length <= 20 * 1024 * 1024) {
                     put("content", result.content)
+                } else {
+                    put("contentTruncated", true)
                 }
             }
             BridgeResponse.success(requestId, data.toString())
@@ -1149,6 +1152,10 @@ class AozoraBridge(
         return try {
             val result = client.deleteAccount(confirmToken)
             // 服务端已冻结账号；现在清空本地状态。
+            // T-M5-04c review #5: repository.clearAllData 失败升级为
+            // Bridge 错误 —— 避免本地 PII 残留却被报告成"删除成功"。
+            // TokenStore / ConsentStore 的瞬态失败保留为 warning（它们
+            // 下次启动时会再被清理，且不含敏感数据）。
             wipeLocalState()
             val data = JSONObject().apply {
                 put("status", result.status)
@@ -1156,6 +1163,9 @@ class AozoraBridge(
                 put("message", result.message)
             }
             BridgeResponse.success(requestId, data.toString())
+        } catch (e: IllegalStateException) {
+            // wipeLocalState 把 DB 清空失败升级为 IllegalStateException
+            BridgeResponse.error(requestId, "wipe_failed", e.message ?: "failed to clear local data")
         } catch (e: com.aozora.app.deletion.DeletionClient.DeletionError.AuthLost) {
             BridgeResponse.error(requestId, "auth_lost", e.message ?: "authentication required")
         } catch (e: com.aozora.app.deletion.DeletionClient.DeletionError.InvalidToken) {
@@ -1180,10 +1190,14 @@ class AozoraBridge(
      * 注册时仍使用同一设备标识，便于服务端审计和反欺诈。
      */
     private suspend fun wipeLocalState() {
+        // T-M5-04c review #5: Room 清空失败必须向调用方冒泡 —— 否则前端
+        // 以为删除成功，但本地 PII 仍然残留。tokenStore/consentStore 的
+        // 瞬态失败保留为 warning（它们不含敏感数据，且下次启动会再清理）。
         try {
             repository.clearAllData()
         } catch (t: Throwable) {
-            android.util.Log.w("AozoraBridge", "clearAllData failed", t)
+            android.util.Log.e("AozoraBridge", "clearAllData failed", t)
+            throw IllegalStateException("failed to clear local database: ${t.message}", t)
         }
         try {
             tokenStore?.clear()

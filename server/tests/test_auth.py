@@ -416,7 +416,7 @@ class TestProductionGuards:
                 env="production",
                 secret_key="super-secret-key-that-is-not-default",
                 dev_auth_code="",
-                cors_origins="https://aozora.example",
+                cors_origins="https://app.aozora.app",
             )
 
     def test_production_accepts_secure_config(self):
@@ -425,10 +425,36 @@ class TestProductionGuards:
             env="production",
             secret_key="super-secret-key-that-is-not-default",
             dev_auth_code="",
-            cors_origins="https://aozora.example",
+            cors_origins="https://app.aozora.app",
             ai_provider_api_key="sk-test-not-a-real-key",
         )
         assert s.is_production is True
+
+    def test_cors_non_aozora_domain_rejected_in_production(self):
+        """O-T-M5-02-3: production CORS only accepts *.aozora.app over https."""
+        from pydantic import ValidationError
+        with pytest.raises(ValidationError, match="CORS_ORIGINS"):
+            Settings(
+                database_url="sqlite+aiosqlite:///test.db",
+                env="production",
+                secret_key="super-secret-key-that-is-not-default",
+                dev_auth_code="",
+                cors_origins="https://evil.com",
+                ai_provider_api_key="sk-test-not-a-real-key",
+            )
+
+    def test_cors_http_scheme_rejected_in_production(self):
+        """O-T-M5-02-3: http:// is rejected even on aozora.app."""
+        from pydantic import ValidationError
+        with pytest.raises(ValidationError, match="CORS_ORIGINS"):
+            Settings(
+                database_url="sqlite+aiosqlite:///test.db",
+                env="production",
+                secret_key="super-secret-key-that-is-not-default",
+                dev_auth_code="",
+                cors_origins="http://app.aozora.app",
+                ai_provider_api_key="sk-test-not-a-real-key",
+            )
 
     def test_ttl_must_be_positive(self):
         from pydantic import ValidationError
