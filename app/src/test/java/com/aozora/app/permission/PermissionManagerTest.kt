@@ -47,11 +47,13 @@ class PermissionManagerTest {
     }
 
     @Test
-    fun getAllStatuses_returnsThreePermissions() {
+    fun getAllStatuses_returnsFourPermissions_onApi33() {
         val statuses = manager.getAllStatuses()
         assertTrue(statuses.containsKey(android.Manifest.permission.RECORD_AUDIO))
         assertTrue(statuses.containsKey(android.Manifest.permission.CAMERA))
-        assertEquals(3, statuses.size)
+        // NEW-A1 fix: POST_NOTIFICATIONS included on API 33+
+        assertTrue(statuses.containsKey(android.Manifest.permission.POST_NOTIFICATIONS))
+        assertEquals(4, statuses.size)
     }
 
     @Test

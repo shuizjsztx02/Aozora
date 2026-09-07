@@ -1,5 +1,6 @@
 <?xml version="1.0" encoding="utf-8"?>
-<!-- T-M4-04d: FileProvider paths — camera temp images stored in cacheDir. -->
+<!-- T-M4-04d: FileProvider paths — camera temp images stored in cacheDir/camera_temp.
+     CR-01 fix: Use dedicated subdirectory instead of "." to avoid exposing entire cache. -->
 <paths>
-    <cache-path name="cache" path="." />
+    <cache-path name="camera_images" path="camera_temp/" />
 </paths>

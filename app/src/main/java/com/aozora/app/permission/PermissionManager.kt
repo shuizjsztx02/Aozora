@@ -81,12 +81,27 @@ class PermissionManager(private val activity: ComponentActivity) {
 
     /**
      * 获取 T-M4-04 相关的所有权限状态。
+     *
+     * NEW-A1 fix: 补 POST_NOTIFICATIONS，与 TS 类型 Record<PermissionType, PermissionStatus> 对齐。
+     * API 33+ 检查真实运行时状态；低版本不需要运行时通知权限，直接返回 GRANTED。
      */
-    fun getAllStatuses(): Map<String, PermissionStatus> = mapOf(
-        android.Manifest.permission.RECORD_AUDIO to getStatus(android.Manifest.permission.RECORD_AUDIO),
-        android.Manifest.permission.CAMERA to getStatus(android.Manifest.permission.CAMERA),
-        imagePermission() to getStatus(imagePermission())
-    )
+    fun getAllStatuses(): Map<String, PermissionStatus> {
+        val result = mutableMapOf(
+            android.Manifest.permission.RECORD_AUDIO to getStatus(android.Manifest.permission.RECORD_AUDIO),
+            android.Manifest.permission.CAMERA to getStatus(android.Manifest.permission.CAMERA),
+            imagePermission() to getStatus(imagePermission())
+        )
+        // POST_NOTIFICATIONS: API 33+ 有真实运行时权限；低版本 checkSelfPermission
+        // 对未定义的权限返回 GRANTED，但 shouldShowRequestPermissionRationale 返回 false，
+        // 若 prefs 中无「已请求」记录则 getStatus 返回 NOT_REQUESTED — 语义不正确。
+        // 因此低版本直接返回 GRANTED。
+        if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.TIRAMISU) {
+            result[android.Manifest.permission.POST_NOTIFICATIONS] = getStatus(android.Manifest.permission.POST_NOTIFICATIONS)
+        } else {
+            result["NOTIFICATIONS_LEGACY"] = PermissionStatus.GRANTED
+        }
+        return result
+    }
 
     /**
      * 请求单个权限。

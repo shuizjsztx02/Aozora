@@ -44,7 +44,9 @@ class VoiceRecognitionService(private val context: Context) {
     }
 
     // Vosk 模型
+    @Volatile
     private var model: Model? = null
+    @Volatile
     private var isModelLoaded = false
 
     // 录音状态
@@ -58,6 +60,7 @@ class VoiceRecognitionService(private val context: Context) {
     private var recognitionJob: Job? = null
 
     // 回调
+    @Volatile
     private var listener: VoiceRecognitionListener? = null
 
     /**
@@ -342,9 +345,12 @@ class VoiceRecognitionService(private val context: Context) {
      * 可用于内存压力时主动回收。
      */
     fun releaseModel() {
-        val m = model
-        model = null
-        isModelLoaded = false
+        val m: Model?
+        synchronized(stateLock) {
+            m = model
+            model = null
+            isModelLoaded = false
+        }
         try { m?.close() } catch (_: Exception) {}
     }
 

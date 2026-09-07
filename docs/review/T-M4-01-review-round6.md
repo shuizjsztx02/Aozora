@@ -217,3 +217,36 @@ prefix 匹配的结果依赖 `name_to_id` 的迭代顺序（dict 插入顺序）
 | P3 记录 | 3 | 已知限制，有 TODO |
 
 **建议：** P1 修复后可合入。P1-1（token 审计一致性）是影响成本对账的正确性问题，优先级高于 P1-2（测试覆盖）。
+
+---
+
+## 修复记录（2026-09-07 第 1 轮修复后）
+
+### P1-1 已修复 ✅
+
+**改动：** `service.py` 新增 `_record_failure_usage()` 方法，在 `interpret()`、`_generate_narrative()`、`parse_image()` 的 retry 循环最终失败路径上调用。该方法在 request session 上 `flush + commit`（此时 session 无其他 pending write），确保 usage 行在 `AppException` 导致 rollback 前已持久化。
+
+**技术细节：** `_record_failure_usage` 使用 `self._db`（request session）而不是独立 session，原因：测试环境中 `get_session_factory()` 返回的默认 factory 与 `ai_env` 的 factory 不在同一个 in-memory DB 上。在 request session 上 commit 是安全的，因为调用点无其他 pending write（quota check 是只读 SELECT）。
+
+**新增测试：**
+- `test_invalid_json_failure_records_tokens` — 两次 JSON parse 失败 → 两次 attempt 的 tokens 全部记录
+- `test_provider_error_failure_records_prior_tokens` — 第一次 JSON 失败 + 第二次 5xx → 第一次的 tokens 被记录
+
+**测试结果：** 431 passed, 2 skipped（+5 新测试）。
+
+### P1-2 已修复 ✅
+
+**改动：** `test_ai_gateway.py` 新增 `TestParseImage` 类（3 个测试）。FakeProvider 新增 `complete_with_images` 方法。
+
+**新增测试：**
+- `test_happy_path_returns_proposal` — 完整 happy path：图片解析 → category name→ID 解析 → proposal 返回
+- `test_expired_attachment_returns_410` — EXPIRED → 410
+- `test_not_pending_attachment_returns_409` — PARSED → 409
+
+### P2-1 已修复 ✅
+
+**改动：** `_generate_narrative()` 的 retry token 累积注释已更新，明确 `retry_*` 包含所有失败 attempt（含最后一次），消除了原始代码中"减法"的可读性障碍。
+
+### P2-4 已修复 ✅
+
+**改动：** `_record_usage_from_tokens()` 在 `request_id` 超过 64 字符时输出 DEBUG 日志。

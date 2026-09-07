@@ -628,6 +628,7 @@ class AozoraBridge(
         android.Manifest.permission.READ_MEDIA_IMAGES -> "READ_MEDIA_IMAGES"
         android.Manifest.permission.READ_EXTERNAL_STORAGE -> "READ_MEDIA_IMAGES" // 低版本映射到同一 key
         android.Manifest.permission.POST_NOTIFICATIONS -> "POST_NOTIFICATIONS"
+        "NOTIFICATIONS_LEGACY" -> "POST_NOTIFICATIONS" // NEW-A1: API < 33 始终 granted
         else -> null
     }
 

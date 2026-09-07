@@ -84,13 +84,18 @@ export function QuickEntrySheet({ categories, onClose, onSuccess }: QuickEntrySh
     if (att.attachmentId === parsedAttachmentRef.current) return
     parsedAttachmentRef.current = att.attachmentId
 
+    // NEW-D1 fix: 防止 stale parse — 用户放弃或换图后，过期结果不再覆盖状态
+    let cancelled = false
+
     const doParse = async () => {
       setParseState('parsing')
       setParseError(null)
       setParseProposal(null)
       try {
         const bookId = await getBookId()
+        if (cancelled) return
         const result = await bridge.parseImage(att.attachmentId, bookId)
+        if (cancelled) return
         const proposal = result.proposal as unknown as ActionProposal
         const txCount = (proposal.transactions ?? []).length
 
