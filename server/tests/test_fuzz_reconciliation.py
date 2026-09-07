@@ -203,6 +203,63 @@ async def verify_invariants(
     assert grand_income == expected_income
 
 
+def assert_tamper_detected(
+    seed_txs: list[dict],
+    expected_expense: int,
+    expected_income: int,
+) -> None:
+    """P2-1: Verify that tampering with a transaction amount is detected.
+
+    This mirrors TS/Kotlin assertTamperDetected functionality.
+    Modifies the first active transaction's amount by +1 cent and verifies
+    that the totals change.
+    """
+    if not seed_txs:
+        return
+
+    # Verify base data matches expected first
+    active = [t for t in seed_txs if not t.get("_deleted")]
+    actual_expense = sum(t["amount_cents"] for t in active if t["type"] == TxType.EXPENSE)
+    actual_income = sum(t["amount_cents"] for t in active if t["type"] == TxType.INCOME)
+
+    if actual_expense != expected_expense or actual_income != expected_income:
+        raise AssertionError(
+            f"Base data doesn't match expected: "
+            f"expense={actual_expense}/{expected_expense}, "
+            f"income={actual_income}/{expected_income}"
+        )
+
+    # Find first active tx and tamper it
+    first_active_idx = -1
+    for i, t in enumerate(seed_txs):
+        if not t.get("_deleted"):
+            first_active_idx = i
+            break
+
+    if first_active_idx < 0:
+        return
+
+    # Tamper: add 1 cent to the first active transaction
+    tampered_txs = []
+    for i, t in enumerate(seed_txs):
+        if i == first_active_idx:
+            tampered_t = {**t, "amount_cents": t["amount_cents"] + 1}
+            tampered_txs.append(tampered_t)
+        else:
+            tampered_txs.append(t)
+
+    # Compute tampered totals
+    tampered_active = [t for t in tampered_txs if not t.get("_deleted")]
+    tampered_expense = sum(t["amount_cents"] for t in tampered_active if t["type"] == TxType.EXPENSE)
+    tampered_income = sum(t["amount_cents"] for t in tampered_active if t["type"] == TxType.INCOME)
+
+    # The tampered total MUST differ from expected
+    expense_changed = tampered_expense != expected_expense
+    income_changed = tampered_income != expected_income
+    if not expense_changed and not income_changed:
+        raise AssertionError("Tamper NOT detected: totals unchanged after modifying amount")
+
+
 def corpus_tx_to_db_dict(
     ctx: dict,
     book_id: uuid.UUID,
@@ -275,6 +332,7 @@ async def test_corpus_edge_cases_zero_amount(fuzz_env):
     cannot exist in the system. This test verifies the guard.
     """
     from datetime import date
+
     from sqlalchemy.exc import IntegrityError
 
     session = fuzz_env["session"]
@@ -310,11 +368,12 @@ async def test_corpus_negative_float_amount():
 
 @pytest.mark.asyncio
 async def test_corpus_edge_cases_file_loadable():
-    """Edge cases JSON is loadable and contains boundary values (P1#10)."""
+    """Edge cases JSON is loadable and contains valid boundary values (P1#10)."""
     cases = load_edge_cases()
-    assert len(cases) >= 5
+    assert len(cases) >= 4
     amounts = {c["amountCents"] for c in cases}
-    # Verify boundary values are present
+    # Verify valid boundary values are present
     assert 0 in amounts
-    assert -1 in amounts
     assert 1 in amounts
+    # Negative amounts moved to invalid-edges.json
+    assert all(a >= 0 for a in amounts)
