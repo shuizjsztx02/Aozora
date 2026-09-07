@@ -48,13 +48,9 @@ def upgrade() -> None:
     # NOTE: user_id is nullable at the DDL level for ALTER TABLE simplicity.
     # The ORM layer enforces NOT NULL via application logic on insert.
     #
-    # TODO (Bug-C1): before production deploy with existing attachment rows:
-    #   1. Backfill: UPDATE attachments SET user_id = (
-    #        SELECT t.user_id FROM transactions t
-    #        WHERE t.id = attachments.transaction_id
-    #      ) WHERE user_id IS NULL AND transaction_id IS NOT NULL;
-    #   2. Create follow-up migration 0010 to SET NOT NULL on user_id.
-    #   3. Delete orphan PENDING rows with no user_id (pre-T-M4-04c data).
+    # RESOLVED (Bug-C1): migration 0010_attachment_user_id_backfill backfills
+    # user_id from transactions, deletes orphans, sets NOT NULL, and creates
+    # ix_attachments_user_id index. Run 0010 before production deploy.
 
 
 def downgrade() -> None:

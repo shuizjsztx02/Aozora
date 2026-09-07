@@ -1,12 +1,29 @@
 # T-M4-04c 代码审查（服务端附件 API）
 
 审查日期：2026-09-06（第 1 轮）
+修复确认：2026-09-06（第 2 轮 — R-M4-39~45 全部修复核实通过）
 审查范围：`server/src/modules/attachments/`（routes/service/schemas/__init__）、`server/src/models/attachment.py`、`server/src/migrations/versions/0009_attachment_user_id.py`、`server/src/common/config.py`（upload_dir）、`server/src/main.py`（router 注册 + 启动清理）、`server/tests/test_attachments.py`、`server/tests/test_migrations.py`（0009 部分）、T-M4-04c 完成记录。
 基线：04c 文件集随提交 `c101afb` 入库，审查时与 HEAD（`3b73dd5`）一致（`git status` 对该文件集为空）。工作区含并行会话的大量未提交改动（T-M4-03 第 4 轮修复、T-M4-05 修复、04a P2 修复、04d 初期文件），均不在本次审查范围，本审查未触碰。
 审查环境：Windows / Python 3.13.12 / pytest + aiosqlite（内存库）；CI 事实源为 `.github/workflows/ci.yml` server job（ubuntu / py3.13 / `ruff check src/ tests/` + `pytest tests/`）。
 编号说明：R-M4-38 已被并行的 T-M4-03 第 4 轮复审占用，本轮自 R-M4-39 起。
 
-## 结论
+## 第 2 轮修复确认（2026-09-06）
+
+| ID | 级别 | 修复核实 | 证据 |
+|---|---|---|---|
+| R-M4-39 | 🔴 P1 | ✅ 已修复 | `cleanup_expired_files()` 改为 DB 驱动：仅查 PENDING/EXPIRED 行，绝不删 LINKED/PARSED 文件（service.py L73-111） |
+| R-M4-40 | 🟡 P2 | ✅ 已修复 | `_sniff_mime` 返回 None 时直接 415 拒绝，不回退到 header（service.py L225-233） |
+| R-M4-41 | 🟡 P2 | ✅ 已修复 | 分块读取 64KB/块，累计超 MAX 即中止 413，不全量物化（service.py L205-223） |
+| R-M4-42 | 🟡 P2 | ✅ 已修复 | `docs/architecture/data-model.md` L11-26 补 attachments 表 + 状态机；`security.md` L12-21 补上传安全面 |
+| R-M4-43 | 🟡 P2 | ✅ 已修复 | 迁移 0009 docstring 更正为 "PostgreSQL only"（0009_attachment_user_id.py L15-20） |
+| R-M4-44 | 🟢 P3 | ✅ 已修复 | `_verify_transaction_ownership` 加 `Book.deleted_at.is_(None)` 过滤（service.py L148） |
+| R-M4-45 | 🟢 P3 | ✅ 已修复 | 死枚举删除；`get_attachment` 去冗余 flip（L285-287）；GET /attachments 加分页（L274-276） |
+
+**全量测试：424 passed, 2 skipped, 0 failed ✅。**
+
+---
+
+## 第 1 轮结论（历史保留）
 
 **⚠️ 审查不通过（第 1 轮）：1 项 P1 + 4 项 P2 + 2 项 P3。**
 

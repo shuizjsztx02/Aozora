@@ -80,6 +80,9 @@ object BridgeCommands {
     // T-M4-04d: 图片链路
     const val IMAGE_PICK = "image.pick"
     const val IMAGE_DELETE = "image.delete"
+
+    // T-M4-04e: 图片记账解析
+    const val IMAGE_PARSE = "image.parse"
 }
 
 /**

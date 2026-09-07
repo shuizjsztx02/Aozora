@@ -28,6 +28,7 @@ class TestMigrationConsistency:
             "0004_budget_unique_constraint", "0005_note_length",
             "0006_budget_deleted_at", "0007_ai_usage_index",
             "0008_proposal_idempotency", "0009_attachment_user_id",
+            "0010_attachment_user_id_backfill",
         ):
             try:
                 m = importlib.import_module(f"src.migrations.versions.{rev}")
@@ -64,6 +65,7 @@ class TestMigrationConsistency:
             "0004_budget_unique_constraint", "0005_note_length",
             "0006_budget_deleted_at", "0007_ai_usage_index",
             "0008_proposal_idempotency", "0009_attachment_user_id",
+            "0010_attachment_user_id_backfill",
         ):
             try:
                 m = importlib.import_module(f"src.migrations.versions.{rev}")
@@ -180,3 +182,10 @@ class TestMigrationConsistency:
         m9 = importlib.import_module("src.migrations.versions.0009_attachment_user_id")
         assert m9.down_revision == m8.revision
         assert m9.revision == "0009_attachment_user_id"
+
+    def test_attachment_backfill_migration_chains_onto_0009(self):
+        """NEW-1/NEW-2: 0010_attachment_user_id_backfill must extend the chain."""
+        m9 = importlib.import_module("src.migrations.versions.0009_attachment_user_id")
+        m10 = importlib.import_module("src.migrations.versions.0010_attachment_user_id_backfill")
+        assert m10.down_revision == m9.revision
+        assert m10.revision == "0010_attachment_user_id_backfill"

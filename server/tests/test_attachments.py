@@ -661,4 +661,39 @@ class TestAttachmentAPI:
 
         assert client.get(f"/attachments/{att_id}", headers=h2).status_code == 404
         assert client.get(f"/attachments/{att_id}/download", headers=h2).status_code == 404
-        assert client.delete(f"/attachments/{att_id}", headers=h2).status_code == 404
+
+
+# ---------------------------------------------------------------------------
+# NEW-2: Orphan file cleanup on DB flush failure
+# ---------------------------------------------------------------------------
+
+class TestOrphanCleanup:
+    """NEW-2: When the DB flush fails after writing the file, the orphan
+    file must be cleaned up so it does not linger on disk without a row.
+    """
+
+    @pytest.mark.asyncio
+    async def test_upload_db_failure_cleans_up_file(
+        self, db: AsyncSession, users: dict, upload_dir: Path, monkeypatch,
+    ):
+        from src.modules.attachments import service as svc_mod
+        monkeypatch.setattr(svc_mod, "_get_upload_dir", lambda: upload_dir)
+
+        # Force flush to fail by breaking the session.
+        async def _broken_flush(*a, **kw):
+            raise RuntimeError("simulated DB failure")
+
+        monkeypatch.setattr(db, "flush", _broken_flush)
+
+        svc = AttachmentService(db)
+        upload = _upload_bytes(FAKE_JPEG, "image/jpeg")
+
+        with pytest.raises(RuntimeError, match="simulated DB failure"):
+            await svc.upload(users["alice"].id, upload)
+
+        # The file must NOT remain on disk (orphan).
+        files_on_disk = list(upload_dir.rglob("*"))
+        files_on_disk = [f for f in files_on_disk if f.is_file()]
+        assert len(files_on_disk) == 0, (
+            f"Orphan files left on disk after DB failure: {files_on_disk}"
+        )

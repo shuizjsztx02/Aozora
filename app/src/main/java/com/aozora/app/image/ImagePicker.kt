@@ -86,7 +86,11 @@ class ImagePicker(private val activity: ComponentActivity) {
                 }
             }
         }
-        pendingCallback.set(callback)
+        // R-M4-50 fix: 防御重入——若已有 pending callback，取消旧的
+        val previousCallback = pendingCallback.getAndSet(callback)
+        if (previousCallback != null) {
+            previousCallback(null) // 触发 PickerCancelled
+        }
 
         when (source) {
             Source.CAMERA -> {

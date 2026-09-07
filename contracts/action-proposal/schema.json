@@ -41,6 +41,10 @@
       "type": "array",
       "items": { "type": "string" },
       "description": "警告列表"
+    },
+    "meta": {
+      "type": "object",
+      "description": "可选元数据（如 source、attachmentId），供服务端/客户端扩展使用"
     }
   },
   "additionalProperties": false,

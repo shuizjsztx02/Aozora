@@ -190,6 +190,13 @@ class AIService:
                 )
             except ProviderError as exc:
                 if not exc.retryable or attempt >= MAX_ATTEMPTS:
+                    # P1-1: record tokens from earlier attempts that
+                    # reached the provider (billed but previously lost).
+                    await self._record_failure_usage(
+                        user, model, request_id,
+                        extra_prompt_tokens=retry_prompt_tokens,
+                        extra_completion_tokens=retry_completion_tokens,
+                    )
                     self._log_failure(request_id, tpl, model, attempt, exc.reason, started)
                     raise AppException(
                         503, "ai_unavailable", "AI service is temporarily unavailable",
@@ -206,6 +213,13 @@ class AIService:
                 retry_prompt_tokens += result.prompt_tokens
                 retry_completion_tokens += result.completion_tokens
                 if attempt >= MAX_ATTEMPTS:
+                    # P1-1: the final attempt consumed tokens too
+                    # (retry_*_tokens includes this attempt).
+                    await self._record_failure_usage(
+                        user, model, request_id,
+                        extra_prompt_tokens=retry_prompt_tokens,
+                        extra_completion_tokens=retry_completion_tokens,
+                    )
                     self._log_failure(
                         request_id, tpl, model, attempt, "invalid_json", started,
                     )
@@ -323,6 +337,38 @@ class AIService:
 
     # -- usage & logging ---------------------------------------------------------
 
+    async def _record_usage_from_tokens(
+        self, user: User, provider_name: str, model: str, request_id: str,
+        *, prompt_tokens: int, completion_tokens: int,
+    ) -> None:
+        """Record an AIUsage row from explicit token counts.
+
+        Shared helper for success and failure paths. The caller is
+        responsible for computing the total token counts (including any
+        retry extras). See ``_record_usage`` for the success-path wrapper.
+        """
+        total_tokens = prompt_tokens + completion_tokens
+        price = self._cfg.ai_price_per_1m_tokens
+        cost = round(total_tokens * price / 1_000_000) if price else 0
+        if len(request_id) > 64:
+            logger.debug(
+                "X-Request-Id truncated to 64 chars",
+                extra={"request_id_prefix": request_id[:16], "original_length": len(request_id)},
+            )
+        self._db.add(
+            AIUsage(
+                user_id=user.id,
+                provider=provider_name,
+                model=model,
+                tokens=total_tokens,
+                cost=cost,
+                # X-Request-Id is client-supplied and unbounded; the column
+                # is String(64) — truncation keeps PostgreSQL from erroring.
+                request_id=request_id[:64],
+            )
+        )
+        await self._db.flush()
+
     async def _record_usage(
         self, user: User, result: ProviderResult, model: str, request_id: str,
         *, extra_prompt_tokens: int = 0, extra_completion_tokens: int = 0,
@@ -336,28 +382,40 @@ class AIService:
         Only recorded on the success path: ``get_db_session`` rolls the
         session back when the request raises, so failure-path rows would
         be discarded anyway. Failed attempts are tracked via the
-        structured WARNING log (``attempt`` / ``outcome`` fields).
+        structured WARNING log (``attempt`` / ``outcome`` fields) AND via
+        ``_record_failure_usage`` on the error path (P1-1 fix).
         """
         assert self._provider is not None
-        total_tokens = (
-            result.prompt_tokens + result.completion_tokens
-            + extra_prompt_tokens + extra_completion_tokens
+        await self._record_usage_from_tokens(
+            user, self._provider.name, model, request_id,
+            prompt_tokens=result.prompt_tokens + extra_prompt_tokens,
+            completion_tokens=result.completion_tokens + extra_completion_tokens,
         )
-        price = self._cfg.ai_price_per_1m_tokens
-        cost = round(total_tokens * price / 1_000_000) if price else 0
-        self._db.add(
-            AIUsage(
-                user_id=user.id,
-                provider=self._provider.name,
-                model=model,
-                tokens=total_tokens,
-                cost=cost,
-                # X-Request-Id is client-supplied and unbounded; the column
-                # is String(64) — truncation keeps PostgreSQL from erroring.
-                request_id=request_id[:64],
-            )
+
+    async def _record_failure_usage(
+        self, user: User, model: str, request_id: str,
+        *, extra_prompt_tokens: int = 0, extra_completion_tokens: int = 0,
+    ) -> None:
+        """Record tokens consumed by provider attempts that preceded a failure.
+
+        When retries reach the provider (consuming tokens) but the overall
+        request fails (5xx on final attempt, or invalid JSON after all
+        retries), the tokens are still billed by the provider. This
+        ensures they appear in the AIUsage audit table even though the
+        request returned an error.
+
+        No-op when no tokens were consumed (e.g. ProviderError on the
+        first attempt — no result, no tokens billed).
+        """
+        assert self._provider is not None
+        total = extra_prompt_tokens + extra_completion_tokens
+        if total == 0:
+            return
+        await self._record_usage_from_tokens(
+            user, self._provider.name, model, request_id,
+            prompt_tokens=extra_prompt_tokens,
+            completion_tokens=extra_completion_tokens,
         )
-        await self._db.flush()
 
     def _log_success(
         self,
@@ -895,10 +953,10 @@ class AIService:
 
         result: ProviderResult | None = None
         output: dict | None = None
-        # R-M4-43: an attempt that reached the provider but produced
-        # unusable JSON still consumed tokens — accumulate them so the
-        # audit row and response usage reflect true cost across retries
-        # (same pattern as ``interpret``, R-M4-06).
+        # R-M4-43: tokens consumed by earlier attempts that reached the
+        # provider but produced unusable output. Accumulated after each
+        # failed parse so retry_* includes all failed attempts (P2-1
+        # semantics — same as interpret/parse_image, no subtraction).
         retry_prompt_tokens = 0
         retry_completion_tokens = 0
         for attempt in range(1, MAX_ATTEMPTS + 1):
@@ -911,6 +969,13 @@ class AIService:
                 )
             except ProviderError as exc:
                 if not exc.retryable or attempt >= MAX_ATTEMPTS:
+                    # P1-1: record tokens from earlier attempts that
+                    # reached the provider (billed but previously lost).
+                    await self._record_failure_usage(
+                        user, model, request_id,
+                        extra_prompt_tokens=retry_prompt_tokens,
+                        extra_completion_tokens=retry_completion_tokens,
+                    )
                     self._log_failure(request_id, tpl, model, attempt, exc.reason, started)
                     return  # No narrative, no provider result → no usage to record
                 continue
@@ -922,17 +987,16 @@ class AIService:
                 retry_prompt_tokens += result.prompt_tokens
                 retry_completion_tokens += result.completion_tokens
                 if attempt >= MAX_ATTEMPTS:
+                    # P1-1: retry_* now includes ALL failed attempts
+                    # (this one included). Record them all — the provider
+                    # billed every attempt regardless of parse outcome.
+                    await self._record_failure_usage(
+                        user, model, request_id,
+                        extra_prompt_tokens=retry_prompt_tokens,
+                        extra_completion_tokens=retry_completion_tokens,
+                    )
                     self._log_failure(
                         request_id, tpl, model, attempt, "invalid_json", started,
-                    )
-                    # R-M4-10 fix: the provider returned a real result with
-                    # real tokens — record them before discarding the narrative.
-                    # retry_*_tokens includes this last attempt; earlier attempts
-                    # contribute (retry_* - result.*) as extras.
-                    await self._record_usage(
-                        user, result, model, request_id,
-                        extra_prompt_tokens=retry_prompt_tokens - result.prompt_tokens,
-                        extra_completion_tokens=retry_completion_tokens - result.completion_tokens,
                     )
                     return
                 continue
@@ -1074,6 +1138,13 @@ class AIService:
                 )
             except ProviderError as exc:
                 if not exc.retryable or attempt >= MAX_ATTEMPTS:
+                    # P1-1: record tokens from earlier attempts that
+                    # reached the provider (billed but previously lost).
+                    await self._record_failure_usage(
+                        user, model, request_id,
+                        extra_prompt_tokens=retry_prompt_tokens,
+                        extra_completion_tokens=retry_completion_tokens,
+                    )
                     self._log_failure(request_id, tpl, model, attempt, exc.reason, started)
                     raise AppException(
                         503, "ai_unavailable", "AI service is temporarily unavailable",
@@ -1087,6 +1158,13 @@ class AIService:
                 retry_prompt_tokens += result.prompt_tokens
                 retry_completion_tokens += result.completion_tokens
                 if attempt >= MAX_ATTEMPTS:
+                    # P1-1: the final attempt consumed tokens too
+                    # (retry_*_tokens includes this attempt).
+                    await self._record_failure_usage(
+                        user, model, request_id,
+                        extra_prompt_tokens=retry_prompt_tokens,
+                        extra_completion_tokens=retry_completion_tokens,
+                    )
                     self._log_failure(request_id, tpl, model, attempt, "invalid_json", started)
                     raise AppException(
                         503, "ai_invalid_output",
@@ -1117,7 +1195,9 @@ class AIService:
         # -- Resolve category names to IDs --
         from .context import load_validation_context
         ctx = await load_validation_context(self._db, user.id, book_id)
-        resolved_txs = self._resolve_categories(raw_transactions, ctx)
+        resolved_txs = self._resolve_categories(
+            raw_transactions, ctx, user.timezone,
+        )
 
         # -- Build complete ActionProposal --
         # T-M4-04e: meta.attachmentId lets the client link transactions
@@ -1166,13 +1246,16 @@ class AIService:
     def _resolve_categories(
         raw_transactions: list,
         ctx: "ProposalValidationContext",
+        tz_name: str = "UTC",
     ) -> list[dict]:
         """Resolve category names from LLM output to category IDs.
 
-        Uses fuzzy matching: the LLM may output "餐饮" while the user's
-        category is named "餐饮" (exact) or "餐饮食谱" (prefix match).
-        Unresolved categories fall back to the first expense category
-        in the context (if any), or empty string.
+        Uses exact matching first, then prefix fallback.
+        Unresolved categories fall back to the first available category
+        in the context (if any), so that the resulting proposal always
+        passes schema validation (``categoryId`` requires ``minLength: 1``).
+        Empty ``bizDate`` falls back to today in the user's timezone
+        (``format: date`` required).
         """
         if not raw_transactions:
             return []
@@ -1183,6 +1266,20 @@ class AIService:
             name_to_id[cat_name] = cat_id
             # Also add common aliases (strip whitespace)
             name_to_id[cat_name.strip()] = cat_id
+
+        # Determine fallback category ID: first available category.
+        # We cannot know the type from context alone, so we just pick the
+        # first category ID available. The user can edit in the batch card.
+        fallback_category_id = next(iter(ctx.category_names.values()), "")
+
+        # R-M4-52 fix: today in the user's timezone — same day boundary as
+        # the quota system (local_day_start_utc). A UTC fallback would date
+        # early-morning entries one day back for UTC+ users.
+        try:
+            tz = ZoneInfo(tz_name)
+        except (ZoneInfoNotFoundError, ValueError):
+            tz = ZoneInfo("UTC")
+        today_str = datetime.now(tz).date().isoformat()
 
         resolved = []
         for tx in raw_transactions:
@@ -1198,11 +1295,20 @@ class AIService:
                         cat_id = cid
                         break
 
+            # R-M4-53 fix: unresolved category → fallback (schema minLength: 1)
+            if not cat_id:
+                cat_id = fallback_category_id
+
+            # R-M4-52 fix: empty bizDate → today (schema format: date)
+            biz_date = str(tx.get("bizDate", "")).strip()
+            if not biz_date:
+                biz_date = today_str
+
             resolved.append({
                 "type": tx.get("type", "expense"),
                 "amountCents": int(tx.get("amountCents", 0)),
                 "categoryId": cat_id,
                 "note": str(tx.get("note", "")),
-                "bizDate": str(tx.get("bizDate", "")),
+                "bizDate": biz_date,
             })
         return resolved

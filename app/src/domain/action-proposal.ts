@@ -54,6 +54,8 @@ export interface ActionProposal {
   transactions?: TransactionItem[]
   message: string
   warnings: string[]
+  /** 可选元数据（如 source、attachmentId），T-M4-04e 图片记账用 */
+  meta?: Record<string, unknown>
 }
 
 // ─── 校验结果 ───

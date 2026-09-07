@@ -1,6 +1,6 @@
 # Aozora · 生产执行规划
 
-**状态：** M1 全部完成 ✅，M2 阶段 T-M2-01 至 T-M2-05 全部交付 ✅。M3 阶段 T-M3-01、T-M3-02、T-M3-03 全部交付 ✅。M4 阶段 T-M4-00 前端骨架与核心页面 ✅（2026-09-06 交付，含技术栈、四时主题、核心页面数据流）；T-M4-05 通知、快捷方式与小组件 ✅（2026-09-06 第 5 轮复审通过，R-M4-41~46 修复属实，6R 闭环）；T-M4-04 语音、图片与桥接 ✅（2026-09-07 第 5 轮复审通过：04a/04c/04d/04e 全部通过，NEW-1/NEW-2/Bug-C1 已修复，详见 docs/review/T-M4-04-review-round5.md）。
+**状态：** M1 全部完成 ✅，M2 阶段 T-M2-01 至 T-M2-05 全部交付 ✅。M3 阶段 T-M3-01、T-M3-02、T-M3-03 全部交付 ✅。M4 阶段 T-M4-00 前端骨架与核心页面 ✅（2026-09-06 交付，含技术栈、四时主题、核心页面数据流）；T-M4-05 通知、快捷方式与小组件 ✅（2026-09-06 第 5 轮复审通过，R-M4-41~46 修复属实，6R 闭环；2026-09-07 R-M4-40 编译阻塞已解决，全量测试通过）；T-M4-04 语音、图片与桥接 ✅（2026-09-07 第 5 轮复审通过：04a/04c/04d/04e 全部通过，NEW-1/NEW-2/Bug-C1 已修复，详见 docs/review/T-M4-04-review-round5.md）。
 **用途：** 后续执行 Agent 的唯一任务选择与交接入口。产品、架构与全局验收以 `docs/APP-CONTEXT.md` 为准；本文件只维护顺序、闸门、交接与完成记录。
 
 ## 执行规则
@@ -747,6 +747,8 @@
 
 > **✅ 2026-09-06 第 5 轮复审通过：** R-M4-27~30（第 2 轮）已修复并经第 5 轮复验属实（R-M4-41~46）；voice/image 单元测试补齐（13 项新测试，45 项全绿）。详见 docs/review/T-M4-05-review-round5.md。
 >
+> **🔄 2026-09-07 状态更新：** R-M4-40（Kotlin 编译阻塞，T-M4-04b/d 工作区问题）已解决。`./gradlew testDebugUnitTest` ✅ BUILD SUCCESSFUL，T-M4-05 Kotlin 单测（ReminderSchedulerTest 9 / WidgetDataHelperTest 15 / AozoraWidgetProviderTest 4 / BridgeProtocolTest 6）全部通过。前端 480/480 通过（29 files），服务端 426/426 通过。
+>
 > **⚠️ Commit 勘误（3e1607b）：** 该提交 message 为 "feat: T-M4-05 数据导出与统计服务完成 + 多项集成修复"，但实际内容为 T-M4-04b/d voice/image 代码 + server AI 改动 + R-M4-27~30 修复，与"数据导出与统计服务"无关。T-M4-05 的正确范围是"通知、快捷方式与小组件迁移"（见 APP-CONTEXT.md §9），"数据导出与统计服务"属于 T-M2-05（已完成）范畴，从未在本任务中实现。历史 commit message 已无法安全改写，以此说明为准。
 
 按交接模板：
@@ -769,8 +771,8 @@
 - **验证命令与结果：**
   - `npm run lint` → exit 0（仅 warnings）
   - `npm run typecheck` → exit 0
-  - `npm test -- --run` → **349 passed**（18 test files）
-  - 既有 348 项测试全部不回归
+  - `npm test -- --run` → **480 passed**（29 test files）
+  - 既有测试全部不回归；Kotlin `./gradlew testDebugUnitTest` ✅ BUILD SUCCESSFUL（R-M4-40 编译阻塞已解决）
 - **数据/同步/AI/安全影响：**
   - 数据：小组件通过 WidgetDataHelper 直接读 Room，与前端聚合器使用相同 Repository，金额一致
   - 同步：SyncWorker 成功后触发 widget 刷新

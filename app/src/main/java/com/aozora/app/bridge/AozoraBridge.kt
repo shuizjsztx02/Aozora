@@ -14,6 +14,7 @@ import com.aozora.app.sync.SyncEngine
 import com.aozora.app.sync.SyncScheduler
 import com.aozora.app.sync.SyncState
 import com.aozora.app.voice.VoiceRecognitionService
+import androidx.core.content.ContextCompat
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
@@ -152,6 +153,9 @@ class AozoraBridge(
             // T-M4-04d: 图片链路
             BridgeCommands.IMAGE_PICK -> handleImagePick(requestId, payload)
             BridgeCommands.IMAGE_DELETE -> handleImageDelete(requestId, payload)
+
+            // T-M4-04e: 图片记账解析
+            BridgeCommands.IMAGE_PARSE -> handleImageParse(requestId, payload)
 
             else -> BridgeResponse.error(requestId, "unknown_command", "Unknown command: $command")
         }
@@ -666,6 +670,17 @@ class AozoraBridge(
             return BridgeResponse.error(requestId, "already_recording", "Already recording")
         }
 
+        // R-M4-43 fix: Bridge 层防御检查 RECORD_AUDIO 权限，避免 service 层在 AudioRecord 创建时才触发 SecurityException
+        val ctx = syncContext
+        if (ctx != null) {
+            val granted = ContextCompat.checkSelfPermission(
+                ctx, android.Manifest.permission.RECORD_AUDIO
+            ) == android.content.pm.PackageManager.PERMISSION_GRANTED
+            if (!granted) {
+                return BridgeResponse.error(requestId, "permission_denied", "RECORD_AUDIO permission not granted")
+            }
+        }
+
         val started = service.startRecording(object : VoiceRecognitionService.VoiceRecognitionListener {
             override fun onPartialResult(text: String) {
                 dispatchVoicePartial(text)
@@ -820,6 +835,44 @@ class AozoraBridge(
         }
         client.deleteAttachment(attachmentId)
         return BridgeResponse.success(requestId, JSONObject().put("success", true).toString())
+    }
+
+    /**
+     * T-M4-04e: 解析已上传的小票/账单图片。
+     *
+     * 调用 AiGatewayClient.parseImage → 服务端 /ai/parse-image。
+     * 返回完整 ActionProposal（add_tx_batch）供前端展示批量确认卡。
+     */
+    private suspend fun handleImageParse(requestId: String, p: JSONObject): BridgeResponse {
+        val client = aiGatewayClient
+            ?: return BridgeResponse.error(requestId, "unavailable", "AI gateway client not injected")
+        val attachmentId = p.optString("attachmentId", "")
+        if (attachmentId.isBlank()) {
+            return BridgeResponse.error(requestId, "invalid_input", "Missing required field: attachmentId")
+        }
+        val bookId = p.optString("bookId", "")
+        if (bookId.isBlank()) {
+            return BridgeResponse.error(requestId, "invalid_input", "Missing required field: bookId")
+        }
+        return try {
+            val resultJson = client.parseImage(attachmentId, bookId)
+            BridgeResponse.success(requestId, resultJson)
+        } catch (e: AiGatewayClient.AiError.Timeout) {
+            BridgeResponse.error(requestId, "timeout", "Image parse request timed out")
+        } catch (e: AiGatewayClient.AiError.Network) {
+            BridgeResponse.error(requestId, "network_error", e.message ?: "Network error")
+        } catch (e: AiGatewayClient.AiError.RateLimited) {
+            BridgeResponse.error(requestId, "rate_limited", "AI rate limit exceeded")
+        } catch (e: AiGatewayClient.AiError.Unavailable) {
+            // 503 可能是 no_ai_provider，也可能是暂时不可用
+            if (e.httpCode == 503) {
+                BridgeResponse.error(requestId, "no_ai_provider", "AI service is temporarily unavailable")
+            } else {
+                BridgeResponse.error(requestId, "server_error", "AI service unavailable: HTTP ${e.httpCode}")
+            }
+        } catch (e: AiGatewayClient.AiError.AuthLost) {
+            BridgeResponse.error(requestId, "auth_lost", "Authentication required")
+        }
     }
 
     /** Push upload progress to frontend via `window.__aozoraImageProgress__`. */

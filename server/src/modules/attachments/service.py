@@ -247,6 +247,10 @@ class AttachmentService:
         dest.write_bytes(data)
 
         # --- Persist DB row.
+        # NEW-2 fix: if the DB write fails after the file has been written
+        # to disk, the file becomes an orphan (no DB row → cleanup can
+        # never find it). Wrap in try/except to delete the orphaned file
+        # before re-raising.
         attachment = Attachment(
             id=attachment_id,
             user_id=user_id,
@@ -257,7 +261,17 @@ class AttachmentService:
             expires_at=datetime.now(UTC) + timedelta(hours=PENDING_EXPIRY_HOURS),
         )
         self.db.add(attachment)
-        await self.db.flush()
+        try:
+            await self.db.flush()
+        except Exception:
+            try:
+                dest.unlink(missing_ok=True)
+            except OSError:
+                logger.warning(
+                    "Failed to clean up orphan file %s after DB error",
+                    dest, exc_info=True,
+                )
+            raise
         await self.db.refresh(attachment)
         return attachment
 

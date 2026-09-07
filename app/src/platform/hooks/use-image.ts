@@ -42,6 +42,8 @@ export interface UseImageReturn {
   retry: () => Promise<ImagePickResult | null>
   /** 删除服务端附件（放弃草稿）。 */
   clear: () => Promise<void>
+  /** 从草稿恢复 attachment 状态（用于重新打开弹层后显示缩略图）。 */
+  restore: (attachment: ImagePickResult) => void
 }
 
 export function useImage(): UseImageReturn {
@@ -108,6 +110,14 @@ export function useImage(): UseImageReturn {
     setProgress(-1)
   }, [attachment, bridge])
 
+  // 从草稿恢复 attachment 状态（用于重新打开弹层后显示缩略图）
+  const restore = useCallback((att: ImagePickResult) => {
+    setAttachment(att)
+    setError(null)
+    setProgress(1)
+    setUploading(false)
+  }, [])
+
   return {
     uploading,
     progress,
@@ -117,5 +127,6 @@ export function useImage(): UseImageReturn {
     pickImage,
     retry,
     clear,
+    restore,
   }
 }

@@ -18,6 +18,11 @@ import { AssistantPage } from '../features/assistant/AssistantPage'
 import { OnboardingPage, isOnboardingCompleted } from '../features/onboarding/OnboardingPage'
 import { LoginPage } from '../features/auth/LoginPage'
 
+/** 默认路由目标：未完成首启则去 onboarding，否则去 home */
+function DefaultRoute() {
+  return <Navigate to={isOnboardingCompleted() ? '/home' : '/onboarding'} replace />
+}
+
 /** 路由守卫 — 未完成首启引导时重定向到 onboarding */
 function ProtectedRoute({ children }: { children: ReactNode }) {
   if (!isOnboardingCompleted()) {
@@ -58,7 +63,7 @@ export function Router() {
         <Route path="/me" element={<ProtectedRoute><AppLayout><MePage /></AppLayout></ProtectedRoute>} />
         <Route path="/assistant" element={<ProtectedRoute><AssistantPage /></ProtectedRoute>} />
         <Route path="/settings/reminder" element={<ProtectedRoute><AppLayout><ReminderSettingsPage /></AppLayout></ProtectedRoute>} />
-        <Route path="*" element={<Navigate to="/home" replace />} />
+        <Route path="*" element={<DefaultRoute />} />
       </Routes>
     </HashRouter>
   )

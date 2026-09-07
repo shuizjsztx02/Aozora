@@ -16,6 +16,7 @@ import org.robolectric.RobolectricTestRunner
 import org.robolectric.RuntimeEnvironment
 import org.robolectric.annotation.Config
 import java.time.LocalDate
+import java.time.ZoneId
 import java.time.format.DateTimeFormatter
 
 /**
@@ -34,7 +35,7 @@ class WidgetDataHelperTest {
     private lateinit var db: AozoraDatabase
     private lateinit var repository: Repository
 
-    private val today: String = LocalDate.now().format(DateTimeFormatter.ISO_LOCAL_DATE)
+    private val today: String = LocalDate.now(ZoneId.of("Asia/Shanghai")).format(DateTimeFormatter.ISO_LOCAL_DATE)
     private val month: String = today.slice(0..6)
 
     @Before

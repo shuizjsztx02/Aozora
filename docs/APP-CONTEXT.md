@@ -121,7 +121,7 @@
 | 本地数据与离线队列 | Room v2 schema（6 实体 + `sync_meta`），`pending_mutations` 携带 `expectedVersion`/`lastError`；Repository 单事务合并路径 `applyServerChanges`；WorkManager 同步调度打通；设备可靠性已通过 | `PARTIAL`，T-M3-02 ✅ |
 | 原生桥、提醒、小组件与快捷方式 | 版本化 Bridge v1 25 命令（含 `sync.*` + `reminder.*` 3 个）；ReminderScheduler + AlarmManager + BootReceiver；AozoraWidgetProvider（Room 聚合，三状态）；静态 shortcut + deep link 路由 | `PARTIAL`，T-M4-05 ✅ |
 | 服务端 | FastAPI 骨架、配置校验、健康检查、OpenAPI 3.1、Dockerfile；11 实体模型 + Alembic 迁移（0001_initial → 0006_budget_deleted_at）；auth 模块；账本核心 API（Books/Categories/Accounts/Transactions/Budgets CRUD）；统计与导出 API（月度/趋势聚合、JSON/CSV 导出，对账不变量）；同步模块（push/pull/bootstrap、幂等 mutation、cursor 变更流、budget 软删支持）| `PARTIAL`，T-M2-01/02/03/04/05 ✅；T-M3-01 ✅；T-M3-02 服务端 budget 扩展 ✅ |
-| 测试 | 前端 349 + Android JVM（含 SyncPayloadMapperTest 11 + BridgeProtocolTest 25 命令检查 + ReminderSchedulerTest）+ 设备 Room（含 Migration1To2 + SyncEngineTest + 手工 FlightMode）+ 服务端 184 项通过 | `PARTIAL` |
+| 测试 | 前端 480 + Android JVM（含 SyncPayloadMapperTest 11 + BridgeProtocolTest 25 命令检查 + ReminderSchedulerTest）+ 设备 Room（含 Migration1To2 + SyncEngineTest + 手工 FlightMode）+ 服务端 426 项通过 | `PARTIAL` |
 | 发布 | 无签名材料和可分发产物 | `TARGET` |
 
 ### 3.2 当前不能视为已交付的能力
@@ -698,6 +698,7 @@ app/src/
 #### T-M4-05 通知、快捷方式与小组件迁移
 
 - **目标：** 原生入口统一读取 Room/同步后的数据。
+- **范围澄清（2026-09-06）：** 提交 `3e1607b` 的 commit message 误标为"数据导出与统计服务完成"，该服务实属 T-M2-05（已完成），从未在本任务中实现。T-M4-05 的正确范围为通知、快捷方式与小组件迁移，详见 `docs/milestones/production-execution-plan.md` T-M4-05 完成记录中的 Commit 勘误。
 - **依赖：** T-M1-03、T-M3-02、T-M4-00。
 - **实施：** ReminderScheduler、Widget Provider 和 shortcuts 改用 repository；增加登录/无数据/待同步状态。
 - **验收：** 重启后提醒有效；小组件与首页金额一致；快捷入口打开正确页面；无旧 JSON 依赖。

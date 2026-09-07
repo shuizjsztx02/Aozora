@@ -4,7 +4,7 @@
  * 提供拍照 / 从相册选择两个入口，集成权限预检。
  */
 
-import { useCallback } from 'react'
+import { useCallback, useState, useEffect, useRef } from 'react'
 import { motion, AnimatePresence } from 'framer-motion'
 import { usePermissions } from '../../platform/hooks/use-permissions'
 
@@ -15,6 +15,10 @@ interface ImagePickerSheetProps {
 
 export function ImagePickerSheet({ onPick, onClose }: ImagePickerSheetProps) {
   const { canCamera, canGallery, requestPermission, openSettings, shouldGuideSettings } = usePermissions()
+  const [pendingSource, setPendingSource] = useState<'camera' | 'gallery' | null>(null)
+  // 用 ref 持有最新 onPick，避免 effect 依赖不稳定（父组件每次 image/draft 变化都重建 handleImagePick）
+  const onPickRef = useRef(onPick)
+  onPickRef.current = onPick
 
   const handlePick = useCallback(
     async (source: 'camera' | 'gallery') => {
@@ -22,6 +26,8 @@ export function ImagePickerSheet({ onPick, onClose }: ImagePickerSheetProps) {
       const perm = source === 'camera' ? 'CAMERA' as const : 'READ_MEDIA_IMAGES' as const
 
       if (!hasPermission) {
+        // R-M4-48 fix: 记录待处理源，权限授予后自动续接
+        setPendingSource(source)
         await requestPermission(perm)
         return
       }
@@ -30,6 +36,16 @@ export function ImagePickerSheet({ onPick, onClose }: ImagePickerSheetProps) {
     },
     [canCamera, canGallery, requestPermission, onPick],
   )
+
+  // R-M4-48 fix: 权限授予后自动续接选择
+  useEffect(() => {
+    if (!pendingSource) return
+    const hasPermission = pendingSource === 'camera' ? canCamera : canGallery
+    if (hasPermission) {
+      onPickRef.current(pendingSource)
+      setPendingSource(null)
+    }
+  }, [pendingSource, canCamera, canGallery])
 
   return (
     <AnimatePresence>

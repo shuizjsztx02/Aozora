@@ -317,11 +317,15 @@ class TestImageParseSuccess:
         data = resp.json()
         assert len(data["proposal"]["transactions"]) == 3
         assert data["confidence"] == 0.88
-        # "餐饮" resolved, "交通" resolved, "购物" unresolved (no such category)
+        # "餐饮" resolved, "交通" resolved, "购物" unresolved → fallback to first category
         txs = data["proposal"]["transactions"]
         assert txs[0]["categoryId"] != ""  # 餐饮
         assert txs[1]["categoryId"] != ""  # 交通
-        assert txs[2]["categoryId"] == ""  # 购物 (not in user's categories)
+        # R-M4-53 fix: unresolved category falls back to first available (not empty)
+        assert txs[2]["categoryId"] != ""  # 购物 → fallback
+        # R-M4-52 fix: empty bizDate falls back to today (not empty string)
+        assert txs[2]["bizDate"] != ""
+        assert len(txs[2]["bizDate"]) == 10  # YYYY-MM-DD format
 
     def test_category_prefix_match(self, img_env):
         """LLM outputs '餐饮' but user has '餐饮' AND '餐饮食谱' — exact match wins."""

@@ -165,7 +165,8 @@ class ImageClient(
         onProgress: (Long, Long) -> Unit,
     ): MultipartBody {
         val bytes = file.readBytes()
-        val contentType = guessMime(file)
+        // R-M4-49 fix: 压缩输出恒为 JPEG，直接使用 image/jpeg
+        val contentType = "image/jpeg"
 
         return MultipartBody.Builder()
             .setType(MultipartBody.FORM)
@@ -177,16 +178,6 @@ class ImageClient(
                 )
             )
             .build()
-    }
-
-    private fun guessMime(file: File): String {
-        val ext = file.extension.lowercase()
-        return when (ext) {
-            "jpg", "jpeg" -> "image/jpeg"
-            "png" -> "image/png"
-            "webp" -> "image/webp"
-            else -> "image/jpeg"
-        }
     }
 
     private fun parseAttachmentResponse(body: String): UploadResult {

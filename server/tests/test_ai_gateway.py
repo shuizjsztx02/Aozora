@@ -15,6 +15,7 @@ import json
 import logging
 import uuid
 from datetime import UTC, datetime, timedelta
+from pathlib import Path
 
 import httpx
 import pytest
@@ -36,6 +37,10 @@ from src.modules.ai.provider import (
     reset_llm_provider,
 )
 from src.modules.ai.service import MAX_ATTEMPTS, _ai_rate_limits, local_day_start_utc
+
+# Ensure models are registered with Base.metadata before ai_env creates tables
+from src.models.attachment import Attachment  # noqa: F401
+from src.models.ledger import Account, Book, Category  # noqa: F401
 
 VALID_OUTPUT = {
     "type": "expense",
@@ -79,6 +84,12 @@ class FakeProvider:
         if isinstance(item, ProviderError):
             raise item
         return item
+
+    async def complete_with_images(self, messages, *, model, max_tokens, timeout):
+        """Same as ``complete`` — the fake ignores image data URLs."""
+        return await self.complete(
+            messages, model=model, max_tokens=max_tokens, timeout=timeout,
+        )
 
 
 class AIEnv:
@@ -435,6 +446,35 @@ class TestDegradation:
         assert resp.status_code == 503
         assert resp.json()["code"] == "ai_invalid_output"
 
+    def test_invalid_json_failure_records_tokens(self, ai_env):
+        """P1-1: when retries exhaust, tokens from failed attempts are still
+        recorded in AIUsage so the audit table matches provider billing."""
+        ai_env.provider.results = [
+            ProviderResult("garbage", 90, 30),
+            ProviderResult("also garbage", 100, 35),
+        ]
+        user = _guest(ai_env)
+        resp = _interpret(ai_env, user)
+        assert resp.status_code == 503
+        # Both attempts' tokens must appear in the usage table
+        usages = _fetch_usage(ai_env, user["id"])
+        assert len(usages) == 1
+        assert usages[0].tokens == 90 + 30 + 100 + 35  # both attempts
+
+    def test_provider_error_failure_records_prior_tokens(self, ai_env):
+        """P1-1: provider 5xx after a JSON-fail retry records the earlier tokens."""
+        ai_env.provider.results = [
+            ProviderResult("garbage", 90, 30),        # attempt 1: JSON fail
+            ProviderError(status=503, retryable=True, reason="http_5xx"),  # attempt 2: 5xx
+        ]
+        user = _guest(ai_env)
+        resp = _interpret(ai_env, user)
+        assert resp.status_code == 503
+        # Attempt 1 consumed tokens (billed); attempt 2 didn't (ProviderError)
+        usages = _fetch_usage(ai_env, user["id"])
+        assert len(usages) == 1
+        assert usages[0].tokens == 90 + 30  # only attempt 1's tokens
+
     def test_non_dict_json_degrades(self, ai_env):
         ai_env.provider.results = [ProviderResult("[1, 2, 3]", 90, 30)] * MAX_ATTEMPTS
         user = _guest(ai_env)
@@ -742,3 +782,173 @@ class TestDashScopeProvider:
             model="m", max_tokens=8, timeout=1.0,
         )
         assert result == ProviderResult("{}", 0, 0)
+
+
+# ── P1-2: parse_image integration tests ──────────────────────────────
+
+IMAGE_PARSE_OUTPUT = {
+    "transactions": [
+        {
+            "type": "expense",
+            "amountCents": 3500,
+            "category": "餐饮",
+            "note": "午餐",
+            "bizDate": "2026-09-06",
+        },
+    ],
+    "confidence": 0.92,
+    "proposalId": "img-test-001",
+}
+
+
+def _seed_parse_image_env(env: AIEnv, *, status: str = "pending"):
+    """Create user + book + category + attachment in DB. Returns dicts."""
+    from src.models.attachment import Attachment, AttachmentStatus
+    from src.models.ledger import Account, Book, Category, CategoryKind
+
+    # Create user via auth endpoint (this also returns the token)
+    user = _guest(env)
+    user_id = uuid.UUID(user["id"])
+
+    async def _run():
+        async with env.factory() as session:
+            # Book
+            book = Book(id=uuid.uuid4(), owner_id=user_id, name="测试本")
+            session.add(book)
+            await session.flush()
+
+            # Category — kind (not type), no color field
+            cat = Category(
+                id=uuid.uuid4(), book_id=book.id, owner_id=user_id,
+                name="餐饮", kind=CategoryKind.EXPENSE,
+            )
+            session.add(cat)
+
+            # Account — owner_id (not user_id), no type/currency
+            acct = Account(
+                id=uuid.uuid4(), owner_id=user_id, name="现金",
+            )
+            session.add(acct)
+
+            # Attachment
+            att_id = uuid.uuid4()
+            att = Attachment(
+                id=att_id, user_id=user_id, object_key="receipt.jpg",
+                mime_type="image/jpeg", file_size=100,
+                status=AttachmentStatus(status),
+            )
+            session.add(att)
+            await session.commit()
+            return {
+                "user": user,
+                "book_id": str(book.id),
+                "category_id": str(cat.id),
+                "attachment_id": str(att_id),
+            }
+
+    return asyncio.run(_run())
+
+
+class TestParseImage:
+    """T-M4-04e: image receipt parsing — core paths."""
+
+    def test_happy_path_returns_proposal(self, ai_env, monkeypatch):
+        """Valid image → vision model → resolved proposal with category IDs."""
+        import tempfile
+        upload_dir = tempfile.mkdtemp()
+        try:
+            # Write a tiny fake image file
+            with open(f"{upload_dir}/receipt.jpg", "wb") as f:
+                f.write(b"\xff\xd8\xff\xe0fake-image")
+            monkeypatch.setattr(
+                "src.modules.attachments.service._get_upload_dir", lambda: Path(upload_dir),
+            )
+
+            ids = _seed_parse_image_env(ai_env, status="pending")
+            user = ids["user"]
+
+            # Set provider to return image parse output
+            parse_json = json.dumps(IMAGE_PARSE_OUTPUT, ensure_ascii=False)
+            ai_env.provider.results = [
+                ProviderResult(parse_json, 200, 80),
+            ]
+
+            resp = ai_env.client.post(
+                "/ai/parse-image",
+                json={
+                    "attachment_id": ids["attachment_id"],
+                    "book_id": ids["book_id"],
+                },
+                headers=_auth(user),
+            )
+            assert resp.status_code == 200, resp.text
+            body = resp.json()
+            assert body["proposal"]["action"] == "add_tx_batch"
+            txs = body["proposal"]["transactions"]
+            assert len(txs) == 1
+            # Category name "餐饮" should be resolved to the seeded category ID
+            assert txs[0]["categoryId"] == ids["category_id"]
+            assert txs[0]["amountCents"] == 3500
+            assert body["confidence"] == 0.92
+            assert body["attachment_id"] == ids["attachment_id"]
+            # Usage recorded
+            assert body["usage"]["prompt_tokens"] == 200
+        finally:
+            import shutil
+            shutil.rmtree(upload_dir, ignore_errors=True)
+
+    def test_expired_attachment_returns_410(self, ai_env, monkeypatch):
+        """Attachment with status=EXPIRED → 410 Gone."""
+        import tempfile
+        upload_dir = tempfile.mkdtemp()
+        try:
+            with open(f"{upload_dir}/receipt.jpg", "wb") as f:
+                f.write(b"\xff\xd8\xff\xe0fake")
+            monkeypatch.setattr(
+                "src.modules.attachments.service._get_upload_dir", lambda: Path(upload_dir),
+            )
+
+            ids = _seed_parse_image_env(ai_env, status="expired")
+            user = ids["user"]
+
+            resp = ai_env.client.post(
+                "/ai/parse-image",
+                json={
+                    "attachment_id": ids["attachment_id"],
+                    "book_id": ids["book_id"],
+                },
+                headers=_auth(user),
+            )
+            assert resp.status_code == 410
+            assert resp.json()["code"] == "attachment_expired"
+        finally:
+            import shutil
+            shutil.rmtree(upload_dir, ignore_errors=True)
+
+    def test_not_pending_attachment_returns_409(self, ai_env, monkeypatch):
+        """Attachment with status=PARSED (not PENDING) → 409 Conflict."""
+        import tempfile
+        upload_dir = tempfile.mkdtemp()
+        try:
+            with open(f"{upload_dir}/receipt.jpg", "wb") as f:
+                f.write(b"\xff\xd8\xff\xe0fake")
+            monkeypatch.setattr(
+                "src.modules.attachments.service._get_upload_dir", lambda: Path(upload_dir),
+            )
+
+            ids = _seed_parse_image_env(ai_env, status="parsed")
+            user = ids["user"]
+
+            resp = ai_env.client.post(
+                "/ai/parse-image",
+                json={
+                    "attachment_id": ids["attachment_id"],
+                    "book_id": ids["book_id"],
+                },
+                headers=_auth(user),
+            )
+            assert resp.status_code == 409
+            assert resp.json()["code"] == "attachment_not_pending"
+        finally:
+            import shutil
+            shutil.rmtree(upload_dir, ignore_errors=True)

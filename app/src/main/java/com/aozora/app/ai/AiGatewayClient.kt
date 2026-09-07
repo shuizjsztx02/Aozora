@@ -75,6 +75,18 @@ class AiGatewayClient(
     suspend fun report(bookId: String, period: String): String =
         executeAuthorized("$baseUrl/ai/report", buildReportRequest(bookId, period))
 
+    /**
+     * T-M4-04e: POST /ai/parse-image — 小票/账单图片 → ActionProposal.
+     *
+     * 视觉模型较慢，使用 120s 超时而非默认 25s。
+     */
+    suspend fun parseImage(attachmentId: String, bookId: String): String =
+        executeAuthorized(
+            "$baseUrl/ai/parse-image",
+            buildParseImageRequest(attachmentId, bookId),
+            timeoutSeconds = IMAGE_PARSE_TIMEOUT_SECONDS,
+        )
+
     // ─── internal ────────────────────────────────────────────────────────
 
     private fun buildInterpretRequest(input: String): String =
@@ -103,7 +115,17 @@ class AiGatewayClient(
             .put("period", period)
             .toString()
 
-    private suspend fun executeAuthorized(url: String, bodyJson: String): String {
+    private fun buildParseImageRequest(attachmentId: String, bookId: String): String =
+        JSONObject()
+            .put("attachment_id", attachmentId)
+            .put("book_id", bookId)
+            .toString()
+
+    private suspend fun executeAuthorized(
+        url: String,
+        bodyJson: String,
+        timeoutSeconds: Long = CALL_TIMEOUT_SECONDS,
+    ): String {
         val token = withContext(Dispatchers.IO) {
             try {
                 authClient.ensureValidAccessToken()
@@ -120,11 +142,19 @@ class AiGatewayClient(
             .header("X-Request-Id", UUID.randomUUID().toString())
             .build()
 
+        // Use a per-call client when the caller needs a non-default timeout
+        // (e.g. image parse at 120s). newBuilder() shares the connection pool.
+        val callClient = if (timeoutSeconds != CALL_TIMEOUT_SECONDS) {
+            httpClient.newBuilder().callTimeout(timeoutSeconds, TimeUnit.SECONDS).build()
+        } else {
+            httpClient
+        }
+
         // P1#2: enqueue + suspendCancellableCoroutine instead of a blocking
         // execute() — the HTTP call is now actually cancelled when the
         // calling coroutine is cancelled (e.g. user leaves the screen).
         return suspendCancellableCoroutine { cont ->
-            val call = httpClient.newCall(request)
+            val call = callClient.newCall(request)
             cont.invokeOnCancellation { call.cancel() }
             call.enqueue(object : Callback {
                 override fun onFailure(call: Call, e: IOException) {
@@ -183,5 +213,7 @@ class AiGatewayClient(
     companion object {
         private val JSON = "application/json".toMediaType()
         private const val CALL_TIMEOUT_SECONDS = 25L
+        /** T-M4-04e: 视觉模型较慢，图片解析使用 120s 超时。 */
+        private const val IMAGE_PARSE_TIMEOUT_SECONDS = 120L
     }
 }
