@@ -6,10 +6,11 @@ Exercises: auth → ledger → AI → sync → stats → export → attachments 
 
 from __future__ import annotations
 
-import httpx
-import pytest
 import uuid
 from datetime import date, datetime, timedelta, timezone
+
+import httpx
+import pytest
 
 BASE = "http://127.0.0.1:8000/api/v1"
 TODAY = date.today()
@@ -31,6 +32,17 @@ def e2e_client():
     c.headers["Authorization"] = f"Bearer {body['tokens']['access_token']}"
     c._e2e_user_id = body["user_id"]
     c._e2e_refresh = body["tokens"]["refresh_token"]
+
+    # F-M5-04a-F1: server-side sync push now requires a recorded consent
+    # for one of the user's devices. Record it up front so all subsequent
+    # push-based tests can proceed without per-test ceremony.
+    now = datetime.now(timezone.utc).isoformat()
+    r = c.post("/consent", json={
+        "device_id": "e2e-session", "policy_version": "v1",
+        "consented_at": now,
+    })
+    assert r.status_code == 201, f"Consent seed failed: {r.status_code} {r.text}"
+
     yield c
     c.close()
 
@@ -340,7 +352,6 @@ class TestSyncE2E:
         cat = shared_data["expense_cat"]
         acct = shared_data["account"]
         payload = self._payload(b["id"], cat["id"], acct["id"])
-        mid = payload["mutations"][0]["mutation_id"]
 
         r1 = e2e_client.post("/sync/push", json=payload)
         assert r1.json()["results"][0]["status"] == "applied"
