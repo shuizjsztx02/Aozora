@@ -11,8 +11,16 @@ infra/
 │   ├── cleanup.sh        # Retention policy cleanup
 │   ├── verify-backup.sh  # Daily restore + assertion
 │   └── production-params.md  # D-EXEC-02 backfill checklist
+├── deploy/               # T-M5-05a: Deployment scripts
+│   └── staging-deploy.sh # Zero-to-staging deployment
 └── monitoring/           # T-M5-05: Observability
-    └── alert-rules.yml   # Prometheus alerting rules
+    ├── alert-rules.yml   # Prometheus alerting rules
+    ├── otel-collector-config.yaml  # OTel Collector routing
+    ├── prometheus.yml    # Prometheus scrape config
+    ├── loki-config.yaml  # Loki log aggregation
+    ├── tempo-config.yaml # Tempo distributed tracing
+    ├── grafana-datasources.yaml  # Grafana datasource provisioning
+    └── alertmanager.yml  # Alert routing configuration
 ```
 
 Secret values belong only in external secret storage and never in this repository.

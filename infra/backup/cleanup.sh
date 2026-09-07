@@ -13,8 +13,7 @@
 #   FAILURE_MARKER          失败标记路径（默认 ${BACKUP_DIR}/.backup_failed）
 #   PROMETHEUS_TEXTFILE_DIR 设置后向该目录写入 Prometheus textfile 指标（.prom）
 
-# Alpine (postgres:18-alpine) uses busybox ash; pipefail / process
-# substitution are not supported. Use `set -eu` and POSIX constructs.
+# 使用 set -eu（不启用 pipefail），保持与 ash 兼容以便未来替换基础镜像。
 set -eu
 
 if [ -z "${BACKUP_DIR:-}" ]; then
@@ -41,8 +40,9 @@ echo "[cleanup] Starting cleanup at $(date -u +%Y-%m-%dT%H:%M:%SZ)"
 LOCAL_THRESHOLD=$((RETENTION_LOCAL_DAYS - 1))
 echo "[cleanup] Removing local backups older than ${RETENTION_LOCAL_DAYS} days from ${BACKUP_DIR} (mtime +${LOCAL_THRESHOLD})"
 
+TMP_LIST=""
+trap 'rm -f "${TMP_LIST:-}" 2>/dev/null' EXIT
 TMP_LIST="$(mktemp)"
-trap 'rm -f "${TMP_LIST}" 2>/dev/null' EXIT
 find "${BACKUP_DIR}" -maxdepth 1 -type f \( -name '*.dump' -o -name '*.dump.enc' -o -name '*.dump.sha256' \) -mtime +"${LOCAL_THRESHOLD}" > "${TMP_LIST}" 2>/dev/null || true
 
 DELETED_LOCAL=0
@@ -83,21 +83,12 @@ else
 fi
 
 # ── Prometheus textfile 指标 ──
+# 注：backup_files_count 由 backup.sh 写入 backup_metrics.prom，
+# 此处不再重复定义，避免 Prometheus textfile collector 遇到同目录
+# 多文件重复定义同一 metric 的冲突（NEW-1 修复）。
 if [ -n "${PROMETHEUS_TEXTFILE_DIR:-}" ]; then
   mkdir -p "${PROMETHEUS_TEXTFILE_DIR}" 2>/dev/null || true
-  # 统计当前 BACKUP_DIR 中剩余的备份文件数
-  FILES_COUNT=0
-  for f in "${BACKUP_DIR}"/aozora-*.dump "${BACKUP_DIR}"/aozora-*.dump.enc; do
-    [ -f "$f" ] && FILES_COUNT=$((FILES_COUNT + 1))
-  done
-  tmp="${PROMETHEUS_TEXTFILE_DIR}/.backup_cleanup_metrics.$$.prom"
-  final="${PROMETHEUS_TEXTFILE_DIR}/backup_cleanup_metrics.prom"
-  cat > "${tmp}" <<EOF
-# HELP backup_files_count Number of backup files in BACKUP_DIR after cleanup
-# TYPE backup_files_count gauge
-backup_files_count ${FILES_COUNT}
-EOF
-  mv "${tmp}" "${final}" 2>/dev/null || rm -f "${tmp}" 2>/dev/null || true
+  echo "[cleanup] Metrics skipped (backup_files_count provided by backup.sh)"
 fi
 
 echo "[cleanup] Cleanup completed at $(date -u +%Y-%m-%dT%H:%M:%SZ)"

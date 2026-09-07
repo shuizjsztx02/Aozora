@@ -812,7 +812,7 @@
 |---|---|---|---|---|
 | T-M5-01 对账不变量与端到端测试 | M1–M4 核心链路 | 三端共享 fixture、固定种子 fuzz、异常注入、E2E 进 CI | 无 | ✅ **通过**（01a/01b/01c/01d 全 ✅；三端共享 fixture 5 场景、fuzz 100/50 轮全绿、同步五态注入 TS 17/Python 8/Kotlin 14 全通过、E2E 脚本 + CI 三端门禁就绪） |
 | T-M5-02 安全加固 | T-M4-01 | 客户端/服务端安全基线、产物密钥扫描、依赖扫描 | D-EXEC-04（仅 02c 生产密钥复核） | ✅ **通过**（02a/02b/02c/02d 全 ✅；Android 104 测试全绿、Server 476 测试全绿；安全头/请求限制/NSC 拆分/日志脱敏/密钥扫描/依赖审计均已落地） |
-| T-M5-03 备份恢复与灾难演练 | T-M2-02 ✅ | 备份自动化、恢复 runbook、演练记录 | D-EXEC-02（生产参数最晚 T-M6-01a 前回填） | ✅ **通过**（03a/03b/03c 全 ✅；ADR-005 选型 pg_dump 定时、backup.sh + cleanup.sh + verify-backup.sh 脚本就绪、docker-compose.backup.yml overlay 就绪；隔离演练 DRILL PASSED：RPO 7s ≤ 24h、RTO 11s ≤ 4h、16 表恢复完整、SHA-256 校验通过；alert-rules.yml BackupFailure 规则就绪、production-params.md D-EXEC-02 回填清单就绪；第三轮审查 7 项修复全部通过） |
+| T-M5-03 备份恢复与灾难演练 | T-M2-02 ✅ | 备份自动化、恢复 runbook、演练记录 | D-EXEC-02（生产参数最晚 T-M6-01a 前回填） | ✅ **通过**（03a/03b/03c 全 ✅；ADR-005 选型 pg_dump 定时、backup.sh + cleanup.sh + verify-backup.sh 脚本就绪、docker-compose.backup.yml overlay 就绪；隔离演练 DRILL PASSED：RPO 7s ≤ 24h、RTO 11s ≤ 4h、16 表恢复完整、SHA-256 校验通过；alert-rules.yml BackupFailure 规则就绪、production-params.md D-EXEC-02 回填清单就绪；第三轮审查 10 项修复（Fix #1–#7 + NEW-1/NEW-2/NEW-3）全部通过，详见 docs/review/T-M5-03-review.md） |
 | T-M5-04 隐私、权限与账号生命周期 | T-M2-03 ✅、T-M2-05 ✅ | 同意流、用户导出、删除与保留链路 | D-EXEC-06（隐私主体/删除责任） | ⏳ 未开始 |
 | T-M5-05 生产监控与种子内测 | T-M5-01 至 04（父级；05a/05b 可提前） | staging 可观测栈、六类看板、内测报告 | D-EXEC-06（内测分发渠道） | ⏳ 未开始 |
 

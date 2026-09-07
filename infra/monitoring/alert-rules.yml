@@ -9,7 +9,7 @@
 #
 #   backup_last_success_timestamp_seconds   backup.sh          (成功时刻，Unix 时间戳)
 #   backup_last_exit_code                   backup.sh          (最近一次退出码)
-#   backup_files_count                      backup.sh/cleanup.sh (目录中备份文件数)
+#   backup_files_count                      backup.sh (目录中备份文件数)
 #   backup_verify_exit_code                 verify-backup.sh   (校验脚本退出码)
 #
 # 部署时需确保 node_exporter 的 --collector.textfile.directory 指向脚本写入的目录，

@@ -1,4 +1,4 @@
-#!/bin/sh
+#!/usr/bin/env bash
 # infra/backup/backup-scheduler.sh — UTC 03:00 锚定的备份调度器
 #
 # 用法：
@@ -41,9 +41,10 @@ seconds_until_utc() {
 echo "[backup-scheduler] Starting at $(date -u +%Y-%m-%dT%H:%M:%SZ)"
 
 # 首次启动立即运行一次备份（首次安装后尽快产生可验证备份）
+# NEW-2 修复：backup.sh / cleanup.sh 使用 bash 特性，改用 bash 调用
 echo "[backup-scheduler] Running initial backup..."
-if sh "${SCRIPTS_DIR}/backup.sh"; then
-  sh "${SCRIPTS_DIR}/cleanup.sh" || echo "[backup-scheduler] WARNING: cleanup.sh failed (non-fatal)" >&2
+if bash "${SCRIPTS_DIR}/backup.sh"; then
+  bash "${SCRIPTS_DIR}/cleanup.sh" || echo "[backup-scheduler] WARNING: cleanup.sh failed (non-fatal)" >&2
 else
   echo "[backup-scheduler] WARNING: initial backup failed; will retry at 03:00 UTC" >&2
 fi
@@ -55,8 +56,9 @@ while true; do
   sleep "${WAIT_SECS}"
 
   echo "[backup-scheduler] Running scheduled backup at $(date -u +%Y-%m-%dT%H:%M:%SZ)..."
-  if sh "${SCRIPTS_DIR}/backup.sh"; then
-    sh "${SCRIPTS_DIR}/cleanup.sh" || echo "[backup-scheduler] WARNING: cleanup.sh failed (non-fatal)" >&2
+  # NEW-2 修复：backup.sh / cleanup.sh 使用 bash 特性，改用 bash 调用
+  if bash "${SCRIPTS_DIR}/backup.sh"; then
+    bash "${SCRIPTS_DIR}/cleanup.sh" || echo "[backup-scheduler] WARNING: cleanup.sh failed (non-fatal)" >&2
   else
     echo "[backup-scheduler] ERROR: scheduled backup failed (exit $?)" >&2
   fi

@@ -38,12 +38,8 @@ createdb --host=localhost --port=5432 --username=aozora aozora_restore
 BACKUP_DIR="${BACKUP_DIR:-./backups}"
 LATEST="$(ls -t "${BACKUP_DIR}"/aozora-*.dump | head -1)"
 
-# 校验 SHA-256（LATEST 为绝对路径时无需 cd；相对路径则在 BACKUP_DIR 内校验）
-if [[ "${LATEST}" = /* ]]; then
-  sha256sum -c "${LATEST}.sha256"
-else
-  (cd "${BACKUP_DIR}" && sha256sum -c "$(basename "${LATEST}").sha256")
-fi
+# 校验 SHA-256（始终 cd 到备份所在目录，避免绝对/相对路径分支）
+(cd "$(dirname "${LATEST}")" && sha256sum -c "$(basename "${LATEST}").sha256")
 
 # 恢复
 pg_restore \

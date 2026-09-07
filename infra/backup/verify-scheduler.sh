@@ -1,4 +1,4 @@
-#!/bin/sh
+#!/usr/bin/env bash
 # infra/backup/verify-scheduler.sh — UTC 04:00 锚定的校验调度器
 #
 # 行为：
@@ -39,7 +39,8 @@ while true; do
   sleep "${WAIT_SECS}"
 
   echo "[verify-scheduler] Running scheduled verification at $(date -u +%Y-%m-%dT%H:%M:%SZ)..."
-  if ! sh "${SCRIPTS_DIR}/verify-backup.sh"; then
+  # NEW-2 修复：verify-backup.sh 使用 bash 特性，改用 bash 调用
+  if ! bash "${SCRIPTS_DIR}/verify-backup.sh"; then
     echo "[verify-scheduler] ERROR: verification failed (exit $?)" >&2
   fi
 done

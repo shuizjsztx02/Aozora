@@ -44,7 +44,8 @@ services:
       db:
         condition: service_healthy
     # UTC 03:00 锚定调度（H3 修复）；首次启动立即运行一次
-    entrypoint: ["sh", "/scripts/backup-scheduler.sh"]
+    # NEW-2 修复：脚本使用 bash 特性（[[ ]]），改用 bash 调用
+    entrypoint: ["bash", "/scripts/backup-scheduler.sh"]
     networks:
       - default
 
@@ -79,7 +80,8 @@ services:
       db:
         condition: service_healthy
     # UTC 04:00 锚定调度
-    entrypoint: ["sh", "/scripts/verify-scheduler.sh"]
+    # NEW-2 修复：脚本使用 bash 特性（[[ ]]），改用 bash 调用
+    entrypoint: ["bash", "/scripts/verify-scheduler.sh"]
     networks:
       - default
 

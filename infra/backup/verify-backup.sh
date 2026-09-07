@@ -20,7 +20,7 @@
 #   PROMETHEUS_TEXTFILE_DIR  设置后向该目录写入 Prometheus textfile 指标（.prom）
 #   STRICT_ALEMBIC  设置为 1 时 alembic 迁移失败会导致整体失败（默认 0 = WARNING）
 
-# Alpine (postgres:18-alpine) uses busybox ash; pipefail is not supported.
+# 使用 set -eu（不启用 pipefail），保持与 ash 兼容以便未来替换基础镜像。
 set -eu
 
 PGHOST="${PGHOST:-localhost}"
@@ -121,7 +121,7 @@ cleanup() {
     --if-exists "${RESTORE_DB}" 2>/dev/null || true
   # 清理解密临时文件
   if [[ -n "${DECRYPTED_FILE:-}" ]] && [[ -f "${DECRYPTED_FILE:-}" ]]; then
-    rm -f "${DECRYPTED_FILE}"
+    rm -f "${DECRYPTED_FILE}" 2>/dev/null || true
   fi
   if [[ ${exit_code} -ne 0 ]]; then
     echo "[verify] Verification FAILED (exit code: ${exit_code})" >&2

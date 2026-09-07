@@ -27,6 +27,8 @@ from src.models.ledger import (
 from src.models.user import User
 
 FIXTURE = Path("../contracts/fixtures/reconciliation/basic/seed.json")
+if not FIXTURE.exists():
+    raise SystemExit(f"fixture not found: {FIXTURE.resolve()}")
 seed = json.loads(FIXTURE.read_text(encoding="utf-8"))
 
 

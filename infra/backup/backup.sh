@@ -28,8 +28,7 @@
 #   2  pg_dump 或加密失败
 #   3  校验和计算失败
 
-# Alpine (postgres:18-alpine) uses busybox ash which does NOT support
-# `set -o pipefail`. Use `set -eu` to remain sh-compatible.
+# 使用 set -eu（不启用 pipefail），保持与 ash 兼容以便未来替换基础镜像。
 set -eu
 
 # ── 参数校验（先于所有默认值展开，避免 BACKUP_DIR 未设置时落到 /tmp）──
@@ -139,6 +138,8 @@ if [[ -n "${BACKUP_PASSPHRASE:-}" ]]; then
   fi
   rm -f "${DUMP_FILE}"
   DUMP_FILE="${DUMP_FILE}.enc"
+  # NEW-3 修复：加密后校验和文件名应为 .dump.enc.sha256，而非 .dump.sha256
+  CHECKSUM_FILE="${DUMP_FILE}.sha256"
   echo "[backup] Encrypted: ${DUMP_FILE}"
 fi
 

@@ -87,7 +87,7 @@ pg_dump \
 |---|---|
 | `backup_last_success_timestamp_seconds` | backup.sh |
 | `backup_last_exit_code` | backup.sh |
-| `backup_files_count` | backup.sh + cleanup.sh |
+| `backup_files_count` | backup.sh |
 | `backup_verify_exit_code` | verify-backup.sh |
 
 ## 异地副本
