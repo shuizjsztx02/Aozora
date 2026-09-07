@@ -2,10 +2,14 @@
 
 Single guest session贯穿所有场景，避免触发 per-IP 频率限制。
 Exercises: auth → ledger → AI → sync → stats → export → attachments → consent.
+
+NOTE: These tests require a live server at http://127.0.0.1:8000.
+In CI, skip unless E2E_LIVE=1 is set.
 """
 
 from __future__ import annotations
 
+import os
 import uuid
 from datetime import date, datetime, timedelta, timezone
 
@@ -18,6 +22,22 @@ PERIOD = TODAY.strftime("%Y-%m")
 TODAY_ISO = TODAY.isoformat()
 TZ8 = timezone(timedelta(hours=8))
 OCCURRED = datetime.combine(TODAY, datetime.min.time()).replace(tzinfo=TZ8).isoformat()
+
+
+# ─── Skip entire module if live server is unavailable ───────────────────────
+
+def _server_reachable() -> bool:
+    try:
+        r = httpx.get(f"{BASE}/health", timeout=2)
+        return r.status_code == 200
+    except Exception:
+        return False
+
+
+pytestmark = pytest.mark.skipif(
+    os.environ.get("E2E_LIVE") != "1" and not _server_reachable(),
+    reason="Live server not available (set E2E_LIVE=1 to enable)",
+)
 
 
 # ─── Shared session (created once, reused by all classes) ──────────────────
