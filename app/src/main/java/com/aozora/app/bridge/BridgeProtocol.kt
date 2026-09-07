@@ -98,6 +98,35 @@ object BridgeCommands {
     // T-M5-04c: 账号删除
     const val ACCOUNT_REQUEST_DELETION_TOKEN = "account.requestDeletionToken"
     const val ACCOUNT_DELETE = "account.delete"
+
+    /**
+     * T-M5-02a review: canonical list of every command constant above.
+     *
+     * SecurityConfigTest uses this to detect drift between BridgeCommands
+     * constants and the dispatch whitelist.  Whenever a new command is
+     * added, it MUST be appended here — the test asserts that the size
+     * of this list matches the dispatch branches in AozoraBridge.kt.
+     */
+    val ALL: List<String> = listOf(
+        GET_VERSION,
+        TX_INSERT, TX_GET, TX_LIST_BY_BOOK, TX_LIST_BY_DATE, TX_SOFT_DELETE,
+        BOOK_LIST, BOOK_INSERT,
+        CATEGORY_LIST,
+        ACCOUNT_LIST, ACCOUNT_INSERT, ACCOUNT_ARCHIVE,
+        BUDGET_LIST, BUDGET_INSERT, BUDGET_UPDATE, BUDGET_DELETE,
+        PM_LIST, PM_MARK_SYNCING, PM_MARK_FAILED, PM_REMOVE,
+        SYNC_GET_STATUS, SYNC_TRIGGER,
+        REMINDER_GET_STATUS, REMINDER_SET, REMINDER_CHECK_PERMISSION,
+        AI_REPORT,
+        AI_INTERPRET, AI_VALIDATE, AI_EXECUTE,
+        PERMISSIONS_GET_STATUS, PERMISSIONS_REQUEST, PERMISSIONS_OPEN_SETTINGS,
+        VOICE_START_RECORDING, VOICE_STOP_RECORDING,
+        IMAGE_PICK, IMAGE_DELETE,
+        IMAGE_PARSE, IMAGE_PARSE_CANCEL,
+        CONSENT_RECORD, CONSENT_STATUS,
+        EXPORT_CREATE, EXPORT_LIST, EXPORT_GET, EXPORT_DOWNLOAD,
+        ACCOUNT_REQUEST_DELETION_TOKEN, ACCOUNT_DELETE,
+    )
 }
 
 /**

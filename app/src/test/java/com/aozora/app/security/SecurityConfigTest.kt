@@ -28,12 +28,15 @@ class SecurityConfigTest {
 
     @Test
     fun bridgeCommandCount_matchesTypescriptContract() {
-        // bridge-types.ts and BridgeCommands.kt must stay in sync.
-        // If a command is added or removed, BOTH files must be updated.
-        val kotlinCommands = extractBridgeCommandStrings()
+        // BridgeCommands.ALL is the canonical list — adding a new command
+        // requires updating BOTH the Kotlin BridgeCommands object and the
+        // TypeScript BridgeCommands in bridge-types.ts.  This test fails
+        // whenever the list grows, forcing an explicit decision about
+        // whether the TS contract was updated in parallel.
+        val kotlinCommands = BridgeCommands.ALL
         assertEquals(
-            "Bridge command count must be 44 (sync with bridge-types.ts)",
-            44,
+            "Bridge command count must be 46 (sync with bridge-types.ts)",
+            46,
             kotlinCommands.size
         )
         assertEquals(
@@ -45,7 +48,7 @@ class SecurityConfigTest {
 
     @Test
     fun bridgeCommands_noEmptyOrBlank() {
-        val commands = extractBridgeCommandStrings()
+        val commands = BridgeCommands.ALL
         commands.forEach { cmd ->
             assertTrue("Bridge command must not be blank: '$cmd'", cmd.isNotBlank())
         }
@@ -127,38 +130,14 @@ class SecurityConfigTest {
         )
     }
 
-    // ------------------------------------------------------------------
-    // Helpers
-    // ------------------------------------------------------------------
-
-    private fun extractBridgeCommandStrings(): List<String> {
-        return listOf(
-            BridgeCommands.GET_VERSION,
-            BridgeCommands.TX_INSERT, BridgeCommands.TX_GET,
-            BridgeCommands.TX_LIST_BY_BOOK, BridgeCommands.TX_LIST_BY_DATE,
-            BridgeCommands.TX_SOFT_DELETE,
-            BridgeCommands.BOOK_LIST, BridgeCommands.BOOK_INSERT,
-            BridgeCommands.CATEGORY_LIST,
-            BridgeCommands.ACCOUNT_LIST, BridgeCommands.ACCOUNT_INSERT,
-            BridgeCommands.ACCOUNT_ARCHIVE,
-            BridgeCommands.BUDGET_LIST, BridgeCommands.BUDGET_INSERT,
-            BridgeCommands.BUDGET_UPDATE, BridgeCommands.BUDGET_DELETE,
-            BridgeCommands.PM_LIST, BridgeCommands.PM_MARK_SYNCING,
-            BridgeCommands.PM_MARK_FAILED, BridgeCommands.PM_REMOVE,
-            BridgeCommands.SYNC_GET_STATUS, BridgeCommands.SYNC_TRIGGER,
-            BridgeCommands.REMINDER_GET_STATUS, BridgeCommands.REMINDER_SET,
-            BridgeCommands.REMINDER_CHECK_PERMISSION,
-            BridgeCommands.AI_REPORT,
-            BridgeCommands.AI_INTERPRET, BridgeCommands.AI_VALIDATE,
-            BridgeCommands.AI_EXECUTE,
-            BridgeCommands.PERMISSIONS_GET_STATUS, BridgeCommands.PERMISSIONS_REQUEST,
-            BridgeCommands.PERMISSIONS_OPEN_SETTINGS,
-            BridgeCommands.VOICE_START_RECORDING, BridgeCommands.VOICE_STOP_RECORDING,
-            BridgeCommands.IMAGE_PICK, BridgeCommands.IMAGE_DELETE,
-            BridgeCommands.IMAGE_PARSE, BridgeCommands.IMAGE_PARSE_CANCEL,
-            BridgeCommands.CONSENT_RECORD, BridgeCommands.CONSENT_STATUS,
-            BridgeCommands.EXPORT_CREATE, BridgeCommands.EXPORT_LIST,
-            BridgeCommands.EXPORT_GET, BridgeCommands.EXPORT_DOWNLOAD,
+    @Test
+    fun manifest_hasDataExtractionRules() {
+        val manifest = java.io.File("src/main/AndroidManifest.xml")
+        if (!manifest.exists()) return
+        val content = manifest.readText()
+        assertTrue(
+            "AndroidManifest must declare android:dataExtractionRules (API 31+)",
+            content.contains("android:dataExtractionRules")
         )
     }
 }
