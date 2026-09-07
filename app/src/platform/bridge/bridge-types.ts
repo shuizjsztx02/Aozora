@@ -72,6 +72,9 @@ export const BridgeCommands = {
   // T-M4-04d: 图片链路
   IMAGE_PICK: 'image.pick',
   IMAGE_DELETE: 'image.delete',
+
+  // T-M4-04e: 图片记账解析
+  IMAGE_PARSE: 'image.parse',
 } as const
 
 export type BridgeCommandName = typeof BridgeCommands[keyof typeof BridgeCommands]
@@ -347,3 +350,33 @@ export interface ImageProgressEvent {
   sent: number
   total: number
 }
+
+// ─── T-M4-04e: 图片记账解析类型 ───
+
+export interface ParseImageParams {
+  attachmentId: string
+  bookId: string
+}
+
+/** 服务端 /ai/parse-image 返回的解析结果。 */
+export interface ParseImageResult {
+  request_id: string
+  /** 完整 ActionProposal（action: add_tx_batch）。 */
+  proposal: Record<string, unknown>
+  attachment_id: string
+  confidence: number
+  usage: { prompt_tokens: number; completion_tokens: number }
+}
+
+/** parseImage 桥错误码。 */
+export type ParseImageErrorCode =
+  | 'network_error'
+  | 'server_error'
+  | 'auth_lost'
+  | 'no_ai_provider'
+  | 'attachment_not_found'
+  | 'attachment_not_pending'
+  | 'attachment_expired'
+  | 'file_missing'
+  | 'image_too_large'
+  | 'parse_failed'

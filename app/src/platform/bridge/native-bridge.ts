@@ -36,6 +36,7 @@ import {
   type PermissionResultEvent,
   type ImagePickResult,
   type ImageProgressEvent,
+  type ParseImageResult,
 } from './bridge-types'
 
 declare global {
@@ -401,6 +402,20 @@ export class NativeBridge {
   /** 删除服务端附件（用于清理用户放弃的草稿）。 */
   async deleteImage(attachmentId: string): Promise<{ success: boolean }> {
     return this.call('image.delete', { attachmentId })
+  }
+
+  /**
+   * T-M4-04e: 解析已上传的小票/账单图片。
+   *
+   * 调用服务端 /ai/parse-image，返回 ActionProposal（add_tx_batch）。
+   * 超时设为 120s——视觉模型可能较慢。
+   */
+  async parseImage(attachmentId: string, bookId: string): Promise<ParseImageResult> {
+    return this.call<ParseImageResult>(
+      'image.parse',
+      { attachmentId, bookId },
+      { timeoutMs: 120_000 },
+    )
   }
 
   /**

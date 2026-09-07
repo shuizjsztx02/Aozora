@@ -559,6 +559,7 @@ class TestExportFileLifecycle:
         """N-05: cleanup_expired_files deletes only old export files."""
         import shutil
         import tempfile
+
         from src.modules.exports import service as exports_service
 
         tmp_path = Path(tempfile.mkdtemp(prefix="aozora_test_lifecycle_"))
