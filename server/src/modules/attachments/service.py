@@ -244,7 +244,23 @@ class AttachmentService:
         # but defensive).
         if dest.exists():
             raise AppException(409, "conflict", "Attachment id collision")
-        dest.write_bytes(data)
+        # NEW-C1 fix: 磁盘满等 OSError 给出明确 507（而非泛 500）
+        try:
+            dest.write_bytes(data)
+        except OSError as exc:
+            # P3-5: write_bytes may leave a partial file on disk; clean it
+            # up before surfacing 507 (mirrors NEW-2 DB-flush cleanup).
+            try:
+                dest.unlink(missing_ok=True)
+            except OSError:
+                logger.warning(
+                    "Failed to clean up partial file %s after write error",
+                    dest, exc_info=True,
+                )
+            raise AppException(
+                507, "insufficient_storage",
+                f"Failed to write attachment file: {exc}",
+            ) from exc
 
         # --- Persist DB row.
         # NEW-2 fix: if the DB write fails after the file has been written

@@ -136,6 +136,10 @@ async def get_current_user(
 
     if user is None:
         raise AppException(401, "user_not_found", "User not found")
+    # T-M5-04c: FROZEN users can still authenticate (so they can call
+    # GET /me / DELETE /me / POST /me/deletion-cancel), but per-endpoint
+    # guards in sync/stats reject data-plane operations. DEACTIVATED
+    # and DELETED are fully blocked.
     if user.status in (UserStatus.DEACTIVATED, UserStatus.DELETED):
         raise AppException(403, "account_disabled", "Account is deactivated or deleted")
 

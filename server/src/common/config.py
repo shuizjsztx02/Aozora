@@ -72,6 +72,12 @@ class Settings(BaseSettings):
         validation_alias=AliasChoices("REDIS_URL", "redis_url"),
     )
 
+    # --- T-M5-02b: request-body size limit (non-upload endpoints) ---
+    max_request_size: int = Field(
+        default=10 * 1024 * 1024,
+        validation_alias=AliasChoices("MAX_REQUEST_SIZE", "max_request_size"),
+    )
+
     # --- api ---
     api_prefix: str = Field(
         default="/api/v1",

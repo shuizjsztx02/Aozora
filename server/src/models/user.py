@@ -1,4 +1,8 @@
-"""T-M2-02: User and DeviceSession models."""
+"""T-M2-02 + T-M5-04c: User and DeviceSession models.
+
+T-M5-04c adds ``FROZEN`` status plus ``frozen_at`` / ``deletion_requested_at``
+columns to support the 7-day account-deletion grace window.
+"""
 
 from __future__ import annotations
 
@@ -16,6 +20,10 @@ from src.models.base import AuditMixin, Base
 class UserStatus(str, enum.Enum):
     GUEST = "guest"
     ACTIVE = "active"
+    # T-M5-04c: user requested deletion. Data is preserved for 7 days
+    # (grace window) before physical deletion by infra/cleanup/account-deletion.py.
+    # Frozen users cannot push new data; pull returns empty.
+    FROZEN = "frozen"
     DEACTIVATED = "deactivated"
     DELETED = "deleted"
 
@@ -48,6 +56,17 @@ class User(Base, AuditMixin):
         default="Asia/Shanghai",
         server_default="Asia/Shanghai",
         nullable=False,
+    )
+    # T-M5-04c: account-deletion grace window tracking.
+    # ``frozen_at`` is set when the user confirms deletion; physical
+    # deletion occurs 7 days later via infra/cleanup/account-deletion.py.
+    # ``deletion_requested_at`` mirrors the original request timestamp
+    # (which may differ from frozen_at if the user re-confirms).
+    frozen_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True,
+    )
+    deletion_requested_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True,
     )
 
     # relationships

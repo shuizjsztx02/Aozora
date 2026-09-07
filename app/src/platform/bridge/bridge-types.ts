@@ -75,6 +75,21 @@ export const BridgeCommands = {
 
   // T-M4-04e: 图片记账解析
   IMAGE_PARSE: 'image.parse',
+  IMAGE_PARSE_CANCEL: 'image.parse_cancel',
+
+  // T-M5-04a: 隐私同意
+  CONSENT_RECORD: 'consent.record',
+  CONSENT_STATUS: 'consent.status',
+
+  // T-M5-04b: 数据导出
+  EXPORT_CREATE: 'export.create',
+  EXPORT_LIST: 'export.list',
+  EXPORT_GET: 'export.get',
+  EXPORT_DOWNLOAD: 'export.download',
+
+  // T-M5-04c: 账号删除
+  ACCOUNT_REQUEST_DELETION_TOKEN: 'account.requestDeletionToken',
+  ACCOUNT_DELETE: 'account.delete',
 } as const
 
 export type BridgeCommandName = typeof BridgeCommands[keyof typeof BridgeCommands]
@@ -380,3 +395,81 @@ export type ParseImageErrorCode =
   | 'file_missing'
   | 'image_too_large'
   | 'parse_failed'
+
+// ─── T-M5-04a: 隐私同意类型 ───
+
+export interface ConsentRecordParams {
+  policyVersion?: string
+  consentedAt?: number
+  deviceId?: string
+}
+
+export interface ConsentRecordResult {
+  id: string
+  policyVersion: string
+  consentedAt: number
+}
+
+export interface ConsentStatusResult {
+  hasConsented: boolean
+}
+
+// ─── T-M5-04b: 数据导出类型 ───
+
+export type ExportFormat = 'json' | 'csv'
+export type ExportStatus = 'pending' | 'completed' | 'failed' | 'expired'
+
+export interface ExportData {
+  id: string
+  bookId: string
+  format: ExportFormat
+  status: ExportStatus
+  createdAt: string
+  expiresAt?: string
+  fileSize?: number
+}
+
+export interface ExportCreateParams {
+  bookId: string
+  format?: ExportFormat
+}
+
+export interface ExportDownloadResult {
+  localPath: string
+  filename: string
+  /** 文件文本内容（≤ 20MB 时返回）；用于前端对账。 */
+  content?: string
+}
+
+/** export.download 桥错误码。 */
+export type ExportErrorCode =
+  | 'network_error'
+  | 'server_error'
+  | 'auth_lost'
+  | 'not_found'
+  | 'expired'
+  | 'invalid_input'
+  | 'unavailable'
+
+// ─── T-M5-04c: 账号删除类型 ───
+
+export interface AccountDeletionTokenResult {
+  confirmToken: string
+  expiresAt: string
+}
+
+export interface AccountDeleteResult {
+  status: 'frozen'
+  frozenAt: string
+  message: string
+}
+
+/** account.delete 桥错误码。 */
+export type AccountDeleteErrorCode =
+  | 'network_error'
+  | 'server_error'
+  | 'auth_lost'
+  | 'invalid_token'
+  | 'deletion_pending'
+  | 'invalid_input'
+  | 'unavailable'

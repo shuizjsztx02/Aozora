@@ -7,6 +7,7 @@ import androidx.room.RoomDatabase
 import com.aozora.app.db.dao.*
 import com.aozora.app.db.entity.*
 import com.aozora.app.db.migrations.MIGRATION_1_2
+import com.aozora.app.db.migrations.MIGRATION_2_3
 
 /**
  * Aozora Room 数据库。
@@ -27,8 +28,9 @@ import com.aozora.app.db.migrations.MIGRATION_1_2
         BudgetEntity::class,
         PendingMutationEntity::class,
         SyncMetaEntity::class,
+        UserConsentEntity::class,
     ],
-    version = 2,
+    version = 3,
     exportSchema = true
 )
 abstract class AozoraDatabase : RoomDatabase() {
@@ -40,6 +42,7 @@ abstract class AozoraDatabase : RoomDatabase() {
     abstract fun budgetDao(): BudgetDao
     abstract fun pendingMutationDao(): PendingMutationDao
     abstract fun syncMetaDao(): SyncMetaDao
+    abstract fun userConsentDao(): UserConsentDao
 
     companion object {
         const val DATABASE_NAME = "aozora.db"
@@ -56,7 +59,7 @@ abstract class AozoraDatabase : RoomDatabase() {
 
         internal fun open(context: Context, name: String = DATABASE_NAME): AozoraDatabase =
             Room.databaseBuilder(context.applicationContext, AozoraDatabase::class.java, name)
-                .addMigrations(MIGRATION_1_2)
+                .addMigrations(MIGRATION_1_2, MIGRATION_2_3)
                 .build()
 
         /** 仅用于测试：创建内存数据库，迁移同样应用 */
@@ -64,7 +67,7 @@ abstract class AozoraDatabase : RoomDatabase() {
             return Room.inMemoryDatabaseBuilder(
                 context.applicationContext,
                 AozoraDatabase::class.java
-            ).addMigrations(MIGRATION_1_2).build()
+            ).addMigrations(MIGRATION_1_2, MIGRATION_2_3).build()
         }
     }
 }

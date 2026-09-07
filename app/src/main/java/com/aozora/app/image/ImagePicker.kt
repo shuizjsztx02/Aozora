@@ -119,7 +119,9 @@ class ImagePicker(private val activity: ComponentActivity) {
     }
 
     private fun createTempImageUri(): Uri {
-        val file = java.io.File.createTempFile("aozora_cam_", ".jpg", activity.cacheDir)
+        // CR-01 fix: Use dedicated subdirectory to limit FileProvider exposure scope.
+        val cameraDir = java.io.File(activity.cacheDir, "camera_temp").apply { mkdirs() }
+        val file = java.io.File.createTempFile("aozora_cam_", ".jpg", cameraDir)
         return androidx.core.content.FileProvider.getUriForFile(
             activity,
             "${activity.packageName}.fileprovider",

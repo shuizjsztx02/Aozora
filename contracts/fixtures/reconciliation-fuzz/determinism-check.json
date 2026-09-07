@@ -1,0 +1,57 @@
+{
+  "seed": 42,
+  "iterations": 100,
+  "match": true,
+  "sample": [
+    {
+      "id": "fuzz-tx-0",
+      "bookId": "fuzz-book",
+      "type": "income",
+      "amountCents": 72853,
+      "categoryId": "cat-transport",
+      "bizDate": "2026-09-20",
+      "source": "nlu_local",
+      "deletedAt": null
+    },
+    {
+      "id": "fuzz-tx-1",
+      "bookId": "fuzz-book",
+      "type": "expense",
+      "amountCents": 64404,
+      "categoryId": "cat-food",
+      "bizDate": "2026-10-10",
+      "source": "nlu_ai",
+      "deletedAt": null
+    },
+    {
+      "id": "fuzz-tx-2",
+      "bookId": "fuzz-book",
+      "type": "income",
+      "amountCents": 72852,
+      "categoryId": "cat-shopping",
+      "bizDate": "2026-09-01",
+      "source": "nlu_ai",
+      "deletedAt": null
+    },
+    {
+      "id": "fuzz-tx-3",
+      "bookId": "fuzz-book",
+      "type": "expense",
+      "amountCents": 20442,
+      "categoryId": "cat-bonus",
+      "bizDate": "2026-09-25",
+      "source": "nlu_local",
+      "deletedAt": null
+    },
+    {
+      "id": "fuzz-tx-4",
+      "bookId": "fuzz-book",
+      "type": "income",
+      "amountCents": 58781,
+      "categoryId": "cat-food",
+      "bizDate": "2026-10-20",
+      "source": "manual",
+      "deletedAt": null
+    }
+  ]
+}

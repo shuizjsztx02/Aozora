@@ -697,3 +697,33 @@ class TestOrphanCleanup:
         assert len(files_on_disk) == 0, (
             f"Orphan files left on disk after DB failure: {files_on_disk}"
         )
+
+
+class TestDiskWriteFailure:
+    """NEW-C1: OSError during write_bytes → 507 Insufficient Storage."""
+
+    @pytest.mark.asyncio
+    async def test_disk_full_returns_507(
+        self, db: AsyncSession, users: dict, upload_dir: Path, monkeypatch,
+    ):
+        from src.common.errors import AppException
+        from src.modules.attachments import service as svc_mod
+
+        monkeypatch.setattr(svc_mod, "_get_upload_dir", lambda: upload_dir)
+
+        # Simulate OSError on write_bytes (e.g. disk full).
+        from pathlib import Path as _Path
+        _orig_write_bytes = _Path.write_bytes
+
+        def _failing_write(self_path, data):
+            raise OSError(28, "No space left on device")
+
+        monkeypatch.setattr(_Path, "write_bytes", _failing_write)
+
+        svc = AttachmentService(db)
+        upload = _upload_bytes(FAKE_JPEG, "image/jpeg")
+
+        with pytest.raises(AppException) as exc_info:
+            await svc.upload(users["alice"].id, upload)
+        assert exc_info.value.status_code == 507
+        assert exc_info.value.code == "insufficient_storage"

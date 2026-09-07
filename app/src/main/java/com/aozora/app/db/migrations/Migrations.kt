@@ -28,3 +28,22 @@ val MIGRATION_1_2: Migration = object : Migration(1, 2) {
         )
     }
 }
+
+/**
+ * T-M5-04a Room schema 迁移。
+ *
+ * v2 → v3：
+ * - 新增 user_consent 表（隐私政策同意记录）。
+ */
+val MIGRATION_2_3: Migration = object : Migration(2, 3) {
+    override fun migrate(db: SupportSQLiteDatabase) {
+        db.execSQL(
+            "CREATE TABLE IF NOT EXISTS `user_consent` (" +
+                "`id` TEXT NOT NULL, " +
+                "`deviceId` TEXT NOT NULL, " +
+                "`policyVersion` TEXT NOT NULL, " +
+                "`consentedAt` INTEGER NOT NULL, " +
+                "PRIMARY KEY(`id`))"
+        )
+    }
+}

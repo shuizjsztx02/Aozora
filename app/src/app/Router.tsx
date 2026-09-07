@@ -14,9 +14,11 @@ import { DetailPage } from '../features/ledger/DetailPage'
 import { ReportsPage } from '../features/reports/ReportsPage'
 import { MePage } from '../features/settings/MePage'
 import { ReminderSettingsPage } from '../features/settings/ReminderSettingsPage'
+import { ExportPage } from '../features/settings/ExportPage'
 import { AssistantPage } from '../features/assistant/AssistantPage'
 import { OnboardingPage, isOnboardingCompleted } from '../features/onboarding/OnboardingPage'
 import { LoginPage } from '../features/auth/LoginPage'
+import { PrivacyPage, TermsPage } from '../features/legal/LegalPage'
 
 /** 默认路由目标：未完成首启则去 onboarding，否则去 home */
 function DefaultRoute() {
@@ -57,12 +59,16 @@ export function Router() {
       <Routes>
         <Route path="/onboarding" element={<OnboardingPage />} />
         <Route path="/login" element={<LoginPage />} />
+        {/* T-M5-04a F13: 法律文本页——公开路由，不依赖 onboarding 完成状态 */}
+        <Route path="/privacy" element={<PrivacyPage />} />
+        <Route path="/terms" element={<TermsPage />} />
         <Route path="/home" element={<ProtectedRoute><AppLayout><HomePage /></AppLayout></ProtectedRoute>} />
         <Route path="/detail" element={<ProtectedRoute><AppLayout><DetailPage /></AppLayout></ProtectedRoute>} />
         <Route path="/reports" element={<ProtectedRoute><AppLayout><ReportsPage /></AppLayout></ProtectedRoute>} />
         <Route path="/me" element={<ProtectedRoute><AppLayout><MePage /></AppLayout></ProtectedRoute>} />
         <Route path="/assistant" element={<ProtectedRoute><AssistantPage /></ProtectedRoute>} />
         <Route path="/settings/reminder" element={<ProtectedRoute><AppLayout><ReminderSettingsPage /></AppLayout></ProtectedRoute>} />
+        <Route path="/settings/export" element={<ProtectedRoute><AppLayout><ExportPage /></AppLayout></ProtectedRoute>} />
         <Route path="*" element={<DefaultRoute />} />
       </Routes>
     </HashRouter>

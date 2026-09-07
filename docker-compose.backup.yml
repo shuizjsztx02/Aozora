@@ -1,0 +1,88 @@
+# docker-compose.backup.yml — T-M5-03 备份 overlay
+#
+# 用法：
+#   docker compose -f docker-compose.yml -f docker-compose.backup.yml up -d
+#
+# 挂载到主 docker-compose 项目的 db 服务：
+#   - backup 服务：每日 UTC 03:00 执行 pg_dump（via backup-scheduler.sh）
+#   - backup-verify 服务：每日 UTC 04:00 调用 verify-backup.sh（完整恢复 + 表断言）
+#
+# ╔══════════════════════════════════════════════════════════════════════════╗
+# ║  ⚠ WARNING — 本文件仅用于本地 / CI 演练环境，不得直接用于生产           ║
+# ║                                                                        ║
+# ║  • PGPASSWORD 以明文写入本文件，仅适合受控的隔离环境                    ║
+# ║  • 生产环境必须通过 secret manager 注入 PGPASSWORD / BACKUP_PASSPHRASE  ║
+# ║  • 异地副本模拟为本地 ./backups/offsite，非真实异地                     ║
+# ║                                                                        ║
+# ║  生产参数详见 infra/backup/production-params.md (D-EXEC-02)             ║
+# ╚══════════════════════════════════════════════════════════════════════════╝
+
+services:
+  backup:
+    image: postgres:18-alpine
+    restart: always
+    environment:
+      PGHOST: db
+      PGPORT: "5432"
+      PGUSER: aozora
+      # 明文密码仅限演练环境；生产必须通过 secret manager 注入（见顶部 WARNING）
+      PGPASSWORD: aozora
+      PGDATABASE: aozora
+      BACKUP_DIR: /backups
+      OFFSITE_DIR: /backups/offsite
+      RETENTION_LOCAL_DAYS: "7"
+      RETENTION_OFFSITE_DAYS: "90"
+      FAILURE_MARKER: /backups/.backup_failed
+      SUCCESS_MARKER: /backups/.backup_succeeded
+      # 将指标暴露给挂载到 /metrics 的 node_exporter textfile-collector
+      PROMETHEUS_TEXTFILE_DIR: /metrics
+    volumes:
+      - backup_data:/backups
+      - backup_metrics:/metrics
+      - ./infra/backup:/scripts:ro
+    depends_on:
+      db:
+        condition: service_healthy
+    # UTC 03:00 锚定调度（H3 修复）；首次启动立即运行一次
+    entrypoint: ["sh", "/scripts/backup-scheduler.sh"]
+    networks:
+      - default
+
+  # 备份完整性校验：每日 UTC 04:00 运行（H4 修复：直接调用 verify-backup.sh）
+  # 完整流程：解密 .enc（如需要）→ SHA-256 校验 → 恢复至临时 DB →
+  #          运行 Alembic → 14 表断言 → 清理
+  backup-verify:
+    image: postgres:18-alpine
+    restart: always
+    environment:
+      PGHOST: db
+      PGPORT: "5432"
+      PGUSER: aozora
+      # 明文密码仅限演练环境（见顶部 WARNING）
+      PGPASSWORD: aozora
+      PGDATABASE: aozora
+      BACKUP_DIR: /backups
+      FAILURE_MARKER: /backups/.backup_failed
+      SUCCESS_MARKER: /backups/.backup_succeeded
+      # verify-backup.sh 需要 PROJECT_ROOT 定位 alembic.ini
+      # 容器内无真实仓库，指向 /scripts 模拟（verify-backup.sh 在此环境下
+      # 会跳过 alembic 步骤，但仍执行完整的恢复 + 表断言）
+      PROJECT_ROOT: /scripts
+      # 加密备份需要 BACKUP_PASSPHRASE；演练环境未加密，可省略
+      # BACKUP_PASSPHRASE: (通过 secret manager 注入)
+      PROMETHEUS_TEXTFILE_DIR: /metrics
+    volumes:
+      - backup_data:/backups:ro
+      - backup_metrics:/metrics
+      - ./infra/backup:/scripts:ro
+    depends_on:
+      db:
+        condition: service_healthy
+    # UTC 04:00 锚定调度
+    entrypoint: ["sh", "/scripts/verify-scheduler.sh"]
+    networks:
+      - default
+
+volumes:
+  backup_data:
+  backup_metrics:

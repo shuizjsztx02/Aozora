@@ -83,6 +83,21 @@ object BridgeCommands {
 
     // T-M4-04e: 图片记账解析
     const val IMAGE_PARSE = "image.parse"
+    const val IMAGE_PARSE_CANCEL = "image.parse_cancel"
+
+    // T-M5-04a: 隐私同意
+    const val CONSENT_RECORD = "consent.record"
+    const val CONSENT_STATUS = "consent.status"
+
+    // T-M5-04b: 数据导出
+    const val EXPORT_CREATE = "export.create"
+    const val EXPORT_LIST = "export.list"
+    const val EXPORT_GET = "export.get"
+    const val EXPORT_DOWNLOAD = "export.download"
+
+    // T-M5-04c: 账号删除
+    const val ACCOUNT_REQUEST_DELETION_TOKEN = "account.requestDeletionToken"
+    const val ACCOUNT_DELETE = "account.delete"
 }
 
 /**

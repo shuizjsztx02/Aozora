@@ -2,6 +2,10 @@ plugins {
     id("com.android.application")
     id("org.jetbrains.kotlin.android")
     id("com.google.devtools.ksp") version "2.0.21-1.0.28"
+    // T-M5-02d: OWASP DependencyCheck — Android dependency CVE scan.
+    // Run locally with: ./gradlew :app:dependencyCheckAnalyze
+    // Set NVD_API_KEY env var to avoid unauthenticated NVD rate limits.
+    id("org.owasp.dependencycheck") version "11.1.0"
 }
 
 val webDistDir = layout.projectDirectory.dir("dist")

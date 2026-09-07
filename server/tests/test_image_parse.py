@@ -362,7 +362,10 @@ class TestImageParseSuccess:
         asyncio.run(_check())
 
     def test_empty_image_no_transactions(self, img_env):
-        """Unrecognizable image → empty proposal with confidence=0."""
+        """Unrecognizable image → empty proposal with confidence=0.
+        NEW-R6-1: status must become PARSED even for zero transactions
+        to prevent the attachment from expiring after 24h.
+        """
         empty_output = {
             "action": "add_tx_batch",
             "proposalId": "",
@@ -384,6 +387,60 @@ class TestImageParseSuccess:
         assert data["proposal"]["transactions"] == []
         # Still gets a proposalId generated
         assert data["proposal"]["proposalId"] != ""
+
+        # NEW-R6-1: zero-tx must also mark PARSED to prevent 24h expiry
+        async def _check():
+            async with img_env.factory() as session:
+                from sqlalchemy import select
+                result = await session.execute(
+                    select(Attachment).where(Attachment.id == uuid.UUID(att_id))
+                )
+                att = result.scalar_one()
+                assert att.status == AttachmentStatus.PARSED
+                assert att.expires_at is None
+
+        asyncio.run(_check())
+
+    def test_zero_tx_retry_after_parsed(self, img_env):
+        """NEW-2 fix: after zero-tx parse (status=PARSED), user can retry and get new results."""
+        empty_output = {
+            "action": "add_tx_batch",
+            "proposalId": "",
+            "confidence": 0,
+            "transactions": [],
+        }
+        good_output = {
+            "action": "add_tx_batch",
+            "proposalId": "",
+            "confidence": 0.9,
+            "transactions": [
+                {
+                    "type": "expense",
+                    "amountCents": 5000,
+                    "categoryName": "餐饮",
+                    "bizDate": "2026-09-01",
+                }
+            ],
+        }
+        # First call returns zero tx, second call returns good data
+        img_env.provider.results = [
+            ProviderResult(json.dumps(empty_output), 100, 50),
+            ProviderResult(json.dumps(good_output), 200, 100),
+        ]
+
+        user = _guest(img_env)
+        book_id = _seed_book_and_categories(img_env, user["id"])
+        att_id = _seed_attachment(img_env, user["id"])
+
+        # First parse: zero transactions → PARSED
+        resp1 = _parse_image(img_env, user, att_id, book_id)
+        assert resp1.status_code == 200
+        assert resp1.json()["proposal"]["transactions"] == []
+
+        # Second parse (retry): should succeed, not 409
+        resp2 = _parse_image(img_env, user, att_id, book_id)
+        assert resp2.status_code == 200
+        assert len(resp2.json()["proposal"]["transactions"]) == 1
 
 
 class TestImageParseOwnership:
@@ -412,14 +469,15 @@ class TestImageParseOwnership:
         resp = _parse_image(img_env, user, att_id, book_id)
         assert resp.status_code == 410
 
-    def test_already_parsed_409(self, img_env):
-        """Already-parsed attachment cannot be re-parsed."""
+    def test_already_parsed_can_reparse(self, img_env):
+        """NEW-R6-1 fix: PARSED attachment can be re-parsed (status resets to PENDING first)."""
         user = _guest(img_env)
         book_id = _seed_book_and_categories(img_env, user["id"])
         att_id = _seed_attachment(img_env, user["id"], status=AttachmentStatus.PARSED)
 
         resp = _parse_image(img_env, user, att_id, book_id)
-        assert resp.status_code == 409
+        # Should succeed (not 409) — re-parsing is now allowed
+        assert resp.status_code == 200
 
     def test_linked_attachment_409(self, img_env):
         """Linked attachment cannot be parsed."""
@@ -643,3 +701,80 @@ class TestResolveCategoriesValidation:
         assert resolved[0]["bizDate"] == "2026-09-06"
         assert resolved[1]["amountCents"] == 2000
         assert len(resolved[1]["bizDate"]) == 10  # today fallback
+
+    def test_type_enum_normalized(self):
+        """NEW-E3: unknown type values are normalized to 'expense'."""
+        from src.modules.ai.service import AIService
+        raw = [
+            {"type": "refund", "amountCents": 1000, "category": "餐饮", "bizDate": "2026-09-06"},
+            {"type": "income", "amountCents": 2000, "category": "餐饮", "bizDate": "2026-09-06"},
+            {"type": "expense", "amountCents": 3000, "category": "餐饮", "bizDate": "2026-09-06"},
+        ]
+        resolved = AIService._resolve_categories(raw, self._ctx())
+        assert len(resolved) == 3
+        assert resolved[0]["type"] == "expense"  # "refund" → normalized
+        assert resolved[1]["type"] == "income"    # valid
+        assert resolved[2]["type"] == "expense"   # valid
+
+    def test_zero_categories_raises_clear_error(self):
+        """NEW-E6: empty category_names → 400 with clear message (not silent "" fallback)."""
+        from src.common.errors import AppException
+        from src.modules.ai.context import ProposalValidationContext
+        from src.modules.ai.service import AIService
+
+        empty_ctx = ProposalValidationContext(
+            category_ids=frozenset(),
+            category_names={},
+        )
+        raw = [{"type": "expense", "amountCents": 1000, "category": "餐饮", "bizDate": "2026-09-06"}]
+        with pytest.raises(AppException) as exc_info:
+            AIService._resolve_categories(raw, empty_ctx)
+        assert exc_info.value.code == "no_categories"
+
+
+class TestConcurrentParseDedup:
+    """NEW-E4: in-process concurrent parse dedup."""
+
+    def test_duplicate_parse_returns_409(self, img_env):
+        """Second parse for the same attachment while first is in progress → 409."""
+        from src.modules.ai.service import _parsing_attachments
+
+        user = _guest(img_env)
+        book_id = _seed_book_and_categories(img_env, user["id"])
+        att_id = _seed_attachment(img_env, user["id"])
+
+        # Simulate another request already parsing this attachment
+        _parsing_attachments.add(att_id)
+        try:
+            resp = _parse_image(img_env, user, att_id, book_id)
+            assert resp.status_code == 409
+            assert resp.json()["code"] == "parse_in_progress"
+        finally:
+            _parsing_attachments.discard(att_id)
+
+    def test_parse_lock_released_on_success(self, img_env):
+        """After a successful parse, the lock is released."""
+        from src.modules.ai.service import _parsing_attachments
+
+        user = _guest(img_env)
+        book_id = _seed_book_and_categories(img_env, user["id"])
+        att_id = _seed_attachment(img_env, user["id"])
+
+        _parse_image(img_env, user, att_id, book_id)
+        assert att_id not in _parsing_attachments
+
+    def test_parse_lock_released_on_error(self, img_env):
+        """After a failed parse, the lock is still released."""
+        from src.modules.ai.service import _parsing_attachments
+
+        img_env.provider.results = [
+            ProviderError(status=500, retryable=True, reason="http_5xx"),
+            ProviderError(status=500, retryable=True, reason="http_5xx"),
+        ]
+
+        user = _guest(img_env)
+        book_id = _seed_book_and_categories(img_env, user["id"])
+        att_id = _seed_attachment(img_env, user["id"])
+
+        _parse_image(img_env, user, att_id, book_id)
+        assert att_id not in _parsing_attachments

@@ -1,0 +1,32 @@
+# docker-compose.drill.yml — T-M5-03b 演练专用
+#
+# 绕过主 docker-compose.yml 中 postgres 18 存储路径不兼容问题。
+# postgres 18+ 要求挂载 /var/lib/postgresql 而非 /var/lib/postgresql/data。
+#
+# ╔══════════════════════════════════════════════════════════════════════╗
+# ║  本文件不独立运行任何演练逻辑。                                      ║
+# ║  演练入口是 tools/test-drill.sh，它引用本文件启动 drill-db 服务，    ║
+# ║  然后依次执行备份 / 恢复 / 校验。直接 `docker compose -f ... up`    ║
+# ║  只会启动数据库，不会触发任何演练步骤。                              ║
+# ╚══════════════════════════════════════════════════════════════════════╝
+
+services:
+  drill-db:
+    image: postgres:18-alpine
+    environment:
+      POSTGRES_USER: aozora
+      POSTGRES_PASSWORD: aozora
+      POSTGRES_DB: aozora
+    ports:
+      - "15432:5432"
+    volumes:
+      - drill_pgdata:/var/lib/postgresql
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U aozora"]
+      interval: 3s
+      timeout: 3s
+      retries: 15
+      start_period: 10s
+
+volumes:
+  drill_pgdata:

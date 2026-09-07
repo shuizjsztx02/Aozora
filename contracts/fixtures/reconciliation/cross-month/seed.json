@@ -1,0 +1,25 @@
+{
+  "description": "Transactions spanning three months to test monthly grouping.",
+  "user": {
+    "id": "00000000-0000-0000-0000-000000000001",
+    "timezone": "Asia/Shanghai"
+  },
+  "books": [
+    { "id": "b0000000-0000-0000-0000-000000000001", "name": "Daily", "icon": "book" }
+  ],
+  "categories": [
+    { "id": "c0000000-0000-0000-0000-000000000001", "bookId": "b0000000-0000-0000-0000-000000000001", "kind": "expense", "name": "Food" },
+    { "id": "c0000000-0000-0000-0000-000000000003", "bookId": "b0000000-0000-0000-0000-000000000001", "kind": "income", "name": "Salary" }
+  ],
+  "accounts": [
+    { "id": "a0000000-0000-0000-0000-000000000001", "name": "Cash", "icon": "cash" }
+  ],
+  "transactions": [
+    { "id": "e0000000-0000-0000-0000-000000000001", "bookId": "b0000000-0000-0000-0000-000000000001", "type": "expense", "amountCents": 2000, "categoryId": "c0000000-0000-0000-0000-000000000001", "accountId": "a0000000-0000-0000-0000-000000000001", "note": "Aug dinner", "bizDate": "2026-08-31", "occurredAt": 1756627200000, "source": "manual" },
+    { "id": "e0000000-0000-0000-0000-000000000002", "bookId": "b0000000-0000-0000-0000-000000000001", "type": "expense", "amountCents": 3000, "categoryId": "c0000000-0000-0000-0000-000000000001", "accountId": "a0000000-0000-0000-0000-000000000001", "note": "Sep lunch", "bizDate": "2026-09-01", "occurredAt": 1756713600000, "source": "manual" },
+    { "id": "e0000000-0000-0000-0000-000000000003", "bookId": "b0000000-0000-0000-0000-000000000001", "type": "income", "amountCents": 30000, "categoryId": "c0000000-0000-0000-0000-000000000003", "accountId": "a0000000-0000-0000-0000-000000000001", "note": "Aug salary", "bizDate": "2026-08-31", "occurredAt": 1756627200000, "source": "manual" },
+    { "id": "e0000000-0000-0000-0000-000000000004", "bookId": "b0000000-0000-0000-0000-000000000001", "type": "income", "amountCents": 20000, "categoryId": "c0000000-0000-0000-0000-000000000003", "accountId": "a0000000-0000-0000-0000-000000000001", "note": "Sep salary", "bizDate": "2026-09-01", "occurredAt": 1756713600000, "source": "manual" },
+    { "id": "e0000000-0000-0000-0000-000000000005", "bookId": "b0000000-0000-0000-0000-000000000001", "type": "expense", "amountCents": 8000, "categoryId": "c0000000-0000-0000-0000-000000000001", "accountId": "a0000000-0000-0000-0000-000000000001", "note": "Oct shopping", "bizDate": "2026-10-01", "occurredAt": 1759305600000, "source": "manual" }
+  ],
+  "budgets": []
+}

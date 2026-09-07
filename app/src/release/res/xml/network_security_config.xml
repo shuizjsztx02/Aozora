@@ -1,0 +1,12 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  T-M5-02a: release overlay — all traffic must be HTTPS.  No cleartext
+  exceptions.  Only the production domain pattern (*.aozora.app) is
+  trusted with subdomains.  This overrides the main config during
+  release builds via Gradle resource merging.
+-->
+<network-security-config>
+    <domain-config cleartextTrafficPermitted="false">
+        <domain includeSubdomains="true">aozora.app</domain>
+    </domain-config>
+</network-security-config>

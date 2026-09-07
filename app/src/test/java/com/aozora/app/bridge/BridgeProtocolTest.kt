@@ -110,8 +110,19 @@ class BridgeProtocolTest {
             // T-M4-04d: 图片链路
             BridgeCommands.IMAGE_PICK,
             BridgeCommands.IMAGE_DELETE,
+            // T-M4-04e: 图片记账解析
+            BridgeCommands.IMAGE_PARSE,
+            BridgeCommands.IMAGE_PARSE_CANCEL,
+            // T-M5-04a: 隐私同意
+            BridgeCommands.CONSENT_RECORD,
+            BridgeCommands.CONSENT_STATUS,
+            // T-M5-04b: 数据导出
+            BridgeCommands.EXPORT_CREATE,
+            BridgeCommands.EXPORT_LIST,
+            BridgeCommands.EXPORT_GET,
+            BridgeCommands.EXPORT_DOWNLOAD,
         )
-        assertEquals(36, commands.size)
+        assertEquals(44, commands.size)
         // 无重复
         assertEquals(commands.size, commands.toSet().size)
     }

@@ -29,11 +29,13 @@ jobs:
       - run: npm run lint
       - run: npm run typecheck
       - run: npm test -- --run
+      # T-M5-02d: dependency vulnerability scan (high+ severity).
+      - run: npm audit --audit-level=high
 
   android:
     name: Android Compile & JVM Test
     runs-on: ubuntu-latest
-    timeout-minutes: 25
+    timeout-minutes: 40
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
@@ -51,6 +53,29 @@ jobs:
       - run: npm ci
         working-directory: app
       - run: bash ./gradlew :app:lintDebug :app:testDebugUnitTest :app:assembleDebug :app:assembleDebugAndroidTest --no-daemon
+      # T-M5-01d: actually run androidTest classes on emulator (P0#2).
+      - name: Enable KVM group perms
+        run: |
+          echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' | sudo tee /etc/udev/rules.d/99-kvm4all.rules
+          sudo udevadm control --reload-rules
+          sudo udevadm trigger --name-match=kvm
+      - name: Run connected Android tests
+        uses: reactivecircus/android-emulator-runner@v2
+        with:
+          api-level: 36
+          arch: x86_64
+          profile: pixel_6
+          target: google_apis
+          script: bash ./gradlew :app:connectedDebugAndroidTest --no-daemon
+      # T-M5-01d / P2#32: upload JUnit XML so failures show per-test, not just stdout.
+      - name: Upload androidTest results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: android-test-results
+          path: app/build/outputs/androidTest-results/
+      # T-M5-02d: OWASP DependencyCheck — Android dependency CVE scan (CVSS >= 7 fails).
+      - run: bash ./gradlew :app:dependencyCheckAnalyze -PfailBuildOnCVSS=7 --no-daemon
 
   server:
     name: Server Lint & Test
@@ -68,4 +93,6 @@ jobs:
           cache-dependency-path: server/pyproject.toml
       - run: pip install -e ".[dev]"
       - run: ruff check src/ tests/
+      # T-M5-02d: dependency vulnerability scan.
+      - run: pip install pip-audit && pip-audit -r pyproject.toml
       - run: pytest tests/ --tb=short -q

@@ -57,6 +57,10 @@ export function useImage(): UseImageReturn {
   // 保存最近一次的参数供 retry 使用
   const lastArgs = useRef<{ source: 'camera' | 'gallery'; quality: number } | null>(null)
 
+  // CR-03 fix: generation counter to prevent clear() from clobbering
+  // a newly selected image when pickImage() and clear() run concurrently.
+  const generationRef = useRef(0)
+
   // 监听上传进度
   useEffect(() => {
     return bridge.onImageProgress((event: ImageProgressEvent) => {
@@ -68,6 +72,10 @@ export function useImage(): UseImageReturn {
 
   const pickImage = useCallback(
     async (source: 'camera' | 'gallery', quality = 80): Promise<ImagePickResult> => {
+      // CR-03 fix: increment generation so any in-flight clear() knows to bail.
+      generationRef.current += 1
+      const myGeneration = generationRef.current
+
       setUploading(true)
       setProgress(-1)
       setError(null)
@@ -76,15 +84,20 @@ export function useImage(): UseImageReturn {
 
       try {
         const result = await bridge.pickImage(source, quality)
-        setAttachment(result)
-        setProgress(1)
-        setUploading(false)
+        // Only update state if no newer pickImage or clear() has started
+        if (generationRef.current === myGeneration) {
+          setAttachment(result)
+          setProgress(1)
+          setUploading(false)
+        }
         return result
       } catch (e) {
-        setUploading(false)
-        setProgress(-1)
-        const code = e instanceof Error && 'code' in e ? (e as { code: string }).code : 'unknown'
-        setError(code)
+        if (generationRef.current === myGeneration) {
+          setUploading(false)
+          setProgress(-1)
+          const code = e instanceof Error && 'code' in e ? (e as { code: string }).code : 'unknown'
+          setError(code)
+        }
         throw e
       }
     },
@@ -98,6 +111,11 @@ export function useImage(): UseImageReturn {
   }, [pickImage])
 
   const clear = useCallback(async () => {
+    // CR-03 fix: increment generation so any in-flight pickImage() knows to bail,
+    // and capture current generation to check if a newer operation has started.
+    generationRef.current += 1
+    const myGeneration = generationRef.current
+
     if (attachment?.attachmentId) {
       try {
         await bridge.deleteImage(attachment.attachmentId)
@@ -105,9 +123,12 @@ export function useImage(): UseImageReturn {
         // 删除失败不阻塞 UI（服务端 24h 后自动过期）
       }
     }
-    setAttachment(null)
-    setError(null)
-    setProgress(-1)
+    // Only clear state if no newer pickImage() or clear() has started
+    if (generationRef.current === myGeneration) {
+      setAttachment(null)
+      setError(null)
+      setProgress(-1)
+    }
   }, [attachment, bridge])
 
   // 从草稿恢复 attachment 状态（用于重新打开弹层后显示缩略图）

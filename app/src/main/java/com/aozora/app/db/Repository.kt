@@ -707,4 +707,27 @@ class Repository(private val db: AozoraDatabase) {
             period = period, amountCents = amountCents, version = version
         )
     }
+
+    // ─── T-M5-04a: Consent ───
+
+    suspend fun insertConsent(consent: UserConsentEntity) {
+        db.userConsentDao().insert(consent)
+    }
+
+    suspend fun getLatestConsent(): UserConsentEntity? =
+        db.userConsentDao().getLatest()
+
+    // ─── T-M5-04c: Account deletion — wipe local state ───
+
+    /**
+     * 清空所有 Room 表（账号删除后调用）。
+     *
+     * 调用方须同时清空 TokenStore / ConsentStore 与 localStorage，
+     * 并导航回首启页，以完成完整的账号删除链路。
+     */
+    suspend fun clearAllData() {
+        db.withTransaction {
+            db.clearAllTables()
+        }
+    }
 }

@@ -1,0 +1,91 @@
+# infra/monitoring/alert-rules.yml — Prometheus alerting rules
+# T-M5-03c: BackupFailure 规则
+# T-M5-05b: 完整规则集将在此基础上扩展
+#
+# 由 Alertmanager 消费（T-M5-05a 部署）。
+#
+# ── 指标来源（H2 修复）──────────────────────────────────────────
+# 这些规则消费下列指标，分别由对应脚本通过 PROMETHEUS_TEXTFILE_DIR 写入 .prom 文件：
+#
+#   backup_last_success_timestamp_seconds   backup.sh          (成功时刻，Unix 时间戳)
+#   backup_last_exit_code                   backup.sh          (最近一次退出码)
+#   backup_files_count                      backup.sh/cleanup.sh (目录中备份文件数)
+#   backup_verify_exit_code                 verify-backup.sh   (校验脚本退出码)
+#
+# 部署时需确保 node_exporter 的 --collector.textfile.directory 指向脚本写入的目录，
+# 或使用 pushgateway 由脚本主动推送（backup.sh 已支持 textfile，可改为推送）。
+# 若该部署未接通指标采集，本文件中的规则将永远不触发（no-data ≠ healthy）。
+#
+# ── runbook_url 说明（M7 修复）────────────────────────────────
+# runbook_url 为仓库相对路径。部署时需：
+#   (a) 替换为仓库托管平台（GitHub/GitLab）的绝对 URL，或
+#   (b) 通过 alertmanager 的 route 配置将 annotation 映射为可点击链接。
+# 当前值仅为人工参考。
+
+group_name: &default_runbook docs/runbooks/disaster-recovery.md
+
+groups:
+  - name: backup
+    interval: 60s
+    rules:
+      # ── 备份文件新鲜度 ──
+      # 如果最新备份文件超过 26 小时未更新（窗口 UTC 03:00 + 2h 容忍），触发告警
+      - alert: BackupStale
+        expr: |
+          (time() - backup_last_success_timestamp_seconds) > 93600
+        for: 10m
+        labels:
+          severity: critical
+          team: infrastructure
+        annotations:
+          summary: "数据库备份超过 26 小时未成功"
+          description: |
+            最新备份时间戳 {{ "{{" }} $value | humanizeTimestamp {{ "}}" }} 距今超过 26 小时。
+            检查 backup 容器日志和 BACKUP_DIR 磁盘空间。
+          runbook_url: *default_runbook
+
+      # ── 备份失败 ──
+      # 通过 textfile-collector 暴露 backup_last_exit_code 指标
+      - alert: BackupFailure
+        expr: |
+          backup_last_exit_code != 0
+        for: 5m
+        labels:
+          severity: critical
+          team: infrastructure
+        annotations:
+          summary: "pg_dump 备份失败（exit code != 0）"
+          description: |
+            最近一次 pg_dump 退出码 {{ "{{" }} $value {{ "}}" }}。
+            检查 FAILURE_MARKER 文件及 backup 容器日志。
+          runbook_url: *default_runbook
+
+      # ── 备份文件缺失 ──
+      # backup_files_count == 0 表示 BACKUP_DIR 中无任何 .dump 文件
+      - alert: BackupMissing
+        expr: |
+          backup_files_count == 0
+        for: 5m
+        labels:
+          severity: critical
+          team: infrastructure
+        annotations:
+          summary: "备份目录无任何备份文件"
+          description: |
+            BACKUP_DIR 中备份文件数为 0。可能是备份从未运行或被意外清理。
+          runbook_url: *default_runbook
+
+      # ── 备份校验失败 ──
+      - alert: BackupVerifyFailed
+        expr: |
+          backup_verify_exit_code != 0
+        for: 5m
+        labels:
+          severity: warning
+          team: infrastructure
+        annotations:
+          summary: "备份完整性校验失败"
+          description: |
+            verify-backup.sh 退出码 {{ "{{" }} $value {{ "}}" }}。
+            恢复抽样库后断言未通过，可能备份文件损坏。
+          runbook_url: *default_runbook

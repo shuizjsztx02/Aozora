@@ -8,8 +8,40 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 import sys
 from datetime import UTC, datetime
+
+# T-M5-02d: pattern matching sensitive field names that must be redacted
+# before being written to logs.  Two-branch approach:
+#   • Matches both underscore forms (``api_key``, ``auth_token``) and
+#     hyphen forms (``x-api-key``, ``x-refresh-token``).
+#   • Uses lookbehind ``(?<=[^a-z0-9])`` instead of ``\b`` so that
+#     prefixed attrs like ``x_api_key`` and ``auth_token`` are caught.
+#   • Negative: ``prompt_tokens`` / ``completion_tokens`` (plural ``tokens``
+#     is not matched by singular ``token`` alternative).
+_SENSITIVE_KEY_RE = re.compile(
+    r"(?i)(?:^|(?<=[^a-z0-9]))"
+    r"(token|refresh[_-]token|password|secret|api[_-]key|apikey|secret[_-]key|authorization)"
+    r"(?=\b|[_-])",
+)
+_REDACTED = "***"
+
+
+class SensitiveFieldFilter(logging.Filter):
+    """Redact sensitive fields from ``LogRecord.extra`` before formatting.
+
+    Any attribute whose key matches ``_SENSITIVE_KEY_RE`` is replaced
+    with ``***`` in the JSON output.  This provides defence-in-depth
+    alongside the existing extras whitelist (which already prevents
+    arbitrary keys from reaching the output).
+    """
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        for attr in list(vars(record)):
+            if _SENSITIVE_KEY_RE.search(attr):
+                setattr(record, attr, _REDACTED)
+        return True
 
 
 class JSONFormatter(logging.Formatter):
@@ -35,6 +67,9 @@ class JSONFormatter(logging.Formatter):
         ):
             value = getattr(record, key, None)
             if value is not None:
+                # T-M5-02d: redact sensitive field values in the output.
+                if _SENSITIVE_KEY_RE.search(key):
+                    value = _REDACTED
                 payload[key] = value
         return json.dumps(payload, ensure_ascii=False)
 
@@ -44,6 +79,8 @@ def setup_logging(level: str = "INFO") -> None:
     fmt = JSONFormatter()
     handler = logging.StreamHandler(sys.stdout)
     handler.setFormatter(fmt)
+    # T-M5-02d: defence-in-depth redaction filter on the handler.
+    handler.addFilter(SensitiveFieldFilter())
 
     root = logging.getLogger()
     root.handlers.clear()

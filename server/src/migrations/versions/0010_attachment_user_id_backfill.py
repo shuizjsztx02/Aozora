@@ -31,11 +31,12 @@ depends_on = None
 
 
 def upgrade() -> None:
-    # Step 1: Backfill user_id from transactions for rows missing it.
+    # Step 1: Backfill user_id from transactions → books → owner_id.
     op.execute(
         sa.text(
             "UPDATE attachments SET user_id = ("
-            "  SELECT t.user_id FROM transactions t"
+            "  SELECT b.owner_id FROM transactions t"
+            "  JOIN books b ON b.id = t.book_id"
             "  WHERE t.id = attachments.transaction_id"
             ") WHERE user_id IS NULL AND transaction_id IS NOT NULL"
         )
@@ -63,6 +64,13 @@ def upgrade() -> None:
 
 
 def downgrade() -> None:
+    # ⚠ DATA-LOSS WARNING:
+    # upgrade() deletes rows (PENDING attachments with no user_id / transaction_id)
+    # and backfills user_id from transactions.  downgrade() can NOT recover that
+    # deleted data, nor re-null user_id on rows that were backfilled.  It only
+    # restores the nullable constraint and drops the index.  Running downgrade
+    # on a production database that has been upgraded will leave orphan rows
+    # unrecoverable.  Treat downgrade as non-reversible for data.
     op.drop_index("ix_attachments_user_id", table_name="attachments")
     op.alter_column(
         "attachments",

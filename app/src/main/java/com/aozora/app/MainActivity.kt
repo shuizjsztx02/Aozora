@@ -63,6 +63,12 @@ class MainActivity : AppCompatActivity() {
             settings.domStorageEnabled = true
             settings.allowFileAccess = false
             settings.allowContentAccess = false
+            // T-M5-02a: explicit deny of file-URL cross-origin access
+            // (default false on API 30+, but declared defensively).
+            @Suppress("DEPRECATION")
+            settings.allowFileAccessFromFileURLs = false
+            @Suppress("DEPRECATION")
+            settings.allowUniversalAccessFromFileURLs = false
         }
 
         val assetLoader = WebViewAssetLoader.Builder()
@@ -94,7 +100,12 @@ class MainActivity : AppCompatActivity() {
             permissionManager = permissionManager,
             imagePicker = imagePicker,
             imageClient = app.imageClient,
-            voiceRecognitionService = app.voiceRecognitionService
+            voiceRecognitionService = app.voiceRecognitionService,
+            consentStore = app.consentStore,
+            exportClient = app.exportClient,
+            // T-M5-04c: 账号删除链路
+            deletionClient = app.deletionClient,
+            tokenStore = app.tokenStore
         )
         webView.addJavascriptInterface(bridge, "AozoraBridge")
 
@@ -113,7 +124,10 @@ class MainActivity : AppCompatActivity() {
 
         // T-M3-02: 启动时收集同步状态事件 → 桥接到前端；同时触发一轮同步。
         observeSyncStatus()
-        SyncScheduler.enqueue(this)
+        // T-M5-04a: 未同意隐私政策前不上行业务数据
+        if (app.consentStore.hasConsented()) {
+            SyncScheduler.enqueue(this)
+        }
     }
 
     override fun onNewIntent(intent: Intent) {
@@ -128,7 +142,10 @@ class MainActivity : AppCompatActivity() {
     override fun onResume() {
         super.onResume()
         // 每次回到前台再触发一轮（保证飞机模式恢复后能同步）
-        SyncScheduler.enqueue(this)
+        // T-M5-04a: 未同意隐私政策前不上行业务数据
+        if (app.consentStore.hasConsented()) {
+            SyncScheduler.enqueue(this)
+        }
     }
 
     private var webViewDestroyed = false

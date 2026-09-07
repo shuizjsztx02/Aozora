@@ -1,0 +1,13 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  T-M5-02a: debug overlay — permits cleartext for localhost and emulator
+  loopback (10.0.2.2).  This file overrides the main network_security_config.xml
+  during debug builds via Gradle resource merging.  Release builds use the
+  overlay in src/release/ which is HTTPS-only.
+-->
+<network-security-config>
+    <domain-config cleartextTrafficPermitted="true">
+        <domain includeSubdomains="false">localhost</domain>
+        <domain includeSubdomains="false">10.0.2.2</domain>
+    </domain-config>
+</network-security-config>

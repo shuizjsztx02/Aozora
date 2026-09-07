@@ -167,6 +167,9 @@ export function DetailPage() {
                           <div className="min-w-0">
                             <div className="text-sm font-medium truncate" style={{ color: 'var(--ink)' }}>
                               {cat?.name || '未分类'}
+                              {tx.source === 'nlu_ai' && (
+                                <span className="ai-badge ml-1.5 text-[10px] px-1 py-0.5 rounded" style={{ background: 'var(--glass)', color: 'var(--accent)', border: '1px solid var(--glass-border)' }}>AI</span>
+                              )}
                             </div>
                             {tx.note && <div className="text-xs text-ink3 truncate">{tx.note}</div>}
                           </div>

@@ -1,0 +1,25 @@
+{
+  "description": "Basic single-month scenario: 4 active transactions, simple aggregation. Note: tx e0000000-...-0003 has accountId=null (cash payment without account tracking) — accounts array is non-empty, so null is a valid per-tx choice (P3#34).",
+  "user": {
+    "id": "00000000-0000-0000-0000-000000000001",
+    "timezone": "Asia/Shanghai"
+  },
+  "books": [
+    { "id": "b0000000-0000-0000-0000-000000000001", "name": "Daily", "icon": "book" }
+  ],
+  "categories": [
+    { "id": "c0000000-0000-0000-0000-000000000001", "bookId": "b0000000-0000-0000-0000-000000000001", "kind": "expense", "name": "Food" },
+    { "id": "c0000000-0000-0000-0000-000000000002", "bookId": "b0000000-0000-0000-0000-000000000001", "kind": "expense", "name": "Transport" },
+    { "id": "c0000000-0000-0000-0000-000000000003", "bookId": "b0000000-0000-0000-0000-000000000001", "kind": "income", "name": "Salary" }
+  ],
+  "accounts": [
+    { "id": "a0000000-0000-0000-0000-000000000001", "name": "Cash", "icon": "cash" }
+  ],
+  "transactions": [
+    { "id": "e0000000-0000-0000-0000-000000000001", "bookId": "b0000000-0000-0000-0000-000000000001", "type": "expense", "amountCents": 3500, "categoryId": "c0000000-0000-0000-0000-000000000001", "accountId": "a0000000-0000-0000-0000-000000000001", "note": "Lunch", "bizDate": "2026-09-01", "occurredAt": 1756713600000, "source": "manual" },
+    { "id": "e0000000-0000-0000-0000-000000000002", "bookId": "b0000000-0000-0000-0000-000000000001", "type": "expense", "amountCents": 1500, "categoryId": "c0000000-0000-0000-0000-000000000002", "accountId": "a0000000-0000-0000-0000-000000000001", "note": "Bus", "bizDate": "2026-09-02", "occurredAt": 1756796400000, "source": "manual" },
+    { "id": "e0000000-0000-0000-0000-000000000003", "bookId": "b0000000-0000-0000-0000-000000000001", "type": "expense", "amountCents": 5000, "categoryId": "c0000000-0000-0000-0000-000000000001", "accountId": null, "note": "Dinner", "bizDate": "2026-09-03", "occurredAt": 1756879200000, "source": "manual" },
+    { "id": "e0000000-0000-0000-0000-000000000004", "bookId": "b0000000-0000-0000-0000-000000000001", "type": "income", "amountCents": 50000, "categoryId": "c0000000-0000-0000-0000-000000000003", "accountId": "a0000000-0000-0000-0000-000000000001", "note": "Monthly salary", "bizDate": "2026-09-01", "occurredAt": 1756713600000, "source": "manual" }
+  ],
+  "budgets": []
+}

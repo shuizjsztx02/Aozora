@@ -1,0 +1,17 @@
+<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+    <application>
+        <!--
+          T-M5-01d: Debug-only BroadcastReceiver for E2E testing via adb am broadcast.
+          Only present in debug build variants — never ships in release.
+          Exported so shell (adb) can send broadcasts to it.
+        -->
+        <receiver
+            android:name="com.aozora.app.bridge.BridgeReceiver"
+            android:exported="true"
+            android:enabled="true">
+            <intent-filter>
+                <action android:name="com.aozora.app.BRIDGE_COMMAND" />
+            </intent-filter>
+        </receiver>
+    </application>
+</manifest>

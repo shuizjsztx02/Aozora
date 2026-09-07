@@ -28,6 +28,11 @@ class SyncWorker(
 
     override suspend fun doWork(): Result {
         val app = applicationContext as? AozoraApp ?: return Result.failure()
+        // T-M5-04a S0-1: 防御纵深——即便 SyncScheduler 入队时已同意，
+        // 实际执行时也可能被清数据 / 登出清空，再校一次避免未同意即上行。
+        if (!app.consentStore.hasConsented()) {
+            return Result.success()
+        }
         val engine = app.syncEngine ?: return Result.failure()
         return when (engine.runOnce()) {
             SyncEngine.SyncOutcome.OK -> {

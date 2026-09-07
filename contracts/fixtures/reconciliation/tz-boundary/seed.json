@@ -1,0 +1,21 @@
+{
+  "description": "Transactions near day/month boundaries to test timezone handling. bizDate (authoritative user-tz date) differs from UTC-occurredAt month: one tx straddles Aug/Sep, one straddles Sep/Oct. All three aggregation strategies (bizDate, UTC-occurredAt, Shanghai-occurredAt) should produce different monthly groupings.",
+  "user": {
+    "id": "00000000-0000-0000-0000-000000000001",
+    "timezone": "Asia/Shanghai"
+  },
+  "books": [
+    { "id": "b0000000-0000-0000-0000-000000000001", "name": "Daily", "icon": "book" }
+  ],
+  "categories": [
+    { "id": "c0000000-0000-0000-0000-000000000001", "bookId": "b0000000-0000-0000-0000-000000000001", "kind": "expense", "name": "Food" },
+    { "id": "c0000000-0000-0000-0000-000000000003", "bookId": "b0000000-0000-0000-0000-000000000001", "kind": "income", "name": "Salary" }
+  ],
+  "accounts": [],
+  "transactions": [
+    { "id": "e0000000-0000-0000-0000-000000000001", "bookId": "b0000000-0000-0000-0000-000000000001", "type": "expense", "amountCents": 1000, "categoryId": "c0000000-0000-0000-0000-000000000001", "accountId": null, "note": "Late Aug 31 UTC = Sep 1 Shanghai (bizDate authoritative)", "bizDate": "2026-09-01", "occurredAt": 1756684800000, "source": "manual" },
+    { "id": "e0000000-0000-0000-0000-000000000002", "bookId": "b0000000-0000-0000-0000-000000000001", "type": "expense", "amountCents": 2000, "categoryId": "c0000000-0000-0000-0000-000000000001", "accountId": null, "note": "Oct 1 UTC = Sep 30 Shanghai (bizDate authoritative)", "bizDate": "2026-09-30", "occurredAt": 1759276800000, "source": "manual" },
+    { "id": "e0000000-0000-0000-0000-000000000003", "bookId": "b0000000-0000-0000-0000-000000000001", "type": "income", "amountCents": 15000, "categoryId": "c0000000-0000-0000-0000-000000000003", "accountId": null, "note": "Freelance in Sep", "bizDate": "2026-09-15", "occurredAt": 1757923200000, "source": "manual" }
+  ],
+  "budgets": []
+}

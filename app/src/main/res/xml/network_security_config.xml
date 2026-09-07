@@ -1,9 +1,14 @@
 <?xml version="1.0" encoding="utf-8"?>
 <!--
-  T-M3-02: debug builds reach the local dev server via emulator loopback;
-  release builds point at a production HTTPS base (via gradle property), so
-  the localhost exception is inert in production but harmless.
-  Other domains must be HTTPS (usesCleartextTraffic=false at the root).
+  T-M3-02 / T-M5-02a: base network security config.
+
+  This file is overridden per build type via Gradle resource merging:
+    • src/debug/res/xml/network_security_config.xml  — allows cleartext
+      for localhost and emulator loopback (10.0.2.2).
+    • src/release/res/xml/network_security_config.xml — HTTPS-only for
+      *.aozora.app with no cleartext exceptions.
+
+  The base file below serves as the fallback and matches the debug overlay.
 -->
 <network-security-config>
     <domain-config cleartextTrafficPermitted="true">

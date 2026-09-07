@@ -5,8 +5,10 @@ import androidx.work.Configuration
 import com.aozora.app.ai.AiGatewayClient
 import com.aozora.app.auth.AuthClient
 import com.aozora.app.auth.TokenStore
+import com.aozora.app.consent.ConsentStore
 import com.aozora.app.db.AozoraDatabase
 import com.aozora.app.db.Repository
+import com.aozora.app.export.ExportClient
 import com.aozora.app.image.ImageClient
 import com.aozora.app.reminder.ReminderScheduler
 import com.aozora.app.sync.HttpSyncApi
@@ -105,10 +107,33 @@ class AozoraApp : Application(), Configuration.Provider {
         )
     }
 
+    /** T-M5-04b: 数据导出客户端（与 sync 共用连接池）。 */
+    val exportClient: ExportClient by lazy {
+        ExportClient(
+            baseUrl = BuildConfig.SYNC_BASE_URL,
+            httpClient = httpClient,
+            authClient = authClient
+        )
+    }
+
+    /** T-M5-04c: 账号删除客户端（与 sync 共用连接池）。 */
+    val deletionClient: com.aozora.app.deletion.DeletionClient by lazy {
+        com.aozora.app.deletion.DeletionClient(
+            baseUrl = BuildConfig.SYNC_BASE_URL,
+            httpClient = httpClient,
+            tokenStore = tokenStore
+        )
+    }
+
     /** T-M4-04b: Vosk 离线语音识别服务。
      *  首次使用时需调用 initialize() 加载模型（约 1-2 秒）。 */
     val voiceRecognitionService: VoiceRecognitionService by lazy {
         VoiceRecognitionService(this)
+    }
+
+    /** T-M5-04a: 隐私同意快速检查。 */
+    val consentStore: ConsentStore by lazy {
+        ConsentStore(this)
     }
 
     override val workManagerConfiguration: Configuration

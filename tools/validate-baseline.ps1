@@ -4,9 +4,9 @@ $prohibited = @('*.apk', '*.aab', '*.jks', '*.keystore', 'ai-config.js')
 $matches = foreach ($pattern in $prohibited) {
   Get-ChildItem -LiteralPath $root -Recurse -Force -File -Filter $pattern |
     Where-Object {
-      $_.FullName -notmatch '\\node_modules\\|\\.git\\' -and
+      $_.FullName -notmatch '[/\\]node_modules[/\\]|[/\\]\.git[/\\]' -and
       -not ($_.Extension -in @('.apk', '.aab') -and
-        $_.FullName.StartsWith((Join-Path $root 'app\build\outputs') + '\', [StringComparison]::OrdinalIgnoreCase))
+        $_.FullName.StartsWith((Join-Path $root (Join-Path 'app' 'build' 'outputs')) + [IO.Path]::DirectorySeparatorChar, [StringComparison]::OrdinalIgnoreCase))
     }
 }
 
@@ -41,4 +41,66 @@ if ($secretMatches -and $LASTEXITCODE -gt 1) {
   }
 }
 
-Write-Output 'Baseline validation passed.'
+# ─── T-M5-01d: Three-platform test gates ───
+
+Write-Output 'Running three-platform test gates...'
+
+# 1. TypeScript (vitest)
+Write-Output '  [1/3] TypeScript tests...'
+Push-Location (Join-Path $root 'app')
+try {
+    $npxAvailable = Get-Command npx -ErrorAction SilentlyContinue
+    if ($npxAvailable) {
+        & npx vitest run --reporter=basic 2>&1 | ForEach-Object { Write-Output "    $_" }
+        if ($LASTEXITCODE -ne 0) {
+            throw 'TypeScript tests failed.'
+        }
+        Write-Output '  ✓ TypeScript tests passed'
+    } else {
+        throw 'npx not found on PATH — cannot run TypeScript tests. Install Node.js and ensure npx is available.'
+    }
+} finally {
+    Pop-Location
+}
+
+# 2. Python (pytest)
+Write-Output '  [2/3] Python tests...'
+Push-Location (Join-Path $root 'server')
+try {
+    $pytestAvailable = Get-Command pytest -ErrorAction SilentlyContinue
+    if ($pytestAvailable) {
+        & pytest tests/ --tb=short -q 2>&1 | ForEach-Object { Write-Output "    $_" }
+        if ($LASTEXITCODE -ne 0) {
+            throw 'Python tests failed.'
+        }
+        Write-Output '  ✓ Python tests passed'
+    } else {
+        throw 'pytest not found on PATH — cannot run Python tests. Install from server/pyproject.toml dev dependencies.'
+    }
+} finally {
+    Pop-Location
+}
+
+# 3. Kotlin (JVM unit tests via gradle)
+Write-Output '  [3/3] Kotlin JVM tests...'
+Push-Location $root
+try {
+    $gradlewExists = Test-Path (Join-Path $root 'gradlew')
+    if ($gradlewExists) {
+        if ($IsWindows -or $env:OS -match 'Windows') {
+            & .\gradlew.bat :app:testDebugUnitTest --no-daemon 2>&1 | ForEach-Object { Write-Output "    $_" }
+        } else {
+            & ./gradlew :app:testDebugUnitTest --no-daemon 2>&1 | ForEach-Object { Write-Output "    $_" }
+        }
+        if ($LASTEXITCODE -ne 0) {
+            throw 'Kotlin JVM tests failed.'
+        }
+        Write-Output '  ✓ Kotlin JVM tests passed'
+    } else {
+        throw 'gradlew not found at repo root — cannot run Kotlin tests.'
+    }
+} finally {
+    Pop-Location
+}
+
+Write-Output 'Baseline validation passed (including three-platform test gates).'

@@ -15,6 +15,7 @@ from src.common.errors import register_exception_handlers
 from src.common.health import router as health_router
 from src.common.logging import setup_logging
 from src.common.request_id import RequestIdMiddleware
+from src.common.security import RequestBodyLimitMiddleware, SecurityHeadersMiddleware
 from src.modules.accounts.routes import router as accounts_router
 from src.modules.ai.routes import router as ai_router
 from src.modules.attachments.routes import router as attachments_router
@@ -23,6 +24,8 @@ from src.modules.auth.routes import router as auth_router
 from src.modules.books.routes import router as books_router
 from src.modules.budgets.routes import router as budgets_router
 from src.modules.categories.routes import router as categories_router
+from src.modules.consent.routes import router as consent_router
+from src.modules.deletion.routes import router as deletion_router
 from src.modules.exports.routes import router as exports_router
 from src.modules.statistics.routes import router as stats_router
 from src.modules.sync.routes import router as sync_router
@@ -93,21 +96,23 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     logger.info("Shutdown complete")
 
 
+cfg = get_config()
+
 app = FastAPI(
     title="Aozora API",
     description="Aozora production ledger API",
     version="0.1.0",
-    openapi_url="/openapi.json",
-    docs_url="/docs",
-    redoc_url="/redoc",
+    # T-M5-02b: hide Swagger/ReDoc/OpenAPI in production.
+    openapi_url=None if cfg.env == "production" else "/openapi.json",
+    docs_url=None if cfg.env == "production" else "/docs",
+    redoc_url=None if cfg.env == "production" else "/redoc",
     lifespan=lifespan,
 )
 
-# -- Middleware (order matters: outermost first) --------------------------
+# -- Middleware (order matters: outermost LAST — add_middleware wraps) -----
 
 app.add_middleware(RequestIdMiddleware)
 
-cfg = get_config()
 app.add_middleware(
     CORSMiddleware,
     allow_origins=cfg.cors_origin_list,
@@ -115,6 +120,15 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+# T-M5-02b: request-body size cap (inner).
+app.add_middleware(
+    RequestBodyLimitMiddleware,
+    max_bytes=cfg.max_request_size,
+    exclude_paths=[f"{cfg.api_prefix}/attachments"],
+)
+# T-M5-02b / R-T-M5-02-3: security headers must be the outermost middleware
+# so they attach even when RequestBodyLimitMiddleware short-circuits with 413.
+app.add_middleware(SecurityHeadersMiddleware)
 
 # -- Exception handlers ---------------------------------------------------
 
@@ -161,6 +175,8 @@ app.include_router(exports_router, prefix=cfg.api_prefix)
 app.include_router(sync_router, prefix=cfg.api_prefix)
 app.include_router(ai_router, prefix=cfg.api_prefix)
 app.include_router(attachments_router, prefix=cfg.api_prefix)
+app.include_router(consent_router, prefix=cfg.api_prefix)
+app.include_router(deletion_router, prefix=cfg.api_prefix)
 
 
 @app.get("/", tags=["meta"])

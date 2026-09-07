@@ -1,0 +1,1007 @@
+{
+  "seed": 42,
+  "iterations": 100,
+  "prng": "LCG(1664525, 1013904223, 2^32)",
+  "transactions": [
+    {
+      "id": "fuzz-tx-0",
+      "bookId": "fuzz-book",
+      "type": "income",
+      "amountCents": 72853,
+      "categoryId": "cat-transport",
+      "bizDate": "2026-09-20",
+      "source": "nlu_local",
+      "deletedAt": null
+    },
+    {
+      "id": "fuzz-tx-1",
+      "bookId": "fuzz-book",
+      "type": "expense",
+      "amountCents": 64404,
+      "categoryId": "cat-food",
+      "bizDate": "2026-10-10",
+      "source": "nlu_ai",
+      "deletedAt": null
+    },
+    {
+      "id": "fuzz-tx-2",
+      "bookId": "fuzz-book",
+      "type": "income",
+      "amountCents": 72852,
+      "categoryId": "cat-shopping",
+      "bizDate": "2026-09-01",
+      "source": "nlu_ai",
+      "deletedAt": null
+    },
+    {
+      "id": "fuzz-tx-3",
+      "bookId": "fuzz-book",
+      "type": "expense",
+      "amountCents": 20442,
+      "categoryId": "cat-bonus",
+      "bizDate": "2026-09-25",
+      "source": "nlu_local",
+      "deletedAt": null
+    },
+    {
+      "id": "fuzz-tx-4",
+      "bookId": "fuzz-book",
+      "type": "income",
+      "amountCents": 58781,
+      "categoryId": "cat-food",
+      "bizDate": "2026-10-20",
+      "source": "manual",
+      "deletedAt": null
+    },
+    {
+      "id": "fuzz-tx-5",
+      "bookId": "fuzz-book",
+      "type": "expense",
+      "amountCents": 10112,
+      "categoryId": "cat-shopping",
+      "bizDate": "2026-10-10",
+      "source": "manual",
+      "deletedAt": null
+    },
+    {
+      "id": "fuzz-tx-6",
+      "bookId": "fuzz-book",
+      "type": "income",
+      "amountCents": 72003,
+      "categoryId": "cat-transport",
+      "bizDate": "2026-08-01",
+      "source": "manual",
+      "deletedAt": null
+    },
+    {
+      "id": "fuzz-tx-7",
+      "bookId": "fuzz-book",
+      "type": "expense",
+      "amountCents": 71095,
+      "categoryId": "cat-shopping",
+      "bizDate": "2026-10-25",
+      "source": "nlu_ai",
+      "deletedAt": null
+    },
+    {
+      "id": "fuzz-tx-8",
+      "bookId": "fuzz-book",
+      "type": "income",
+      "amountCents": 98195,
+      "categoryId": "cat-salary",
+      "bizDate": "2026-08-20",
+      "source": "nlu_local",
+      "deletedAt": null
+    },
+    {
+      "id": "fuzz-tx-9",
+      "bookId": "fuzz-book",
+      "type": "expense",
+      "amountCents": 42457,
+      "categoryId": "cat-shopping",
+      "bizDate": "2026-10-10",
+      "source": "manual",
+      "deletedAt": null
+    },
+    {
+      "id": "fuzz-tx-10",
+      "bookId": "fuzz-book",
+      "type": "income",
+      "amountCents": 81972,
+      "categoryId": "cat-salary",
+      "bizDate": "2026-09-01",
+      "source": "nlu_ai",
+      "deletedAt": null
+    },
+    {
+      "id": "fuzz-tx-11",
+      "bookId": "fuzz-book",
+      "type": "expense",
+      "amountCents": 27572,
+      "categoryId": "cat-shopping",
+      "bizDate": "2026-10-25",
+      "source": "nlu_local",
+      "deletedAt": null
+    },
+    {
+      "id": "fuzz-tx-12",
+      "bookId": "fuzz-book",
+      "type": "income",
+      "amountCents": 63194,
+      "categoryId": "cat-shopping",
+      "bizDate": "2026-08-20",
+      "source": "nlu_ai",
+      "deletedAt": null
+    },
+    {
+      "id": "fuzz-tx-13",
+      "bookId": "fuzz-book",
+      "type": "expense",
+      "amountCents": 49293,
+      "categoryId": "cat-bonus",
+      "bizDate": "2026-10-10",
+      "source": "nlu_local",
+      "deletedAt": null
+    },
+    {
+      "id": "fuzz-tx-14",
+      "bookId": "fuzz-book",
+      "type": "income",
+      "amountCents": 2836,
+      "categoryId": "cat-transport",
+      "bizDate": "2026-09-01",
+      "source": "manual",
+      "deletedAt": null
+    },
+    {
+      "id": "fuzz-tx-15",
+      "bookId": "fuzz-book",
+      "type": "expense",
+      "amountCents": 93148,
+      "categoryId": "cat-transport",
+      "bizDate": "2026-09-25",
+      "source": "nlu_ai",
+      "deletedAt": null
+    },
+    {
+      "id": "fuzz-tx-16",
+      "bookId": "fuzz-book",
+      "type": "income",
+      "amountCents": 29499,
+      "categoryId": "cat-transport",
+      "bizDate": "2026-09-20",
+      "source": "manual",
+      "deletedAt": null
+    },
+    {
+      "id": "fuzz-tx-17",
+      "bookId": "fuzz-book",
+      "type": "expense",
+      "amountCents": 45530,
+      "categoryId": "cat-transport",
+      "bizDate": "2026-10-10",
+      "source": "manual",
+      "deletedAt": null
+    },
+    {
+      "id": "fuzz-tx-18",
+      "bookId": "fuzz-book",
+      "type": "income",
+      "amountCents": 64,
+      "categoryId": "cat-salary",
+      "bizDate": "2026-09-01",
+      "source": "nlu_ai",
+      "deletedAt": null
+    },
+    {
+      "id": "fuzz-tx-19",
+      "bookId": "fuzz-book",
+      "type": "expense",
+      "amountCents": 86803,
+      "categoryId": "cat-transport",
+      "bizDate": "2026-08-25",
+      "source": "manual",
+      "deletedAt": null
+    },
+    {
+      "id": "fuzz-tx-20",
+      "bookId": "fuzz-book",
+      "type": "income",
+      "amountCents": 64372,
+      "categoryId": "cat-salary",
+      "bizDate": "2026-10-20",
+      "source": "nlu_ai",
+      "deletedAt": null
+    },
+    {
+      "id": "fuzz-tx-21",
+      "bookId": "fuzz-book",
+      "type": "expense",
+      "amountCents": 33395,
+      "categoryId": "cat-food",
+      "bizDate": "2026-10-10",
+      "source": "nlu_ai",
+      "deletedAt": null
+    },
+    {
+      "id": "fuzz-tx-22",
+      "bookId": "fuzz-book",
+      "type": "income",
+      "amountCents": 37890,
+      "categoryId": "cat-salary",
+      "bizDate": "2026-09-01",
+      "source": "nlu_local",
+      "deletedAt": null
+    },
+    {
+      "id": "fuzz-tx-23",
+      "bookId": "fuzz-book",
+      "type": "expense",
+      "amountCents": 65627,
+      "categoryId": "cat-transport",
+      "bizDate": "2026-10-25",
+      "source": "nlu_ai",
+      "deletedAt": null
+    },
+    {
+      "id": "fuzz-tx-24",
+      "bookId": "fuzz-book",
+      "type": "income",
+      "amountCents": 61791,
+      "categoryId": "cat-food",
+      "bizDate": "2026-10-20",
+      "source": "nlu_local",
+      "deletedAt": null
+    },
+    {
+      "id": "fuzz-tx-25",
+      "bookId": "fuzz-book",
+      "type": "expense",
+      "amountCents": 94578,
+      "categoryId": "cat-shopping",
+      "bizDate": "2026-09-10",
+      "source": "manual",
+      "deletedAt": null
+    },
+    {
+      "id": "fuzz-tx-26",
+      "bookId": "fuzz-book",
+      "type": "income",
+      "amountCents": 44366,
+      "categoryId": "cat-food",
+      "bizDate": "2026-08-01",
+      "source": "manual",
+      "deletedAt": null
+    },
+    {
+      "id": "fuzz-tx-27",
+      "bookId": "fuzz-book",
+      "type": "expense",
+      "amountCents": 14782,
+      "categoryId": "cat-shopping",
+      "bizDate": "2026-09-25",
+      "source": "nlu_local",
+      "deletedAt": null
+    },
+    {
+      "id": "fuzz-tx-28",
+      "bookId": "fuzz-book",
+      "type": "income",
+      "amountCents": 91275,
+      "categoryId": "cat-salary",
+      "bizDate": "2026-09-20",
+      "source": "nlu_ai",
+      "deletedAt": null
+    },
+    {
+      "id": "fuzz-tx-29",
+      "bookId": "fuzz-book",
+      "type": "expense",
+      "amountCents": 60176,
+      "categoryId": "cat-bonus",
+      "bizDate": "2026-10-10",
+      "source": "manual",
+      "deletedAt": null
+    },
+    {
+      "id": "fuzz-tx-30",
+      "bookId": "fuzz-book",
+      "type": "income",
+      "amountCents": 15887,
+      "categoryId": "cat-bonus",
+      "bizDate": "2026-09-01",
+      "source": "manual",
+      "deletedAt": null
+    },
+    {
+      "id": "fuzz-tx-31",
+      "bookId": "fuzz-book",
+      "type": "expense",
+      "amountCents": 2546,
+      "categoryId": "cat-salary",
+      "bizDate": "2026-08-25",
+      "source": "manual",
+      "deletedAt": null
+    },
+    {
+      "id": "fuzz-tx-32",
+      "bookId": "fuzz-book",
+      "type": "income",
+      "amountCents": 34957,
+      "categoryId": "cat-bonus",
+      "bizDate": "2026-08-20",
+      "source": "nlu_ai",
+      "deletedAt": null
+    },
+    {
+      "id": "fuzz-tx-33",
+      "bookId": "fuzz-book",
+      "type": "expense",
+      "amountCents": 86699,
+      "categoryId": "cat-food",
+      "bizDate": "2026-08-10",
+      "source": "nlu_ai",
+      "deletedAt": null
+    },
+    {
+      "id": "fuzz-tx-34",
+      "bookId": "fuzz-book",
+      "type": "income",
+      "amountCents": 73895,
+      "categoryId": "cat-transport",
+      "bizDate": "2026-10-01",
+      "source": "manual",
+      "deletedAt": null
+    },
+    {
+      "id": "fuzz-tx-35",
+      "bookId": "fuzz-book",
+      "type": "expense",
+      "amountCents": 49216,
+      "categoryId": "cat-transport",
+      "bizDate": "2026-09-25",
+      "source": "manual",
+      "deletedAt": null
+    },
+    {
+      "id": "fuzz-tx-36",
+      "bookId": "fuzz-book",
+      "type": "income",
+      "amountCents": 76827,
+      "categoryId": "cat-transport",
+      "bizDate": "2026-10-20",
+      "source": "manual",
+      "deletedAt": null
+    },
+    {
+      "id": "fuzz-tx-37",
+      "bookId": "fuzz-book",
+      "type": "expense",
+      "amountCents": 94713,
+      "categoryId": "cat-bonus",
+      "bizDate": "2026-08-10",
+      "source": "nlu_ai",
+      "deletedAt": null
+    },
+    {
+      "id": "fuzz-tx-38",
+      "bookId": "fuzz-book",
+      "type": "income",
+      "amountCents": 71305,
+      "categoryId": "cat-bonus",
+      "bizDate": "2026-09-01",
+      "source": "nlu_local",
+      "deletedAt": null
+    },
+    {
+      "id": "fuzz-tx-39",
+      "bookId": "fuzz-book",
+      "type": "expense",
+      "amountCents": 14789,
+      "categoryId": "cat-transport",
+      "bizDate": "2026-09-25",
+      "source": "nlu_local",
+      "deletedAt": null
+    },
+    {
+      "id": "fuzz-tx-40",
+      "bookId": "fuzz-book",
+      "type": "income",
+      "amountCents": 31458,
+      "categoryId": "cat-salary",
+      "bizDate": "2026-09-20",
+      "source": "nlu_ai",
+      "deletedAt": null
+    },
+    {
+      "id": "fuzz-tx-41",
+      "bookId": "fuzz-book",
+      "type": "expense",
+      "amountCents": 77483,
+      "categoryId": "cat-transport",
+      "bizDate": "2026-10-10",
+      "source": "manual",
+      "deletedAt": null
+    },
+    {
+      "id": "fuzz-tx-42",
+      "bookId": "fuzz-book",
+      "type": "income",
+      "amountCents": 48640,
+      "categoryId": "cat-transport",
+      "bizDate": "2026-08-01",
+      "source": "manual",
+      "deletedAt": null
+    },
+    {
+      "id": "fuzz-tx-43",
+      "bookId": "fuzz-book",
+      "type": "expense",
+      "amountCents": 49263,
+      "categoryId": "cat-salary",
+      "bizDate": "2026-09-25",
+      "source": "manual",
+      "deletedAt": null
+    },
+    {
+      "id": "fuzz-tx-44",
+      "bookId": "fuzz-book",
+      "type": "income",
+      "amountCents": 94158,
+      "categoryId": "cat-transport",
+      "bizDate": "2026-08-20",
+      "source": "manual",
+      "deletedAt": null
+    },
+    {
+      "id": "fuzz-tx-45",
+      "bookId": "fuzz-book",
+      "type": "expense",
+      "amountCents": 21015,
+      "categoryId": "cat-shopping",
+      "bizDate": "2026-09-10",
+      "source": "manual",
+      "deletedAt": null
+    },
+    {
+      "id": "fuzz-tx-46",
+      "bookId": "fuzz-book",
+      "type": "income",
+      "amountCents": 62843,
+      "categoryId": "cat-shopping",
+      "bizDate": "2026-10-01",
+      "source": "nlu_ai",
+      "deletedAt": null
+    },
+    {
+      "id": "fuzz-tx-47",
+      "bookId": "fuzz-book",
+      "type": "expense",
+      "amountCents": 41234,
+      "categoryId": "cat-food",
+      "bizDate": "2026-08-25",
+      "source": "nlu_ai",
+      "deletedAt": null
+    },
+    {
+      "id": "fuzz-tx-48",
+      "bookId": "fuzz-book",
+      "type": "income",
+      "amountCents": 71593,
+      "categoryId": "cat-salary",
+      "bizDate": "2026-10-20",
+      "source": "nlu_ai",
+      "deletedAt": null
+    },
+    {
+      "id": "fuzz-tx-49",
+      "bookId": "fuzz-book",
+      "type": "expense",
+      "amountCents": 22382,
+      "categoryId": "cat-shopping",
+      "bizDate": "2026-09-10",
+      "source": "nlu_local",
+      "deletedAt": null
+    },
+    {
+      "id": "fuzz-tx-50",
+      "bookId": "fuzz-book",
+      "type": "income",
+      "amountCents": 24822,
+      "categoryId": "cat-food",
+      "bizDate": "2026-09-01",
+      "source": "nlu_local",
+      "deletedAt": null
+    },
+    {
+      "id": "fuzz-tx-51",
+      "bookId": "fuzz-book",
+      "type": "expense",
+      "amountCents": 39355,
+      "categoryId": "cat-food",
+      "bizDate": "2026-08-25",
+      "source": "manual",
+      "deletedAt": null
+    },
+    {
+      "id": "fuzz-tx-52",
+      "bookId": "fuzz-book",
+      "type": "income",
+      "amountCents": 13344,
+      "categoryId": "cat-salary",
+      "bizDate": "2026-08-20",
+      "source": "manual",
+      "deletedAt": null
+    },
+    {
+      "id": "fuzz-tx-53",
+      "bookId": "fuzz-book",
+      "type": "expense",
+      "amountCents": 93632,
+      "categoryId": "cat-transport",
+      "bizDate": "2026-10-10",
+      "source": "nlu_ai",
+      "deletedAt": null
+    },
+    {
+      "id": "fuzz-tx-54",
+      "bookId": "fuzz-book",
+      "type": "income",
+      "amountCents": 89168,
+      "categoryId": "cat-shopping",
+      "bizDate": "2026-09-01",
+      "source": "nlu_ai",
+      "deletedAt": null
+    },
+    {
+      "id": "fuzz-tx-55",
+      "bookId": "fuzz-book",
+      "type": "expense",
+      "amountCents": 51595,
+      "categoryId": "cat-transport",
+      "bizDate": "2026-10-25",
+      "source": "nlu_local",
+      "deletedAt": null
+    },
+    {
+      "id": "fuzz-tx-56",
+      "bookId": "fuzz-book",
+      "type": "income",
+      "amountCents": 72697,
+      "categoryId": "cat-shopping",
+      "bizDate": "2026-09-20",
+      "source": "nlu_ai",
+      "deletedAt": null
+    },
+    {
+      "id": "fuzz-tx-57",
+      "bookId": "fuzz-book",
+      "type": "expense",
+      "amountCents": 59059,
+      "categoryId": "cat-transport",
+      "bizDate": "2026-09-10",
+      "source": "nlu_local",
+      "deletedAt": null
+    },
+    {
+      "id": "fuzz-tx-58",
+      "bookId": "fuzz-book",
+      "type": "income",
+      "amountCents": 52616,
+      "categoryId": "cat-food",
+      "bizDate": "2026-09-01",
+      "source": "nlu_local",
+      "deletedAt": null
+    },
+    {
+      "id": "fuzz-tx-59",
+      "bookId": "fuzz-book",
+      "type": "expense",
+      "amountCents": 99336,
+      "categoryId": "cat-transport",
+      "bizDate": "2026-09-25",
+      "source": "manual",
+      "deletedAt": null
+    },
+    {
+      "id": "fuzz-tx-60",
+      "bookId": "fuzz-book",
+      "type": "income",
+      "amountCents": 9369,
+      "categoryId": "cat-salary",
+      "bizDate": "2026-10-20",
+      "source": "nlu_ai",
+      "deletedAt": null
+    },
+    {
+      "id": "fuzz-tx-61",
+      "bookId": "fuzz-book",
+      "type": "expense",
+      "amountCents": 50754,
+      "categoryId": "cat-salary",
+      "bizDate": "2026-10-10",
+      "source": "nlu_local",
+      "deletedAt": null
+    },
+    {
+      "id": "fuzz-tx-62",
+      "bookId": "fuzz-book",
+      "type": "income",
+      "amountCents": 45656,
+      "categoryId": "cat-food",
+      "bizDate": "2026-08-01",
+      "source": "nlu_local",
+      "deletedAt": null
+    },
+    {
+      "id": "fuzz-tx-63",
+      "bookId": "fuzz-book",
+      "type": "expense",
+      "amountCents": 46805,
+      "categoryId": "cat-salary",
+      "bizDate": "2026-10-25",
+      "source": "manual",
+      "deletedAt": null
+    },
+    {
+      "id": "fuzz-tx-64",
+      "bookId": "fuzz-book",
+      "type": "income",
+      "amountCents": 3415,
+      "categoryId": "cat-salary",
+      "bizDate": "2026-10-20",
+      "source": "nlu_local",
+      "deletedAt": null
+    },
+    {
+      "id": "fuzz-tx-65",
+      "bookId": "fuzz-book",
+      "type": "expense",
+      "amountCents": 28268,
+      "categoryId": "cat-food",
+      "bizDate": "2026-08-10",
+      "source": "nlu_local",
+      "deletedAt": null
+    },
+    {
+      "id": "fuzz-tx-66",
+      "bookId": "fuzz-book",
+      "type": "income",
+      "amountCents": 12397,
+      "categoryId": "cat-food",
+      "bizDate": "2026-08-01",
+      "source": "nlu_ai",
+      "deletedAt": null
+    },
+    {
+      "id": "fuzz-tx-67",
+      "bookId": "fuzz-book",
+      "type": "expense",
+      "amountCents": 46817,
+      "categoryId": "cat-food",
+      "bizDate": "2026-10-25",
+      "source": "nlu_local",
+      "deletedAt": null
+    },
+    {
+      "id": "fuzz-tx-68",
+      "bookId": "fuzz-book",
+      "type": "income",
+      "amountCents": 67636,
+      "categoryId": "cat-transport",
+      "bizDate": "2026-10-20",
+      "source": "nlu_ai",
+      "deletedAt": null
+    },
+    {
+      "id": "fuzz-tx-69",
+      "bookId": "fuzz-book",
+      "type": "expense",
+      "amountCents": 14585,
+      "categoryId": "cat-transport",
+      "bizDate": "2026-09-10",
+      "source": "nlu_ai",
+      "deletedAt": null
+    },
+    {
+      "id": "fuzz-tx-70",
+      "bookId": "fuzz-book",
+      "type": "income",
+      "amountCents": 32355,
+      "categoryId": "cat-salary",
+      "bizDate": "2026-08-01",
+      "source": "nlu_ai",
+      "deletedAt": null
+    },
+    {
+      "id": "fuzz-tx-71",
+      "bookId": "fuzz-book",
+      "type": "expense",
+      "amountCents": 72106,
+      "categoryId": "cat-salary",
+      "bizDate": "2026-09-25",
+      "source": "nlu_ai",
+      "deletedAt": null
+    },
+    {
+      "id": "fuzz-tx-72",
+      "bookId": "fuzz-book",
+      "type": "income",
+      "amountCents": 22406,
+      "categoryId": "cat-bonus",
+      "bizDate": "2026-08-20",
+      "source": "nlu_local",
+      "deletedAt": null
+    },
+    {
+      "id": "fuzz-tx-73",
+      "bookId": "fuzz-book",
+      "type": "expense",
+      "amountCents": 86938,
+      "categoryId": "cat-bonus",
+      "bizDate": "2026-08-10",
+      "source": "nlu_local",
+      "deletedAt": null
+    },
+    {
+      "id": "fuzz-tx-74",
+      "bookId": "fuzz-book",
+      "type": "income",
+      "amountCents": 12457,
+      "categoryId": "cat-transport",
+      "bizDate": "2026-09-01",
+      "source": "manual",
+      "deletedAt": null
+    },
+    {
+      "id": "fuzz-tx-75",
+      "bookId": "fuzz-book",
+      "type": "expense",
+      "amountCents": 50260,
+      "categoryId": "cat-shopping",
+      "bizDate": "2026-10-25",
+      "source": "manual",
+      "deletedAt": null
+    },
+    {
+      "id": "fuzz-tx-76",
+      "bookId": "fuzz-book",
+      "type": "income",
+      "amountCents": 61195,
+      "categoryId": "cat-shopping",
+      "bizDate": "2026-10-20",
+      "source": "nlu_local",
+      "deletedAt": null
+    },
+    {
+      "id": "fuzz-tx-77",
+      "bookId": "fuzz-book",
+      "type": "expense",
+      "amountCents": 4438,
+      "categoryId": "cat-transport",
+      "bizDate": "2026-10-10",
+      "source": "nlu_ai",
+      "deletedAt": null
+    },
+    {
+      "id": "fuzz-tx-78",
+      "bookId": "fuzz-book",
+      "type": "income",
+      "amountCents": 69740,
+      "categoryId": "cat-bonus",
+      "bizDate": "2026-10-01",
+      "source": "nlu_local",
+      "deletedAt": null
+    },
+    {
+      "id": "fuzz-tx-79",
+      "bookId": "fuzz-book",
+      "type": "expense",
+      "amountCents": 58418,
+      "categoryId": "cat-food",
+      "bizDate": "2026-08-25",
+      "source": "manual",
+      "deletedAt": null
+    },
+    {
+      "id": "fuzz-tx-80",
+      "bookId": "fuzz-book",
+      "type": "income",
+      "amountCents": 35084,
+      "categoryId": "cat-shopping",
+      "bizDate": "2026-08-20",
+      "source": "manual",
+      "deletedAt": null
+    },
+    {
+      "id": "fuzz-tx-81",
+      "bookId": "fuzz-book",
+      "type": "expense",
+      "amountCents": 49547,
+      "categoryId": "cat-food",
+      "bizDate": "2026-10-10",
+      "source": "manual",
+      "deletedAt": null
+    },
+    {
+      "id": "fuzz-tx-82",
+      "bookId": "fuzz-book",
+      "type": "income",
+      "amountCents": 4761,
+      "categoryId": "cat-shopping",
+      "bizDate": "2026-09-01",
+      "source": "nlu_ai",
+      "deletedAt": null
+    },
+    {
+      "id": "fuzz-tx-83",
+      "bookId": "fuzz-book",
+      "type": "expense",
+      "amountCents": 8875,
+      "categoryId": "cat-salary",
+      "bizDate": "2026-08-25",
+      "source": "nlu_local",
+      "deletedAt": null
+    },
+    {
+      "id": "fuzz-tx-84",
+      "bookId": "fuzz-book",
+      "type": "income",
+      "amountCents": 68953,
+      "categoryId": "cat-shopping",
+      "bizDate": "2026-08-20",
+      "source": "nlu_local",
+      "deletedAt": null
+    },
+    {
+      "id": "fuzz-tx-85",
+      "bookId": "fuzz-book",
+      "type": "expense",
+      "amountCents": 47363,
+      "categoryId": "cat-salary",
+      "bizDate": "2026-09-10",
+      "source": "manual",
+      "deletedAt": null
+    },
+    {
+      "id": "fuzz-tx-86",
+      "bookId": "fuzz-book",
+      "type": "income",
+      "amountCents": 75942,
+      "categoryId": "cat-bonus",
+      "bizDate": "2026-09-01",
+      "source": "nlu_ai",
+      "deletedAt": null
+    },
+    {
+      "id": "fuzz-tx-87",
+      "bookId": "fuzz-book",
+      "type": "expense",
+      "amountCents": 84196,
+      "categoryId": "cat-salary",
+      "bizDate": "2026-08-25",
+      "source": "manual",
+      "deletedAt": null
+    },
+    {
+      "id": "fuzz-tx-88",
+      "bookId": "fuzz-book",
+      "type": "income",
+      "amountCents": 9367,
+      "categoryId": "cat-shopping",
+      "bizDate": "2026-08-20",
+      "source": "nlu_ai",
+      "deletedAt": null
+    },
+    {
+      "id": "fuzz-tx-89",
+      "bookId": "fuzz-book",
+      "type": "expense",
+      "amountCents": 19237,
+      "categoryId": "cat-bonus",
+      "bizDate": "2026-08-10",
+      "source": "nlu_ai",
+      "deletedAt": null
+    },
+    {
+      "id": "fuzz-tx-90",
+      "bookId": "fuzz-book",
+      "type": "income",
+      "amountCents": 3158,
+      "categoryId": "cat-bonus",
+      "bizDate": "2026-09-01",
+      "source": "nlu_ai",
+      "deletedAt": null
+    },
+    {
+      "id": "fuzz-tx-91",
+      "bookId": "fuzz-book",
+      "type": "expense",
+      "amountCents": 75951,
+      "categoryId": "cat-food",
+      "bizDate": "2026-09-25",
+      "source": "nlu_local",
+      "deletedAt": null
+    },
+    {
+      "id": "fuzz-tx-92",
+      "bookId": "fuzz-book",
+      "type": "income",
+      "amountCents": 50445,
+      "categoryId": "cat-salary",
+      "bizDate": "2026-10-20",
+      "source": "nlu_local",
+      "deletedAt": null
+    },
+    {
+      "id": "fuzz-tx-93",
+      "bookId": "fuzz-book",
+      "type": "expense",
+      "amountCents": 11731,
+      "categoryId": "cat-bonus",
+      "bizDate": "2026-09-10",
+      "source": "manual",
+      "deletedAt": null
+    },
+    {
+      "id": "fuzz-tx-94",
+      "bookId": "fuzz-book",
+      "type": "income",
+      "amountCents": 54221,
+      "categoryId": "cat-food",
+      "bizDate": "2026-09-01",
+      "source": "nlu_local",
+      "deletedAt": null
+    },
+    {
+      "id": "fuzz-tx-95",
+      "bookId": "fuzz-book",
+      "type": "expense",
+      "amountCents": 78277,
+      "categoryId": "cat-bonus",
+      "bizDate": "2026-08-25",
+      "source": "nlu_local",
+      "deletedAt": null
+    },
+    {
+      "id": "fuzz-tx-96",
+      "bookId": "fuzz-book",
+      "type": "income",
+      "amountCents": 73397,
+      "categoryId": "cat-food",
+      "bizDate": "2026-09-20",
+      "source": "nlu_ai",
+      "deletedAt": null
+    },
+    {
+      "id": "fuzz-tx-97",
+      "bookId": "fuzz-book",
+      "type": "expense",
+      "amountCents": 21400,
+      "categoryId": "cat-transport",
+      "bizDate": "2026-08-10",
+      "source": "manual",
+      "deletedAt": null
+    },
+    {
+      "id": "fuzz-tx-98",
+      "bookId": "fuzz-book",
+      "type": "income",
+      "amountCents": 99133,
+      "categoryId": "cat-shopping",
+      "bizDate": "2026-08-01",
+      "source": "nlu_ai",
+      "deletedAt": null
+    },
+    {
+      "id": "fuzz-tx-99",
+      "bookId": "fuzz-book",
+      "type": "expense",
+      "amountCents": 89983,
+      "categoryId": "cat-shopping",
+      "bizDate": "2026-10-25",
+      "source": "manual",
+      "deletedAt": null
+    }
+  ]
+}
