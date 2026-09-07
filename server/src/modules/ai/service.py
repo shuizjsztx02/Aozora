@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 import time
 import uuid
 from collections import defaultdict
@@ -404,6 +405,12 @@ class AIService:
         ensures they appear in the AIUsage audit table even though the
         request returned an error.
 
+        Commits the usage row immediately on ``self._db`` so it survives
+        the session rollback that follows when AppException propagates.
+        At the call sites, no other pending writes exist in the session
+        (the only prior DB operation is a read-only quota check), so the
+        commit is safe.
+
         No-op when no tokens were consumed (e.g. ProviderError on the
         first attempt — no result, no tokens billed).
         """
@@ -411,11 +418,20 @@ class AIService:
         total = extra_prompt_tokens + extra_completion_tokens
         if total == 0:
             return
-        await self._record_usage_from_tokens(
-            user, self._provider.name, model, request_id,
-            prompt_tokens=extra_prompt_tokens,
-            completion_tokens=extra_completion_tokens,
+        price = self._cfg.ai_price_per_1m_tokens
+        cost = round(total * price / 1_000_000) if price else 0
+        self._db.add(
+            AIUsage(
+                user_id=user.id,
+                provider=self._provider.name,
+                model=model,
+                tokens=total,
+                cost=cost,
+                request_id=request_id[:64],
+            )
         )
+        await self._db.flush()
+        await self._db.commit()
 
     def _log_success(
         self,
@@ -1301,12 +1317,31 @@ class AIService:
 
             # R-M4-52 fix: empty bizDate → today (schema format: date)
             biz_date = str(tx.get("bizDate", "")).strip()
-            if not biz_date:
+            # NEW-E2 fix: non-empty but malformed bizDate → also fall back to today
+            if not biz_date or not re.match(r"^\d{4}-\d{2}-\d{2}$", biz_date):
                 biz_date = today_str
+
+            # NEW-E1 fix: validate amountCents — skip transactions with
+            # zero / non-numeric / negative amounts (schema minimum: 1)
+            raw_amount = tx.get("amountCents", 0)
+            try:
+                amount_cents = int(raw_amount)
+            except (TypeError, ValueError):
+                logger.warning(
+                    "Skipping transaction with invalid amountCents: %r",
+                    raw_amount,
+                )
+                continue
+            if amount_cents < 1:
+                logger.warning(
+                    "Skipping transaction with amountCents < 1: %d",
+                    amount_cents,
+                )
+                continue
 
             resolved.append({
                 "type": tx.get("type", "expense"),
-                "amountCents": int(tx.get("amountCents", 0)),
+                "amountCents": amount_cents,
                 "categoryId": cat_id,
                 "note": str(tx.get("note", "")),
                 "bizDate": biz_date,

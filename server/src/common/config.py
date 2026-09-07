@@ -26,7 +26,9 @@ class Settings(BaseSettings):
     )
 
     # --- runtime ---
-    env: str = Field(
+    # CR-02 fix: Literal constraint prevents typos from silently bypassing
+    # production safety checks (secret_key/CORS/dev_auth validation).
+    env: Literal["production", "development", "test", "testing", "staging"] = Field(
         default="development",
         validation_alias=AliasChoices("ENV", "env"),
     )

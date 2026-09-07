@@ -564,3 +564,82 @@ class TestImageParseEdgeCases:
         # image_url should be a base64 data URL
         image_part = next(p for p in user_content if p["type"] == "image_url")
         assert image_part["image_url"]["url"].startswith("data:image/jpeg;base64,")
+
+
+class TestResolveCategoriesValidation:
+    """NEW-E1 / NEW-E2: LLM output data validation in _resolve_categories."""
+
+    @staticmethod
+    def _ctx():
+        from src.modules.ai.context import ProposalValidationContext
+        return ProposalValidationContext(
+            category_ids=frozenset({"cat-food"}),
+            category_names={"餐饮": "cat-food"},
+        )
+
+    def test_amount_cents_zero_skipped(self):
+        """amountCents=0 is skipped (schema minimum: 1)."""
+        from src.modules.ai.service import AIService
+        raw = [{"type": "expense", "amountCents": 0, "category": "餐饮", "bizDate": "2026-09-06"}]
+        resolved = AIService._resolve_categories(raw, self._ctx())
+        assert resolved == []
+
+    def test_amount_cents_negative_skipped(self):
+        """amountCents < 0 is skipped."""
+        from src.modules.ai.service import AIService
+        raw = [{"type": "expense", "amountCents": -100, "category": "餐饮", "bizDate": "2026-09-06"}]
+        resolved = AIService._resolve_categories(raw, self._ctx())
+        assert resolved == []
+
+    def test_amount_cents_non_numeric_skipped(self):
+        """amountCents='abc' is skipped (no crash)."""
+        from src.modules.ai.service import AIService
+        raw = [{"type": "expense", "amountCents": "abc", "category": "餐饮", "bizDate": "2026-09-06"}]
+        resolved = AIService._resolve_categories(raw, self._ctx())
+        assert resolved == []
+
+    def test_amount_cents_null_skipped(self):
+        """amountCents=null is skipped (no crash)."""
+        from src.modules.ai.service import AIService
+        raw = [{"type": "expense", "amountCents": None, "category": "餐饮", "bizDate": "2026-09-06"}]
+        resolved = AIService._resolve_categories(raw, self._ctx())
+        assert resolved == []
+
+    def test_malformed_biz_date_fallback(self):
+        """Non-empty but malformed bizDate falls back to today."""
+        from src.modules.ai.service import AIService
+        raw = [{"type": "expense", "amountCents": 1000, "category": "餐饮", "bizDate": "2026/9/6"}]
+        resolved = AIService._resolve_categories(raw, self._ctx())
+        assert len(resolved) == 1
+        assert len(resolved[0]["bizDate"]) == 10  # YYYY-MM-DD
+
+    def test_biz_date_yesterday_fallback(self):
+        """bizDate='yesterday' falls back to today."""
+        from src.modules.ai.service import AIService
+        raw = [{"type": "expense", "amountCents": 1000, "category": "餐饮", "bizDate": "yesterday"}]
+        resolved = AIService._resolve_categories(raw, self._ctx())
+        assert len(resolved) == 1
+        assert resolved[0]["bizDate"].endswith("-") is False
+        assert len(resolved[0]["bizDate"]) == 10
+
+    def test_valid_biz_date_preserved(self):
+        """Valid bizDate passes through unchanged."""
+        from src.modules.ai.service import AIService
+        raw = [{"type": "expense", "amountCents": 1000, "category": "餐饮", "bizDate": "2026-01-15"}]
+        resolved = AIService._resolve_categories(raw, self._ctx())
+        assert resolved[0]["bizDate"] == "2026-01-15"
+
+    def test_valid_transactions_not_skipped(self):
+        """Normal transactions pass validation normally."""
+        from src.modules.ai.service import AIService
+        raw = [
+            {"type": "expense", "amountCents": 1000, "category": "餐饮", "bizDate": "2026-09-06"},
+            {"type": "expense", "amountCents": 0, "category": "餐饮", "bizDate": "2026-09-06"},  # skipped
+            {"type": "expense", "amountCents": 2000, "category": "餐饮", "bizDate": "garbage"},   # kept, bizDate fixed
+        ]
+        resolved = AIService._resolve_categories(raw, self._ctx())
+        assert len(resolved) == 2
+        assert resolved[0]["amountCents"] == 1000
+        assert resolved[0]["bizDate"] == "2026-09-06"
+        assert resolved[1]["amountCents"] == 2000
+        assert len(resolved[1]["bizDate"]) == 10  # today fallback

@@ -28,6 +28,10 @@ from src.common.config import Settings, get_config, set_config
 from src.common.database import get_db_session
 from src.common.logging import JSONFormatter
 from src.models.ai import AIUsage
+
+# Ensure models are registered with Base.metadata before ai_env creates tables
+from src.models.attachment import Attachment  # noqa: F401
+from src.models.ledger import Account, Book, Category  # noqa: F401
 from src.modules.ai.provider import (
     DashScopeProvider,
     ProviderError,
@@ -37,10 +41,6 @@ from src.modules.ai.provider import (
     reset_llm_provider,
 )
 from src.modules.ai.service import MAX_ATTEMPTS, _ai_rate_limits, local_day_start_utc
-
-# Ensure models are registered with Base.metadata before ai_env creates tables
-from src.models.attachment import Attachment  # noqa: F401
-from src.models.ledger import Account, Book, Category  # noqa: F401
 
 VALID_OUTPUT = {
     "type": "expense",
