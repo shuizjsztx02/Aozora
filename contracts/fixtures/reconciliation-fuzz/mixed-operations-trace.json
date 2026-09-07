@@ -174,7 +174,7 @@
         "categoryId": "cat-transport",
         "bizDate": "2026-08-28",
         "source": "manual",
-        "deletedAt": 1725000000090
+        "deletedAt": 1795968000000
       }
     },
     {
@@ -414,7 +414,7 @@
         "categoryId": "cat-food",
         "bizDate": "2026-08-28",
         "source": "manual",
-        "deletedAt": 1725000000099
+        "deletedAt": 1796745600000
       }
     },
     {
@@ -553,7 +553,7 @@
         "categoryId": "cat-transport",
         "bizDate": "2026-09-20",
         "source": "nlu_ai",
-        "deletedAt": 1725000000089
+        "deletedAt": 1795881600000
       }
     },
     {
@@ -571,7 +571,7 @@
         "categoryId": "cat-food",
         "bizDate": "2026-08-25",
         "source": "manual",
-        "deletedAt": 1725000000084
+        "deletedAt": 1795449600000
       }
     },
     {
@@ -713,7 +713,7 @@
         "categoryId": "cat-salary",
         "bizDate": "2026-08-05",
         "source": "nlu_ai",
-        "deletedAt": 1725000000085
+        "deletedAt": 1795536000000
       }
     },
     {

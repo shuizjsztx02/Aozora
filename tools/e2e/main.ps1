@@ -10,7 +10,7 @@
     3. Offline recording + sync recovery
     4. List transactions (edit + conflict require multi-device setup; covered by unit tests)
     5. Device rebuild (bootstrap after data clear)
-    6. Account deletion (deferred to T-M5-04c; always skipped)
+    6. Account deletion (smoke — token issuance only; full flow in pytest)
 
     Requires:
     - adb available on PATH
@@ -129,9 +129,11 @@ function Assert-True {
         Write-Pass $Message
         $script:passed++
     } else {
+        # P2-10: no throw — caller's catch block would double-count the failure.
+        # Let subsequent assertions in the same block still run so we report all
+        # failures, not just the first.
         Write-Fail $Message
         $script:failed++
-        throw "Assertion failed: $Message"
     }
 }
 
@@ -266,9 +268,16 @@ try {
 Write-Step 'E2E-06' 'Account Deletion'
 
 try {
-    # Deferred to T-M5-04c — just verify the UI path exists
-    Write-Pass 'Account deletion path: SKIPPED (deferred to T-M5-04c)'
-    $script:skipped++
+    # T-M5-04c: verify the deletion-token bridge command is wired end-to-end.
+    # We intentionally DO NOT call `account.delete` — that would consume the
+    # test account and break subsequent runs. The server-side pytest suite
+    # (tests/test_deletion.py) exercises the full two-phase flow including
+    # freeze + cancel + physical delete.
+    $result = Invoke-BridgeCommand -Command 'account.requestDeletionToken' -Payload '{}'
+    Assert-True ($null -ne $result) 'account.requestDeletionToken bridge command accepted'
+
+    Write-Pass 'Account deletion path: OK (smoke — token issuance only)'
+    $script:passed++
 } catch {
     Write-Fail "Account deletion path: FAIL ($($_.Exception.Message))"
     $script:failed++
@@ -276,12 +285,12 @@ try {
 
 # ─── Summary ───
 
-$totalPaths = 5  # E2E-01 through E2E-05 (E2E-06 always skipped)
+$totalPaths = 6  # E2E-01 through E2E-06
 $realPassed = [Math]::Min($script:passed, $totalPaths)
 Write-Host ''
 Write-Host '═══════════════════════════════════════════' -ForegroundColor White
 Write-Host "  E2E Results: $($script:passed) assertions passed, $($script:failed) failed, $($script:skipped) skipped" -ForegroundColor White
-Write-Host "  Core paths:  4 real (01,02,03,05) + 1 list-only (04) + 1 skipped (06 deferred to T-M5-04c)" -ForegroundColor White
+Write-Host "  Core paths:  5 real (01,02,03,05,06-smoke) + 1 list-only (04)" -ForegroundColor White
 Write-Host '═══════════════════════════════════════════' -ForegroundColor White
 
 if ($script:failed -gt 0) {

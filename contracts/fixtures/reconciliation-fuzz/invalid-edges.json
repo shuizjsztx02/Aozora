@@ -1,0 +1,27 @@
+{
+  "description": "Invalid boundary values \u2014 negative amounts that every platform must reject",
+  "cases": [
+    {
+      "id": "edge-invalid-1",
+      "bookId": "fuzz-book",
+      "type": "expense",
+      "amountCents": -1,
+      "categoryId": "cat-food",
+      "bizDate": "2026-09-01",
+      "source": "manual",
+      "deletedAt": null,
+      "note": "edge case: amount=-1 (must be rejected)"
+    },
+    {
+      "id": "edge-invalid-2",
+      "bookId": "fuzz-book",
+      "type": "expense",
+      "amountCents": -9007199254740991,
+      "categoryId": "cat-food",
+      "bizDate": "2026-09-01",
+      "source": "manual",
+      "deletedAt": null,
+      "note": "edge case: amount=-9007199254740991 (must be rejected)"
+    }
+  ]
+}

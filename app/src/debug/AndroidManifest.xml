@@ -4,11 +4,16 @@
           T-M5-01d: Debug-only BroadcastReceiver for E2E testing via adb am broadcast.
           Only present in debug build variants — never ships in release.
           Exported so shell (adb) can send broadcasts to it.
+          P1-4: android:permission requires sender hold the signature-level
+          BRIDGE_COMMAND permission — only same-signing-key apps (our debug
+          builds) or adb shell (which bypasses runtime checks) can reach it.
+          Third-party apps on the device are blocked.
         -->
         <receiver
             android:name="com.aozora.app.bridge.BridgeReceiver"
             android:exported="true"
-            android:enabled="true">
+            android:enabled="true"
+            android:permission="com.aozora.app.permission.BRIDGE_COMMAND">
             <intent-filter>
                 <action android:name="com.aozora.app.BRIDGE_COMMAND" />
             </intent-filter>

@@ -313,11 +313,25 @@ class ReconciliationTest {
         val txs = ReconciliationAssertions.parseTransactions(seed)
         val result = ReconciliationAssertions.assertReconciliation(txs)
 
-        // All bizDates in 2026-09
-        assertEquals(1, result.monthly.size)
+        // bizDate spans two months: 2026-09 (TX1 + TX3) and 2026-10 (TX2)
+        assertEquals(2, result.monthly.size)
         assertNotNull(result.monthly["2026-09"])
+        assertNotNull(result.monthly["2026-10"])
         assertEquals(3000L, result.total.totalExpense)
         assertEquals(15000L, result.total.totalIncome)
+        assertEquals(3, result.total.count)
+
+        // 2026-09: TX1 (1000 expense) + TX3 (15000 income)
+        val sept = result.monthly["2026-09"]!!
+        assertEquals(1000L, sept.totalExpense)
+        assertEquals(15000L, sept.totalIncome)
+        assertEquals(2, sept.count)
+
+        // 2026-10: TX2 (2000 expense)
+        val oct = result.monthly["2026-10"]!!
+        assertEquals(2000L, oct.totalExpense)
+        assertEquals(0L, oct.totalIncome)
+        assertEquals(1, oct.count)
     }
 
     @Test

@@ -1,5 +1,5 @@
 {
-  "description": "Boundary values that bounded PRNG fuzz cannot reach (P1#10)",
+  "description": "Valid boundary values that bounded PRNG fuzz cannot reach (P1#10)",
   "cases": [
     {
       "id": "edge-0",
@@ -27,17 +27,6 @@
       "id": "edge-2",
       "bookId": "fuzz-book",
       "type": "expense",
-      "amountCents": -1,
-      "categoryId": "cat-food",
-      "bizDate": "2026-09-01",
-      "source": "manual",
-      "deletedAt": null,
-      "note": "edge case: amount=-1"
-    },
-    {
-      "id": "edge-3",
-      "bookId": "fuzz-book",
-      "type": "expense",
       "amountCents": 99999,
       "categoryId": "cat-food",
       "bizDate": "2026-09-01",
@@ -46,7 +35,7 @@
       "note": "edge case: amount=99999"
     },
     {
-      "id": "edge-4",
+      "id": "edge-3",
       "bookId": "fuzz-book",
       "type": "expense",
       "amountCents": 9007199254740991,
@@ -55,28 +44,6 @@
       "source": "manual",
       "deletedAt": null,
       "note": "edge case: amount=9007199254740991"
-    },
-    {
-      "id": "edge-5",
-      "bookId": "fuzz-book",
-      "type": "expense",
-      "amountCents": -9007199254740991,
-      "categoryId": "cat-food",
-      "bizDate": "2026-09-01",
-      "source": "manual",
-      "deletedAt": null,
-      "note": "edge case: amount=-9007199254740991"
-    },
-    {
-      "id": "edge-empty",
-      "bookId": "fuzz-book",
-      "type": "expense",
-      "amountCents": 0,
-      "categoryId": "cat-food",
-      "bizDate": "2026-09-01",
-      "source": "manual",
-      "deletedAt": null,
-      "note": "edge case: zero amount (aggregator must handle)"
     }
   ]
 }

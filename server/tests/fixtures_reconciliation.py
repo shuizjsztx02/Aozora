@@ -445,15 +445,28 @@ async def test_budget_mixed_deficit_month(db_session):
 
 @pytest.mark.asyncio
 async def test_tz_boundary_uses_biz_date(db_session):
-    """TZ-boundary scenario: verify grouping by bizDate, not occurredAt."""
+    """TZ-boundary scenario: verify grouping by bizDate, not occurredAt.
+
+    The seed has two boundary transactions whose UTC-occurredAt month differs
+    from their Shanghai-bizDate month (e.g. 2026-08-31T16:00Z = 2026-09-01 in
+    Shanghai). Grouping must follow bizDate, yielding:
+      - 2026-09: TX1 (1000 expense) + TX3 (15000 income)
+      - 2026-10: TX2 (2000 expense)
+    """
     seed = load_seed("tz-boundary")
     result = await assert_reconciliation(db_session, seed)
 
-    # All bizDates are in 2026-09
-    assert len(result["stats"]) == 1
+    # bizDate spans two months: 2026-09 and 2026-10
+    assert len(result["stats"]) == 2
     assert "2026-09" in result["stats"]
+    assert "2026-10" in result["stats"]
 
-    stats = result["stats"]["2026-09"]
-    assert stats.total_expense == 3000
-    assert stats.total_income == 15000
-    assert stats.transaction_count == 3
+    sep_stats = result["stats"]["2026-09"]
+    assert sep_stats.total_expense == 1000
+    assert sep_stats.total_income == 15000
+    assert sep_stats.transaction_count == 2
+
+    oct_stats = result["stats"]["2026-10"]
+    assert oct_stats.total_expense == 2000
+    assert oct_stats.total_income == 0
+    assert oct_stats.transaction_count == 1

@@ -195,13 +195,26 @@ describe('T-M5-01a: tz-boundary scenario expected values', () => {
     const txs = seedToTransactions(seed)
     const result = assertReconciliation(txs)
 
-    // All transactions have bizDate in 2026-09
-    expect(result.monthly.size).toBe(1)
+    // bizDate spans two months: 2026-09 (TX1 + TX3) and 2026-10 (TX2)
+    expect(result.monthly.size).toBe(2)
     expect(result.monthly.get('2026-09')).toBeDefined()
+    expect(result.monthly.get('2026-10')).toBeDefined()
 
     // Total: expense=3000, income=15000
     expect(result.total.totalExpense).toBe(3000)
     expect(result.total.totalIncome).toBe(15000)
     expect(result.total.count).toBe(3)
+
+    // 2026-09: TX1 (1000 expense) + TX3 (15000 income)
+    const sept = result.monthly.get('2026-09')
+    expect(sept?.totalExpense).toBe(1000)
+    expect(sept?.totalIncome).toBe(15000)
+    expect(sept?.count).toBe(2)
+
+    // 2026-10: TX2 (2000 expense)
+    const oct = result.monthly.get('2026-10')
+    expect(oct?.totalExpense).toBe(2000)
+    expect(oct?.totalIncome).toBe(0)
+    expect(oct?.count).toBe(1)
   })
 })

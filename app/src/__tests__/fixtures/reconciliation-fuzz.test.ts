@@ -191,8 +191,12 @@ describe('T-M5-01b: Fixed-seed reconciliation fuzz', () => {
     }
   })
 
-  it('edge cases: zero amount is handled, negative/NaN would fail invariant', () => {
+  it('edge cases: zero amount is handled, negative amounts are rejected by cents()', () => {
     const edge = loadEdgeCases()
+    const invalidData = JSON.parse(
+      readFileSync(resolve(CORPUS_DIR, 'invalid-edges.json'), 'utf-8')
+    )
+    const invalid: { amountCents: number }[] = invalidData.cases
 
     // Zero amount is a valid edge case — aggregator should handle it
     const zeroTx = edge.find((e) => e.amountCents === 0)
@@ -211,11 +215,11 @@ describe('T-M5-01b: Fixed-seed reconciliation fuzz', () => {
     expect(emptyTotal.totalExpense as number).toBe(0)
     expect(emptyTotal.totalIncome as number).toBe(0)
 
-    // Negative amount: type system guard
-    expect(Number.isSafeInteger(1000)).toBe(true)
-    expect(Number.isSafeInteger(1000.5)).toBe(false)
-    expect(Number.isSafeInteger(NaN)).toBe(false)
-    expect(Number.isSafeInteger(Infinity)).toBe(false)
+    // P1-3: Negative amounts must be rejected by cents() — cross-platform rejection coverage
+    expect(invalid.length).toBeGreaterThanOrEqual(1)
+    for (const c of invalid) {
+      expect(() => cents(c.amountCents)).toThrow()
+    }
   })
 
   it('duplicate transactions inflate totals (dedup is sync layer)', () => {

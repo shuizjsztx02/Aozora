@@ -26,7 +26,8 @@ TYPES_BIASED = ["expense", "expense", "expense", "income"]  # 3:1 expense bias (
 SOURCES = ["manual", "nlu_local", "nlu_ai"]
 MONTHS = ["2026-08", "2026-09", "2026-10"]
 DAYS = ["01", "05", "10", "15", "20", "20", "25", "28"]  # 8 entries for cleaner pick
-EDGE_AMOUNTS = [0, 1, -1, 99999, 2**53 - 1, -(2**53 - 1)]  # 0, min, negative, max, MAX_SAFE_INTEGER, -MAX_SAFE_INTEGER
+EDGE_AMOUNTS = [0, 1, 99999, 2**53 - 1]  # valid edges: 0, min positive, large, MAX_SAFE_INTEGER
+EDGE_AMOUNTS_INVALID = [-1, -(2**53 - 1)]  # invalid edges: negative values (must be rejected)
 
 MASK32 = 0xFFFFFFFF
 
@@ -104,7 +105,7 @@ def generate_mixed_operations_trace(rng: LCG) -> list[dict]:
             active = [t for t in txs if t["deletedAt"] is None]
             if active:
                 target = rng.pick(active)
-                target["deletedAt"] = 1725000000000 + i  # fake timestamp
+                target["deletedAt"] = 1788192000000 + i * 86400000  # 2026-09-01 + i days
                 trace.append({"op": "softDelete", "id": target["id"]})
         elif op < 9:
             # Undo a random deleted tx
@@ -125,7 +126,7 @@ def generate_mixed_operations_trace(rng: LCG) -> list[dict]:
 
 
 def generate_edge_cases() -> list[dict]:
-    """Edge cases that the fuzzer should hit but doesn't with bounded PRNG (P1#10)."""
+    """Valid edge cases that the fuzzer should hit but doesn't with bounded PRNG (P1#10)."""
     cases = []
     for i, amt in enumerate(EDGE_AMOUNTS):
         cases.append({
@@ -139,18 +140,24 @@ def generate_edge_cases() -> list[dict]:
             "deletedAt": None,
             "note": f"edge case: amount={amt}",
         })
-    # Empty input
-    cases.append({
-        "id": "edge-empty",
-        "bookId": "fuzz-book",
-        "type": "expense",
-        "amountCents": 0,
-        "categoryId": "cat-food",
-        "bizDate": "2026-09-01",
-        "source": "manual",
-        "deletedAt": None,
-        "note": "edge case: zero amount (aggregator must handle)",
-    })
+    return cases
+
+
+def generate_invalid_edges() -> list[dict]:
+    """Invalid edge cases — negative amounts that every platform must reject."""
+    cases = []
+    for i, amt in enumerate(EDGE_AMOUNTS_INVALID):
+        cases.append({
+            "id": f"edge-invalid-{i + 1}",
+            "bookId": "fuzz-book",
+            "type": "expense",
+            "amountCents": amt,
+            "categoryId": "cat-food",
+            "bizDate": "2026-09-01",
+            "source": "manual",
+            "deletedAt": None,
+            "note": f"edge case: amount={amt} (must be rejected)",
+        })
     return cases
 
 
@@ -181,13 +188,21 @@ def main() -> int:
     }, indent=2))
     print(f"  wrote {out_dir / 'mixed-operations-trace.json'} ({len(trace)} ops)")
 
-    # 3. edge-cases.json — boundary values
+    # 3. edge-cases.json — valid boundary values
     edge = generate_edge_cases()
     (out_dir / "edge-cases.json").write_text(json.dumps({
-        "description": "Boundary values that bounded PRNG fuzz cannot reach (P1#10)",
+        "description": "Valid boundary values that bounded PRNG fuzz cannot reach (P1#10)",
         "cases": edge,
     }, indent=2))
     print(f"  wrote {out_dir / 'edge-cases.json'} ({len(edge)} cases)")
+
+    # 3b. invalid-edges.json — boundary values that must be REJECTED
+    invalid = generate_invalid_edges()
+    (out_dir / "invalid-edges.json").write_text(json.dumps({
+        "description": "Invalid boundary values — negative amounts that every platform must reject",
+        "cases": invalid,
+    }, indent=2))
+    print(f"  wrote {out_dir / 'invalid-edges.json'} ({len(invalid)} cases)")
 
     # 4. determinism-check.json — two runs from same seed, should match
     rng_a = LCG(SEED)
