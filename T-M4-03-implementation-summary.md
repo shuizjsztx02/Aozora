@@ -85,14 +85,16 @@ T-M4-03 实现了基于事实包（Fact Pack）的 AI 月度报告生成功能�
 - 未声明数字检测测试
 - 上下文构建测试（基础字段、Top分类、预算、最大交易、趋势）
 
-### T-M4-03c: 客户端洞察展示（未实现）
-**状态**: 待实现
+### T-M4-03c: 客户端洞察展示
+**状态**: ✅ 已完成（2026-09-06）
 
-**计划功能**:
-- 在 ReportsPage.tsx 添加 AI 洞察卡片
-- 调用 `POST /api/v1/ai/report` 获取报告和叙述
-- 离线降级：无网络时显示纯本地统计
-- 缓存机制：避免重复请求（基于 data_hash）
+**已实现功能**:
+- AiInsightCard 组件集成到 ReportsPage
+- 通过 bridge `ai.report` 命令调用服务端 `/ai/report`
+- 离线降级：`navigator.onLine` 检测，离线时不请求、不渲染卡片
+- localStorage 缓存（键 `bookId:period`，TTL 1 小时）
+- `narrative_cached` 标记展示
+- 10 个客户端测试全绿
 
 ## 关键技术决策
 
@@ -104,10 +106,12 @@ T-M4-03 实现了基于事实包（Fact Pack）的 AI 月度报告生成功能�
 
 ## 测试结果
 
-**总计**: 297 个测试通过
-- T-M4-03a (Fact Pack): 13 个测试
-- T-M4-03b (Narrative): 15 个测试
-- 其他模块: 269 个测试
+**任务级**: 37 个测试通过（第 8 轮实测 2026-09-07）
+- T-M4-03a (Fact Pack): 17 个测试（含 4 个统计对账守卫）
+- T-M4-03b (Narrative): 20 个测试（含缓存/usage/限流降级）
+- T-M4-03c (Client): 10 个测试
+
+**全量**: 服务端 426 passed / 2 skipped / 0 error；客户端 473 passed
 
 ## 修复的问题
 
@@ -138,9 +142,9 @@ T-M4-03 实现了基于事实包（Fact Pack）的 AI 月度报告生成功能�
 
 ## 后续工作
 
-1. **T-M4-03c**: 实现客户端 AI 洞察卡片和离线降级
-2. **Redis 缓存**: 多实例部署时替换内存缓存
-3. **叙述缓存**: 缓存 LLM 生成的叙述，避免重复生成
+1. ~~**T-M4-03c**: 实现客户端 AI 洞察卡片和离线降级~~ ✅ 已完成
+2. ~~**叙述缓存**: 缓存 LLM 生成的叙述，避免重复生成~~ ✅ 已完成（R-M4-09，300s TTL / 500 条目）
+3. **Redis 缓存**: 多实例部署时替换内存缓存
 4. **监控指标**: 添加叙述校验失败率、缓存命中率等指标
 
 ## 文件清单
@@ -150,6 +154,8 @@ T-M4-03 实现了基于事实包（Fact Pack）的 AI 月度报告生成功能�
 - `server/src/modules/ai/narrative.py` (225行)
 - `tests/test_fact_pack.py` (280行)
 - `tests/test_narrative_report.py` (230行)
+- `app/src/features/reports/AiInsightCard.tsx` (170行)
+- `app/src/__tests__/features/AiInsightCard.test.tsx` (158行)
 
 **修改**:
 - `server/src/modules/ai/prompts.py` (+30行)

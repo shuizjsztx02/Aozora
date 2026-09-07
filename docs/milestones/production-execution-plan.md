@@ -1,6 +1,6 @@
 # Aozora · 生产执行规划
 
-**状态：** M1 全部完成 ✅，M2 阶段 T-M2-01 至 T-M2-05 全部交付 ✅。M3 阶段 T-M3-01、T-M3-02、T-M3-03 全部交付 ✅。M4 阶段 T-M4-00 前端骨架与核心页面 ✅（2026-09-06 交付，含技术栈、四时主题、核心页面数据流）；T-M4-05 通知、快捷方式与小组件 ✅（2026-09-06 第 5 轮复审通过，R-M4-41~46 修复属实，6R 闭环）；T-M4-04c 服务端附件 API 🔧 修复已就绪待复审（R-M4-39~45 全部修复，424 服务端测试全绿，详见 docs/review/T-M4-04c-review.md）。
+**状态：** M1 全部完成 ✅，M2 阶段 T-M2-01 至 T-M2-05 全部交付 ✅。M3 阶段 T-M3-01、T-M3-02、T-M3-03 全部交付 ✅。M4 阶段 T-M4-00 前端骨架与核心页面 ✅（2026-09-06 交付，含技术栈、四时主题、核心页面数据流）；T-M4-05 通知、快捷方式与小组件 ✅（2026-09-06 第 5 轮复审通过，R-M4-41~46 修复属实，6R 闭环）；T-M4-04 语音、图片与桥接 ✅（2026-09-07 第 5 轮复审通过：04a/04c/04d/04e 全部通过，NEW-1/NEW-2/Bug-C1 已修复，详见 docs/review/T-M4-04-review-round5.md）。
 **用途：** 后续执行 Agent 的唯一任务选择与交接入口。产品、架构与全局验收以 `docs/APP-CONTEXT.md` 为准；本文件只维护顺序、闸门、交接与完成记录。
 
 ## 执行规则
@@ -570,8 +570,8 @@
 | T-M4-00 前端骨架与核心页面 | T-M1-03 ✅、T-M3-02 ✅ | 前端技术栈落地、四时设计系统、核心页面数据流 | 无 | ✅ **通过** |
 | T-M4-01 AI Gateway | T-M2-03 ✅ | provider adapter、用量、脱敏日志、ADR-003 WebView 调用通道 | D-EXEC-04 已关闭 ✅；R-PROD-01 已关闭 ✅ | ✅ **通过**（01a/01b/01c/01d 全 ✅，352+ 测试全绿，DashScope 真实密钥冒烟通过；产物密钥扫描归属 T-M5-02c） |
 | T-M4-02 动作协议与确认卡 | T-M1-05 ✅、T-M2-04 ✅、T-M4-00、T-M4-01 | 安全确认与撤销闭环 | 无 | ⏳ 进行中（服务端 3/4 完成，客户端待 T-M4-01d） |
-| T-M4-03 AI 查询与洞察 | T-M2-05 ✅、T-M4-00、T-M4-01 | 事实包、数字校验、离线降级 | 无 | ✅ **通过**（03a/03b 第 7 轮复审通过：R-M4-08~R-M4-17/R-M4-38 全部关闭；任务级 37 + 全量 424 passed / 2 skipped / 0 error；03c ✅ 客户端 10 测试全绿，AiInsightCard 集成 ReportsPage，离线降级 + localStorage 缓存 1h TTL；客户端全量 452 全绿。详见 docs/review/T-M4-03-review-round7.md） |
-| T-M4-04 语音、图片与桥接 | T-M4-02 | 权限状态机、图片上传 | D-EXEC-05（仅 04c） | ⏳ 进行中（04a ✅ 审查通过；04c 已交付、⚠️ 第 1 轮审查不通过（R-M4-39 P1 + 4 P2 + 2 P3）；04b/04d/04e 待实现。详见 docs/review/T-M4-04c-review.md） |
+| T-M4-03 AI 查询与洞察 | T-M2-05 ✅、T-M4-00、T-M4-01 | 事实包、数字校验、离线降级 | 无 | ✅ **通过**（第 8 轮复审确认：R-M4-08~R-M4-17/R-M4-38 全部关闭；任务级 37 + 全量 426 passed / 2 skipped / 0 error；03c ✅ 客户端 10 测试全绿，AiInsightCard 集成 ReportsPage，离线降级 + localStorage 缓存 1h TTL；客户端全量 473 passed。详见 docs/review/T-M4-03-review-round8.md） |
+| T-M4-04 语音、图片与桥接 | T-M4-02 | 权限状态机、图片上传 | D-EXEC-05（仅 04c） | ✅ **通过**（第 5 轮 2026-09-07：04a ✅；04c ✅ 全部修复通过（R-M4-39~45 闭环 + NEW-1/NEW-2/Bug-C1 已修）；04b ⏳ 代码完成待真机；04d ✅ 客户端图片链路已实现（ImagePickerSheet + ImageUploadView）；04e ✅ 图片解析与批量确认已实现（handleImageParse + BatchConfirmationCard）。详见 docs/review/T-M4-04-review-round5.md） |
 | T-M4-05 通知、快捷方式、小组件 | T-M1-03 ✅、T-M3-02 ✅、T-M4-00 | 原生入口统一读 Room | 无 | ✅ 通过（第 5 轮 2026-09-06：R-M4-41~46 全部修复属实，6R 闭环；R-M4-27~30 已修复。详见 docs/review/T-M4-05-review-round5.md） |
 | T-M4-06 视觉与无障碍 | T-M4-00、T-M4-02、T-M4-03 | 四时主题打磨、截图基线 | 无 | ✅ 通过（06a/06b/06c 全 ✅；28 项设计测试通过；ADR-004 截图基线方案已定） |
 
@@ -611,8 +611,8 @@
 
 | 子任务 | 硬依赖 | 交接产物 | 最低验证 | 状态 |
 |---|---|---|---|---|
-| T-M4-03a 事实包服务 | T-M2-05 ✅、T-M4-01b | 确定性事实包生成（月度聚合、趋势、分类占比、预算执行、最大单笔——复用 statistics 模块）；事实包 schema；数据哈希缓存（同数据不重复调 LLM、不重复计费） | 对账不变量：事实包数字 == 统计 API 输出；缓存命中/失效测试 | ✅ 通过（第 6 轮：17 用例全绿含 4 个 HTTP 级 parity 守卫；R-M4-08 口径统一/R-M4-11/R-M4-12 已关闭；待原子提交） |
-| T-M4-03b 叙述生成与数字校验 | 03a、01c | LLM 仅基于事实包生成叙述；输出中全部数字引用校验（无法映射事实包 → 拒绝动作 + 记录安全级事件）；月度洞察与查询回答；AIUsage 记录 | 正例数字全部可追溯；篡改/不一致数字用例被拒绝 | ✅ 通过（第 6 轮：20 用例全绿含 usage/限流降级测试；R-M4-10 invalid_json 耗尽路径已补记+测试锁死，R-M4-14/R-M4-15 已关闭；待原子提交） |
+| T-M4-03a 事实包服务 | T-M2-05 ✅、T-M4-01b | 确定性事实包生成（月度聚合、趋势、分类占比、预算执行、最大单笔——复用 statistics 模块）；事实包 schema；数据哈希缓存（同数据不重复调 LLM、不重复计费） | 对账不变量：事实包数字 == 统计 API 输出；缓存命中/失效测试 | ✅ 通过（第 8 轮确认：17 用例全绿含 4 个 HTTP 级 parity 守卫；R-M4-08 口径统一/R-M4-11/R-M4-12 已关闭；已提交入库） |
+| T-M4-03b 叙述生成与数字校验 | 03a、01c | LLM 仅基于事实包生成叙述；输出中全部数字引用校验（无法映射事实包 → 拒绝动作 + 记录安全级事件）；月度洞察与查询回答；AIUsage 记录 | 正例数字全部可追溯；篡改/不一致数字用例被拒绝 | ✅ 通过（第 8 轮确认：20 用例全绿含 usage/限流降级测试；R-M4-10 invalid_json 耗尽路径已补记+测试锁死，R-M4-14/R-M4-15 已关闭；已提交入库） |
 | T-M4-03c 客户端洞察展示与离线降级 | 03b、T-M4-00f | 报表页 AI 洞察卡与查询结果展示；离线/降级 → 纯本地统计报告；数据未变读缓存不重复请求计费 | 飞行模式仍可查看基础报告；数据未变时无新增用量记录 | ✅ 通过（AiInsightCard.tsx 170 行 + 10 测试全绿；事实包摘要 + AI 叙述展示；localStorage 缓存 1h TTL（键 bookId:period）；navigator.onLine 离线降级（不请求、不渲染卡片）；bridge 不可用静默跳过；narrative_cached 标记展示；ReportsPage 已集成） |
 
 ### T-M4-04 语音、图片与桥接
@@ -621,13 +621,13 @@
 |---|---|---|---|---|
 | T-M4-04a 权限状态机与桥扩展 | T-M4-02c | Android 运行时权限状态机（RECORD_AUDIO / CAMERA / READ_MEDIA_IMAGES：未请求/授予/拒绝/永久拒绝 → 引导设置）；bridge 扩展 permissions.* / voice.* / image.* 命令 + TS platform adapter | 权限分支（授予/拒绝/永久拒绝）真机通过；权限拒绝不阻塞手动记账 | ✅ 已完成（2026-09-06，PermissionManager 四态 + 7 桥命令 + usePermissions hook；voice.*/image.* 占位 unavailable；8 项 Robolectric + 389 TS 测试全绿） |
 | T-M4-04b Vosk 离线语音 | 04a | Vosk 依赖与中文小模型资产打包（体积与许可核查）；录音生命周期与识别服务；实时部分转写草稿；转写文本 → 本地 NLU / AI Gateway | 短句端到端延迟达标（PR-5 10 秒记账）；离线可用；APK 体积增量记录 | ⏳ 代码完成（2026-09-06，VoiceRecognitionService + Bridge 2 命令 + useVoice hook；模型需手动下载；前端 400 + Kotlin 36 测试全绿；待真机验证） |
-| T-M4-04c 服务端附件 API | T-M2-02 ✅；D-EXEC-05（正式存储） | Attachment 上传/列表/删除端点（模型已存在）；大小与格式限制；过期清理策略；私有访问（ownership）；对象存储接入（D-EXEC-05 确认前临时目录兜底） | 上传/过期/越权测试；限制与策略断言 | 🔧 修复已就绪待复审（2026-09-06：R-M4-39~45 全部修复——DB 驱动清理、magic-byte 拒绝分支生效、分块读取 64KB/块、架构文档补齐 data-model.md + security.md、迁移 0009 docstring 更正 PG-only、软删 Book 过滤、死枚举清理+分页补齐；424 服务端测试全绿。详见 docs/review/T-M4-04c-review.md） |
-| T-M4-04d 客户端图片链路 | 04a、04c | 相机/相册选择；客户端压缩（大小与格式受控）；上传适配与进度；上传或解析失败 → 保留草稿可恢复 | 失败后可恢复；临时图片按策略删除 | ⏳ 未开始 |
-| T-M4-04e 图片记账解析与批量确认 | 04d、T-M4-02b | 图片 → AI Gateway（多模态）→ add_tx_batch 提案 → 复用批量确认卡；解析失败保留草稿并提示联网后继续 | 多笔识别 → 批量确认闭环；解析失败不丢草稿 | ⏳ 未开始 |
+| T-M4-04c 服务端附件 API | T-M2-02 ✅；D-EXEC-05（正式存储） | Attachment 上传/列表/删除端点（模型已存在）；大小与格式限制；过期清理策略；私有访问（ownership）；对象存储接入（D-EXEC-05 确认前临时目录兜底） | 上传/过期/越权测试；限制与策略断言 | ✅ **通过**（第 5 轮 2026-09-07：R-M4-39~45 全部修复闭环；NEW-1 追加 ix_attachments_user_id 索引；NEW-2 孤儿文件清理（DB flush 失败时回滚文件）；Bug-C1 迁移 0010 执行 user_id backfill + NOT NULL + 索引。详见 docs/review/T-M4-04-review-round5.md） |
+| T-M4-04d 客户端图片链路 | 04a、04c | 相机/相册选择；客户端压缩（大小与格式受控）；上传适配与进度；上传或解析失败 → 保留草稿可恢复 | 失败后可恢复；临时图片按策略删除 | ✅ **通过**（ImagePickerSheet.tsx + ImageUploadView.tsx + useImage hook + image-draft-store；权限预检 + 自动续接 R-M4-48；草稿恢复；8 种错误码展示） |
+| T-M4-04e 图片记账解析与批量确认 | 04d、T-M4-02b | 图片 → AI Gateway（多模态）→ add_tx_batch 提案 → 复用批量确认卡；解析失败保留草稿并提示联网后继续 | 多笔识别 → 批量确认闭环；解析失败不丢草稿 | ✅ **通过**（handleImageParse 接入 AI Gateway + BatchConfirmationCard.tsx 已实现；QuickEntrySheet 集成；草稿恢复闭环；防重复解析 useRef 守卫） |
 
 ### T-M4-04c 完成记录
 
-> **⚠️ 2026-09-06 第 1 轮审查不通过：** R-M4-39（P1，启动清理不查 DB、按 mtime 误删 LINKED/PARSED 附件文件，EXPIRED 行永不清理）；R-M4-40/41/42/43（P2：MIME 内容校验死分支、上传全量读内存后才查 10MB、docs/architecture 无 attachments 文档先行缺失、迁移 0009 SQLite 兼容声明不实且全仓迁移无执行验证）；R-M4-44/45（P3：软删账本可 link、代码卫生杂项）。下方完成记录中相应 ✅ 声称以审查结论为准。详见 docs/review/T-M4-04c-review.md。
+> **✅ 2026-09-07 第 5 轮复审通过：** R-M4-39~45 全部修复属实（第四轮审查文档有两处事实错误，代码为真实来源）；NEW-1（ix_attachments_user_id 索引）、NEW-2（孤儿文件清理）、Bug-C1（迁移 0010 backfill）已修复。详见 docs/review/T-M4-04-review-round5.md。
 
 按交接模板：
 
