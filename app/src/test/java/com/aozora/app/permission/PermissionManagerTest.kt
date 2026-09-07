@@ -83,14 +83,43 @@ class PermissionManagerTest {
 
     @Test
     fun getStatus_afterRequestMarked_returnsDeniedOrPermanent() {
-        // 标记已请求（模拟用户曾请求过）
+        // P2-2 fix: 将原本 OR 断言拆分。Robolectric 默认 shouldShowRequestPermissionRationale=false
+        // （无 UI 对话框历史），所以「已请求 + 未授予」必然落入 PERMANENTLY_DENIED。
+        // 这比原来的 OR 断言更严格：回归到"总是 DENIED"会被捕获。
         val prefs = context.getSharedPreferences("aozora_permissions", Context.MODE_PRIVATE)
         prefs.edit().putBoolean("perm_requested_${android.Manifest.permission.CAMERA}", true).apply()
-
         val status = manager.getStatus(android.Manifest.permission.CAMERA)
-        assertTrue(
-            status == PermissionStatus.DENIED || status == PermissionStatus.PERMANENTLY_DENIED
+        assertEquals(
+            "Robolectric 无 UI 历史 → shouldShowRationale=false → PERMANENTLY_DENIED",
+            PermissionStatus.PERMANENTLY_DENIED, status
         )
+    }
+
+    @Test
+    fun getStatus_withoutRequestMarked_returnsNotRequested() {
+        // P2-2 配套：未请求分支保持 NOT_REQUESTED，确保「已请求」标记是关键分支点
+        val status = manager.getStatus(android.Manifest.permission.CAMERA)
+        assertEquals(PermissionStatus.NOT_REQUESTED, status)
+    }
+
+    // 注：DENIED 状态（shouldShowRequestPermissionRationale=true）需要真实权限对话框历史，
+    // Robolectric 无公开 API 模拟"已拒绝一次且 rationale 仍显示"。此分支由 PERMANENTLY_DENIED
+    // 测试间接覆盖——getStatus 的 if/else 两个分支均被断言。
+
+    @Test
+    @Config(sdk = [30])
+    fun getAllStatuses_onApi30_returnsLegacyKeys() {
+        // P2-3 fix: 覆盖 API < 33 的 legacy 分支（NOTIFICATIONS_LEGACY + READ_EXTERNAL_STORAGE）
+        val statuses = manager.getAllStatuses()
+        assertTrue(statuses.containsKey(android.Manifest.permission.RECORD_AUDIO))
+        assertTrue(statuses.containsKey(android.Manifest.permission.CAMERA))
+        assertTrue(statuses.containsKey(android.Manifest.permission.READ_EXTERNAL_STORAGE))
+        assertTrue(statuses.containsKey("NOTIFICATIONS_LEGACY"))
+        assertEquals(PermissionStatus.GRANTED, statuses["NOTIFICATIONS_LEGACY"])
+        assertEquals(4, statuses.size)
+        // API 30 不应包含 TIRAMISU 才有的 key
+        assertFalse(statuses.containsKey(android.Manifest.permission.POST_NOTIFICATIONS))
+        assertFalse(statuses.containsKey(android.Manifest.permission.READ_MEDIA_IMAGES))
     }
 
     @Test

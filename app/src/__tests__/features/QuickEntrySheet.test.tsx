@@ -44,6 +44,12 @@ const mockBridge = vi.hoisted(() => ({
   }),
   validateProposal: vi.fn().mockResolvedValue({ valid: true }),
   executeProposal: vi.fn().mockResolvedValue({ transaction_ids: ['tx-1'] }),
+  parseImage: vi.fn().mockResolvedValue({
+    proposal: { proposalId: 'prop-1', transactions: [], confidence: 0.9 },
+    attachmentId: 'att-1',
+    confidence: 0.9,
+  }),
+  cancelImageParse: vi.fn(),
 }))
 
 vi.mock('../../platform/hooks/use-bridge', () => ({
@@ -69,12 +75,24 @@ vi.mock('../../platform/hooks/use-image', () => ({
   useImage: () => mockImage,
 }))
 
+const mockDraft = vi.hoisted(() => ({
+  current: null as {
+    attachmentId: string | null
+    attachment?: { attachmentId: string; mimeType: string; fileSize: number } | null
+    source: 'camera' | 'gallery'
+    error: string | null
+    parseError?: string | null
+    proposal?: Record<string, unknown> | null
+    createdAt: number
+  } | null,
+}))
+
 vi.mock('../../platform/store/image-draft-store', () => ({
   useImageDraftStore: () => ({
     saveDraft: vi.fn(),
     clearDraft: vi.fn(),
   }),
-  useImageDraft: () => null,
+  useImageDraft: () => mockDraft.current,
 }))
 
 const TEST_CATEGORIES = [
@@ -93,6 +111,7 @@ describe('QuickEntrySheet', () => {
     mockImage.progress = -1
     mockImage.attachment = null
     mockImage.error = null
+    mockDraft.current = null
   })
 
   it('renders amount input and category selection', () => {
@@ -192,5 +211,91 @@ describe('QuickEntrySheet', () => {
       />,
     )
     expect(screen.getByTestId('image-success')).toBeTruthy()
+  })
+
+  it('recovers draft with parseError and calls bridge.parseImage on retry (P2-6)', async () => {
+    mockDraft.current = {
+      attachmentId: 'att-draft',
+      source: 'camera',
+      error: null,
+      parseError: 'no_categories',
+      proposal: null,
+      createdAt: Date.now(),
+    }
+    mockBridge.parseImage.mockResolvedValueOnce({
+      proposal: {
+        proposalId: 'prop-1',
+        transactions: [{
+          amountCents: 1500,
+          txType: 'expense',
+          categoryId: 'cat-food',
+          note: '午餐',
+          bizDate: '2026-09-07',
+        }],
+        confidence: 0.9,
+        warnings: [],
+        requiresConfirmation: true,
+      },
+      attachmentId: 'att-draft',
+      confidence: 0.9,
+    })
+    const user = userEvent.setup()
+    render(
+      <QuickEntrySheet
+        categories={TEST_CATEGORIES}
+        onClose={onClose}
+        onSuccess={onSuccess}
+      />,
+    )
+
+    // Mount effect restores parseError from draft → parse error UI visible
+    expect(screen.getByTestId('image-parse-error')).toBeTruthy()
+    expect(screen.getByTestId('parse-retry')).toBeTruthy()
+    expect(screen.getByTestId('parse-dismiss')).toBeTruthy()
+
+    // Click retry → handleParseRetry → bridge.parseImage(draft.attachmentId, bookId)
+    await user.click(screen.getByTestId('parse-retry'))
+    await vi.waitFor(() => {
+      expect(mockBridge.parseImage).toHaveBeenCalledWith('att-draft', 'book-1')
+    })
+  })
+
+  it('auto-triggers parseImage on mount when image.attachment is set and renders BatchConfirmationCard (P2-7)', async () => {
+    mockImage.attachment = {
+      attachmentId: 'att-1',
+      mimeType: 'image/jpeg',
+      fileSize: 2048,
+    }
+    mockBridge.parseImage.mockResolvedValueOnce({
+      proposal: {
+        proposalId: 'prop-1',
+        transactions: [{
+          amountCents: 1500,
+          txType: 'expense',
+          categoryId: 'cat-food',
+          note: '午餐',
+          bizDate: '2026-09-07',
+        }],
+        confidence: 0.9,
+        warnings: [],
+        requiresConfirmation: true,
+      },
+      attachmentId: 'att-1',
+      confidence: 0.9,
+    })
+    render(
+      <QuickEntrySheet
+        categories={TEST_CATEGORIES}
+        onClose={onClose}
+        onSuccess={onSuccess}
+      />,
+    )
+
+    // Wait for async parse → BatchConfirmationCard renders
+    const batchCard = await screen.findByTestId('batch-confirmation-card')
+    expect(batchCard).toBeTruthy()
+
+    // parseImage should have been called with attachmentId and bookId
+    expect(mockBridge.parseImage).toHaveBeenCalledWith('att-1', 'book-1')
   })
 })

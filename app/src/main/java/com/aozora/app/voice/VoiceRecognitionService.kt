@@ -48,6 +48,9 @@ class VoiceRecognitionService(private val context: Context) {
     private var model: Model? = null
     @Volatile
     private var isModelLoaded = false
+    // P2-1 fix: 防止并发 initialize() 同时进入 asset 复制分支（一个 deleteRecursively 时另一个写入）
+    @Volatile
+    private var isInitializing = false
 
     // 录音状态
     private val stateLock = Any()
@@ -77,6 +80,19 @@ class VoiceRecognitionService(private val context: Context) {
             onComplete(true, null)
             return
         }
+        // P2-1 fix: 拦截并发 initialize 调用——第二个调用直接返回，等首次完成后 isModelLoaded 翻转
+        synchronized(stateLock) {
+            if (isInitializing) {
+                Log.w(TAG, "initialize() already in flight — skip concurrent call")
+                // 不阻塞；调用方（Activity.onCreate）通常只触发一次
+                return
+            }
+            if (isModelLoaded) {
+                onComplete(true, null)
+                return
+            }
+            isInitializing = true
+        }
 
         scope.launch(Dispatchers.IO) {
             try {
@@ -93,11 +109,13 @@ class VoiceRecognitionService(private val context: Context) {
                 withContext(Dispatchers.Main) {
                     model = voskModel
                     isModelLoaded = true
+                    synchronized(stateLock) { isInitializing = false }
                     Log.i(TAG, "Vosk model loaded successfully from ${modelDir.absolutePath}")
                     onComplete(true, null)
                 }
             } catch (e: Exception) {
                 Log.e(TAG, "Failed to load Vosk model", e)
+                synchronized(stateLock) { isInitializing = false }
                 withContext(Dispatchers.Main) {
                     onComplete(false, e.message ?: "Failed to load model")
                 }
@@ -267,25 +285,27 @@ class VoiceRecognitionService(private val context: Context) {
                 record?.stop()
             } catch (_: Exception) { /* ignore — may already be stopped */ }
 
-            // 取消并等待识别循环退出（在 IO 线程 join，不阻塞主线程）
-            job?.cancelAndJoin()
-
-            // 获取最终结果
+            // NEW-B3 fix: 在 cancel 前先获取最终结果——cancelAndJoin 后 finally 已关闭 rec，
+            // 不能再调用 finalResult。
             if (rec != null) {
-                val finalJson = rec.finalResult
-                finalText = extractText(finalJson, "text")
-                Log.i(TAG, "Final transcription: $finalText")
+                try {
+                    val finalJson = rec.finalResult
+                    finalText = extractText(finalJson, "text")
+                    Log.i(TAG, "Final transcription: $finalText")
+                } catch (_: Exception) { /* rec may already be released */ }
             }
 
-            // 释放 AudioRecord
-            try {
-                record?.release()
-            } catch (_: Exception) { /* ignore */ }
+            // 取消并等待识别循环退出。
+            // 注意：recognitionLoop.finally 通过身份检查 `audioRecord === record` 决定是否释放，
+            // 但本方法在锁内已将字段置 null，finally 检查会失败——因此释放由本处显式完成，
+            // 而非 finally（修正此前"finally 块统一释放"注释的错误描述）。
+            job?.cancelAndJoin()
 
-            // 释放 Recognizer
-            try {
-                rec?.close()
-            } catch (_: Exception) { /* ignore */ }
+            // P1 fix: stopRecording 路径下 finally 不会释放（字段已清空），必须在此显式释放。
+            // 每次 start→stop 周期都会走到这里；若遗漏，AudioRecord 原生句柄 + Recognizer 原生内存
+            // 将永久泄漏，N 次后 AudioRecord() 抛异常或返回未初始化。
+            try { record?.release() } catch (_: Exception) { /* ignore */ }
+            try { rec?.close() } catch (_: Exception) { /* ignore */ }
 
             listener = null
             Log.i(TAG, "Voice recording stopped")
@@ -420,20 +440,27 @@ class VoiceRecognitionService(private val context: Context) {
         } finally {
             // P2 fix：无论正常退出还是崩溃，都重置 isRecording
             isRecording = false
-            // 安全网：若 stopRecording/shutdown 已在协程启动前被调用并将
-            // audioRecord 置 null，这里负责释放本地持有的 record。
-            // 若 stopRecording 已先释放，record 是同一实例，release() 被忽略。
+            // NEW-B3 fix: 仅在本协程仍"拥有"资源时才释放——若 stopRecording/shutdown
+            // 已将字段置 null（由另一线程释放），这里跳过，避免二次 release/close。
+            var shouldReleaseRecord = false
+            var shouldReleaseRec = false
             synchronized(stateLock) {
                 if (audioRecord === record) {
                     audioRecord = null
+                    shouldReleaseRecord = true
                 }
                 if (recognizer === rec) {
                     recognizer = null
+                    shouldReleaseRec = true
                 }
             }
-            try { record.stop() } catch (_: Exception) {}
-            try { record.release() } catch (_: Exception) {}
-            try { rec.close() } catch (_: Exception) {}
+            if (shouldReleaseRecord) {
+                try { record.stop() } catch (_: Exception) {}
+                try { record.release() } catch (_: Exception) {}
+            }
+            if (shouldReleaseRec) {
+                try { rec.close() } catch (_: Exception) {}
+            }
         }
     }
 

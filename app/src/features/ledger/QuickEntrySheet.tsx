@@ -42,6 +42,8 @@ export function QuickEntrySheet({ categories, onClose, onSuccess }: QuickEntrySh
   const [parseProposal, setParseProposal] = useState<ActionProposal | null>(null)
   const [parseError, setParseError] = useState<string | null>(null)
   const [batchSubmitting, setBatchSubmitting] = useState(false)
+  // NEW-E5 fix: 批量确认校验失败时展示给用户
+  const [batchError, setBatchError] = useState<string | null>(null)
 
   // 防止重复触发解析（React strict mode 或 image.attachment 引用变化）
   const parsedAttachmentRef = useRef<string | null>(null)
@@ -62,6 +64,9 @@ export function QuickEntrySheet({ categories, onClose, onSuccess }: QuickEntrySh
   // ─── T-M4-04e: 图片上传成功后自动触发解析 ───────────────────────────
 
   // 初始化：若草稿中已有 proposal（上次解析成功但用户关闭了），恢复批量确认卡
+  // NEW-D2 note: 依赖 zustand persist 的同步 localStorage 水合——draft 在首次渲染时
+  // 已就绪。若未来切换为 AsyncStorage（异步水合），需改用 zustand 的 onRehydrateStorage
+  // 或 hasHydrated() 守卫，否则此处会读到空草稿、静默跳过恢复。
   useEffect(() => {
     if (draft?.proposal && draft.attachmentId) {
       const restored = draft.proposal as unknown as ActionProposal
@@ -75,7 +80,7 @@ export function QuickEntrySheet({ categories, onClose, onSuccess }: QuickEntrySh
       setParseError(draft.parseError)
       setParseState('error')
     }
-  }, []) // 仅在挂载时检查一次
+  }, []) // eslint-disable-line react-hooks/exhaustive-deps -- 仅在挂载时检查一次
 
   // 图片上传完成 → 自动触发 AI 解析
   useEffect(() => {
@@ -129,7 +134,9 @@ export function QuickEntrySheet({ categories, onClose, onSuccess }: QuickEntrySh
           createdAt: Date.now(),
         })
       } catch (e) {
+        // NEW-R6-2 fix: 被取消的 parse 不写 error 状态，避免 UI 闪烁
         const code = e instanceof Error && 'code' in e ? (e as { code: string }).code : 'unknown'
+        if (code === 'cancelled' || cancelled) return
         setParseError(code)
         setParseState('error')
         saveDraft({
@@ -144,6 +151,13 @@ export function QuickEntrySheet({ categories, onClose, onSuccess }: QuickEntrySh
       }
     }
     doParse()
+
+    // NEW-1(R6) + NEW-R6-2 fix: 换图/卸载时标记 cancelled 并取消旧 parse，
+    // 防止旧结果覆盖新状态 + 旧请求继续消耗 tokens
+    return () => {
+      cancelled = true
+      bridge.cancelImageParse()
+    }
   }, [image.attachment]) // eslint-disable-line react-hooks/exhaustive-deps
 
   const handleImagePick = useCallback(async (source: 'camera' | 'gallery') => {
@@ -151,6 +165,7 @@ export function QuickEntrySheet({ categories, onClose, onSuccess }: QuickEntrySh
     setParseState('idle')
     setParseProposal(null)
     setParseError(null)
+    setBatchError(null)
     parsedAttachmentRef.current = null
     try {
       await image.pickImage(source)
@@ -194,9 +209,13 @@ export function QuickEntrySheet({ categories, onClose, onSuccess }: QuickEntrySh
     const currentAttachment = image.attachment ?? draft?.attachment ?? null
     setParseState('parsing')
     setParseError(null)
+    // P3-8 fix: 与主解析 effect 一致的 cancelled 守卫，防止用户换图/卸载后旧结果覆盖状态
+    let cancelled = false
     try {
       const bookId = await getBookId()
+      if (cancelled) return
       const result = await bridge.parseImage(attId, bookId)
+      if (cancelled) return
       const proposal = result.proposal as unknown as ActionProposal
       const txCount = (proposal.transactions ?? []).length
 
@@ -228,6 +247,8 @@ export function QuickEntrySheet({ categories, onClose, onSuccess }: QuickEntrySh
       })
     } catch (e) {
       const code = e instanceof Error && 'code' in e ? (e as { code: string }).code : 'unknown'
+      // P3-8 fix: 与主解析 effect 一致 — 被取消的 parse 不写 error 状态
+      if (code === 'cancelled' || cancelled) return
       setParseError(code)
       setParseState('error')
       saveDraft({
@@ -247,6 +268,7 @@ export function QuickEntrySheet({ categories, onClose, onSuccess }: QuickEntrySh
     setParseState('idle')
     setParseProposal(null)
     setParseError(null)
+    setBatchError(null)
     parsedAttachmentRef.current = null
     clearDraft()
     // 不清除 image.attachment，用户可以继续手动记账或选择新图片
@@ -255,6 +277,7 @@ export function QuickEntrySheet({ categories, onClose, onSuccess }: QuickEntrySh
   // T-M4-04e: 批量确认执行
   const handleBatchConfirm = useCallback(async (editedProposal: ActionProposal) => {
     setBatchSubmitting(true)
+    setBatchError(null)
     try {
       const bookId = await getBookId()
 
@@ -262,7 +285,9 @@ export function QuickEntrySheet({ categories, onClose, onSuccess }: QuickEntrySh
       const proposalRecord = editedProposal as unknown as Record<string, unknown>
       const validation = await bridge.validateProposal(proposalRecord, bookId)
       if (!validation.valid) {
+        // NEW-E5 fix: 将校验失败反馈给用户，而非仅 console.warn
         console.warn('Proposal validation failed:', validation.errors)
+        setBatchError(validation.errors.map(e => e.message).join('; ') || 'validation_failed')
         return
       }
 
@@ -280,8 +305,8 @@ export function QuickEntrySheet({ categories, onClose, onSuccess }: QuickEntrySh
       parsedAttachmentRef.current = null
       onSuccess()
     } catch (err) {
-      console.error('Failed to execute batch proposal:', err)
-      // 保留 parseProposal 状态，用户可以重试
+      const msg = err instanceof Error ? err.message : 'unknown'
+      setBatchError(msg)
     } finally {
       setBatchSubmitting(false)
     }
@@ -293,6 +318,7 @@ export function QuickEntrySheet({ categories, onClose, onSuccess }: QuickEntrySh
     setParseState('idle')
     setParseProposal(null)
     setParseError(null)
+    setBatchError(null)
     parsedAttachmentRef.current = null
   }, [image, clearDraft])
 
@@ -301,6 +327,7 @@ export function QuickEntrySheet({ categories, onClose, onSuccess }: QuickEntrySh
     setParseState('idle')
     setParseProposal(null)
     setParseError(null)
+    setBatchError(null)
     parsedAttachmentRef.current = null
     setShowImagePicker(true)
   }, [image])
@@ -403,6 +430,17 @@ export function QuickEntrySheet({ categories, onClose, onSuccess }: QuickEntrySh
               {batchSubmitting && (
                 <div className="text-center text-xs py-2" style={{ color: 'var(--ink3)' }}>
                   正在记账…
+                </div>
+              )}
+
+              {/* NEW-E5 fix: 校验失败反馈 */}
+              {batchError && !batchSubmitting && (
+                <div
+                  className="mx-4 mt-2 text-center text-xs py-1.5 rounded-lg"
+                  style={{ color: 'var(--expense)', background: 'var(--glass)' }}
+                  data-testid="batch-validation-error"
+                >
+                  ❌ {batchError}
                 </div>
               )}
             </>
@@ -553,6 +591,7 @@ export function QuickEntrySheet({ categories, onClose, onSuccess }: QuickEntrySh
                     <span className="text-xs" style={{ color: 'var(--expense)' }}>
                       ❌ {parseError === 'no_transactions'
                         ? '未识别到消费记录'
+                        : parseError === 'no_categories' ? '未找到匹配的分类'
                         : parseError === 'no_ai_provider' ? '识别失败（AI 服务不可用）' : '识别失败'}
                     </span>
                   </div>

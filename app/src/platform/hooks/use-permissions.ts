@@ -83,7 +83,8 @@ export function usePermissions(): UsePermissionsReturn {
     if (!bridge.isAvailable()) return
     try {
       const { pending } = await bridge.requestPermission(permission)
-      // pending: false（低版本 Android）时结果不走 onPermissionResult 推送，需主动刷新
+      // P3-4 fix: Android 侧已授予时 Bridge 同步返回 {pending: false}，
+      // 此时不走 onPermissionResult 推送，需主动刷新以更新 UI 状态。
       if (!pending) refresh()
     } catch (error) {
       console.warn('[usePermissions] requestPermission failed:', error)

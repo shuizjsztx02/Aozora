@@ -28,7 +28,8 @@ class TestMigrationConsistency:
             "0004_budget_unique_constraint", "0005_note_length",
             "0006_budget_deleted_at", "0007_ai_usage_index",
             "0008_proposal_idempotency", "0009_attachment_user_id",
-            "0010_attachment_user_id_backfill",
+            "0010_attachment_user_id_backfill", "0011_user_consents",
+            "0012_account_deletion",
         ):
             try:
                 m = importlib.import_module(f"src.migrations.versions.{rev}")
@@ -65,7 +66,8 @@ class TestMigrationConsistency:
             "0004_budget_unique_constraint", "0005_note_length",
             "0006_budget_deleted_at", "0007_ai_usage_index",
             "0008_proposal_idempotency", "0009_attachment_user_id",
-            "0010_attachment_user_id_backfill",
+            "0010_attachment_user_id_backfill", "0011_user_consents",
+            "0012_account_deletion",
         ):
             try:
                 m = importlib.import_module(f"src.migrations.versions.{rev}")
@@ -128,13 +130,16 @@ class TestMigrationConsistency:
                 f"{table_name} missing CHECK constraint on amount_cents"
             )
 
-    def test_14_tables_registered(self):
-        """The schema must define exactly 14 tables.
+    def test_17_tables_registered(self):
+        """The schema must define exactly 17 tables.
 
         T-M4-02b added ``proposal_idempotency`` (migration 0008) for AI
         execute dedup, bringing the total from 13 to 14.
+        T-M5-04a added ``user_consents`` (migration 0011), bringing 14 → 15.
+        T-M5-04c added ``deletion_tokens`` + ``deletion_audit`` (migration 0012),
+        bringing 15 → 17.
         """
-        assert len(Base.metadata.tables) == 14
+        assert len(Base.metadata.tables) == 17
 
     def test_transaction_note_column_bounded(self):
         """N-13: transactions.note must be bounded at the DB layer too.

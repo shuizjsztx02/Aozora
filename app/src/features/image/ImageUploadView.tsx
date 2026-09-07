@@ -24,7 +24,6 @@ const ERROR_MESSAGES: Record<string, string> = {
   auth_lost: '登录已过期',
   file_too_large: '文件过大',
   server_error: '服务器错误',
-  bridge_unavailable: '当前环境不支持',
   unknown: '未知错误',
 }
 

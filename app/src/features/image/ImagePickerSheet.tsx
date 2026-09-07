@@ -4,7 +4,7 @@
  * 提供拍照 / 从相册选择两个入口，集成权限预检。
  */
 
-import { useCallback, useState, useEffect, useRef } from 'react'
+import { useState, useEffect, useRef } from 'react'
 import { motion, AnimatePresence } from 'framer-motion'
 import { usePermissions } from '../../platform/hooks/use-permissions'
 
@@ -20,22 +20,20 @@ export function ImagePickerSheet({ onPick, onClose }: ImagePickerSheetProps) {
   const onPickRef = useRef(onPick)
   onPickRef.current = onPick
 
-  const handlePick = useCallback(
-    async (source: 'camera' | 'gallery') => {
-      const hasPermission = source === 'camera' ? canCamera : canGallery
-      const perm = source === 'camera' ? 'CAMERA' as const : 'READ_MEDIA_IMAGES' as const
+  // P3-7 fix: useCallback 无意义（onPick 每次渲染都重建），改为普通函数
+  const handlePick = async (source: 'camera' | 'gallery') => {
+    const hasPermission = source === 'camera' ? canCamera : canGallery
+    const perm = source === 'camera' ? 'CAMERA' as const : 'READ_MEDIA_IMAGES' as const
 
-      if (!hasPermission) {
-        // R-M4-48 fix: 记录待处理源，权限授予后自动续接
-        setPendingSource(source)
-        await requestPermission(perm)
-        return
-      }
+    if (!hasPermission) {
+      // R-M4-48 fix: 记录待处理源，权限授予后自动续接
+      setPendingSource(source)
+      await requestPermission(perm)
+      return
+    }
 
-      onPick(source)
-    },
-    [canCamera, canGallery, requestPermission, onPick],
-  )
+    onPick(source)
+  }
 
   // R-M4-48 fix: 权限授予后自动续接选择
   useEffect(() => {

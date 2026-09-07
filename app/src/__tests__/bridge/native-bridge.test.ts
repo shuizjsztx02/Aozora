@@ -86,9 +86,21 @@ describe('Bridge types — 命令完整性', () => {
     'image.delete',
     // T-M4-04e: 图片记账解析
     'image.parse',
+    'image.parse_cancel',
+    // T-M5-04a: 隐私同意
+    'consent.record',
+    'consent.status',
+    // T-M5-04b: 数据导出
+    'export.create',
+    'export.list',
+    'export.get',
+    'export.download',
+    // T-M5-04c: 账号删除
+    'account.requestDeletionToken',
+    'account.delete',
   ]
 
-  it('BridgeCommands 包含所有 37 个命令（含 AI 4 个 + T-M4-04a 权限 3 个 + 语音 2 个 + 图片 3 个）', () => {
+  it('BridgeCommands 包含所有 46 个命令（含 AI 4 个 + T-M4-04a 权限 3 个 + 语音 2 个 + 图片 4 个 + 同意 2 个 + 导出 4 个 + 账号删除 2 个）', () => {
     const actualCommands = Object.values(BridgeCommands)
     expect(actualCommands).toHaveLength(expectedCommands.length)
     for (const cmd of expectedCommands) {
@@ -717,5 +729,165 @@ describe('NativeBridge — T-M4-04d 图片链路', () => {
       setTimeout(() => simulateResponse(requestId, null, false, 'cancelled', 'Image picker cancelled'), 0)
     })
     await expect(bridge.pickImage('camera')).rejects.toMatchObject({ code: 'cancelled' })
+  })
+
+  it('parseImage → image.parse 命令，payload 含 attachmentId 和 bookId，超时 120s（T-M4-04e）', async () => {
+    mockNative.call.mockImplementation((_v: number, requestId: string, cmd: string, payload: string) => {
+      capturedCommand = cmd
+      capturedPayload = payload
+      setTimeout(() => simulateResponse(requestId, {
+        request_id: 'req-1',
+        proposal: { proposalId: 'prop-1', transactions: [], confidence: 0.9 },
+        attachment_id: 'att-1',
+        confidence: 0.9,
+        usage: { prompt_tokens: 100, completion_tokens: 50 },
+      }), 0)
+    })
+    const result = await bridge.parseImage('att-1', 'book-1')
+    expect(capturedCommand).toBe('image.parse')
+    const payload = JSON.parse(capturedPayload)
+    expect(payload.attachmentId).toBe('att-1')
+    expect(payload.bookId).toBe('book-1')
+    expect(result.attachment_id).toBe('att-1')
+    expect(result.proposal.proposalId).toBe('prop-1')
+  })
+
+  it('cancelImageParse → image.parse_cancel 命令，fire-and-forget（NEW-R6-2 fix）', () => {
+    mockNative.call.mockImplementation(() => {})
+    bridge.cancelImageParse()
+    const cancelCall = mockNative.call.mock.calls.find(c => c[2] === 'image.parse_cancel')
+    expect(cancelCall).toBeDefined()
+    expect(cancelCall![3]).toBe('{}')
+  })
+})
+
+// ─── T-M5-04a: 隐私同意桥命令 ───
+
+describe('NativeBridge — T-M5-04a 隐私同意', () => {
+  let bridge: NativeBridge
+  let capturedCommand = ''
+  let capturedPayload = ''
+
+  beforeEach(() => {
+    bridge = new NativeBridge()
+    installMockBridge().call.mockImplementation((_v: number, requestId: string, cmd: string, payload: string) => {
+      capturedCommand = cmd
+      capturedPayload = payload
+      setTimeout(() => simulateResponse(requestId, {
+        id: 'consent-1',
+        policyVersion: 'v1',
+        consentedAt: Date.now(),
+      }), 0)
+    })
+  })
+
+  it('recordConsent 发送 consent.record 命令', async () => {
+    const result = await bridge.recordConsent({ policyVersion: 'v1' })
+    expect(capturedCommand).toBe('consent.record')
+    const payload = JSON.parse(capturedPayload)
+    expect(payload.policyVersion).toBe('v1')
+    expect(result.id).toBe('consent-1')
+  })
+
+  it('recordConsent 默认 policyVersion 为 v1', async () => {
+    await bridge.recordConsent()
+    const payload = JSON.parse(capturedPayload)
+    expect(payload.policyVersion).toBe('v1')
+  })
+
+  it('getConsentStatus 发送 consent.status 命令', async () => {
+    installMockBridge().call.mockImplementation((_v: number, requestId: string) => {
+      setTimeout(() => simulateResponse(requestId, { hasConsented: true }), 0)
+    })
+    const freshBridge = new NativeBridge()
+    const result = await freshBridge.getConsentStatus()
+    expect(result.hasConsented).toBe(true)
+  })
+})
+
+// ─── T-M5-04b: 数据导出桥命令 ───
+
+describe('NativeBridge — T-M5-04b 数据导出', () => {
+  let bridge: NativeBridge
+  let capturedCommand = ''
+  let capturedPayload = ''
+
+  beforeEach(() => {
+    bridge = new NativeBridge()
+    installMockBridge().call.mockImplementation((_v: number, requestId: string, cmd: string, payload: string) => {
+      capturedCommand = cmd
+      capturedPayload = payload
+      setTimeout(() => simulateResponse(requestId, {
+        id: 'exp-1',
+        bookId: 'book-1',
+        format: 'json',
+        status: 'completed',
+        createdAt: '2026-09-07T10:00:00Z',
+        fileSize: 1234,
+      }), 0)
+    })
+  })
+
+  it('createExport 发送 export.create 命令', async () => {
+    const result = await bridge.createExport({ bookId: 'book-1', format: 'json' })
+    expect(capturedCommand).toBe('export.create')
+    const payload = JSON.parse(capturedPayload)
+    expect(payload.bookId).toBe('book-1')
+    expect(payload.format).toBe('json')
+    expect(result.id).toBe('exp-1')
+    expect(result.status).toBe('completed')
+  })
+
+  it('createExport 默认 format 为 json', async () => {
+    await bridge.createExport({ bookId: 'book-1' })
+    const payload = JSON.parse(capturedPayload)
+    expect(payload.format).toBe('json')
+  })
+
+  it('listExports 发送 export.list 命令', async () => {
+    installMockBridge().call.mockImplementation((_v: number, requestId: string, cmd: string) => {
+      capturedCommand = cmd
+      setTimeout(() => simulateResponse(requestId, [{
+        id: 'exp-1', bookId: 'book-1', format: 'json', status: 'completed',
+        createdAt: '2026-09-07T10:00:00Z',
+      }]), 0)
+    })
+    const freshBridge = new NativeBridge()
+    const result = await freshBridge.listExports()
+    expect(capturedCommand).toBe('export.list')
+    expect(result).toHaveLength(1)
+    expect(result[0].id).toBe('exp-1')
+  })
+
+  it('getExport 发送 export.get 命令', async () => {
+    const result = await bridge.getExport('exp-1')
+    expect(capturedCommand).toBe('export.get')
+    const payload = JSON.parse(capturedPayload)
+    expect(payload.exportId).toBe('exp-1')
+    expect(result.id).toBe('exp-1')
+  })
+
+  it('downloadExport 发送 export.download 命令并返回内容', async () => {
+    installMockBridge().call.mockImplementation((_v: number, requestId: string, cmd: string) => {
+      capturedCommand = cmd
+      setTimeout(() => simulateResponse(requestId, {
+        localPath: '/Download/Aozora/export.json',
+        filename: 'export.json',
+        content: '[{"amount_cents":100,"type":"expense"}]',
+      }), 0)
+    })
+    const freshBridge = new NativeBridge()
+    const result = await freshBridge.downloadExport('exp-1')
+    expect(capturedCommand).toBe('export.download')
+    expect(result.filename).toBe('export.json')
+    expect(result.content).toContain('amount_cents')
+  })
+
+  it('downloadExport 桥错误（expired）抛出 BridgeError', async () => {
+    installMockBridge().call.mockImplementation((_v: number, requestId: string) => {
+      setTimeout(() => simulateResponse(requestId, null, false, 'expired', 'Export has expired'), 0)
+    })
+    const freshBridge = new NativeBridge()
+    await expect(freshBridge.downloadExport('exp-1')).rejects.toThrow(BridgeError)
   })
 })

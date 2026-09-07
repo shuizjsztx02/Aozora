@@ -37,7 +37,18 @@ import {
   type ImagePickResult,
   type ImageProgressEvent,
   type ParseImageResult,
+  type ConsentRecordParams,
+  type ConsentRecordResult,
+  type ConsentStatusResult,
+  type ExportCreateParams,
+  type ExportData,
+  type ExportDownloadResult,
+  type AccountDeletionTokenResult,
+  type AccountDeleteResult,
 } from './bridge-types'
+
+// Re-export BridgeError for consumers (e.g. MePage)
+export { BridgeError }
 
 declare global {
   interface Window {
@@ -419,6 +430,18 @@ export class NativeBridge {
   }
 
   /**
+   * NEW-R6-2 fix: 取消正在进行的图片解析请求。
+   *
+   * Kotlin bridge 会取消底层 HTTP 调用，避免旧请求继续消耗 tokens。
+   * 发送为 fire-and-forget——不等待响应，超时极短。
+   */
+  cancelImageParse(): void {
+    this.call('image.parse_cancel', {}).catch(() => {
+      // Cancel may arrive after parse already completed — ignore errors
+    })
+  }
+
+  /**
    * 注册上传进度监听（Android 压缩上传过程中通过 __aozoraImageProgress__ 推送）。
    * 返回取消订阅函数。
    */
@@ -537,6 +560,81 @@ export class NativeBridge {
         ;(window as any).__aozoraVoiceError__ = prev
       }
     }
+  }
+
+  // ─── T-M5-04a: 隐私同意 ───
+
+  /**
+   * 记录隐私政策同意。
+   *
+   * 写入 Room user_consent 表 + ConsentStore（SharedPreferences）。
+   */
+  async recordConsent(params?: ConsentRecordParams): Promise<ConsentRecordResult> {
+    return this.call<ConsentRecordResult>('consent.record', {
+      policyVersion: params?.policyVersion ?? 'v1',
+      consentedAt: params?.consentedAt ?? Date.now(),
+      deviceId: params?.deviceId ?? '',
+    })
+  }
+
+  /** 查询本地隐私同意状态。 */
+  async getConsentStatus(): Promise<ConsentStatusResult> {
+    return this.call<ConsentStatusResult>('consent.status')
+  }
+
+  // ─── T-M5-04b: 数据导出 ───
+
+  /**
+   * 创建数据导出。服务端同步生成 JSON/CSV 文件。
+   */
+  async createExport(params: ExportCreateParams): Promise<ExportData> {
+    return this.call<ExportData>('export.create', {
+      bookId: params.bookId,
+      format: params.format ?? 'json',
+    })
+  }
+
+  /** 列出当前用户所有导出（按创建时间倒序）。 */
+  async listExports(): Promise<ExportData[]> {
+    return this.call<ExportData[]>('export.list')
+  }
+
+  /** 查询单个导出状态。 */
+  async getExport(exportId: string): Promise<ExportData> {
+    return this.call<ExportData>('export.get', { exportId })
+  }
+
+  /**
+   * 下载导出文件到本地 Downloads/Aozora/ 目录。
+   *
+   * 返回本地路径 + 文件内容（≤ 20MB），前端用 content 做对账校验。
+   */
+  async downloadExport(exportId: string): Promise<ExportDownloadResult> {
+    return this.call<ExportDownloadResult>('export.download', { exportId })
+  }
+
+  // ─── T-M5-04c: 账号删除 ───
+
+  /**
+   * 请求一次性 confirm_token。
+   *
+   * 返回的 token 必须在 5 分钟内通过 [deleteAccount] 消费，否则服务端拒绝。
+   * 前端应在用户输入 "DELETE" 二次确认后调用 [deleteAccount]。
+   */
+  async requestAccountDeletionToken(): Promise<AccountDeletionTokenResult> {
+    return this.call<AccountDeletionTokenResult>('account.requestDeletionToken')
+  }
+
+  /**
+   * 消费 confirm_token 完成账号删除。
+   *
+   * 成功后：
+   * - 服务端将账号置为 frozen（7 天后物理删除）
+   * - 客户端清空 Room / TokenStore / ConsentStore / localStorage
+   * - 跳回首启页
+   */
+  async deleteAccount(confirmToken: string): Promise<AccountDeleteResult> {
+    return this.call<AccountDeleteResult>('account.delete', { confirmToken })
   }
 
   // ─── 测试辅助 ───

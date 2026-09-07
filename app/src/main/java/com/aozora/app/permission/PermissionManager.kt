@@ -23,6 +23,9 @@ import androidx.core.content.ContextCompat
  * - 权限拒绝不阻塞手动记账（isCoreFunctionBlocked 始终返回 false）
  * - Activity 重建后通过 SharedPreferences 恢复"已请求"标记
  * - requestPermission 异步返回结果（通过回调）
+ *
+ * 线程约束：所有方法必须在主线程调用（ActivityResultLauncher 回调、
+ * SharedPreferences 访问、WebView 推送均绑定主线程）。
  */
 class PermissionManager(private val activity: ComponentActivity) {
 
@@ -31,6 +34,8 @@ class PermissionManager(private val activity: ComponentActivity) {
     }
 
     private var permissionLauncher: ActivityResultLauncher<String>? = null
+    // P2-4 fix: 以下两个字段仅在主线程读写（launcher 回调在主线程、requestPermission 由 UI 触发），
+    // 不需 @Volatile；跨线程访问违反类级线程约定。
     private var pendingCallback: ((PermissionStatus) -> Unit)? = null
     private var pendingPermission: String? = null
 

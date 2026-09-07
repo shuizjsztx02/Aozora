@@ -3,8 +3,10 @@ package com.aozora.app.bridge
 import android.webkit.JavascriptInterface
 import android.webkit.WebView
 import com.aozora.app.ai.AiGatewayClient
+import com.aozora.app.consent.ConsentStore
 import com.aozora.app.db.Repository
 import com.aozora.app.db.entity.*
+import com.aozora.app.export.ExportClient
 import com.aozora.app.image.ImageClient
 import com.aozora.app.image.ImagePicker
 import com.aozora.app.permission.PermissionManager
@@ -19,7 +21,10 @@ import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.cancelAndJoin
 import org.json.JSONObject
+import kotlin.coroutines.coroutineContext
 
 /**
  * Aozora 版本化 JS Bridge。
@@ -47,8 +52,16 @@ class AozoraBridge(
     private val permissionManager: PermissionManager? = null,
     private val imagePicker: ImagePicker? = null,
     private val imageClient: ImageClient? = null,
-    private val voiceRecognitionService: VoiceRecognitionService? = null
+    private val voiceRecognitionService: VoiceRecognitionService? = null,
+    private val consentStore: ConsentStore? = null,
+    private val exportClient: ExportClient? = null,
+    // T-M5-04c: 账号删除。
+    private val deletionClient: com.aozora.app.deletion.DeletionClient? = null,
+    private val tokenStore: com.aozora.app.auth.TokenStore? = null
 ) {
+    // NEW-R6-2 fix: 追踪当前活跃的 parse Job，以便取消
+    @Volatile
+    private var activeParseJob: Job? = null
     @JavascriptInterface
     fun call(version: Int, requestId: String, command: String, payloadJson: String) {
         if (version != BridgeProtocol.VERSION) {
@@ -156,6 +169,21 @@ class AozoraBridge(
 
             // T-M4-04e: 图片记账解析
             BridgeCommands.IMAGE_PARSE -> handleImageParse(requestId, payload)
+            BridgeCommands.IMAGE_PARSE_CANCEL -> handleImageParseCancel(requestId)
+
+            // T-M5-04a: 隐私同意
+            BridgeCommands.CONSENT_RECORD -> handleConsentRecord(requestId, payload)
+            BridgeCommands.CONSENT_STATUS -> handleConsentStatus(requestId)
+
+            // T-M5-04b: 数据导出
+            BridgeCommands.EXPORT_CREATE -> handleExportCreate(requestId, payload)
+            BridgeCommands.EXPORT_LIST -> handleExportList(requestId)
+            BridgeCommands.EXPORT_GET -> handleExportGet(requestId, payload)
+            BridgeCommands.EXPORT_DOWNLOAD -> handleExportDownload(requestId, payload)
+
+            // T-M5-04c: 账号删除
+            BridgeCommands.ACCOUNT_REQUEST_DELETION_TOKEN -> handleAccountRequestDeletionToken(requestId)
+            BridgeCommands.ACCOUNT_DELETE -> handleAccountDelete(requestId, payload)
 
             else -> BridgeResponse.error(requestId, "unknown_command", "Unknown command: $command")
         }
@@ -408,6 +436,12 @@ class AozoraBridge(
     }
 
     private fun handleSyncTrigger(requestId: String, p: JSONObject): BridgeResponse {
+        // T-M5-04a S0-1: 未同意隐私政策前禁止触发同步（防止前端绕过 MainActivity 的门禁）。
+        val store = consentStore
+            ?: return BridgeResponse.error(requestId, "unavailable", "consent store not injected")
+        if (!store.hasConsented()) {
+            return BridgeResponse.error(requestId, "consent_required", "Privacy consent required before syncing")
+        }
         val ctx = syncContext
             ?: return BridgeResponse.error(requestId, "unavailable", "sync context not injected")
         val engine = syncEngine
@@ -592,8 +626,23 @@ class AozoraBridge(
         val manager = permissionManager
             ?: return BridgeResponse.error(requestId, "unavailable", "permission manager not injected")
         val permissionName = p.getString("permission")
+
+        // P3-3 fix: POST_NOTIFICATIONS on API < 33 不需要运行时权限，直接返回 granted
+        if (permissionName == "POST_NOTIFICATIONS" &&
+            android.os.Build.VERSION.SDK_INT < android.os.Build.VERSION_CODES.TIRAMISU) {
+            return BridgeResponse.success(
+                requestId,
+                JSONObject().put("success", true).put("granted", true).toString()
+            )
+        }
+
         val androidPerm = keyToPermission(permissionName)
             ?: return BridgeResponse.error(requestId, "invalid_input", "Unknown permission: $permissionName")
+
+        // P3-4 fix: 已授予时同步短路，避免触发多余的系统对话框和 pending:true 响应
+        if (manager.getStatus(androidPerm) == PermissionStatus.GRANTED) {
+            return BridgeResponse.success(requestId, JSONObject().put("pending", false).toString())
+        }
 
         // 异步请求：立即返回 pending，结果通过 __aozoraPermissionResult__ 推送
         manager.requestPermission(androidPerm) { status ->
@@ -843,6 +892,8 @@ class AozoraBridge(
      *
      * 调用 AiGatewayClient.parseImage → 服务端 /ai/parse-image。
      * 返回完整 ActionProposal（add_tx_batch）供前端展示批量确认卡。
+     *
+     * NEW-R6-2 fix: 追踪当前 Job，支持外部取消（用户换图时取消旧请求）。
      */
     private suspend fun handleImageParse(requestId: String, p: JSONObject): BridgeResponse {
         val client = aiGatewayClient
@@ -856,8 +907,20 @@ class AozoraBridge(
             return BridgeResponse.error(requestId, "invalid_input", "Missing required field: bookId")
         }
         return try {
-            val resultJson = client.parseImage(attachmentId, bookId)
-            BridgeResponse.success(requestId, resultJson)
+            // Track this Job so cancel can interrupt it
+            val job = coroutineContext[Job]
+            activeParseJob = job
+            try {
+                val resultJson = client.parseImage(attachmentId, bookId)
+                BridgeResponse.success(requestId, resultJson)
+            } finally {
+                if (activeParseJob === job) activeParseJob = null
+            }
+        } catch (e: CancellationException) {
+            // NEW-R6-2: cancelled (user switched image) — return cancelled response
+            // instead of propagating, so TypeScript gets a definitive answer.
+            activeParseJob = null
+            BridgeResponse.error(requestId, "cancelled", "Parse was cancelled")
         } catch (e: AiGatewayClient.AiError.Timeout) {
             BridgeResponse.error(requestId, "timeout", "Image parse request timed out")
         } catch (e: AiGatewayClient.AiError.Network) {
@@ -874,6 +937,17 @@ class AozoraBridge(
         } catch (e: AiGatewayClient.AiError.AuthLost) {
             BridgeResponse.error(requestId, "auth_lost", "Authentication required")
         }
+    }
+
+    /**
+     * NEW-R6-2 fix: 取消正在进行的图片解析。
+     *
+     * 取消 activeParseJob → AiGatewayClient 的 invokeOnCancellation
+     * 会自动取消底层 OkHttp Call → 服务端收到客户端断开。
+     */
+    private suspend fun handleImageParseCancel(requestId: String): BridgeResponse {
+        activeParseJob?.cancelAndJoin()
+        return BridgeResponse.success(requestId, JSONObject().put("cancelled", true).toString())
     }
 
     /** Push upload progress to frontend via `window.__aozoraImageProgress__`. */
@@ -893,9 +967,268 @@ class AozoraBridge(
         webView.post { webView.evaluateJavascript(js, null) }
     }
 
+    // ─── T-M5-04a: 隐私同意 handlers ───
+
+    /**
+     * 记录隐私政策同意。
+     *
+     * 写入 Room user_consent 表 + ConsentStore（SharedPreferences）。
+     * 服务端同步在认证后通过 SyncEngine 完成。
+     */
+    private suspend fun handleConsentRecord(requestId: String, p: JSONObject): BridgeResponse {
+        val store = consentStore
+            ?: return BridgeResponse.error(requestId, "unavailable", "consent store not injected")
+        // policyVersion 截断至 32 字符，与服务端 user_consents.policy_version(32) 对齐。
+        // 防止恶意 JS 注入超长字符串写爆 Room / 服务端。
+        val policyVersion = p.optString("policyVersion", "v1").take(32)
+        val consentedAt = p.optLong("consentedAt", System.currentTimeMillis())
+        // deviceId 同样受服务端 128 字符限制约束。
+        val deviceId = p.optString("deviceId", "").take(128)
+
+        // 写入 Room
+        val consentId = java.util.UUID.randomUUID().toString()
+        val entity = com.aozora.app.db.entity.UserConsentEntity(
+            id = consentId,
+            deviceId = deviceId,
+            policyVersion = policyVersion,
+            consentedAt = consentedAt
+        )
+        repository.insertConsent(entity)
+
+        // 写入 SharedPreferences（快速检查用）
+        store.markConsented()
+
+        val data = JSONObject().apply {
+            put("id", consentId)
+            put("policyVersion", policyVersion)
+            put("consentedAt", consentedAt)
+        }
+        return BridgeResponse.success(requestId, data.toString())
+    }
+
+    private suspend fun handleConsentStatus(requestId: String): BridgeResponse {
+        val store = consentStore
+            ?: return BridgeResponse.error(requestId, "unavailable", "consent store not injected")
+        val hasConsented = store.hasConsented()
+        val data = JSONObject().apply {
+            put("hasConsented", hasConsented)
+        }
+        return BridgeResponse.success(requestId, data.toString())
+    }
+
+    // ─── T-M5-04b: 数据导出 handlers ───
+
+    private suspend fun handleExportCreate(requestId: String, p: JSONObject): BridgeResponse {
+        val client = exportClient
+            ?: return BridgeResponse.error(requestId, "unavailable", "export client not injected")
+        val bookId = p.getString("bookId")
+        val format = p.optString("format", "json")
+        if (format !in listOf("json", "csv")) {
+            return BridgeResponse.error(requestId, "invalid_input", "format must be 'json' or 'csv'")
+        }
+        return try {
+            val record = client.createExport(bookId, format)
+            BridgeResponse.success(requestId, exportRecordToJson(record).toString())
+        } catch (e: ExportClient.ExportError) {
+            BridgeResponse.error(requestId, exportErrorCode(e), e.message ?: "export failed")
+        }
+    }
+
+    private suspend fun handleExportList(requestId: String): BridgeResponse {
+        val client = exportClient
+            ?: return BridgeResponse.error(requestId, "unavailable", "export client not injected")
+        return try {
+            val records = client.listExports()
+            val arr = org.json.JSONArray()
+            records.forEach { arr.put(exportRecordToJson(it)) }
+            BridgeResponse.success(requestId, arr.toString())
+        } catch (e: ExportClient.ExportError) {
+            BridgeResponse.error(requestId, exportErrorCode(e), e.message ?: "export list failed")
+        }
+    }
+
+    private suspend fun handleExportGet(requestId: String, p: JSONObject): BridgeResponse {
+        val client = exportClient
+            ?: return BridgeResponse.error(requestId, "unavailable", "export client not injected")
+        val exportId = p.getString("exportId")
+        return try {
+            val record = client.getExport(exportId)
+            BridgeResponse.success(requestId, exportRecordToJson(record).toString())
+        } catch (e: ExportClient.ExportError) {
+            BridgeResponse.error(requestId, exportErrorCode(e), e.message ?: "export get failed")
+        }
+    }
+
+    private suspend fun handleExportDownload(requestId: String, p: JSONObject): BridgeResponse {
+        val client = exportClient
+            ?: return BridgeResponse.error(requestId, "unavailable", "export client not injected")
+        val exportId = p.getString("exportId")
+        val ctx = webView.context.applicationContext
+        return try {
+            val result = client.downloadExport(exportId, ctx)
+            val data = JSONObject().apply {
+                put("localPath", result.localPath)
+                put("filename", result.filename)
+                // 大文件（> 20MB）跳过内容返回，避免 OOM
+                if (result.content.length <= 20 * 1024 * 1024) {
+                    put("content", result.content)
+                }
+            }
+            BridgeResponse.success(requestId, data.toString())
+        } catch (e: ExportClient.ExportError) {
+            BridgeResponse.error(requestId, exportErrorCode(e), e.message ?: "export download failed")
+        }
+    }
+
+    private fun exportRecordToJson(record: ExportClient.ExportRecord): JSONObject = JSONObject().apply {
+        put("id", record.id)
+        put("bookId", record.bookId)
+        put("format", record.format)
+        put("status", record.status)
+        put("createdAt", record.createdAt)
+        if (record.expiresAt != null) put("expiresAt", record.expiresAt)
+        if (record.fileSize != null) put("fileSize", record.fileSize)
+    }
+
+    private fun exportErrorCode(e: ExportClient.ExportError): String = when (e) {
+        is ExportClient.ExportError.AuthLost -> "auth_lost"
+        is ExportClient.ExportError.NotFound -> "not_found"
+        is ExportClient.ExportError.Expired -> "expired"
+        is ExportClient.ExportError.ServerError -> "server_error"
+        is ExportClient.ExportError.Network -> "network_error"
+    }
+
+    // ─── T-M5-04c: 账号删除 handlers ───
+
+    /**
+     * 请求一次性 confirm_token（POST /me/deletion-request）。
+     *
+     * 前端拿到 token 后，在用户输入 "DELETE" 二次确认后才调用
+     * `account.delete`。token 5 分钟过期。
+     */
+    private suspend fun handleAccountRequestDeletionToken(
+        requestId: String
+    ): BridgeResponse {
+        val client = deletionClient
+            ?: return BridgeResponse.error(requestId, "unavailable", "deletion client not injected")
+        return try {
+            val result = client.requestDeletionToken()
+            val data = JSONObject().apply {
+                put("confirmToken", result.confirmToken)
+                put("expiresAt", result.expiresAt)
+            }
+            BridgeResponse.success(requestId, data.toString())
+        } catch (e: com.aozora.app.deletion.DeletionClient.DeletionError.AuthLost) {
+            BridgeResponse.error(requestId, "auth_lost", e.message ?: "authentication required")
+        } catch (e: com.aozora.app.deletion.DeletionClient.DeletionError.DeletionPending) {
+            BridgeResponse.error(requestId, "deletion_pending", e.message ?: "deletion already in progress")
+        } catch (e: com.aozora.app.deletion.DeletionClient.DeletionError.ServerError) {
+            BridgeResponse.error(requestId, "server_error", "server error: HTTP ${e.httpCode}")
+        } catch (e: com.aozora.app.deletion.DeletionClient.DeletionError) {
+            BridgeResponse.error(requestId, "network_error", e.message ?: "network error")
+        }
+    }
+
+    /**
+     * 消费 confirm_token 并完成账号删除。
+     *
+     * 流程：
+     *   1. 调用 DELETE /me?confirm_token=xxx 冻结账号
+     *   2. 成功：清空 Room / TokenStore / ConsentStore
+     *   3. 通知 WebView 清空 localStorage 并跳回首启页
+     */
+    private suspend fun handleAccountDelete(
+        requestId: String,
+        p: JSONObject
+    ): BridgeResponse {
+        val client = deletionClient
+            ?: return BridgeResponse.error(requestId, "unavailable", "deletion client not injected")
+        val confirmToken = p.optString("confirmToken", "").ifBlank {
+            return BridgeResponse.error(requestId, "invalid_input", "Missing confirmToken")
+        }
+        return try {
+            val result = client.deleteAccount(confirmToken)
+            // 服务端已冻结账号；现在清空本地状态。
+            wipeLocalState()
+            val data = JSONObject().apply {
+                put("status", result.status)
+                put("frozenAt", result.frozenAt)
+                put("message", result.message)
+            }
+            BridgeResponse.success(requestId, data.toString())
+        } catch (e: com.aozora.app.deletion.DeletionClient.DeletionError.AuthLost) {
+            BridgeResponse.error(requestId, "auth_lost", e.message ?: "authentication required")
+        } catch (e: com.aozora.app.deletion.DeletionClient.DeletionError.InvalidToken) {
+            BridgeResponse.error(requestId, "invalid_token", e.message ?: "invalid or expired confirm_token")
+        } catch (e: com.aozora.app.deletion.DeletionClient.DeletionError.DeletionPending) {
+            BridgeResponse.error(requestId, "deletion_pending", e.message ?: "deletion already in progress")
+        } catch (e: com.aozora.app.deletion.DeletionClient.DeletionError.ServerError) {
+            BridgeResponse.error(requestId, "server_error", "server error: HTTP ${e.httpCode}")
+        } catch (e: com.aozora.app.deletion.DeletionClient.DeletionError) {
+            BridgeResponse.error(requestId, "network_error", e.message ?: "network error")
+        }
+    }
+
+    /**
+     * 清空本地数据（账号删除成功后调用）。
+     *
+     * - Room：清空所有表
+     * - TokenStore：清空 access_token / refresh_token / user_id / device_id 保留
+     * - ConsentStore：清空同意标记
+     *
+     * 注意：device_id 在 TokenStore 中保留 —— 用户在删除账号后重新
+     * 注册时仍使用同一设备标识，便于服务端审计和反欺诈。
+     */
+    private suspend fun wipeLocalState() {
+        try {
+            repository.clearAllData()
+        } catch (t: Throwable) {
+            android.util.Log.w("AozoraBridge", "clearAllData failed", t)
+        }
+        try {
+            tokenStore?.clear()
+        } catch (t: Throwable) {
+            android.util.Log.w("AozoraBridge", "TokenStore.clear failed", t)
+        }
+        try {
+            consentStore?.clear()
+        } catch (t: Throwable) {
+            android.util.Log.w("AozoraBridge", "ConsentStore.clear failed", t)
+        }
+        // 通知 WebView 清空 localStorage 并跳回首启页。
+        val js = """
+            (function(){
+              try {
+                localStorage.clear();
+                sessionStorage.clear();
+              } catch (e) {}
+              try {
+                if (typeof window.__aozoraNavigate__ === 'function') {
+                  window.__aozoraNavigate__('/onboarding');
+                } else {
+                  window.location.hash = '#/onboarding';
+                }
+              } catch (e) {}
+            })();
+        """.trimIndent()
+        webView.post { webView.evaluateJavascript(js, null) }
+    }
+
     private fun respond(response: BridgeResponse) {
-        webView.post {
-            webView.evaluateJavascript(response.toJavascript(), null)
+        // CR-05 fix: wrap in try-catch to prevent exceptions from causing
+        // permanent Promise hangs on the TypeScript side. If WebView is
+        // destroyed or toJson() fails, we silently drop the response rather
+        // than letting the exception escape and leave the client hanging.
+        try {
+            webView.post {
+                try {
+                    webView.evaluateJavascript(response.toJavascript(), null)
+                } catch (_: Exception) {
+                    // WebView destroyed or evaluateJavascript failed — drop response
+                }
+            }
+        } catch (_: Exception) {
+            // post() failed — drop response
         }
     }
 

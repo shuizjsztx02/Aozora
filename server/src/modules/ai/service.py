@@ -71,6 +71,13 @@ _narrative_cache: dict[str, tuple[float, str]] = {}
 _NARRATIVE_CACHE_TTL_SECONDS = 300  # 5 minutes
 _MAX_NARRATIVE_CACHE_ENTRIES = 500
 
+# NEW-E4: attachment IDs currently being parsed (in-process dedup).
+# Same single-instance caveat as _ai_rate_limits — replace with Redis
+# SETNX when deploying multiple workers. Prevents two concurrent
+# parse_image calls for the same attachment from both triggering a
+# vision model call (double billing).
+_parsing_attachments: set[str] = set()
+
 # APP-CONTEXT §6.4 contract constant — "invalid JSON → retry once".
 # Deliberately NOT configurable: a knob here would break the documented
 # 25 s client-cancel budget (2 × timeout + overhead < 25 s).
@@ -1101,12 +1108,18 @@ class AIService:
         attachment = await att_service.get_attachment(attachment_id, user.id)
         if attachment.status == AttachmentStatus.EXPIRED:
             raise AppException(410, "attachment_expired", "Attachment has expired")
-        if attachment.status != AttachmentStatus.PENDING:
+        # NEW-R6-1 fix: allow re-parsing PARSED attachments (e.g. zero-tx
+        # retry or user wants to re-recognise).  Reset to PENDING first so
+        # a mid-parse failure leaves the attachment in a retryable state.
+        if attachment.status not in (AttachmentStatus.PENDING, AttachmentStatus.PARSED):
             status_str = attachment.status.value if hasattr(attachment.status, 'value') else str(attachment.status)
             raise AppException(
                 409, "attachment_not_pending",
-                f"Attachment status is '{status_str}', expected 'pending'",
+                f"Attachment status is '{status_str}', expected 'pending' or 'parsed'",
             )
+        if attachment.status == AttachmentStatus.PARSED:
+            attachment.status = AttachmentStatus.PENDING
+            await self._db.flush()
 
         # -- Read image file --
         upload_dir = _get_upload_dir()
@@ -1134,6 +1147,15 @@ class AIService:
         b64 = base64.b64encode(image_bytes).decode("ascii")
         data_url = f"data:{mime};base64,{b64}"
 
+        # -- NEW-E4 fix: in-process concurrent parse dedup --
+        att_key = str(attachment_id)
+        if att_key in _parsing_attachments:
+            raise AppException(
+                409, "parse_in_progress",
+                "This attachment is already being parsed",
+            )
+        _parsing_attachments.add(att_key)
+
         # -- Call vision model --
         model = self._cfg.ai_vision_model
         messages = render_image_messages(tpl, data_url)
@@ -1144,119 +1166,125 @@ class AIService:
         retry_prompt_tokens = 0
         retry_completion_tokens = 0
 
-        for attempt in range(1, MAX_ATTEMPTS + 1):
-            try:
-                result = await self._provider.complete_with_images(
-                    messages,
-                    model=model,
-                    max_tokens=tpl.max_tokens,
-                    timeout=self._cfg.ai_timeout_seconds,
-                )
-            except ProviderError as exc:
-                if not exc.retryable or attempt >= MAX_ATTEMPTS:
-                    # P1-1: record tokens from earlier attempts that
-                    # reached the provider (billed but previously lost).
-                    await self._record_failure_usage(
-                        user, model, request_id,
-                        extra_prompt_tokens=retry_prompt_tokens,
-                        extra_completion_tokens=retry_completion_tokens,
+        try:
+            for attempt in range(1, MAX_ATTEMPTS + 1):
+                try:
+                    result = await self._provider.complete_with_images(
+                        messages,
+                        model=model,
+                        max_tokens=tpl.max_tokens,
+                        timeout=self._cfg.ai_timeout_seconds,
                     )
-                    self._log_failure(request_id, tpl, model, attempt, exc.reason, started)
-                    raise AppException(
-                        503, "ai_unavailable", "AI service is temporarily unavailable",
-                    )
-                continue
+                except ProviderError as exc:
+                    if not exc.retryable or attempt >= MAX_ATTEMPTS:
+                        # P1-1: record tokens from earlier attempts that
+                        # reached the provider (billed but previously lost).
+                        await self._record_failure_usage(
+                            user, model, request_id,
+                            extra_prompt_tokens=retry_prompt_tokens,
+                            extra_completion_tokens=retry_completion_tokens,
+                        )
+                        self._log_failure(request_id, tpl, model, attempt, exc.reason, started)
+                        raise AppException(
+                            503, "ai_unavailable", "AI service is temporarily unavailable",
+                        )
+                    continue
 
-            try:
-                output = self._parse_json_output(result.content)
-                break
-            except ValueError:
-                retry_prompt_tokens += result.prompt_tokens
-                retry_completion_tokens += result.completion_tokens
-                if attempt >= MAX_ATTEMPTS:
-                    # P1-1: the final attempt consumed tokens too
-                    # (retry_*_tokens includes this attempt).
-                    await self._record_failure_usage(
-                        user, model, request_id,
-                        extra_prompt_tokens=retry_prompt_tokens,
-                        extra_completion_tokens=retry_completion_tokens,
-                    )
-                    self._log_failure(request_id, tpl, model, attempt, "invalid_json", started)
-                    raise AppException(
-                        503, "ai_invalid_output",
-                        "AI service is temporarily unavailable",
-                    )
-                continue
+                try:
+                    output = self._parse_json_output(result.content)
+                    break
+                except ValueError:
+                    retry_prompt_tokens += result.prompt_tokens
+                    retry_completion_tokens += result.completion_tokens
+                    if attempt >= MAX_ATTEMPTS:
+                        # P1-1: the final attempt consumed tokens too
+                        # (retry_*_tokens includes this attempt).
+                        await self._record_failure_usage(
+                            user, model, request_id,
+                            extra_prompt_tokens=retry_prompt_tokens,
+                            extra_completion_tokens=retry_completion_tokens,
+                        )
+                        self._log_failure(request_id, tpl, model, attempt, "invalid_json", started)
+                        raise AppException(
+                            503, "ai_invalid_output",
+                            "AI service is temporarily unavailable",
+                        )
+                    continue
 
-        assert result is not None and output is not None
+            assert result is not None and output is not None
 
-        # -- Record usage --
-        await self._record_usage(
-            user, result, model, request_id,
-            extra_prompt_tokens=retry_prompt_tokens,
-            extra_completion_tokens=retry_completion_tokens,
-        )
-        self._log_success(request_id, tpl, model, result, started)
-        self._log_slow_if_needed(request_id, tpl, model, started)
+            # -- Record usage --
+            await self._record_usage(
+                user, result, model, request_id,
+                extra_prompt_tokens=retry_prompt_tokens,
+                extra_completion_tokens=retry_completion_tokens,
+            )
+            self._log_success(request_id, tpl, model, result, started)
+            self._log_slow_if_needed(request_id, tpl, model, started)
 
-        # -- Extract transactions from LLM output --
-        raw_transactions = output.get("transactions") or []
-        confidence = output.get("confidence", 0)
-        proposal_id = output.get("proposalId", "") or f"img-{uuid.uuid4()}"
+            # -- Extract transactions from LLM output --
+            raw_transactions = output.get("transactions") or []
+            confidence = output.get("confidence", 0)
+            proposal_id = output.get("proposalId", "") or f"img-{uuid.uuid4()}"
 
-        if not isinstance(confidence, (int, float)):
-            confidence = 0
-        confidence = float(max(0, min(1, confidence)))
+            if not isinstance(confidence, (int, float)):
+                confidence = 0
+            confidence = float(max(0, min(1, confidence)))
 
-        # -- Resolve category names to IDs --
-        from .context import load_validation_context
-        ctx = await load_validation_context(self._db, user.id, book_id)
-        resolved_txs = self._resolve_categories(
-            raw_transactions, ctx, user.timezone,
-        )
+            # -- Resolve category names to IDs --
+            from .context import load_validation_context
+            ctx = await load_validation_context(self._db, user.id, book_id)
+            resolved_txs = self._resolve_categories(
+                raw_transactions, ctx, user.timezone,
+            )
 
-        # -- Build complete ActionProposal --
-        # T-M4-04e: meta.attachmentId lets the client link transactions
-        # to this attachment after executing the batch.
-        proposal = {
-            "action": "add_tx_batch",
-            "proposalId": proposal_id,
-            "message": f"图片识别到 {len(resolved_txs)} 笔交易",
-            "confidence": confidence,
-            "transactions": resolved_txs,
-            "warnings": [],
-            "requiresConfirmation": True,
-            "meta": {
-                "source": "image_parse",
-                "attachmentId": str(attachment_id),
-            },
-        }
-
-        # -- Update attachment status → PARSED --
-        attachment.status = AttachmentStatus.PARSED
-        attachment.expires_at = None  # parsed attachments don't expire
-        await self._db.flush()
-
-        logger.info(
-            "AI image parse ok",
-            extra={
-                "request_id": request_id,
-                "attachment_id": str(attachment_id),
-                "transaction_count": len(resolved_txs),
+            # -- Build complete ActionProposal --
+            # T-M4-04e: meta.attachmentId lets the client link transactions
+            # to this attachment after executing the batch.
+            proposal = {
+                "action": "add_tx_batch",
+                "proposalId": proposal_id,
+                "message": f"图片识别到 {len(resolved_txs)} 笔交易",
                 "confidence": confidence,
-            },
-        )
+                "transactions": resolved_txs,
+                "warnings": [],
+                "requiresConfirmation": True,
+                "meta": {
+                    "source": "image_parse",
+                    "attachmentId": str(attachment_id),
+                },
+            }
 
-        return AIParseImageResponse(
-            request_id=request_id,
-            proposal=proposal,
-            attachment_id=str(attachment_id),
-            confidence=confidence,
-            usage=AIUsageInfo(
-                prompt_tokens=result.prompt_tokens + retry_prompt_tokens,
-                completion_tokens=result.completion_tokens + retry_completion_tokens,
-            ),
-        )
+            # NEW-R6-1 fix: always mark PARSED, even for zero transactions.
+            # This prevents the attachment from expiring (24h cleanup),
+            # so the user can retry later without re-uploading.
+            attachment.status = AttachmentStatus.PARSED
+            attachment.expires_at = None  # parsed attachments don't expire
+            await self._db.flush()
+
+            logger.info(
+                "AI image parse ok",
+                extra={
+                    "request_id": request_id,
+                    "attachment_id": str(attachment_id),
+                    "transaction_count": len(resolved_txs),
+                    "confidence": confidence,
+                },
+            )
+
+            return AIParseImageResponse(
+                request_id=request_id,
+                proposal=proposal,
+                attachment_id=str(attachment_id),
+                confidence=confidence,
+                usage=AIUsageInfo(
+                    prompt_tokens=result.prompt_tokens + retry_prompt_tokens,
+                    completion_tokens=result.completion_tokens + retry_completion_tokens,
+                ),
+            )
+        finally:
+            # NEW-E4: always release the in-process parse lock
+            _parsing_attachments.discard(att_key)
 
     @staticmethod
     def _resolve_categories(
@@ -1286,7 +1314,15 @@ class AIService:
         # Determine fallback category ID: first available category.
         # We cannot know the type from context alone, so we just pick the
         # first category ID available. The user can edit in the batch card.
-        fallback_category_id = next(iter(ctx.category_names.values()), "")
+        # NEW-E6 fix: 零分类时不能返回 ""（schema minLength:1 会静默失败），
+        # 必须给出明确错误。
+        if not ctx.category_names:
+            from src.common.errors import AppException
+            raise AppException(
+                400, "no_categories",
+                "No categories configured — add at least one category before parsing images",
+            )
+        fallback_category_id = next(iter(ctx.category_names.values()))
 
         # R-M4-52 fix: today in the user's timezone — same day boundary as
         # the quota system (local_day_start_utc). A UTC fallback would date
@@ -1339,8 +1375,13 @@ class AIService:
                 )
                 continue
 
+            # NEW-E3 fix: normalize type to enum — LLM may produce "refund" etc.
+            tx_type = tx.get("type", "expense")
+            if tx_type not in ("expense", "income"):
+                tx_type = "expense"
+
             resolved.append({
-                "type": tx.get("type", "expense"),
+                "type": tx_type,
                 "amountCents": amount_cents,
                 "categoryId": cat_id,
                 "note": str(tx.get("note", "")),

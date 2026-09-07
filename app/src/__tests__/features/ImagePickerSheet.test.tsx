@@ -99,4 +99,22 @@ describe('ImagePickerSheet', () => {
     await user.click(screen.getByText('去设置'))
     expect(mockPermissions.openSettings).toHaveBeenCalled()
   })
+
+  it('auto-continues pick after permission granted (R-M4-48)', async () => {
+    mockPermissions.canCamera = false
+    const user = userEvent.setup()
+    const { rerender } = render(<ImagePickerSheet onPick={onPick} onClose={onClose} />)
+    await user.click(screen.getByTestId('pick-camera'))
+
+    // Permission was requested, but onPick not yet called (pending)
+    expect(mockPermissions.requestPermission).toHaveBeenCalledWith('CAMERA')
+    expect(onPick).not.toHaveBeenCalled()
+
+    // Simulate permission being granted (e.g., user accepted in system dialog)
+    mockPermissions.canCamera = true
+    rerender(<ImagePickerSheet onPick={onPick} onClose={onClose} />)
+
+    // useEffect should detect permission granted and auto-call onPick via onPickRef
+    expect(onPick).toHaveBeenCalledWith('camera')
+  })
 })

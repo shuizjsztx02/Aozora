@@ -925,8 +925,10 @@ class TestParseImage:
             import shutil
             shutil.rmtree(upload_dir, ignore_errors=True)
 
-    def test_not_pending_attachment_returns_409(self, ai_env, monkeypatch):
-        """Attachment with status=PARSED (not PENDING) → 409 Conflict."""
+    def test_linked_attachment_returns_409(self, ai_env, monkeypatch):
+        """Attachment with status=LINKED (not PENDING/PARSED) → 409 Conflict.
+        NEW-R6-1 fix: PARSED attachments can now be re-parsed; only LINKED/EXPIRED are rejected.
+        """
         import tempfile
         upload_dir = tempfile.mkdtemp()
         try:
@@ -936,7 +938,7 @@ class TestParseImage:
                 "src.modules.attachments.service._get_upload_dir", lambda: Path(upload_dir),
             )
 
-            ids = _seed_parse_image_env(ai_env, status="parsed")
+            ids = _seed_parse_image_env(ai_env, status="linked")
             user = ids["user"]
 
             resp = ai_env.client.post(
