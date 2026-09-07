@@ -28,7 +28,7 @@ dependencies = [
 
 [project.optional-dependencies]
 dev = [
-    "pytest>=8,<9",
+    "pytest>=9",
     "pytest-asyncio>=0.24,<1",
     "ruff>=0.8,<1",
     # R-M2-20: ``httpx`` moved to main dependencies in T-M4-01 (the AI
