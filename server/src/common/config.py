@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 from typing import Literal
 
 from pydantic import AliasChoices, Field, model_validator
@@ -9,6 +10,11 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 
 # Default value for ``secret_key`` — must be overridden in production.
 _DEV_SECRET_KEY = "dev-secret-do-not-use-in-production"
+
+# Production CORS: only `https://[<subdomain>.]aozora.app` is permitted.
+# Rejects bare `*`, third-party origins, and http:// schemes at startup so
+# a misconfigured env-var cannot silently widen the origin allow-list.
+_PROD_CORS_ORIGIN_RE = re.compile(r"^https://([a-z0-9-]+\.)?aozora\.app$")
 
 
 class Settings(BaseSettings):
@@ -94,6 +100,16 @@ class Settings(BaseSettings):
     log_level: str = Field(
         default="INFO",
         validation_alias=AliasChoices("LOG_LEVEL", "log_level"),
+    )
+
+    # --- T-M5-05a: OpenTelemetry ---
+    otel_endpoint: str = Field(
+        default="http://otel-collector:4317",
+        validation_alias=AliasChoices("OTEL_ENDPOINT", "otel_endpoint"),
+    )
+    enable_telemetry: bool = Field(
+        default=True,
+        validation_alias=AliasChoices("ENABLE_TELEMETRY", "enable_telemetry"),
     )
 
     # --- exports ---
@@ -207,6 +223,16 @@ class Settings(BaseSettings):
         if self.cors_origins.strip() == "*":
             raise ValueError(
                 "CORS_ORIGINS must be an explicit allow-list in production"
+            )
+        bad_cors = [
+            o
+            for o in (x.strip() for x in self.cors_origins.split(","))
+            if o and not _PROD_CORS_ORIGIN_RE.match(o)
+        ]
+        if bad_cors:
+            raise ValueError(
+                "CORS_ORIGINS in production must match "
+                f"https://[<subdomain>.]aozora.app; got: {bad_cors}"
             )
         if not self.ai_provider_api_key:
             raise ValueError(

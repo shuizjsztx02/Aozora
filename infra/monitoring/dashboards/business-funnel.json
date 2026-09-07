@@ -1,0 +1,89 @@
+{
+  "annotations": { "list": [] },
+  "description": "Business funnel metrics. Panels populate once server telemetry instruments signup / transaction / retention / export counters (T-M5-05b).",
+  "editable": false,
+  "panels": [
+    {
+      "title": "Signups (24h)",
+      "type": "stat",
+      "gridPos": { "h": 6, "w": 6, "x": 0, "y": 0 },
+      "datasource": { "uid": "prometheus" },
+      "targets": [{
+        "expr": "sum(increase(business_signup_total[24h]))",
+        "legendFormat": "signups"
+      }]
+    },
+    {
+      "title": "Transactions (24h)",
+      "type": "stat",
+      "gridPos": { "h": 6, "w": 6, "x": 6, "y": 0 },
+      "datasource": { "uid": "prometheus" },
+      "targets": [{
+        "expr": "sum(increase(business_transaction_total[24h]))",
+        "legendFormat": "txns"
+      }]
+    },
+    {
+      "title": "Exports (24h)",
+      "type": "stat",
+      "gridPos": { "h": 6, "w": 6, "x": 12, "y": 0 },
+      "datasource": { "uid": "prometheus" },
+      "targets": [{
+        "expr": "sum(increase(business_export_total[24h]))",
+        "legendFormat": "exports"
+      }]
+    },
+    {
+      "title": "D1 Retention (%)",
+      "type": "stat",
+      "gridPos": { "h": 6, "w": 6, "x": 18, "y": 0 },
+      "datasource": { "uid": "prometheus" },
+      "targets": [{
+        "expr": "100 * sum(increase(business_d1_retained_total[24h])) / (sum(increase(business_signup_total[24h])) > 0)",
+        "legendFormat": "D1 %"
+      }],
+      "fieldConfig": { "defaults": { "unit": "percent" } }
+    },
+    {
+      "title": "Funnel (7d cohort)",
+      "type": "barchart",
+      "gridPos": { "h": 10, "w": 12, "x": 0, "y": 6 },
+      "datasource": { "uid": "prometheus" },
+      "targets": [
+        { "expr": "sum(increase(business_signup_total[7d]))", "legendFormat": "signup" },
+        { "expr": "sum(increase(business_transaction_total[7d])) > 0", "legendFormat": "transacted" },
+        { "expr": "sum(increase(business_d1_retained_total[7d]))", "legendFormat": "D1" },
+        { "expr": "sum(increase(business_d7_retained_total[7d]))", "legendFormat": "D7" },
+        { "expr": "sum(increase(business_export_total[7d]))", "legendFormat": "exported" }
+      ]
+    },
+    {
+      "title": "Signup Rate Trend (daily)",
+      "type": "timeseries",
+      "gridPos": { "h": 10, "w": 12, "x": 12, "y": 6 },
+      "datasource": { "uid": "prometheus" },
+      "targets": [{
+        "expr": "sum(increase(business_signup_total[24h]))",
+        "legendFormat": "signups/day"
+      }]
+    },
+    {
+      "title": "D7 Retention (%) [pending retention job]",
+      "type": "stat",
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 16 },
+      "datasource": { "uid": "prometheus" },
+      "targets": [{
+        "expr": "100 * sum(increase(business_d7_retained_total[7d])) / (sum(increase(business_signup_total[7d])) > 0)",
+        "legendFormat": "D7 %"
+      }],
+      "fieldConfig": { "defaults": { "unit": "percent" } }
+    }
+  ],
+  "schemaVersion": 39,
+  "tags": ["aozora", "business"],
+  "templating": { "list": [] },
+  "time": { "from": "now-7d", "to": "now" },
+  "title": "Business Funnel",
+  "uid": "aozora-business",
+  "version": 1
+}

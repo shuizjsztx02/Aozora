@@ -1,0 +1,38 @@
+# infra/monitoring/prometheus.yml — T-M5-05a
+# Prometheus configuration for scraping metrics from API and OTel Collector
+
+global:
+  scrape_interval: 15s
+  evaluation_interval: 15s
+
+# Alertmanager configuration
+alerting:
+  alertmanagers:
+    - static_configs:
+        - targets:
+            - alertmanager:9093
+
+# Load alert rules
+rule_files:
+  - "alert-rules.yml"
+
+# Scrape configurations
+scrape_configs:
+  # Prometheus self-monitoring
+  - job_name: "prometheus"
+    static_configs:
+      - targets: ["localhost:9090"]
+
+  # OTel Collector 内部指标（collector 自身 telemetry）
+  - job_name: "otel-collector"
+    static_configs:
+      - targets: ["otel-collector:8888"]
+    metrics_path: /metrics
+
+  # Aozora API 指标
+  # API 通过 OTLP push 到 OTel Collector；OTel Collector 的 prometheus exporter
+  # 在 :8889 暴露这些指标供 Prometheus scrape（API 本身不直接提供 /metrics）
+  - job_name: "aozora-api"
+    static_configs:
+      - targets: ["otel-collector:8889"]
+    metrics_path: /metrics

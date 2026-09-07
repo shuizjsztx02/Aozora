@@ -26,6 +26,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from src.common.config import Settings, get_config
 from src.common.errors import AppException
+from src.common.telemetry import record_ai_gateway
 from src.models.ai import AIUsage
 from src.models.user import User, UserStatus
 
@@ -245,6 +246,14 @@ class AIService:
         )
         self._log_success(request_id, tpl, model, result, started)
         self._log_slow_if_needed(request_id, tpl, model, started)
+        record_ai_gateway(
+            status="200",
+            degraded=False,
+            provider=self._provider.name,
+            duration_ms=round((time.perf_counter() - started) * 1000, 2),
+            input_tokens=result.prompt_tokens + retry_prompt_tokens,
+            output_tokens=result.completion_tokens + retry_completion_tokens,
+        )
         return AIInterpretResponse(
             request_id=request_id,
             task=tpl.task_id,
@@ -1036,6 +1045,14 @@ class AIService:
         )
         self._log_success(request_id, tpl, model, result, started)
         self._log_slow_if_needed(request_id, tpl, model, started)
+        record_ai_gateway(
+            status="200",
+            degraded=False,
+            provider=self._provider.name,
+            duration_ms=round((time.perf_counter() - started) * 1000, 2),
+            input_tokens=result.prompt_tokens + retry_prompt_tokens,
+            output_tokens=result.completion_tokens + retry_completion_tokens,
+        )
 
         # Number verification
         errors = verify_narrative(output, fact_pack)
@@ -1221,6 +1238,14 @@ class AIService:
             )
             self._log_success(request_id, tpl, model, result, started)
             self._log_slow_if_needed(request_id, tpl, model, started)
+            record_ai_gateway(
+                status="200",
+                degraded=False,
+                provider=self._provider.name,
+                duration_ms=round((time.perf_counter() - started) * 1000, 2),
+                input_tokens=result.prompt_tokens + retry_prompt_tokens,
+                output_tokens=result.completion_tokens + retry_completion_tokens,
+            )
 
             # -- Extract transactions from LLM output --
             raw_transactions = output.get("transactions") or []

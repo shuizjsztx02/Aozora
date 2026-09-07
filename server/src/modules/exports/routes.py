@@ -10,8 +10,10 @@ from fastapi.responses import FileResponse
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from src.common.database import get_db_session
+from src.common.telemetry import record_export
 from src.models.user import User
 from src.modules.auth.dependencies import get_current_user
+from src.modules.auth.frozen import require_active as _require_active
 
 from .schemas import ExportCreate, ExportResponse
 from .service import ExportService
@@ -25,8 +27,10 @@ async def create_export(
     current_user: Annotated[User, Depends(get_current_user)] = ...,
     db: Annotated[AsyncSession, Depends(get_db_session)] = ...,
 ):
+    _require_active(current_user)
     service = ExportService(db)
     export = await service.create_export(body.book_id, current_user.id, body.format)
+    record_export()
     return ExportResponse.model_validate(export)
 
 
@@ -35,6 +39,7 @@ async def list_exports(
     current_user: Annotated[User, Depends(get_current_user)] = ...,
     db: Annotated[AsyncSession, Depends(get_db_session)] = ...,
 ):
+    _require_active(current_user)
     service = ExportService(db)
     exports = await service.list_exports(current_user.id)
     return [ExportResponse.model_validate(e) for e in exports]
@@ -46,6 +51,7 @@ async def get_export(
     current_user: Annotated[User, Depends(get_current_user)] = ...,
     db: Annotated[AsyncSession, Depends(get_db_session)] = ...,
 ):
+    _require_active(current_user)
     service = ExportService(db)
     export = await service.get_export(export_id, current_user.id)
     return ExportResponse.model_validate(export)
@@ -57,6 +63,7 @@ async def download_export(
     current_user: Annotated[User, Depends(get_current_user)] = ...,
     db: Annotated[AsyncSession, Depends(get_db_session)] = ...,
 ):
+    _require_active(current_user)
     service = ExportService(db)
     file_path, filename = await service.get_export_file(export_id, current_user.id)
     media_type = "application/json" if file_path.endswith(".json") else "text/csv"

@@ -12,6 +12,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from src.common.config import get_config
 from src.common.errors import AppException
+from src.common.telemetry import record_signup
 from src.models.user import DeviceSession, User, UserStatus
 
 from .utils import (
@@ -43,6 +44,7 @@ class AuthService:
         user = User(nickname=nickname, timezone=timezone, status=UserStatus.GUEST)
         self.db.add(user)
         await self.db.flush()
+        record_signup()
 
         access_token, refresh_token = await self._create_session(user.id, device_id)
         return user, access_token, refresh_token
@@ -73,6 +75,7 @@ class AuthService:
             self.db.add(user)
             await self.db.flush()
             is_new = True
+            record_signup()
         elif user.status in (UserStatus.DEACTIVATED, UserStatus.DELETED):
             raise AppException(403, "account_disabled", "Account is deactivated or deleted")
 

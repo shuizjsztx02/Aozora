@@ -1,0 +1,200 @@
+# docker-compose.staging.yml — T-M5-05a staging environment with full observability stack
+#
+# Usage:
+#   docker compose -f docker-compose.staging.yml up -d
+#
+# Services:
+#   - API: Aozora production API
+#   - PostgreSQL 18: Database
+#   - OTel Collector: Telemetry data router (traces → Tempo, metrics → Prometheus, logs → Loki)
+#   - Prometheus: Metrics storage (30-day retention)
+#   - Loki: Log aggregation (14-day retention)
+#   - Tempo: Distributed tracing (7-day retention)
+#   - Grafana: Visualization dashboards
+#   - Alertmanager: Alert routing and notification
+#
+# ╔══════════════════════════════════════════════════════════════════════════╗
+# ║  ⚠ WARNING — 本文件用于 staging 环境，不得直接用于生产                  ║
+# ║                                                                        ║
+# ║  • 密码以明文写入本文件，仅适合受控的 staging 环境                     ║
+# ║  • 生产环境必须通过 secret manager 注入所有敏感配置                   ║
+# ║  • 生产部署使用 docker-compose.prod.yml (T-M6-01a)                    ║
+# ╚══════════════════════════════════════════════════════════════════════════╝
+
+services:
+  # ────────────────────────────────────────────────────────────────────────────
+  # PostgreSQL 18 — Database
+  # ────────────────────────────────────────────────────────────────────────────
+  db:
+    image: postgres:18-alpine
+    environment:
+      POSTGRES_USER: aozora
+      POSTGRES_PASSWORD: aozora
+      POSTGRES_DB: aozora
+    ports:
+      - "5432:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U aozora"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+    networks:
+      - staging
+
+  # ────────────────────────────────────────────────────────────────────────────
+  # API — Aozora Production API
+  # ────────────────────────────────────────────────────────────────────────────
+  api:
+    build:
+      context: .
+      dockerfile: server/Dockerfile
+    ports:
+      - "8000:8000"
+    environment:
+      ENV: staging
+      DATABASE_URL: postgresql+asyncpg://aozora:aozora@db:5432/aozora
+      SECRET_KEY: ${SECRET_KEY:-staging-secret-do-not-use-in-production}
+      LOG_LEVEL: INFO
+      OTEL_ENDPOINT: http://otel-collector:4317
+      ENABLE_TELEMETRY: "true"
+    depends_on:
+      db:
+        condition: service_healthy
+    healthcheck:
+      test:
+        - "CMD-SHELL"
+        - "python -c \"import urllib.request; urllib.request.urlopen('http://localhost:8000/api/v1/health/ready')\" || exit 1"
+      interval: 10s
+      timeout: 3s
+      retries: 5
+      start_period: 10s
+    networks:
+      - staging
+
+  # ────────────────────────────────────────────────────────────────────────────
+  # OTel Collector — Telemetry data router
+  # Receives OTLP from API, routes to Tempo (traces), Prometheus (metrics), Loki (logs)
+  # ────────────────────────────────────────────────────────────────────────────
+  otel-collector:
+    image: otel/opentelemetry-collector-contrib:0.102.0
+    command: ["--config=/etc/otel-collector-config.yaml"]
+    volumes:
+      - ./infra/monitoring/otel-collector-config.yaml:/etc/otel-collector-config.yaml:ro
+    ports:
+      - "4317:4317"   # OTLP gRPC receiver
+      - "4318:4318"   # OTLP HTTP receiver
+    depends_on:
+      - tempo
+      - prometheus
+      - loki
+    networks:
+      - staging
+
+  # ────────────────────────────────────────────────────────────────────────────
+  # Prometheus — Metrics storage (30-day retention)
+  # ────────────────────────────────────────────────────────────────────────────
+  prometheus:
+    image: prom/prometheus:v2.53.0
+    command:
+      - "--config.file=/etc/prometheus/prometheus.yml"
+      - "--storage.tsdb.path=/prometheus"
+      - "--storage.tsdb.retention.time=30d"
+      - "--web.console.libraries=/usr/share/prometheus/console_libraries"
+      - "--web.console.templates=/usr/share/prometheus/consoles"
+    volumes:
+      - ./infra/monitoring/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - ./infra/monitoring/alert-rules.yml:/etc/prometheus/alert-rules.yml:ro
+      - prometheus_data:/prometheus
+    ports:
+      - "9090:9090"
+    networks:
+      - staging
+
+  # ────────────────────────────────────────────────────────────────────────────
+  # Loki — Log aggregation (14-day retention)
+  # ────────────────────────────────────────────────────────────────────────────
+  loki:
+    image: grafana/loki:3.0.0
+    command: -config.file=/etc/loki/loki-config.yaml
+    volumes:
+      - ./infra/monitoring/loki-config.yaml:/etc/loki/loki-config.yaml:ro
+      - loki_data:/loki
+    ports:
+      - "3100:3100"
+    networks:
+      - staging
+
+  # ────────────────────────────────────────────────────────────────────────────
+  # Tempo — Distributed tracing (7-day retention)
+  # ────────────────────────────────────────────────────────────────────────────
+  tempo:
+    image: grafana/tempo:2.5.0
+    command: ["-config.file=/etc/tempo/tempo-config.yaml"]
+    volumes:
+      - ./infra/monitoring/tempo-config.yaml:/etc/tempo/tempo-config.yaml:ro
+      - tempo_data:/tmp/tempo
+    ports:
+      - "3200:3200"   # Tempo UI
+      - "4317"        # OTLP gRPC (internal)
+      - "4318"        # OTLP HTTP (internal)
+    networks:
+      - staging
+
+  # ────────────────────────────────────────────────────────────────────────────
+  # Grafana — Visualization dashboards
+  # ────────────────────────────────────────────────────────────────────────────
+  grafana:
+    image: grafana/grafana:10.4.2
+    environment:
+      GF_SECURITY_ADMIN_USER: admin
+      GF_SECURITY_ADMIN_PASSWORD: admin
+      GF_USERS_ALLOW_SIGN_UP: "false"
+    volumes:
+      - ./infra/monitoring/grafana-datasources.yaml:/etc/grafana/provisioning/datasources/datasources.yaml:ro
+      - ./infra/monitoring/dashboards.yml:/etc/grafana/provisioning/dashboards/dashboards.yml:ro
+      - ./infra/monitoring/dashboards:/var/lib/grafana/dashboards:ro
+      - grafana_data:/var/lib/grafana
+    ports:
+      - "3000:3000"
+    depends_on:
+      - prometheus
+      - loki
+      - tempo
+    networks:
+      - staging
+
+  # ────────────────────────────────────────────────────────────────────────────
+  # Alertmanager — Alert routing and notification
+  # ────────────────────────────────────────────────────────────────────────────
+  alertmanager:
+    image: prom/alertmanager:v0.27.0
+    command:
+      - "--config.file=/etc/alertmanager/alertmanager.yml"
+      - "--storage.path=/alertmanager"
+    environment:
+      # T-M5-05b: notification endpoints — override via env in production
+      ALERT_EMAIL_TO: ${ALERT_EMAIL_TO:-devnull@example.com}
+      ALERT_EMAIL_FROM: ${ALERT_EMAIL_FROM:-alertmanager@aozora.app}
+      ALERT_SMTP_HOST: ${ALERT_SMTP_HOST:-localhost:25}
+      ALERT_WEBHOOK_URL: ${ALERT_WEBHOOK_URL:-http://localhost:9999/webhook}
+    volumes:
+      - ./infra/monitoring/alertmanager.yml:/etc/alertmanager/alertmanager.yml:ro
+      - alertmanager_data:/alertmanager
+    ports:
+      - "9093:9093"
+    networks:
+      - staging
+
+volumes:
+  pgdata:
+  prometheus_data:
+  loki_data:
+  tempo_data:
+  grafana_data:
+  alertmanager_data:
+
+networks:
+  staging:
+    driver: bridge

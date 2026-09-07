@@ -16,6 +16,7 @@ from src.common.health import router as health_router
 from src.common.logging import setup_logging
 from src.common.request_id import RequestIdMiddleware
 from src.common.security import RequestBodyLimitMiddleware, SecurityHeadersMiddleware
+from src.common.telemetry import record_request
 from src.modules.accounts.routes import router as accounts_router
 from src.modules.ai.routes import router as ai_router
 from src.modules.attachments.routes import router as attachments_router
@@ -29,6 +30,7 @@ from src.modules.deletion.routes import router as deletion_router
 from src.modules.exports.routes import router as exports_router
 from src.modules.statistics.routes import router as stats_router
 from src.modules.sync.routes import router as sync_router
+from src.modules.telemetry.routes import router as telemetry_router
 from src.modules.transactions.routes import router as transactions_router
 
 logger = logging.getLogger(__name__)
@@ -39,6 +41,14 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     """Startup / shutdown lifecycle."""
     cfg = get_config()
     setup_logging(cfg.log_level)
+    # T-M5-05a: initialize OpenTelemetry SDK (traces → Tempo, metrics → Prometheus)
+    from src.common.telemetry import setup_telemetry
+    setup_telemetry(
+        service_name="aozora-api",
+        otlp_endpoint=cfg.otel_endpoint,
+        enable_tracing=cfg.enable_telemetry,
+        enable_metrics=cfg.enable_telemetry,
+    )
     logger.info(
         "Starting Aozora API",
         extra={
@@ -155,6 +165,8 @@ async def log_requests(request: Request, call_next):
             "duration_ms": duration_ms,
         },
     )
+    # T-M5-05a: record request metrics (counter, error counter, duration histogram)
+    record_request(request.method, request.url.path, response.status_code, duration_ms)
     return response
 
 
@@ -177,6 +189,7 @@ app.include_router(ai_router, prefix=cfg.api_prefix)
 app.include_router(attachments_router, prefix=cfg.api_prefix)
 app.include_router(consent_router, prefix=cfg.api_prefix)
 app.include_router(deletion_router, prefix=cfg.api_prefix)
+app.include_router(telemetry_router, prefix=cfg.api_prefix)
 
 
 @app.get("/", tags=["meta"])

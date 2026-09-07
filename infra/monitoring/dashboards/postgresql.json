@@ -1,0 +1,101 @@
+{
+  "annotations": { "list": [] },
+  "description": "PostgreSQL health. Backup metrics come from textfile collector (backup.sh). Connection/query metrics require postgres_exporter — when unavailable, panels show 'no data' (T-M5-05b fallback; postgres_exporter wiring planned for T-M6-01a).",
+  "editable": false,
+  "panels": [
+    {
+      "title": "Backup Age (hours)",
+      "type": "stat",
+      "gridPos": { "h": 6, "w": 6, "x": 0, "y": 0 },
+      "datasource": { "uid": "prometheus" },
+      "targets": [{
+        "expr": "(time() - backup_last_success_timestamp_seconds) / 3600",
+        "legendFormat": "age"
+      }],
+      "fieldConfig": { "defaults": { "unit": "h", "thresholds": { "steps": [
+        { "color": "green", "value": null },
+        { "color": "yellow", "value": 24 },
+        { "color": "red", "value": 26 }
+      ]}}}
+    },
+    {
+      "title": "Backup Exit Code",
+      "type": "stat",
+      "gridPos": { "h": 6, "w": 6, "x": 6, "y": 0 },
+      "datasource": { "uid": "prometheus" },
+      "targets": [{ "expr": "backup_last_exit_code", "legendFormat": "exit" }],
+      "fieldConfig": { "defaults": { "thresholds": { "steps": [
+        { "color": "green", "value": null },
+        { "color": "red", "value": 1 }
+      ]}}}
+    },
+    {
+      "title": "Backup Files Count",
+      "type": "stat",
+      "gridPos": { "h": 6, "w": 6, "x": 12, "y": 0 },
+      "datasource": { "uid": "prometheus" },
+      "targets": [{ "expr": "backup_files_count", "legendFormat": "files" }]
+    },
+    {
+      "title": "Backup Verify Exit Code",
+      "type": "stat",
+      "gridPos": { "h": 6, "w": 6, "x": 18, "y": 0 },
+      "datasource": { "uid": "prometheus" },
+      "targets": [{ "expr": "backup_verify_exit_code", "legendFormat": "verify" }],
+      "fieldConfig": { "defaults": { "thresholds": { "steps": [
+        { "color": "green", "value": null },
+        { "color": "red", "value": 1 }
+      ]}}}
+    },
+    {
+      "title": "Active Connections [requires postgres_exporter]",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 6 },
+      "datasource": { "uid": "prometheus" },
+      "targets": [{
+        "expr": "pg_stat_activity_count",
+        "legendFormat": "{{state}}"
+      }]
+    },
+    {
+      "title": "Slow Queries (>1s) [requires postgres_exporter]",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 6 },
+      "datasource": { "uid": "prometheus" },
+      "targets": [{
+        "expr": "pg_stat_activity_max_tx_duration",
+        "legendFormat": "max tx duration"
+      }]
+    },
+    {
+      "title": "Database Size (bytes) [requires postgres_exporter]",
+      "type": "stat",
+      "gridPos": { "h": 8, "w": 8, "x": 0, "y": 14 },
+      "datasource": { "uid": "prometheus" },
+      "targets": [{ "expr": "pg_database_size_bytes", "legendFormat": "{{datname}}" }],
+      "fieldConfig": { "defaults": { "unit": "bytes" } }
+    },
+    {
+      "title": "Cache Hit Ratio [requires postgres_exporter]",
+      "type": "gauge",
+      "gridPos": { "h": 8, "w": 8, "x": 8, "y": 14 },
+      "datasource": { "uid": "prometheus" },
+      "targets": [{
+        "expr": "pg_stat_database_blks_hit / (pg_stat_database_blks_hit + pg_stat_database_blks_read)",
+        "legendFormat": "hit ratio"
+      }],
+      "fieldConfig": { "defaults": { "unit": "percentunit", "thresholds": { "steps": [
+        { "color": "red", "value": null },
+        { "color": "yellow", "value": 0.9 },
+        { "color": "green", "value": 0.98 }
+      ]}}}
+    }
+  ],
+  "schemaVersion": 39,
+  "tags": ["aozora", "postgres"],
+  "templating": { "list": [] },
+  "time": { "from": "now-6h", "to": "now" },
+  "title": "PostgreSQL",
+  "uid": "aozora-postgres",
+  "version": 1
+}

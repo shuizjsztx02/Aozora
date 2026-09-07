@@ -1,0 +1,70 @@
+{
+  "annotations": { "list": [] },
+  "description": "Android client health. Metrics populated by POST /telemetry/crash (crash_reports_total) and client-reported active_devices_total. Panels populate once Android CrashReporter.kt (T-M5-05b) starts reporting.",
+  "editable": false,
+  "panels": [
+    {
+      "title": "Version Distribution",
+      "type": "piechart",
+      "gridPos": { "h": 8, "w": 8, "x": 0, "y": 0 },
+      "datasource": { "uid": "prometheus" },
+      "targets": [{
+        "expr": "sum(active_devices_total) by (app_version)",
+        "legendFormat": "{{app_version}}",
+        "instant": true
+      }]
+    },
+    {
+      "title": "Crash-Free Session Rate (24h)",
+      "type": "stat",
+      "gridPos": { "h": 8, "w": 8, "x": 8, "y": 0 },
+      "datasource": { "uid": "prometheus" },
+      "targets": [{
+        "expr": "100 * (1 - sum(increase(crash_reports_total[24h])) / (sum(active_devices_total) > 0))",
+        "legendFormat": "crash-free %"
+      }],
+      "fieldConfig": { "defaults": { "unit": "percent", "thresholds": { "steps": [
+        { "color": "red", "value": null },
+        { "color": "yellow", "value": 99 },
+        { "color": "green", "value": 99.5 }
+      ]}}}
+    },
+    {
+      "title": "Active Devices",
+      "type": "stat",
+      "gridPos": { "h": 8, "w": 8, "x": 16, "y": 0 },
+      "datasource": { "uid": "prometheus" },
+      "targets": [{
+        "expr": "sum(active_devices_total)",
+        "legendFormat": "devices"
+      }]
+    },
+    {
+      "title": "Crash Reports (24h)",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 8 },
+      "datasource": { "uid": "prometheus" },
+      "targets": [{
+        "expr": "sum(increase(crash_reports_total[1h])) by (app_version)",
+        "legendFormat": "{{app_version}}"
+      }]
+    },
+    {
+      "title": "ANR Rate (24h) [pending ANR reporting]",
+      "type": "stat",
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 8 },
+      "datasource": { "uid": "prometheus" },
+      "targets": [{
+        "expr": "sum(increase(anr_reports_total[24h]))",
+        "legendFormat": "ANR count"
+      }]
+    }
+  ],
+  "schemaVersion": 39,
+  "tags": ["aozora", "android"],
+  "templating": { "list": [] },
+  "time": { "from": "now-7d", "to": "now" },
+  "title": "Android Health",
+  "uid": "aozora-android",
+  "version": 1
+}

@@ -1,0 +1,80 @@
+# infra/monitoring/alertmanager.yml — T-M5-05a + T-M5-05b
+# Alertmanager configuration for routing alerts to notification channels.
+#
+# Notification endpoints are injected via environment variables so the same
+# file can be used across staging / production without editing:
+#
+#   ALERT_EMAIL_TO         — recipient address (default: devnull@example.com)
+#   ALERT_EMAIL_FROM       — sender address     (default: alertmanager@aozora.app)
+#   ALERT_SMTP_HOST        — SMTP relay         (default: localhost)
+#   ALERT_WEBHOOK_URL      — generic webhook    (default: http://localhost:9999/webhook)
+#
+# In staging the defaults are /dev/null — replace via secret manager in prod.
+
+global:
+  resolve_timeout: 5m
+  # SMTP settings — env vars substituted at container start by Alertmanager's
+  # built-in templating. When unset, the defaults below keep the config loadable.
+  smtp_from: '{{ env "ALERT_EMAIL_FROM" "alertmanager@aozora.app" }}'
+  smtp_smarthost: '{{ env "ALERT_SMTP_HOST" "localhost:25" }}'
+  smtp_require_tls: false
+
+# ── Templates ─────────────────────────────────────────────────────────────
+templates:
+  - "/etc/alertmanager/templates/*.tmpl"
+
+# ── Routing tree ─────────────────────────────────────────────────────────
+route:
+  receiver: "default-receiver"
+  group_by: ["alertname", "severity"]
+  group_wait: 30s
+  group_interval: 5m
+  repeat_interval: 4h
+  routes:
+    # S0 alerts — immediate paging (critical severity)
+    - match:
+        severity: critical
+      receiver: "critical-receiver"
+      group_wait: 10s
+      repeat_interval: 1h
+      continue: true
+
+    # S1 alerts — high priority (warning severity)
+    - match:
+        severity: warning
+      receiver: "warning-receiver"
+      repeat_interval: 2h
+
+# ── Receivers ────────────────────────────────────────────────────────────
+receivers:
+  - name: "default-receiver"
+    # Fallback: log-only in staging. Wire up real channels in production.
+    webhook_configs:
+      - url: '{{ env "ALERT_WEBHOOK_URL" "http://localhost:9999/webhook" }}'
+        send_resolved: true
+
+  - name: "critical-receiver"
+    # S0: email + webhook (PagerDuty/Slack can be added by replacing webhook URL)
+    email_configs:
+      - to: '{{ env "ALERT_EMAIL_TO" "devnull@example.com" }}'
+        send_resolved: true
+        headers:
+          Subject: '[S0] {{ "{{" }} .CommonLabels.alertname {{ "}}" }} — {{ "{{" }} .CommonAnnotations.summary {{ "}}" }}'
+    webhook_configs:
+      - url: '{{ env "ALERT_WEBHOOK_URL" "http://localhost:9999/webhook" }}'
+        send_resolved: true
+
+  - name: "warning-receiver"
+    # S1: webhook only (email fatigue avoided for warnings)
+    webhook_configs:
+      - url: '{{ env "ALERT_WEBHOOK_URL" "http://localhost:9999/webhook" }}'
+        send_resolved: true
+
+# ── Inhibition ───────────────────────────────────────────────────────────
+# Suppress warning when a critical alert for the same alertname is firing.
+inhibit_rules:
+  - source_match:
+      severity: "critical"
+    target_match:
+      severity: "warning"
+    equal: ["alertname"]

@@ -1,0 +1,64 @@
+{
+  "annotations": { "list": [] },
+  "description": "AI Gateway health. Metrics emitted by server/src/common/telemetry.py (ai_gateway_requests_total{status, degraded, provider}) — panels populate once the instrumentation in T-M5-05b is deployed.",
+  "editable": false,
+  "panels": [
+    {
+      "title": "Request Rate (req/s)",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 8, "x": 0, "y": 0 },
+      "datasource": { "uid": "prometheus" },
+      "targets": [{
+        "expr": "sum(rate(ai_gateway_requests_total[5m])) by (provider)",
+        "legendFormat": "{{provider}}"
+      }]
+    },
+    {
+      "title": "Error Rate (%)",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 8, "x": 8, "y": 0 },
+      "datasource": { "uid": "prometheus" },
+      "targets": [{
+        "expr": "100 * sum(rate(ai_gateway_requests_total{status=~\"5..\"}[5m])) / (sum(rate(ai_gateway_requests_total[5m])) > 0)",
+        "legendFormat": "error %"
+      }]
+    },
+    {
+      "title": "Degraded Rate (%)",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 8, "x": 16, "y": 0 },
+      "datasource": { "uid": "prometheus" },
+      "targets": [{
+        "expr": "100 * sum(rate(ai_gateway_requests_total{degraded=\"true\"}[5m])) / (sum(rate(ai_gateway_requests_total[5m])) > 0)",
+        "legendFormat": "degraded %"
+      }]
+    },
+    {
+      "title": "Latency p50 / p95 (ms)",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 8 },
+      "datasource": { "uid": "prometheus" },
+      "targets": [
+        { "expr": "histogram_quantile(0.50, sum(rate(ai_gateway_duration_ms_bucket[5m])) by (le))", "legendFormat": "p50" },
+        { "expr": "histogram_quantile(0.95, sum(rate(ai_gateway_duration_ms_bucket[5m])) by (le))", "legendFormat": "p95" }
+      ]
+    },
+    {
+      "title": "Token Usage (total tokens)",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 8 },
+      "datasource": { "uid": "prometheus" },
+      "targets": [
+        { "expr": "sum(increase(ai_gateway_tokens_total{kind=\"input\"}[1h]))", "legendFormat": "input tokens/h" },
+        { "expr": "sum(increase(ai_gateway_tokens_total{kind=\"output\"}[1h]))", "legendFormat": "output tokens/h" }
+      ]
+    }
+  ],
+  "schemaVersion": 39,
+  "tags": ["aozora", "ai"],
+  "templating": { "list": [] },
+  "time": { "from": "now-6h", "to": "now" },
+  "title": "AI Gateway",
+  "uid": "aozora-ai",
+  "version": 1
+}

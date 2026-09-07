@@ -9,6 +9,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from src.common.errors import AppException
+from src.common.telemetry import record_transaction
 from src.models.ledger import Book, Category, Transaction
 
 from .repository import TransactionRepository
@@ -71,7 +72,7 @@ class TransactionService:
         await self._verify_book_ownership(data.book_id, user_id)
         await self._verify_category_ownership(data.category_id, user_id)
 
-        return await self.repo.create(
+        tx = await self.repo.create(
             book_id=data.book_id,
             tx_type=data.type,
             amount_cents=data.amount_cents,
@@ -81,6 +82,8 @@ class TransactionService:
             biz_date=data.biz_date,
             occurred_at=data.occurred_at,
         )
+        record_transaction()
+        return tx
 
     async def create_transaction_batch(
         self,
@@ -123,7 +126,10 @@ class TransactionService:
                 "source": source,
             })
 
-        return await self.repo.create_batch(tx_data_list)
+        created = await self.repo.create_batch(tx_data_list)
+        for _ in created:
+            record_transaction()
+        return created
 
     async def update_transaction(self, tx_id: uuid.UUID, user_id: uuid.UUID, data: TransactionUpdate) -> Transaction:
         tx = await self.get_transaction(tx_id, user_id)

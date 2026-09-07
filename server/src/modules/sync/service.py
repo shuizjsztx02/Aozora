@@ -13,6 +13,7 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from src.common.errors import AppException
+from src.common.telemetry import record_duplicate_entry, record_sync_conflict
 from src.models.budget import Budget, BudgetType
 from src.models.ledger import (
     Account,
@@ -61,6 +62,7 @@ class SyncService:
             # 1. Idempotency check
             existing = await self.repo.get_mutation(mutation.mutation_id, user_id)
             if existing is not None:
+                record_duplicate_entry()
                 results.append(MutationResult(
                     mutation_id=mutation.mutation_id,
                     status="duplicate",
@@ -83,6 +85,7 @@ class SyncService:
                     status="conflict",
                     current_version=exc.current_version,
                 ))
+                record_sync_conflict()
                 # Stop processing remaining mutations after first conflict.
                 break
             except IntegrityError as exc:
