@@ -54,6 +54,10 @@ class MainActivity : AppCompatActivity() {
         database = app.database
         repository = app.repository
 
+        // 第八轮 #1：恢复上次持久化的状态栏高度，insets 监听派发前首帧即注入正确值
+        safeAreaTopPx = getSharedPreferences("aozora_prefs", MODE_PRIVATE)
+            .getInt("safe_area_top_px", 0)
+
         // T-M4-04a: 权限状态机（必须在 setContentView 前注册 launcher）
         permissionManager = PermissionManager(this)
         permissionManager.registerLaunchers()
@@ -90,6 +94,8 @@ class MainActivity : AppCompatActivity() {
                 webViewReady = true
                 // 页面重新加载后 CSS 变量丢失，需重新注入（UI-14）
                 injectSafeAreaTop()
+                // 第八轮 #1：页面就绪后再请求一次 insets 派发，确保拿到真实状态栏高度
+                ViewCompat.requestApplyInsets(webView)
                 // 页面加载完成后，路由深链
                 routeDeepLink()
             }
@@ -119,17 +125,23 @@ class MainActivity : AppCompatActivity() {
         webView.addJavascriptInterface(bridge, "AozoraBridge")
 
         setContentView(webView)
-        // UI-14: targetSdk 35+ 强制 edge-to-edge，WebView 顶到状态栏下。
-        // 读取状态栏 inset 并注入 CSS 变量供 .safe-top 使用（WebView 自身不消费 insets）。
+        // UI-14 / 第八轮 #1：targetSdk 35+ 强制 edge-to-edge，WebView 顶到状态栏下。
+        // 读取状态栏 inset（含刘海 displayCutout）并注入 CSS 变量供 .safe-top 使用
+        //（WebView 自身不消费 insets）。取两者较大值以覆盖挖孔/刘海机型。
         ViewCompat.setOnApplyWindowInsetsListener(webView) { _, insets ->
-            val top = insets.getInsets(WindowInsetsCompat.Type.statusBars()).top
+            val bars = insets.getInsets(WindowInsetsCompat.Type.statusBars())
+            val cutout = insets.getInsets(WindowInsetsCompat.Type.displayCutout())
+            val top = maxOf(bars.top, cutout.top)
             if (top != safeAreaTopPx) {
                 safeAreaTopPx = top
+                persistSafeAreaTop(top)
                 injectSafeAreaTop()
             }
             insets
         }
         webView.loadUrl("https://appassets.androidplatform.net/assets/index.html")
+        // 第八轮 #1：主动请求一次 insets 派发，避免冷启动首帧只有 CSS 兜底值。
+        ViewCompat.requestApplyInsets(webView)
 
         // T-M4-04b: 异步预加载 Vosk 语音识别模型（约 1-2 秒）
         // Bug-B3 fix：传入 scope，Activity 销毁时 scope.cancel() 会取消加载协程，防止回调泄漏
@@ -200,7 +212,9 @@ class MainActivity : AppCompatActivity() {
      */
     private fun injectSafeAreaTop() {
         if (webViewDestroyed || !webViewReady) return
-        val dp = (safeAreaTopPx / resources.displayMetrics.density).toInt()
+        // 第八轮 #1：px→dp 向上取整（ceil），避免向下截断导致安全区小于真实状态栏高度。
+        val density = resources.displayMetrics.density
+        val dp = kotlin.math.ceil(safeAreaTopPx / density).toInt()
         val js = """
             (function(){
               try {
@@ -209,6 +223,12 @@ class MainActivity : AppCompatActivity() {
             })();
         """.trimIndent()
         webView.post { webView.evaluateJavascript(js, null) }
+    }
+
+    /** 第八轮 #1：持久化状态栏高度，进程重建后首帧即注入正确值。 */
+    private fun persistSafeAreaTop(px: Int) {
+        getSharedPreferences("aozora_prefs", MODE_PRIVATE)
+            .edit().putInt("safe_area_top_px", px).apply()
     }
 
     private fun routeDeepLink() {

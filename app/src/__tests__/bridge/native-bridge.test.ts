@@ -51,6 +51,14 @@ describe('Bridge types — 命令完整性', () => {
     'book.list',
     'book.insert',
     'category.list',
+    // 第八轮 REQ-8/REQ-7：分类自定义 + 照片图标 + 存钱目标
+    'category.insert',
+    'category.update',
+    'icon.pick',
+    'savings.list',
+    'savings.insert',
+    'savings.update',
+    'savings.archive',
     'account.list',
     'account.insert',
     'account.update',
@@ -108,7 +116,7 @@ describe('Bridge types — 命令完整性', () => {
     'auth.triggerSync',
   ]
 
-  it('BridgeCommands 包含所有 52 个命令（含 AI 4 个 + T-M4-04a 权限 3 个 + 语音 2 个 + 图片 4 个 + 同意 2 个 + 导出 4 个 + 账号删除 2 个 + 反馈 1 个 + FIX 触感/分享/认证 4 个 + T7-2 账户更新 1 个）', () => {
+  it('BridgeCommands 包含所有 59 个命令（含 AI 4 个 + 权限 3 个 + 语音 2 个 + 图片 4 个 + 同意 2 个 + 导出 4 个 + 账号删除 2 个 + 反馈 1 个 + FIX 4 个 + T7-2 账户更新 1 个 + 第八轮分类/图标/存钱 7 个）', () => {
     const actualCommands = Object.values(BridgeCommands)
     expect(actualCommands).toHaveLength(expectedCommands.length)
     for (const cmd of expectedCommands) {

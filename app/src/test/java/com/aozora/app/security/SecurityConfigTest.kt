@@ -34,10 +34,11 @@ class SecurityConfigTest {
         // whenever the list grows, forcing an explicit decision about
         // whether the TS contract was updated in parallel.
         // T7-1: +ACCOUNT_UPDATE（account.update）→ 52；TS 侧由 T7-2 同步。
+        // 第八轮: +CATEGORY_INSERT/UPDATE +ICON_PICK +SAVINGS_LIST/INSERT/UPDATE/ARCHIVE（+7）→ 59。
         val kotlinCommands = BridgeCommands.ALL
         assertEquals(
-            "Bridge command count must be 52 (sync with bridge-types.ts)",
-            52,
+            "Bridge command count must be 59 (sync with bridge-types.ts)",
+            59,
             kotlinCommands.size
         )
         assertEquals(

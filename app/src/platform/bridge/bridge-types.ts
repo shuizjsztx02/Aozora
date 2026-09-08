@@ -25,6 +25,16 @@ export const BridgeCommands = {
 
   // Category
   CATEGORY_LIST: 'category.list',
+  // 第八轮 REQ-8：分类自定义（新建/编辑）+ 照片图标选择
+  CATEGORY_INSERT: 'category.insert',
+  CATEGORY_UPDATE: 'category.update',
+  ICON_PICK: 'icon.pick',
+
+  // 第八轮 REQ-7：存钱目标（仅本地，不同步）
+  SAVINGS_LIST: 'savings.list',
+  SAVINGS_INSERT: 'savings.insert',
+  SAVINGS_UPDATE: 'savings.update',
+  SAVINGS_ARCHIVE: 'savings.archive',
 
   // Account
   ACCOUNT_LIST: 'account.list',
@@ -181,6 +191,49 @@ export interface CategoryData {
   kind: 'expense' | 'income'
   name: string
   parentId: string | null
+  /** 第八轮 REQ-8：自定义图标（emoji 或 data:image base64 URI）；null=按名映射。 */
+  icon?: string | null
+  version: number
+}
+
+/** 第八轮 REQ-8：category.insert / category.update 入参。 */
+export interface CategoryInput {
+  id: string
+  ownerId?: string
+  kind: 'expense' | 'income'
+  name: string
+  parentId?: string | null
+  icon?: string | null
+  version: number
+}
+
+/** 第八轮 REQ-8：icon.pick 返回（base64 data URI，无服务端上传）。 */
+export interface IconPickResult {
+  dataUri: string
+  size: number
+}
+
+/** 第八轮 REQ-7：存钱目标（仅本地）。 */
+export interface SavingsGoalData {
+  id: string
+  name: string
+  targetCents: number
+  currentCents: number
+  icon: string | null
+  createdAt: number
+  updatedAt: number
+  version: number
+}
+
+/** savings.insert / savings.update 入参（包裹在 {goal} 内，无 mutationId）。 */
+export interface SavingsGoalInput {
+  id: string
+  ownerId?: string
+  name: string
+  targetCents: number
+  currentCents?: number
+  icon?: string | null
+  createdAt?: number
   version: number
 }
 

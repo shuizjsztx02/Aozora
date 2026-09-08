@@ -16,7 +16,7 @@ import { EmptyState } from '../../components/StateViews'
 import { useBridge } from '../../platform/hooks/use-bridge'
 import { newUuid } from '../../platform/uuid'
 import { pickEntryBook } from '../../domain/books'
-import { getCategoryEmoji } from '../../components/category-emoji'
+import { CategoryIcon } from '../../components/CategoryIcon'
 import type { BookData, TransactionData, CategoryData } from '../../platform/bridge/bridge-types'
 import * as Money from '../../domain/money'
 
@@ -418,7 +418,7 @@ export function DetailPage() {
                           className="flex items-center justify-center shrink-0 rounded-xl"
                           style={{ width: 40, height: 40, background: 'var(--glass)', border: '1px solid var(--glass-border)' }}
                         >
-                          <span className="text-[19px] leading-none">{cat ? getCategoryEmoji(cat.name) : '💰'}</span>
+                          <CategoryIcon icon={cat?.icon} name={cat?.name ?? ''} className="text-[19px] leading-none" />
                         </div>
                         <div className="flex-1 min-w-0">
                           <div className="text-[15px] font-semibold truncate" style={{ color: 'var(--ink)' }}>

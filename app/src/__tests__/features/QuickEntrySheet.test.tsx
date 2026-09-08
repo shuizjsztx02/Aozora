@@ -9,7 +9,7 @@
  * - 关闭回调
  */
 import { describe, it, expect, vi, beforeEach } from 'vitest'
-import { render, screen, fireEvent } from '@testing-library/react'
+import { render, screen, fireEvent, within } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { QuickEntrySheet } from '../../features/ledger/QuickEntrySheet'
 import { localBizDate } from '../../domain/date'
@@ -25,6 +25,9 @@ const mockBridge = vi.hoisted(() => ({
     return Promise.resolve(null)
   }),
   insertTransaction: vi.fn().mockResolvedValue({ id: 'tx-new', version: 1 }),
+  // T8-5（REQ-9）：挂载预取账本/账户列表
+  listBooks: vi.fn().mockResolvedValue([{ id: 'book-1', name: '默认账本', version: 1 }]),
+  listAccounts: vi.fn().mockResolvedValue([]),
   hapticFeedback: vi.fn().mockResolvedValue(undefined),
   isAvailable: vi.fn().mockReturnValue(true),
   pickImage: vi.fn().mockResolvedValue({
@@ -380,13 +383,13 @@ describe('QuickEntrySheet', () => {
   // ─── T7-3: 记账目标 = 第一个非 master 账本（决策 #2）───
 
   it('books into the non-master book when book.list has a master entry', async () => {
+    const masterBooks = [
+      { id: 'm', name: '总账本', isMaster: true },
+      { id: 'b1', name: '默认账本', isMaster: false },
+    ]
+    mockBridge.listBooks.mockResolvedValueOnce(masterBooks)
     mockBridge.call.mockImplementationOnce((cmd: string) => {
-      if (cmd === 'book.list') {
-        return Promise.resolve([
-          { id: 'm', name: '总账本', isMaster: true },
-          { id: 'b1', name: '默认账本', isMaster: false },
-        ])
-      }
+      if (cmd === 'book.list') return Promise.resolve(masterBooks)
       return Promise.resolve(null)
     })
     const user = userEvent.setup()
@@ -407,5 +410,87 @@ describe('QuickEntrySheet', () => {
     })
     const [tx] = mockBridge.insertTransaction.mock.calls[0]
     expect(tx.bookId).toBe('b1')
+  })
+
+  // ─── T8-5: 选账本 / 选账户（REQ-9）───
+
+  it('submits with the user-picked book and account (REQ-9)', async () => {
+    mockBridge.listBooks.mockResolvedValueOnce([
+      { id: 'book-1', name: '默认账本' },
+      { id: 'book-2', name: '旅行' },
+    ])
+    mockBridge.listAccounts.mockResolvedValueOnce([
+      { id: 'acc-1', name: '微信', icon: '💬' },
+      { id: 'acc-2', name: '信用卡', icon: '💳' },
+    ])
+    const user = userEvent.setup()
+    render(
+      <QuickEntrySheet
+        categories={TEST_CATEGORIES}
+        onClose={onClose}
+        onSuccess={onSuccess}
+      />,
+    )
+    // 挂载后默认为 默认账本 + 第一个账户，这里显式改选 旅行 + 信用卡
+    await user.click(screen.getByTestId('entry-book-picker'))
+    await user.click(within(screen.getByTestId('entry-book-list')).getByText('旅行'))
+    await user.click(screen.getByTestId('entry-account-picker'))
+    // 按钮文案是 "💳 信用卡" 两段文本节点 → 用正则匹配
+    await user.click(within(screen.getByTestId('entry-account-list')).getByText(/信用卡/))
+
+    await user.click(screen.getByText('1'))
+    await user.click(screen.getByText('0'))
+    await user.click(screen.getByText('餐饮'))
+    await user.click(screen.getByText('记一笔'))
+
+    await vi.waitFor(() => {
+      expect(mockBridge.insertTransaction).toHaveBeenCalled()
+    })
+    const [tx] = mockBridge.insertTransaction.mock.calls[0]
+    expect(tx.bookId).toBe('book-2')
+    expect(tx.accountId).toBe('acc-2')
+  })
+
+  it('defaults to entry book + first account without interaction (REQ-9)', async () => {
+    mockBridge.listBooks.mockResolvedValueOnce([{ id: 'book-1', name: '默认账本' }])
+    mockBridge.listAccounts.mockResolvedValueOnce([{ id: 'acc-1', name: '微信', icon: '💬' }])
+    const user = userEvent.setup()
+    render(
+      <QuickEntrySheet
+        categories={TEST_CATEGORIES}
+        onClose={onClose}
+        onSuccess={onSuccess}
+      />,
+    )
+    await user.click(screen.getByText('1'))
+    await user.click(screen.getByText('0'))
+    await user.click(screen.getByText('餐饮'))
+    await user.click(screen.getByText('记一笔'))
+
+    await vi.waitFor(() => {
+      expect(mockBridge.insertTransaction).toHaveBeenCalled()
+    })
+    const [tx] = mockBridge.insertTransaction.mock.calls[0]
+    expect(tx.bookId).toBe('book-1')
+    expect(tx.accountId).toBe('acc-1')
+  })
+
+  it('master book never appears in the picker list (REQ-9)', async () => {
+    mockBridge.listBooks.mockResolvedValueOnce([
+      { id: 'm', name: '总账本', isMaster: true },
+      { id: 'b1', name: '默认账本' },
+    ])
+    const user = userEvent.setup()
+    render(
+      <QuickEntrySheet
+        categories={TEST_CATEGORIES}
+        onClose={onClose}
+        onSuccess={onSuccess}
+      />,
+    )
+    await user.click(screen.getByTestId('entry-book-picker'))
+    const list = screen.getByTestId('entry-book-list')
+    expect(list.textContent).toContain('默认账本')
+    expect(list.textContent).not.toContain('总账本')
   })
 })

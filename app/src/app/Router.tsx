@@ -5,7 +5,7 @@
  * T-M4-05c: 深链路由 — 通过 window.__aozoraNavigate__ 接收原生导航指令。
  */
 
-import { HashRouter, Routes, Route, Navigate, useNavigate } from 'react-router'
+import { HashRouter, Routes, Route, Navigate, useNavigate, useLocation } from 'react-router'
 import { useEffect } from 'react'
 import type { ReactNode } from 'react'
 import { AppLayout } from '../components/Layout'
@@ -20,6 +20,7 @@ import { AccountsPage } from '../features/settings/AccountsPage'
 import { BooksPage } from '../features/settings/BooksPage'
 import { CategoriesPage } from '../features/settings/CategoriesPage'
 import { BudgetPage } from '../features/settings/BudgetPage'
+import { SavingsPage } from '../features/settings/SavingsPage'
 import { AssistantPage } from '../features/assistant/AssistantPage'
 import { OnboardingPage, isOnboardingCompleted } from '../features/onboarding/OnboardingPage'
 import { LoginPage } from '../features/auth/LoginPage'
@@ -58,10 +59,29 @@ function DeepLinkHandler() {
   return null
 }
 
+/**
+ * 第八轮 #1（UI-17）：路由切换复位文档滚动位置。
+ *
+ * HashRouter 不重置 scrollY——从"我的"页滚动到中下部"更多设置"分组再进子页时，
+ * 文档残留滚动会叠加到子页首帧（吸顶栏 fixed 不受影响，但内容流仍从旧 scrollY 起），
+ * 观感即"顶部安全区没生效"。切页即归零，与账本/账户"从近顶部进入"的观感对齐。
+ */
+function ScrollToTop() {
+  const { pathname } = useLocation()
+  useEffect(() => {
+    window.scrollTo(0, 0)
+  }, [pathname])
+  return null
+}
+
+// 供单测直接渲染
+export { ScrollToTop }
+
 export function Router() {
   return (
     <HashRouter>
       <DeepLinkHandler />
+      <ScrollToTop />
       <AuthLostBanner />
       <Routes>
         <Route path="/onboarding" element={<OnboardingPage />} />
@@ -81,6 +101,7 @@ export function Router() {
         <Route path="/settings/books" element={<ProtectedRoute><AppLayout><BooksPage /></AppLayout></ProtectedRoute>} />
         <Route path="/settings/categories" element={<ProtectedRoute><AppLayout><CategoriesPage /></AppLayout></ProtectedRoute>} />
         <Route path="/settings/budget" element={<ProtectedRoute><AppLayout><BudgetPage /></AppLayout></ProtectedRoute>} />
+        <Route path="/settings/savings" element={<ProtectedRoute><AppLayout><SavingsPage /></AppLayout></ProtectedRoute>} />
         <Route path="*" element={<DefaultRoute />} />
       </Routes>
     </HashRouter>

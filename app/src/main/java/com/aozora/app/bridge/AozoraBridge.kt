@@ -205,6 +205,15 @@ class AozoraBridge(
             BridgeCommands.AUTH_GET_STATUS -> handleAuthGetStatus(requestId)
             BridgeCommands.AUTH_TRIGGER_SYNC -> handleAuthTriggerSync(requestId)
 
+            // 第八轮 REQ-8：分类自定义 + 照片图标；REQ-7：存钱目标
+            BridgeCommands.CATEGORY_INSERT -> handleCategoryInsert(requestId, payload)
+            BridgeCommands.CATEGORY_UPDATE -> handleCategoryUpdate(requestId, payload)
+            BridgeCommands.ICON_PICK -> handleIconPick(requestId, payload)
+            BridgeCommands.SAVINGS_LIST -> handleSavingsList(requestId)
+            BridgeCommands.SAVINGS_INSERT -> handleSavingsInsert(requestId, payload)
+            BridgeCommands.SAVINGS_UPDATE -> handleSavingsUpdate(requestId, payload)
+            BridgeCommands.SAVINGS_ARCHIVE -> handleSavingsArchive(requestId, payload)
+
             else -> BridgeResponse.error(requestId, "unknown_command", "Unknown command: $command")
         }
     }
@@ -300,6 +309,7 @@ class AozoraBridge(
             arr.put(JSONObject().apply {
                 put("id", c.id); put("kind", c.kind); put("name", c.name)
                 put("parentId", c.parentId ?: JSONObject.NULL); put("version", c.version)
+                put("icon", c.icon ?: JSONObject.NULL)
             })
         }
         return BridgeResponse.success(requestId, arr.toString())
@@ -359,6 +369,152 @@ class AozoraBridge(
         repository.archiveAccount(p.getString("id"), p.getString("mutationId"))
         return BridgeResponse.success(requestId, JSONObject().put("success", true).toString())
     }
+
+    // ─── 第八轮 REQ-8：分类自定义（新建 / 更新 / 照片图标） ───
+
+    private suspend fun handleCategoryInsert(requestId: String, p: JSONObject): BridgeResponse {
+        val cObj = p.getJSONObject("category")
+        val mutationId = p.getString("mutationId")
+        val cat = CategoryEntity(
+            id = cObj.getString("id"),
+            ownerId = cObj.optString("ownerId", "local"),
+            bookId = BridgePayload.optionalString(cObj, "bookId"),
+            parentId = BridgePayload.optionalString(cObj, "parentId"),
+            kind = cObj.getString("kind"),
+            name = cObj.getString("name"),
+            icon = BridgePayload.optionalString(cObj, "icon"),
+            archivedAt = null,
+            version = BridgePayload.version(cObj)
+        )
+        repository.insertCategory(cat, mutationId)
+        return BridgeResponse.success(requestId, JSONObject().put("id", cat.id).toString())
+    }
+
+    /** 局部合并（仿 handleAccountUpdate）：缺省字段沿用当前值；version 必须递增。 */
+    private suspend fun handleCategoryUpdate(requestId: String, p: JSONObject): BridgeResponse {
+        val cObj = p.getJSONObject("category")
+        val mutationId = p.getString("mutationId")
+        val current = repository.getCategory(cObj.getString("id"))
+            ?: throw IllegalArgumentException("category not found")
+        val cat = CategoryEntity(
+            id = current.id,
+            ownerId = current.ownerId,
+            bookId = current.bookId,
+            parentId = if (cObj.has("parentId")) BridgePayload.optionalString(cObj, "parentId") else current.parentId,
+            kind = current.kind,
+            name = BridgePayload.optionalString(cObj, "name") ?: current.name,
+            icon = if (cObj.has("icon")) BridgePayload.optionalString(cObj, "icon") else current.icon,
+            archivedAt = current.archivedAt,
+            version = BridgePayload.version(cObj)
+        )
+        repository.updateCategory(cat, mutationId)
+        return BridgeResponse.success(requestId, JSONObject().put("id", cat.id).toString())
+    }
+
+    /**
+     * 分类照片图标选择：复用 ImagePicker + ImageCompressor(128px, q75)，
+     * 返回 base64 data URI，**无服务端上传、离线可用**。取消返回 cancelled。
+     */
+    private suspend fun handleIconPick(requestId: String, p: JSONObject): BridgeResponse {
+        val picker = imagePicker
+            ?: return BridgeResponse.error(requestId, "unavailable", "image picker not injected")
+        val ctx = syncContext
+            ?: return BridgeResponse.error(requestId, "unavailable", "context not injected")
+        val source = when (p.optString("source", "gallery")) {
+            "camera" -> ImagePicker.Source.CAMERA
+            "gallery" -> ImagePicker.Source.GALLERY
+            else -> return BridgeResponse.error(requestId, "invalid_input", "Unknown source")
+        }
+        val uri = try {
+            picker.pickImage(source)
+        } catch (e: ImagePicker.PickerCancelled) {
+            return BridgeResponse.error(requestId, "cancelled", "Image picker cancelled")
+        }
+        return try {
+            val input = ctx.contentResolver.openInputStream(uri)
+                ?: return BridgeResponse.error(requestId, "invalid_input", "Cannot open image")
+            val outFile = input.use {
+                com.aozora.app.image.ImageCompressor.compress(it, ctx.cacheDir, quality = 75, maxDimension = 128)
+            }
+            val bytes = outFile.readBytes()
+            outFile.delete()
+            if (bytes.size > 48 * 1024) {
+                return BridgeResponse.error(requestId, "image_too_large", "Icon exceeds 48KB after compression")
+            }
+            val b64 = android.util.Base64.encodeToString(bytes, android.util.Base64.NO_WRAP)
+            BridgeResponse.success(
+                requestId,
+                JSONObject()
+                    .put("dataUri", "data:image/jpeg;base64,$b64")
+                    .put("size", bytes.size)
+                    .toString()
+            )
+        } catch (e: com.aozora.app.image.ImageCompressor.ImageCompressException) {
+            BridgeResponse.error(requestId, "compress_failed", e.message ?: "Image compression failed")
+        } catch (e: Exception) {
+            BridgeResponse.error(requestId, "internal_error", e.message ?: "Icon pick failed")
+        }
+    }
+
+    // ─── 第八轮 REQ-7：存钱目标（仅本地，无 mutation 入队） ───
+
+    private suspend fun handleSavingsList(requestId: String): BridgeResponse {
+        val arr = org.json.JSONArray()
+        for (g in repository.listSavingsGoals()) {
+            arr.put(JSONObject().apply {
+                put("id", g.id); put("name", g.name)
+                put("targetCents", g.targetCents); put("currentCents", g.currentCents)
+                put("icon", g.icon ?: JSONObject.NULL)
+                put("createdAt", g.createdAt); put("updatedAt", g.updatedAt); put("version", g.version)
+            })
+        }
+        return BridgeResponse.success(requestId, arr.toString())
+    }
+
+    private suspend fun handleSavingsInsert(requestId: String, p: JSONObject): BridgeResponse {
+        val g = p.getJSONObject("goal")
+        val now = System.currentTimeMillis()
+        val entity = SavingsGoalEntity(
+            id = g.getString("id"),
+            ownerId = g.optString("ownerId", "local"),
+            name = g.getString("name"),
+            targetCents = g.getLong("targetCents"),
+            currentCents = if (g.has("currentCents")) g.getLong("currentCents") else 0L,
+            icon = BridgePayload.optionalString(g, "icon"),
+            createdAt = if (g.has("createdAt")) g.getLong("createdAt") else now,
+            updatedAt = now,
+            archivedAt = null,
+            version = BridgePayload.version(g)
+        )
+        repository.insertSavingsGoal(entity)
+        return BridgeResponse.success(requestId, JSONObject().put("id", entity.id).toString())
+    }
+
+    private suspend fun handleSavingsUpdate(requestId: String, p: JSONObject): BridgeResponse {
+        val g = p.getJSONObject("goal")
+        val current = repository.getSavingsGoal(g.getString("id"))
+            ?: throw IllegalArgumentException("savings goal not found")
+        val entity = SavingsGoalEntity(
+            id = current.id,
+            ownerId = current.ownerId,
+            name = BridgePayload.optionalString(g, "name") ?: current.name,
+            targetCents = if (g.has("targetCents")) g.getLong("targetCents") else current.targetCents,
+            currentCents = if (g.has("currentCents")) g.getLong("currentCents") else current.currentCents,
+            icon = if (g.has("icon")) BridgePayload.optionalString(g, "icon") else current.icon,
+            createdAt = current.createdAt,
+            updatedAt = System.currentTimeMillis(),
+            archivedAt = current.archivedAt,
+            version = BridgePayload.version(g)
+        )
+        repository.updateSavingsGoal(entity)
+        return BridgeResponse.success(requestId, JSONObject().put("id", entity.id).toString())
+    }
+
+    private suspend fun handleSavingsArchive(requestId: String, p: JSONObject): BridgeResponse {
+        repository.archiveSavingsGoal(p.getString("id"))
+        return BridgeResponse.success(requestId, JSONObject().put("success", true).toString())
+    }
+
 
     private suspend fun handleBudgetInsert(requestId: String, p: JSONObject): BridgeResponse {
         val bObj = p.getJSONObject("budget")

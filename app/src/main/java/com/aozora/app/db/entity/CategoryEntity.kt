@@ -15,6 +15,7 @@ data class CategoryEntity(
     val parentId: String?,      // 二级分类的父 ID
     val kind: String,           // "expense" | "income"
     val name: String,
+    val icon: String? = null,   // 自定义图标：emoji 字符或 data:image base64 URI；null=按名映射 emoji（v5）
     val archivedAt: Long?,      // UTC ms or null
     val version: Int
 )

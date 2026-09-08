@@ -250,9 +250,10 @@ body.t-night {
 
 /* safe-area — Android WebView 在 edge-to-edge 下 env(safe-area-inset-top) 常为 0，
    --safe-top-px 由 MainActivity 读取 WindowInsets 后经 evaluateJavascript 注入；
-   两者都取不到时回退 24px（UI-14 修复：回退值兜底，真实高度优先） */
+   两者都取不到时回退 28px（UI-14 修复：回退值兜底，真实高度优先；
+   第八轮 #1：24→28 覆盖常见状态栏 24–28dp，注入正常时该值不参与） */
 :root {
-  --safe-top-height: max(env(safe-area-inset-top, 0px), var(--safe-top-px, 0px), 24px);
+  --safe-top-height: max(env(safe-area-inset-top, 0px), var(--safe-top-px, 0px), 28px);
 }
 .safe-top { padding-top: var(--safe-top-height); }
 .safe-bottom { padding-bottom: env(safe-area-inset-bottom, 0px); }

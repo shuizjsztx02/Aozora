@@ -6,7 +6,7 @@
 
 import { useState, useEffect, useCallback } from 'react'
 import { PageHeader } from '../../components/Layout'
-import { getCategoryEmoji } from '../../components/category-emoji'
+import { CategoryIcon } from '../../components/CategoryIcon'
 import { useBridge } from '../../platform/hooks/use-bridge'
 import { newUuid } from '../../platform/uuid'
 import type { BudgetData, CategoryData } from '../../platform/bridge/bridge-types'
@@ -220,7 +220,7 @@ export function BudgetPage() {
                       background: selectedCategoryId === cat.id ? 'var(--glass)' : 'transparent',
                     }}
                   >
-                    <span className="text-lg">{getCategoryEmoji(cat.name)}</span>
+                    <CategoryIcon icon={cat.icon} name={cat.name} className="text-lg" />
                     <span className="truncate max-w-full text-ink2">{cat.name}</span>
                   </button>
                 ))}

@@ -42,12 +42,12 @@ const mockBridge = vi.hoisted(() => ({
 const mockAssistant = vi.hoisted(() => ({
   messages: [] as unknown[],
   phase: 'idle' as AssistantPhase,
-  pendingProposal: null,
+  activeProposal: null,
+  cardStatus: null,
   undoRemaining: 0,
   isSlow: false,
   submitInput: vi.fn(),
-  confirmEditedProposal: vi.fn(),
-  cancelProposal: vi.fn(),
+  editProposal: vi.fn(),
   undoExecution: vi.fn(),
 }))
 

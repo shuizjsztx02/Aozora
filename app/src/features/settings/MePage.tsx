@@ -84,10 +84,11 @@ export function MePage() {
         {/* 数据管理 */}
         <div className="glass-card overflow-hidden">
           <MenuSection title="数据管理">
-            <MenuItem icon="💰" label="账户" onClick={() => navigate('/settings/accounts')} />
-            <MenuItem icon="📒" label="账本" onClick={() => navigate('/settings/books')} />
-            <MenuItem icon="📂" label="分类" onClick={() => navigate('/settings/categories')} />
-            <MenuItem icon="📊" label="预算" onClick={() => navigate('/settings/budget')} />
+            <MenuItem icon="💰" label="账户管理" onClick={() => navigate('/settings/accounts')} />
+            <MenuItem icon="📒" label="账本管理" onClick={() => navigate('/settings/books')} />
+            <MenuItem icon="📂" label="分类管理" onClick={() => navigate('/settings/categories')} />
+            <MenuItem icon="📊" label="预算管理" onClick={() => navigate('/settings/budget')} />
+            <MenuItem icon="🐷" label="存钱管理" onClick={() => navigate('/settings/savings')} />
           </MenuSection>
         </div>
 

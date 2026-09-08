@@ -33,6 +33,17 @@ object BridgeCommands {
 
     // Category
     const val CATEGORY_LIST = "category.list"
+    const val CATEGORY_INSERT = "category.insert"   // 第八轮 REQ-8
+    const val CATEGORY_UPDATE = "category.update"   // 第八轮 REQ-8
+
+    // 第八轮 REQ-8：分类照片图标选择（返回 base64 data URI，无服务端上传）
+    const val ICON_PICK = "icon.pick"
+
+    // 第八轮 REQ-7：存钱目标（仅本地，不同步）
+    const val SAVINGS_LIST = "savings.list"
+    const val SAVINGS_INSERT = "savings.insert"
+    const val SAVINGS_UPDATE = "savings.update"
+    const val SAVINGS_ARCHIVE = "savings.archive"
 
     // Account
     const val ACCOUNT_LIST = "account.list"
@@ -125,7 +136,9 @@ object BridgeCommands {
         GET_VERSION,
         TX_INSERT, TX_GET, TX_LIST_BY_BOOK, TX_LIST_BY_DATE, TX_SOFT_DELETE,
         BOOK_LIST, BOOK_INSERT,
-        CATEGORY_LIST,
+        CATEGORY_LIST, CATEGORY_INSERT, CATEGORY_UPDATE,
+        ICON_PICK,
+        SAVINGS_LIST, SAVINGS_INSERT, SAVINGS_UPDATE, SAVINGS_ARCHIVE,
         ACCOUNT_LIST, ACCOUNT_INSERT, ACCOUNT_UPDATE, ACCOUNT_ARCHIVE,
         BUDGET_LIST, BUDGET_INSERT, BUDGET_UPDATE, BUDGET_DELETE,
         PM_LIST, PM_MARK_SYNCING, PM_MARK_FAILED, PM_REMOVE,

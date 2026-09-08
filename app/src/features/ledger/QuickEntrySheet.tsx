@@ -14,12 +14,12 @@ import { useImageDraftStore, useImageDraft } from '../../platform/store/image-dr
 import { ImagePickerSheet } from '../image/ImagePickerSheet'
 import { ImageUploadView } from '../image/ImageUploadView'
 import { BatchConfirmationCard } from './BatchConfirmationCard'
-import type { CategoryData } from '../../platform/bridge/bridge-types'
+import type { CategoryData, BookData, AccountData } from '../../platform/bridge/bridge-types'
 import type { ActionProposal } from '../../domain/action-proposal'
 import * as Money from '../../domain/money'
 import { todayBizDate } from '../../domain/date'
-import { pickEntryBook } from '../../domain/books'
-import { getCategoryEmoji } from '../../components/category-emoji'
+import { pickEntryBook, pickDefaultAccount } from '../../domain/books'
+import { CategoryIcon } from '../../components/CategoryIcon'
 
 interface QuickEntrySheetProps {
   categories: CategoryData[]
@@ -63,6 +63,41 @@ export function QuickEntrySheet({ categories, onClose, onSuccess }: QuickEntrySh
     bookIdRef.current = id
     return id
   }, [bridge])
+
+  // 第八轮 REQ-9：账本 / 账户选择器。不设即按默认填充（默认账本 = pickEntryBook，
+  // 默认账户 = 第一个账户，无账户则 null）。getBookId 仅供图片解析/batch 路径用默认。
+  const [books, setBooks] = useState<BookData[]>([])
+  const [accounts, setAccounts] = useState<AccountData[]>([])
+  const [selectedBookId, setSelectedBookId] = useState<string | null>(null)
+  const [selectedAccountId, setSelectedAccountId] = useState<string | null>(null)
+  const [openPicker, setOpenPicker] = useState<'book' | 'account' | null>(null)
+
+  useEffect(() => {
+    let cancelled = false
+    bridge.listBooks()
+      .then(list => {
+        if (cancelled) return
+        setBooks(list)
+        setSelectedBookId(pickEntryBook(list)?.id ?? null)
+      })
+      .catch(() => { /* 列表加载失败时保持默认，提交仍可回退 getBookId */ })
+    bridge.listAccounts()
+      .then(list => {
+        if (cancelled) return
+        setAccounts(list)
+        setSelectedAccountId(pickDefaultAccount(list)?.id ?? null)
+      })
+      .catch(() => {})
+    return () => { cancelled = true }
+  }, [bridge])
+
+  const selectableBooks = books.filter(b => !b.isMaster)
+  const bookLabel = selectedBookId
+    ? (books.find(b => b.id === selectedBookId)?.name || '账本')
+    : (pickEntryBook(books)?.name || '选择账本')
+  const accountLabel = selectedAccountId
+    ? (accounts.find(a => a.id === selectedAccountId)?.name || '账户')
+    : (accounts.length > 0 ? '不使用账户' : '无账户')
 
   const filteredCats = categories.filter(c => c.kind === type)
 
@@ -380,7 +415,8 @@ export function QuickEntrySheet({ categories, onClose, onSuccess }: QuickEntrySh
     setSubmitError(null)
     try {
       const amountCents = Money.fromString(amount)
-      const bookId = await getBookId()
+      // REQ-9：优先用户所选账本，未设（列表未加载）则回退默认账本
+      const bookId = selectedBookId ?? await getBookId()
 
       // T7-3（决策 #5）：input 清空时兜底今天；非今日 → occurredAt 取该日本地 12:00
       const safeBizDate = /^\d{4}-\d{2}-\d{2}$/.test(bizDate) ? bizDate : todayBizDate('Asia/Shanghai')
@@ -397,7 +433,7 @@ export function QuickEntrySheet({ categories, onClose, onSuccess }: QuickEntrySh
         type,
         amountCents: amountCents as number,
         categoryId,
-        accountId: null,
+        accountId: selectedAccountId,
         note,
         bizDate: safeBizDate,
         occurredAt,
@@ -415,7 +451,7 @@ export function QuickEntrySheet({ categories, onClose, onSuccess }: QuickEntrySh
     } finally {
       setSubmitting(false)
     }
-  }, [amount, categoryId, type, note, bizDate, bridge, getBookId, submitting, onSuccess])
+  }, [amount, categoryId, type, note, bizDate, bridge, getBookId, selectedBookId, selectedAccountId, submitting, onSuccess])
 
   const displayAmount = amount || '0'
 
@@ -523,6 +559,89 @@ export function QuickEntrySheet({ categories, onClose, onSuccess }: QuickEntrySh
                 </div>
               </div>
 
+              {/* 第八轮 REQ-9：账本 / 账户选择行 */}
+              <div className="px-4 mb-3">
+                <div className="flex gap-2">
+                  <button
+                    type="button"
+                    onClick={() => setOpenPicker(openPicker === 'book' ? null : 'book')}
+                    className="flex items-center gap-1.5 px-3 py-1.5 rounded-full text-xs transition-colors"
+                    style={{ background: 'var(--glass)', color: 'var(--ink2)', border: '1px solid var(--glass-border)' }}
+                    data-testid="entry-book-picker"
+                  >
+                    <span>📒</span>
+                    <span className="max-w-[7rem] truncate">{bookLabel}</span>
+                    <span aria-hidden style={{ opacity: 0.6 }}>▾</span>
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setOpenPicker(openPicker === 'account' ? null : 'account')}
+                    className="flex items-center gap-1.5 px-3 py-1.5 rounded-full text-xs transition-colors"
+                    style={{ background: 'var(--glass)', color: 'var(--ink2)', border: '1px solid var(--glass-border)' }}
+                    data-testid="entry-account-picker"
+                  >
+                    <span>💳</span>
+                    <span className="max-w-[7rem] truncate">{accountLabel}</span>
+                    <span aria-hidden style={{ opacity: 0.6 }}>▾</span>
+                  </button>
+                </div>
+
+                {openPicker === 'book' && (
+                  <div
+                    className="mt-2 rounded-xl p-1 max-h-48 overflow-y-auto"
+                    style={{ background: 'var(--glass)', border: '1px solid var(--glass-border)' }}
+                    data-testid="entry-book-list"
+                  >
+                    {selectableBooks.length === 0 ? (
+                      <div className="px-3 py-2 text-xs text-ink3">暂无可用账本</div>
+                    ) : (
+                      selectableBooks.map(b => (
+                        <button
+                          key={b.id}
+                          type="button"
+                          onClick={() => { setSelectedBookId(b.id); setOpenPicker(null) }}
+                          className="w-full text-left px-3 py-2 rounded-lg text-sm flex items-center justify-between"
+                          style={{ color: selectedBookId === b.id ? 'var(--accent)' : 'var(--ink2)' }}
+                        >
+                          <span>{b.icon} {b.name || '账本'}</span>
+                          {selectedBookId === b.id && <span>✓</span>}
+                        </button>
+                      ))
+                    )}
+                  </div>
+                )}
+
+                {openPicker === 'account' && (
+                  <div
+                    className="mt-2 rounded-xl p-1 max-h-48 overflow-y-auto"
+                    style={{ background: 'var(--glass)', border: '1px solid var(--glass-border)' }}
+                    data-testid="entry-account-list"
+                  >
+                    <button
+                      type="button"
+                      onClick={() => { setSelectedAccountId(null); setOpenPicker(null) }}
+                      className="w-full text-left px-3 py-2 rounded-lg text-sm flex items-center justify-between"
+                      style={{ color: selectedAccountId === null ? 'var(--accent)' : 'var(--ink2)' }}
+                    >
+                      <span>不使用账户</span>
+                      {selectedAccountId === null && <span>✓</span>}
+                    </button>
+                    {accounts.map(a => (
+                      <button
+                        key={a.id}
+                        type="button"
+                        onClick={() => { setSelectedAccountId(a.id); setOpenPicker(null) }}
+                        className="w-full text-left px-3 py-2 rounded-lg text-sm flex items-center justify-between"
+                        style={{ color: selectedAccountId === a.id ? 'var(--accent)' : 'var(--ink2)' }}
+                      >
+                        <span>{a.icon} {a.name}</span>
+                        {selectedAccountId === a.id && <span>✓</span>}
+                      </button>
+                    ))}
+                  </div>
+                )}
+              </div>
+
               {/* 分类选择（REQ-3：每页 10 格 2×5 等高，>10 类横滑翻页 + 指示点） */}
               <div className="px-4 mb-3">
                 <div
@@ -546,7 +665,7 @@ export function QuickEntrySheet({ categories, onClose, onSuccess }: QuickEntrySh
                               background: categoryId === cat.id ? 'var(--glass)' : 'transparent',
                             }}
                           >
-                            <span className="text-lg">{getCategoryEmoji(cat.name)}</span>
+                            <CategoryIcon icon={cat.icon} name={cat.name} className="text-lg" />
                             <span className="truncate max-w-full text-ink2">{cat.name}</span>
                           </button>
                         ))}

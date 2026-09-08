@@ -61,3 +61,31 @@ val MIGRATION_3_4: Migration = object : Migration(3, 4) {
         )
     }
 }
+
+/**
+ * 第八轮（REQ-8 分类自定义 + REQ-7 存钱管理）Room schema 迁移。
+ *
+ * v4 → v5：
+ * - categories 新增 icon TEXT（自定义图标：emoji 或 data:image base64；可空）。
+ * - 新增 savings_goals 表（存钱目标，仅本地不同步）。列序/类型须与
+ *   SavingsGoalEntity 一致，否则 Room 打开时 schema 校验失败。
+ */
+val MIGRATION_4_5: Migration = object : Migration(4, 5) {
+    override fun migrate(db: SupportSQLiteDatabase) {
+        db.execSQL("ALTER TABLE `categories` ADD COLUMN `icon` TEXT")
+        db.execSQL(
+            "CREATE TABLE IF NOT EXISTS `savings_goals` (" +
+                "`id` TEXT NOT NULL, " +
+                "`ownerId` TEXT NOT NULL, " +
+                "`name` TEXT NOT NULL, " +
+                "`targetCents` INTEGER NOT NULL, " +
+                "`currentCents` INTEGER NOT NULL, " +
+                "`icon` TEXT, " +
+                "`createdAt` INTEGER NOT NULL, " +
+                "`updatedAt` INTEGER NOT NULL, " +
+                "`archivedAt` INTEGER, " +
+                "`version` INTEGER NOT NULL, " +
+                "PRIMARY KEY(`id`))"
+        )
+    }
+}

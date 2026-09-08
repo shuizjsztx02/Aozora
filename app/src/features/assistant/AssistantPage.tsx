@@ -12,7 +12,6 @@ import { useAssistant } from './use-assistant'
 import { ConfirmationCard } from './ConfirmationCard'
 import { UndoToast } from './UndoToast'
 import type { CategoryData } from '../../platform/bridge/bridge-types'
-import type { ActionProposal } from '../../domain/action-proposal'
 import { pickEntryBook } from '../../domain/books'
 
 export function AssistantPage() {
@@ -45,12 +44,12 @@ export function AssistantPage() {
   const {
     messages,
     phase,
-    pendingProposal,
+    activeProposal,
+    cardStatus,
     undoRemaining,
     isSlow,
     submitInput,
-    confirmEditedProposal,
-    cancelProposal,
+    editProposal,
     undoExecution,
   } = useAssistant({
     categories,
@@ -86,10 +85,6 @@ export function AssistantPage() {
       handleSubmit()
     }
   }, [handleSubmit])
-
-  const handleConfirmEdited = useCallback((edited: ActionProposal) => {
-    confirmEditedProposal(edited)
-  }, [confirmEditedProposal])
 
   // T-M4-04b: 语音输入控制
   const handleMicClick = useCallback(async () => {
@@ -185,15 +180,14 @@ export function AssistantPage() {
           </div>
         )}
 
-        {/* 确认卡 — confirming 和 executing 阶段都显示 */}
-        {(phase === 'confirming' || phase === 'executing') && pendingProposal && (
+        {/* 第八轮 Bug-6：记账卡常驻编辑器 — 解析后已本地写入，改动即替换保存 */}
+        {activeProposal && cardStatus && (
           <ConfirmationCard
-            proposal={pendingProposal}
+            key={activeProposal.proposalId}
+            proposal={activeProposal}
             categories={categories}
-            onConfirm={handleConfirmEdited}
-            onCancel={cancelProposal}
-            submitting={phase === 'executing'}
-            error={messages.filter(m => m.proposalStatus === 'error').pop()?.text || null}
+            status={cardStatus}
+            onEditCommit={editProposal}
           />
         )}
       </div>

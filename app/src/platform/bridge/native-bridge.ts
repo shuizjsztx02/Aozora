@@ -21,6 +21,10 @@ import {
   type BookInput,
   type BookData,
   type CategoryData,
+  type CategoryInput,
+  type IconPickResult,
+  type SavingsGoalData,
+  type SavingsGoalInput,
   type AccountData,
   type AccountInput,
   type BudgetData,
@@ -221,6 +225,41 @@ export class NativeBridge {
 
   async listCategories(): Promise<CategoryData[]> {
     return this.call<CategoryData[]>('category.list')
+  }
+
+  // 第八轮 REQ-8：分类写命令走包裹结构 {category, mutationId}，与 native 契约一致
+  async insertCategory(category: CategoryInput, mutationId: string): Promise<{ id: string }> {
+    return this.call('category.insert', { category, mutationId })
+  }
+
+  async updateCategory(category: CategoryInput, mutationId: string): Promise<{ id: string }> {
+    return this.call('category.update', { category, mutationId })
+  }
+
+  /**
+   * 分类照片图标选择（第八轮 REQ-8）。打开原生图选取 128px 缩略图，
+   * 返回 base64 data URI（无服务端上传，离线可用）。取消 reject code='cancelled'。
+   */
+  async pickIcon(source: 'camera' | 'gallery'): Promise<IconPickResult> {
+    return this.call<IconPickResult>('icon.pick', { source }, { timeoutMs: 0 })
+  }
+
+  // ─── Savings Goals（第八轮 REQ-7，仅本地） ───
+
+  async listSavingsGoals(): Promise<SavingsGoalData[]> {
+    return this.call<SavingsGoalData[]>('savings.list')
+  }
+
+  async insertSavingsGoal(goal: SavingsGoalInput): Promise<{ id: string }> {
+    return this.call('savings.insert', { goal })
+  }
+
+  async updateSavingsGoal(goal: SavingsGoalInput): Promise<{ id: string }> {
+    return this.call('savings.update', { goal })
+  }
+
+  async archiveSavingsGoal(id: string): Promise<{ success: boolean }> {
+    return this.call('savings.archive', { id })
   }
 
   // ─── Account ───

@@ -1,8 +1,14 @@
 /**
  * T-M4-02c: 助手对话状态机。
  *
- * 编排流程：
- *   输入 → 本地 NLU / AI Gateway 路由 → 服务端验证 → 确认卡 → 执行 → 撤销窗口
+ * 第八轮 Bug-6（用户决策：免确认本地记账）：
+ *   输入 → 本地 NLU / AI Gateway 路由 →（在线时 best-effort 服务端验证）
+ *        → **直接本地 insertTransaction 写入** → 卡片常驻可编辑 → 5s 撤销窗
+ *
+ * 写入权威从服务端 /ai/execute 移到本地 + pending_mutations 队列上行最终一致，
+ * 离线可用，绕开真机未同步时的 "HTTP 404 Book not found"。
+ * ai.execute / ai.validate 桥命令保留（图片批量链路 BatchConfirmationCard 仍在用
+ * executeProposal），本 hook 不再调用 executeProposal。
  *
  * 降级策略（ADR-003 §6.4）：
  *   - 断网 → 本地 NLU
@@ -16,6 +22,7 @@ import { parseInput, type ParseContext } from '../../domain/nlu/parser'
 import { buildProposalFromAiOutput, type AiParseOutput } from '../../domain/ai-proposal-builder'
 import { useBridge } from '../../platform/hooks/use-bridge'
 import { newUuid } from '../../platform/uuid'
+import { todayBizDate } from '../../domain/date'
 import type { CategoryData } from '../../platform/bridge/bridge-types'
 import type { AiValidateVerdict } from '../../platform/bridge/bridge-types'
 import type { Category } from '../../domain/types'
@@ -31,7 +38,11 @@ export interface AssistantMessage {
   validationErrors?: string[]
 }
 
-export type AssistantPhase = 'idle' | 'processing' | 'confirming' | 'executing' | 'undo_window'
+/** 第八轮：'confirming' 态随免确认改造移除——解析成功后直接本地提交。 */
+export type AssistantPhase = 'idle' | 'processing' | 'executing' | 'undo_window'
+
+/** 常驻编辑卡的展示状态（error 态下卡片仍可编辑，改动即重试保存）。 */
+export type CardStatus = 'executing' | 'committed' | 'error'
 
 interface UseAssistantOptions {
   categories: CategoryData[]
@@ -42,13 +53,14 @@ interface UseAssistantOptions {
 interface UseAssistantReturn {
   messages: AssistantMessage[]
   phase: AssistantPhase
-  pendingProposal: ActionProposal | null
+  /** 常驻卡数据；解析成功后设置，撤销后清除。 */
+  activeProposal: ActionProposal | null
+  cardStatus: CardStatus | null
   undoRemaining: number
   isSlow: boolean
   submitInput: (text: string) => Promise<void>
-  confirmProposal: () => Promise<void>
-  confirmEditedProposal: (edited: ActionProposal) => Promise<void>
-  cancelProposal: () => void
+  /** 卡片编辑保存：softDelete 旧笔 + insert 新（编辑 = 替换写）。 */
+  editProposal: (edited: ActionProposal) => Promise<void>
   undoExecution: () => Promise<void>
 }
 
@@ -64,7 +76,8 @@ export function useAssistant({
   const bridge = useBridge()
   const [messages, setMessages] = useState<AssistantMessage[]>([])
   const [phase, setPhase] = useState<AssistantPhase>('idle')
-  const [pendingProposal, setPendingProposal] = useState<ActionProposal | null>(null)
+  const [activeProposal, setActiveProposal] = useState<ActionProposal | null>(null)
+  const [cardStatus, setCardStatus] = useState<CardStatus | null>(null)
   const [undoRemaining, setUndoRemaining] = useState(0)
   const [isSlow, setIsSlow] = useState(false)
   const undoTimerRef = useRef<ReturnType<typeof setInterval> | null>(null)
@@ -72,6 +85,8 @@ export function useAssistant({
   const slowTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
   // C-B3 fix: 并发提交互斥
   const isSubmittingRef = useRef(false)
+  // 当前卡对应的已写入交易 id（编辑=替换写 / 撤销=软删 都以此为准）
+  const activeTxIdsRef = useRef<string[]>([])
 
   // C-C2 fix: 组件卸载时清理所有 timer
   useEffect(() => {
@@ -100,6 +115,117 @@ export function useAssistant({
     }
   }, [categories, timezone])
 
+  const stopUndoTimer = useCallback(() => {
+    if (undoTimerRef.current) {
+      clearInterval(undoTimerRef.current)
+      undoTimerRef.current = null
+    }
+    setUndoRemaining(0)
+  }, [])
+
+  /**
+   * 第八轮：本地写入提案全部交易，返回生成的交易 id。
+   * 聊天提案为单笔 add_tx；若将来出现多笔且中途失败，已写入部分不回滚
+   * （与 QuickEntrySheet 手动记账语义一致——逐笔入队、失败可见）。
+   */
+  const writeTransactions = useCallback(async (proposal: ActionProposal): Promise<string[]> => {
+    const ids: string[] = []
+    const today = todayBizDate(timezone)
+    for (const tx of proposal.transactions ?? []) {
+      const id = newUuid()
+      // 决策 #5（第七轮）对齐：非今日 → occurredAt 取该日本地 12:00
+      let occurredAt = Date.now()
+      if (tx.bizDate && tx.bizDate !== today) {
+        const noon = new Date(tx.bizDate + 'T12:00:00').getTime()
+        if (!Number.isNaN(noon)) occurredAt = noon
+      }
+      await bridge.insertTransaction({
+        id,
+        bookId: bookId!,
+        type: tx.type,
+        amountCents: tx.amountCents,
+        categoryId: tx.categoryId || '',
+        accountId: tx.accountId || null,
+        note: tx.note,
+        bizDate: tx.bizDate,
+        occurredAt,
+        source: 'nlu_ai',
+      }, newUuid()) // mutationId 必须为 UUID（服务端 sync 契约）
+      ids.push(id)
+    }
+    return ids
+  }, [bridge, bookId, timezone])
+
+  const pushBookMissingError = useCallback((proposalId?: string) => {
+    const errMsg: AssistantMessage = {
+      id: 'msg_' + Date.now() + '_err',
+      role: 'assistant',
+      text: '❌ 账本未就绪，无法记账。请返回首页重试。',
+      proposalStatus: 'error',
+    }
+    setMessages(prev => {
+      const base = proposalId
+        ? prev.map(m => m.proposal?.proposalId === proposalId
+            ? { ...m, proposalStatus: 'error' as const } : m)
+        : prev
+      return [...base, errMsg]
+    })
+    setActiveProposal(null)
+    setCardStatus(null)
+    setPhase('idle')
+  }, [])
+
+  /** 首次本地提交（解析成功后自动触发，无确认按钮）。 */
+  const commitProposalInternal = useCallback(async (proposal: ActionProposal) => {
+    if (!bookId) { pushBookMissingError(proposal.proposalId); return }
+    setPhase('executing')
+    setCardStatus('executing')
+
+    try {
+      const ids = await writeTransactions(proposal)
+      activeTxIdsRef.current = ids
+      setMessages(prev => prev.map(m =>
+        m.proposal?.proposalId === proposal.proposalId
+          ? {
+              ...m, proposal,
+              proposalStatus: 'committed' as const,
+              transactionIds: ids,
+              text: '已记录 ' + ids.length + ' 笔交易',
+            }
+          : m
+      ))
+      setCardStatus('committed')
+
+      // 5s 撤销窗（沿用现有 timer / UndoToast）
+      undoDeadlineRef.current = Date.now() + UNDO_WINDOW_SECONDS * 1000
+      setPhase('undo_window')
+      setUndoRemaining(UNDO_WINDOW_SECONDS)
+      undoTimerRef.current = setInterval(() => {
+        const remaining = Math.ceil((undoDeadlineRef.current - Date.now()) / 1000)
+        if (remaining <= 0) {
+          if (undoTimerRef.current) clearInterval(undoTimerRef.current)
+          undoTimerRef.current = null
+          setPhase('idle')
+          setUndoRemaining(0)
+        } else {
+          setUndoRemaining(remaining)
+        }
+      }, 200)
+
+      try { await bridge.triggerSync() } catch { /* ignore */ }
+    } catch (err) {
+      // 本地写入失败必须可见；卡片保持 error 态可编辑重试
+      const errMsg = err instanceof Error ? err.message : '未知错误'
+      activeTxIdsRef.current = []
+      setMessages(prev => prev.map(m =>
+        m.proposal?.proposalId === proposal.proposalId
+          ? { ...m, proposalStatus: 'error' as const, text: `❌ 记账失败：${errMsg}` } : m
+      ))
+      setCardStatus('error')
+      setPhase('idle')
+    }
+  }, [bridge, bookId, pushBookMissingError, writeTransactions])
+
   const submitInput = useCallback(async (text: string) => {
     if (!text.trim()) return
     // C-B3 fix: 并发提交互斥 — 非 idle 阶段拒绝新提交
@@ -107,11 +233,7 @@ export function useAssistant({
     isSubmittingRef.current = true
 
     // C-C1 fix: 新提交时清理旧 undo timer，防止状态机竞争
-    if (undoTimerRef.current) {
-      clearInterval(undoTimerRef.current)
-      undoTimerRef.current = null
-    }
-    setUndoRemaining(0)
+    stopUndoTimer()
 
     const userMsg: AssistantMessage = {
       id: 'msg_' + Date.now() + '_user',
@@ -165,7 +287,7 @@ export function useAssistant({
       finalProposal = localProposal
     }
 
-    // 3. 服务端验证（仅对 AI 生成的交易提案）
+    // 3. 服务端验证（仅对 AI 生成的交易提案；best-effort，失败不阻断本地写）
     if (finalProposal !== localProposal &&
         (finalProposal.action === 'add_tx' || finalProposal.action === 'add_tx_batch') && bookId) {
       try {
@@ -174,11 +296,6 @@ export function useAssistant({
         )
         if (!validation.valid && validation.verdict !== 'rejected_low_confidence') {
           finalProposal = localProposal
-        } else {
-          finalProposal = {
-            ...finalProposal,
-            requiresConfirmation: validation.verdict === 'rejected_low_confidence' || finalProposal.requiresConfirmation,
-          }
         }
       } catch {
         // 验证请求失败 → 保留 AI 结果
@@ -198,159 +315,91 @@ export function useAssistant({
       role: 'assistant',
       text: finalProposal.message,
       proposal: finalProposal,
-      proposalStatus: isTxAction ? 'pending' : 'committed',
+      proposalStatus: isTxAction ? 'executing' : 'committed',
     }
     setMessages(prev => [...prev, assistantMsg])
 
     if (isTxAction) {
-      setPendingProposal(finalProposal)
-      setPhase('confirming')
-    } else {
-      setPhase('idle')
-    }
-    isSubmittingRef.current = false
-  }, [bridge, categories, bookId, timezone, buildParseContext])
-
-  const executeProposalInternal = useCallback(async (proposal: ActionProposal) => {
-    if (!bookId) {
-      // bookId 缺失时给用户明确反馈，而非静默 return
-      const errMsg: AssistantMessage = {
-        id: 'msg_' + Date.now() + '_err',
-        role: 'assistant',
-        text: '❌ 账本未就绪，无法记账。请返回首页重试。',
-        proposalStatus: 'error',
-      }
-      setMessages(prev => [...prev, errMsg])
-      setPhase('idle')
-      setPendingProposal(null)
+      // 第八轮 Bug-6：免确认——解析成功直接本地写入，卡片常驻可编辑
+      setActiveProposal(finalProposal)
+      isSubmittingRef.current = false
+      await commitProposalInternal(finalProposal)
       return
     }
+    setPhase('idle')
+    isSubmittingRef.current = false
+  }, [
+    bridge, categories, bookId, timezone, buildParseContext,
+    commitProposalInternal, stopUndoTimer,
+  ])
+
+  /** 卡片编辑保存：替换写（softDelete 旧 + insert 新），不新增 transaction.update。 */
+  const editProposal = useCallback(async (edited: ActionProposal) => {
+    if (!bookId) { pushBookMissingError(edited.proposalId); return }
+    // 编辑即接管：终止未结束的 5s 撤销窗
+    stopUndoTimer()
+    const oldIds = activeTxIdsRef.current
     setPhase('executing')
-    setMessages(prev => prev.map(m =>
-      m.proposal?.proposalId === proposal.proposalId
-        ? { ...m, proposalStatus: 'executing' as const } : m
-    ))
-
+    setCardStatus('executing')
     try {
-      const result = await bridge.executeProposal(
-        proposal as unknown as Record<string, unknown>,
-        bookId, 'confirm_' + Date.now()
-      )
-
-      // 写入本地 Room
-      if (proposal.transactions) {
-        for (let i = 0; i < proposal.transactions.length && i < result.transaction_ids.length; i++) {
-          const tx = proposal.transactions[i]
-          const txId = result.transaction_ids[i]
-          try {
-            await bridge.insertTransaction({
-              id: txId,
-              bookId,
-              type: tx.type,
-              amountCents: tx.amountCents,
-              categoryId: tx.categoryId || '',
-              accountId: tx.accountId || null,
-              note: tx.note,
-              bizDate: tx.bizDate,
-              occurredAt: Date.now(),
-              source: 'nlu_ai',
-            }, newUuid()) // mutationId 必须为 UUID（服务端 sync 契约）
-          } catch {
-            // 本地写入失败不影响主流程
-          }
-        }
+      for (const id of oldIds) {
+        await bridge.softDeleteTransaction(id, newUuid())
       }
-
+      const ids = await writeTransactions(edited)
+      activeTxIdsRef.current = ids
       setMessages(prev => prev.map(m =>
-        m.proposal?.proposalId === proposal.proposalId
-          ? { ...m, proposalStatus: 'committed' as const,
-              transactionIds: result.transaction_ids,
-              text: '已记录 ' + result.transaction_ids.length + ' 笔交易' }
+        m.proposal?.proposalId === edited.proposalId
+          ? {
+              ...m, proposal: edited,
+              proposalStatus: 'committed' as const,
+              transactionIds: ids,
+              text: '已更新记录',
+            }
           : m
       ))
-
-      const windowSeconds = result.undo_window_seconds || UNDO_WINDOW_SECONDS
-      undoDeadlineRef.current = Date.now() + windowSeconds * 1000
-      setPhase('undo_window')
-      setUndoRemaining(windowSeconds)
-
-      undoTimerRef.current = setInterval(() => {
-        const remaining = Math.ceil((undoDeadlineRef.current - Date.now()) / 1000)
-        if (remaining <= 0) {
-          if (undoTimerRef.current) clearInterval(undoTimerRef.current)
-          undoTimerRef.current = null
-          setPhase('idle')
-          setUndoRemaining(0)
-        } else {
-          setUndoRemaining(remaining)
-        }
-      }, 200)
-      setPendingProposal(null)
-
-      // 触发同步
+      setCardStatus('committed')
+      setPhase('idle')
       try { await bridge.triggerSync() } catch { /* ignore */ }
     } catch (err) {
       const errMsg = err instanceof Error ? err.message : '未知错误'
       setMessages(prev => prev.map(m =>
-        m.proposal?.proposalId === proposal.proposalId
-          ? { ...m, proposalStatus: 'error' as const, text: `❌ 记账失败：${errMsg}` } : m
+        m.proposal?.proposalId === edited.proposalId
+          ? { ...m, proposalStatus: 'error' as const, text: `❌ 保存失败：${errMsg}` } : m
       ))
+      setCardStatus('error')
       setPhase('idle')
-      setPendingProposal(null)
     }
-  }, [bridge, bookId])
-
-  const confirmProposal = useCallback(async () => {
-    if (!pendingProposal) return
-    await executeProposalInternal(pendingProposal)
-  }, [pendingProposal, executeProposalInternal])
-
-  const confirmEditedProposal = useCallback(async (edited: ActionProposal) => {
-    await executeProposalInternal(edited)
-  }, [executeProposalInternal])
-
-  const cancelProposal = useCallback(() => {
-    setPendingProposal(null)
-    setPhase('idle')
-    setMessages(prev => prev.map(m =>
-      m.proposal?.proposalId === pendingProposal?.proposalId
-        ? { ...m, proposalStatus: 'undone' as const, text: '已取消' } : m
-    ))
-  }, [pendingProposal])
+  }, [bridge, bookId, pushBookMissingError, stopUndoTimer, writeTransactions])
 
   const undoExecution = useCallback(async () => {
-    if (undoTimerRef.current) {
-      clearInterval(undoTimerRef.current)
-      undoTimerRef.current = null
-    }
-    const lastExecuted = [...messages].reverse().find(
-      m => m.role === 'assistant' && m.transactionIds && m.transactionIds.length > 0
-    )
-    if (!lastExecuted?.transactionIds) { setPhase('idle'); return }
-
+    stopUndoTimer()
+    const ids = activeTxIdsRef.current
+    if (ids.length === 0) { setPhase('idle'); return }
     try {
-      for (const txId of lastExecuted.transactionIds) {
+      for (const txId of ids) {
         await bridge.softDeleteTransaction(txId, newUuid())
       }
       setMessages(prev => prev.map(m =>
-        m.proposal?.proposalId === lastExecuted.proposal?.proposalId
+        m.transactionIds && m.transactionIds.some(id => ids.includes(id))
           ? { ...m, proposalStatus: 'undone' as const, text: '已撤销' } : m
       ))
+      activeTxIdsRef.current = []
+      setActiveProposal(null)
+      setCardStatus(null)
       try { await bridge.triggerSync() } catch { /* ignore */ }
     } catch {
       // C-B1 fix: undo 失败时通知用户，不静默吞掉
       setMessages(prev => prev.map(m =>
-        m.proposal?.proposalId === lastExecuted.proposal?.proposalId
+        m.transactionIds && m.transactionIds.some(id => ids.includes(id))
           ? { ...m, proposalStatus: 'error' as const, text: '撤销失败，请手动处理' } : m
       ))
     }
     setPhase('idle')
-    setUndoRemaining(0)
-  }, [bridge, messages])
+  }, [bridge, stopUndoTimer])
 
   return {
-    messages, phase, pendingProposal, undoRemaining, isSlow,
-    submitInput, confirmProposal, confirmEditedProposal, cancelProposal, undoExecution,
+    messages, phase, activeProposal, cardStatus, undoRemaining, isSlow,
+    submitInput, editProposal, undoExecution,
   }
 }
 

@@ -11,3 +11,13 @@ export function pickEntryBook<T extends { id: string; isMaster?: boolean }>(
   if (books.length === 0) return undefined
   return books.find((b) => !b.isMaster) ?? books[0]
 }
+
+/**
+ * 第八轮 REQ-9：默认账户选择 — App 无"默认账户"标记，取列表第一个账户
+ * （AccountDao.listActive 按 name 排序）；无账户时 undefined（记账 accountId 传 null）。
+ */
+export function pickDefaultAccount<T extends { id: string }>(
+  accounts: T[]
+): T | undefined {
+  return accounts[0]
+}

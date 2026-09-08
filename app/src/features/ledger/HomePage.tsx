@@ -8,7 +8,7 @@
 import { useState, useEffect, useCallback } from 'react'
 import { useNavigate, useSearchParams } from 'react-router'
 import { SyncBadge } from '../../components/SyncBadge'
-import { getCategoryEmoji } from '../../components/category-emoji'
+import { CategoryIcon } from '../../components/CategoryIcon'
 import { useBridge } from '../../platform/hooks/use-bridge'
 import { useTheme } from '../../design/theme'
 import { QuickEntrySheet } from './QuickEntrySheet'
@@ -248,7 +248,7 @@ export function HomePage() {
                 <div key={tx.id} className="flex items-center justify-between py-3"
                   style={{ borderBottom: '1px solid var(--glass-border)' }}>
                   <div className="flex items-center gap-3">
-                    <span className="text-xl">{cat ? getCategoryEmoji(cat.name) : '💰'}</span>
+                    <CategoryIcon icon={cat?.icon} name={cat?.name ?? ''} className="text-xl" />
                     <div>
                       <div className="text-sm font-medium" style={{ color: 'var(--ink)' }}>
                         {cat?.name || '未分类'}

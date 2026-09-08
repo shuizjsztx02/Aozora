@@ -9,6 +9,7 @@ import com.aozora.app.db.entity.*
 import com.aozora.app.db.migrations.MIGRATION_1_2
 import com.aozora.app.db.migrations.MIGRATION_2_3
 import com.aozora.app.db.migrations.MIGRATION_3_4
+import com.aozora.app.db.migrations.MIGRATION_4_5
 
 /**
  * Aozora Room 数据库。
@@ -18,6 +19,7 @@ import com.aozora.app.db.migrations.MIGRATION_3_4
  * - v2：新增 sync_meta、pending_mutations 增加 expectedVersion/lastError
  *        （T-M3-02 同步引擎）
  * - v4：accounts 新增 accountType；双账本种子（REQ-5/REQ-6，T7-1）
+ * - v5：categories 新增 icon；新增 savings_goals 表（第八轮 REQ-8/REQ-7）
  * 后续 migration 使用 MIGRATION_* 追加，不做破坏性 reset；缺失迁移时
  * Room 会拒绝打开并保留数据（fallbackToDestructiveMigration 未开启）。
  */
@@ -31,8 +33,9 @@ import com.aozora.app.db.migrations.MIGRATION_3_4
         PendingMutationEntity::class,
         SyncMetaEntity::class,
         UserConsentEntity::class,
+        SavingsGoalEntity::class,
     ],
-    version = 4,
+    version = 5,
     exportSchema = true
 )
 abstract class AozoraDatabase : RoomDatabase() {
@@ -45,6 +48,7 @@ abstract class AozoraDatabase : RoomDatabase() {
     abstract fun pendingMutationDao(): PendingMutationDao
     abstract fun syncMetaDao(): SyncMetaDao
     abstract fun userConsentDao(): UserConsentDao
+    abstract fun savingsGoalDao(): SavingsGoalDao
 
     companion object {
         const val DATABASE_NAME = "aozora.db"
@@ -61,7 +65,7 @@ abstract class AozoraDatabase : RoomDatabase() {
 
         internal fun open(context: Context, name: String = DATABASE_NAME): AozoraDatabase =
             Room.databaseBuilder(context.applicationContext, AozoraDatabase::class.java, name)
-                .addMigrations(MIGRATION_1_2, MIGRATION_2_3, MIGRATION_3_4)
+                .addMigrations(MIGRATION_1_2, MIGRATION_2_3, MIGRATION_3_4, MIGRATION_4_5)
                 .build()
 
         /** 仅用于测试：创建内存数据库，迁移同样应用 */
@@ -69,7 +73,7 @@ abstract class AozoraDatabase : RoomDatabase() {
             return Room.inMemoryDatabaseBuilder(
                 context.applicationContext,
                 AozoraDatabase::class.java
-            ).addMigrations(MIGRATION_1_2, MIGRATION_2_3, MIGRATION_3_4).build()
+            ).addMigrations(MIGRATION_1_2, MIGRATION_2_3, MIGRATION_3_4, MIGRATION_4_5).build()
         }
     }
 }

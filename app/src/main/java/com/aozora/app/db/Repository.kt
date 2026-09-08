@@ -237,7 +237,16 @@ class Repository(private val db: AozoraDatabase) {
     suspend fun insertCategory(category: CategoryEntity, mutationId: String) {
         require(mutationId.isNotBlank() && category.id.isNotBlank()) { "IDs are required" }
         require(category.kind in setOf("expense", "income") && category.version > 0) { "invalid category" }
+        require(category.name.isNotBlank() && category.name.length <= 64) { "invalid name" }
         db.withTransaction {
+            // 第八轮（REQ-8）二级分类校验：父须存在、父为顶级（限两级）、同 kind、非自引用
+            category.parentId?.let { parentId ->
+                require(parentId != category.id) { "category cannot be its own parent" }
+                val parent = db.categoryDao().getById(parentId)
+                require(parent != null && parent.archivedAt == null) { "parent category not found" }
+                require(parent.parentId == null) { "only two-level categories are supported" }
+                require(parent.kind == category.kind) { "parent kind mismatch" }
+            }
             db.categoryDao().insert(category)
             db.pendingMutationDao().insert(
                 PendingMutationEntity(
@@ -257,6 +266,90 @@ class Repository(private val db: AozoraDatabase) {
     }
 
     suspend fun listCategories(): List<CategoryEntity> = db.categoryDao().listActive()
+
+    suspend fun getCategory(id: String): CategoryEntity? = db.categoryDao().getById(id)
+
+    /**
+     * 第八轮（REQ-8）：更新分类（改名/图标/父级）+ 写入 pending mutation。
+     * 仿 updateAccount：局部合并由调用方构造完整实体；version 必须递增。
+     * parentId 若非空须指向同 kind 的顶级分类（限两级）。
+     */
+    suspend fun updateCategory(category: CategoryEntity, mutationId: String) {
+        require(mutationId.isNotBlank()) { "mutationId is required" }
+        require(category.id.isNotBlank()) { "entity ID is required" }
+        require(category.name.isNotBlank() && category.name.length <= 64) { "invalid name" }
+        require(category.kind in setOf("expense", "income")) { "invalid kind" }
+        require(category.version > 0) { "invalid version" }
+        db.withTransaction {
+            val current = db.categoryDao().getById(category.id)
+            require(current != null) { "category not found" }
+            require(current.archivedAt == null) { "category is archived" }
+            require(category.version > current.version) { "version must increase" }
+            val parentId = category.parentId
+            if (parentId != null) {
+                require(parentId != category.id) { "category cannot be its own parent" }
+                val parent = db.categoryDao().getById(parentId)
+                require(parent != null && parent.archivedAt == null) { "parent category not found" }
+                require(parent.parentId == null) { "only two-level categories are supported" }
+                require(parent.kind == category.kind) { "parent kind mismatch" }
+            }
+            db.categoryDao().update(category)
+            db.pendingMutationDao().insert(
+                PendingMutationEntity(
+                    mutationId = mutationId,
+                    entityType = "category",
+                    entityId = category.id,
+                    operation = PendingMutationEntity.OP_UPDATE,
+                    payload = categoryToJson(category),
+                    status = PendingMutationEntity.STATUS_PENDING,
+                    retryCount = 0,
+                    createdAt = System.currentTimeMillis(),
+                    expectedVersion = current.version,
+                    lastError = null
+                )
+            )
+        }
+    }
+
+    // ─── Savings Goals（第八轮 REQ-7，仅本地不同步） ───
+    //
+    // 刻意：方法签名不含 mutationId、不写 pending_mutations。
+    // 服务端 sync entity_type 正则不认 savings → 入队会导致整批 push 422
+    // 被 SyncEngine 当可重试 → 毒丸卡死队列。见 SavingsGoalEntity 注释。
+
+    suspend fun listSavingsGoals(): List<SavingsGoalEntity> = db.savingsGoalDao().listActive()
+
+    suspend fun getSavingsGoal(id: String): SavingsGoalEntity? = db.savingsGoalDao().getById(id)
+
+    suspend fun insertSavingsGoal(goal: SavingsGoalEntity) {
+        require(goal.id.isNotBlank() && goal.name.isNotBlank()) { "goal id/name required" }
+        require(goal.targetCents >= 1) { "targetCents must be positive" }
+        require(goal.currentCents >= 0) { "currentCents must be non-negative" }
+        require(goal.version > 0 && goal.archivedAt == null) { "invalid goal insert" }
+        db.savingsGoalDao().insert(goal)
+    }
+
+    suspend fun updateSavingsGoal(goal: SavingsGoalEntity) {
+        require(goal.id.isNotBlank() && goal.name.isNotBlank()) { "goal id/name required" }
+        require(goal.targetCents >= 1) { "targetCents must be positive" }
+        require(goal.currentCents >= 0) { "currentCents must be non-negative" }
+        db.withTransaction {
+            val current = db.savingsGoalDao().getById(goal.id)
+            require(current != null) { "savings goal not found" }
+            require(current.archivedAt == null) { "savings goal is archived" }
+            require(goal.version > current.version) { "version must increase" }
+            db.savingsGoalDao().update(goal)
+        }
+    }
+
+    suspend fun archiveSavingsGoal(id: String) {
+        db.withTransaction {
+            val current = db.savingsGoalDao().getById(id)
+            require(current != null && current.archivedAt == null) { "savings goal not found or already archived" }
+            db.savingsGoalDao().archive(id, System.currentTimeMillis())
+        }
+    }
+
 
     // ─── Account ───
 
@@ -684,7 +777,9 @@ class Repository(private val db: AozoraDatabase) {
                             )
                         } else {
                             val entity = change.toCategory(ownerId) ?: continue
-                            db.categoryDao().upsertFromSync(entity)
+                            // 服务端 Category 无 icon 列：保留本地自定义图标，避免被 pull 冲刷
+                            val localIcon = db.categoryDao().getById(entity.id)?.icon
+                            db.categoryDao().upsertFromSync(entity.copy(icon = localIcon ?: entity.icon))
                         }
                     }
                     "account" -> {
@@ -749,6 +844,8 @@ class Repository(private val db: AozoraDatabase) {
             put("parentId", cat.parentId ?: JSONObject.NULL)
             put("kind", cat.kind)
             put("name", cat.name)
+            // icon：服务端 Category 无此列，push 时未知键被忽略（安全）；仅本地持久化。
+            put("icon", cat.icon ?: JSONObject.NULL)
             put("version", cat.version)
         }.toString()
     }
@@ -824,7 +921,8 @@ class Repository(private val db: AozoraDatabase) {
         val version = map["version"]?.toIntOrNull() ?: 1
         return CategoryEntity(
             id = id, ownerId = ownerId, bookId = bookId, parentId = parentId,
-            kind = kind, name = name, archivedAt = null, version = version
+            kind = kind, name = name, icon = map["icon"],
+            archivedAt = null, version = version
         )
     }
 
