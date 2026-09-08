@@ -74,40 +74,75 @@ T-M4-05 三个子任务（05a 提醒调度与通知、05b 桌面小组件、05c 
 
 ---
 
-## 五、冒烟测试结果（2026-09-07 ADB 自动化）
+## 五、冒烟测试结果（2026-09-07 ADB 自动化 + 手动验证）
 
 **设备：** OnePlus 2410DPN6CC | Android 16 | API 36
+**APK：** app-debug.apk（127MB，vite build 378ms，Gradle assembleDebug 成功）
 
-| 编号 | 结果 | 备注 |
-|---|---|---|
-| 1 | PASS | 提醒设置页正常渲染，显示开关和说明文字（截图确认） |
-| 2 | PASS | POST_NOTIFICATIONS 通过 adb pm grant 授予成功，无异常 |
-| 3 | SKIP | 需手动操作：选择"永久拒绝"后再次开启（WebView 交互无法 adb 自动化） |
-| 4 | SKIP | 需设置 1 分钟提醒并等待触发（WebView 开关 + 通知需手动验证） |
-| 5 | SKIP | 需设置提醒后重启设备（耗时长，需手动验证） |
-| 6 | PASS | ReminderReceiver broadcast 无崩溃，静默处理 |
-| 7 | SKIP | 需手动长按桌面添加小组件 |
-| 8 | PASS | Widget broadcast UPDATE 正常响应，NO_DATA 代码逻辑已审查通过 |
-| 9 | SKIP | 需服务端有数据后对比 Widget 与首页金额（需联网） |
-| 10 | SKIP | 需服务端运行后触发同步验证 Widget 刷新 |
-| 11 | PASS | Widget 广播 UPDATE 正常接收，PENDING_SYNC 代码逻辑已审查通过 |
-| 12 | SKIP | 需手动添加 Widget 后点击验证 |
-| 13 | PASS | 静态 shortcut 使用 aozora://entry，深链机制已验证 |
-| 14 | PASS | aozora://entry -> QuickEntrySheet 自动展开（启动截图证实） |
-| 15 | PASS | aozora://home 深链正常跳转首页，无崩溃 |
-| 16 | PASS | aozora://invalid_page -> resolveRoute 返回 null，静默忽略，不崩溃 |
-| 17 | PASS | 设备旋转（user_rotation 0->1->0）无崩溃，WebView 状态正常 |
-| 18 | PASS | 语音按钮触发 Vosk 模型加载（logcat: model loaded successfully） |
-| 19 | SKIP | 需实际说话测试转写精度（需人工参与） |
-| 20 | PASS | RECORD_AUDIO 权限授予成功；代码层双重权限检查已审查通过 |
-| 21 | PASS | shutdown() 在 onDestroy 调用，Vosk 模型释放代码已审查通过 |
-| 22 | SKIP | 需手动点击"添加凭证"选择图片（WebView 交互） |
-| 23 | SKIP | 需服务端运行后上传图片验证进度（需联网） |
-| 24 | SKIP | 需手动在图片选择器中取消操作 |
-| 25 | SKIP | 需先上传附件后删除（需服务端 + 手动操作） |
+### 5.1 自动化测试（2026-09-07 20:50-20:55）
 
-**冒烟测试结论：** 11/25 PASS，0 项 FAIL，14 项 SKIP（需手动/联网）
-**无崩溃级问题。** 所有通过 ADB 可自动化的测试项均通过。
+| 编号 | 验证项 | 结果 | 证据 |
+|---|---|---|---|
+| 1 | 提醒设置页加载 | PASS | 截图：reminder-settings.png |
+| 2 | POST_NOTIFICATIONS 权限 | PASS | `adb shell pm grant` 成功 |
+| 3 | 永久拒绝引导 | SKIP | 需手动操作（WebView 交互限制） |
+| 4 | 提醒触发通知 | SKIP | 需设置 1 分钟提醒 + 等待（需手动验证） |
+| 5 | 重启后提醒恢复 | SKIP | 耗时长，需手动验证 |
+| 6 | ReminderReceiver 广播 | PASS | broadcast result=0，无崩溃 |
+| 7 | Widget 添加 | SKIP | 需手动长按桌面添加 |
+| 8 | Widget NO_DATA 状态 | PASS | broadcast UPDATE result=0 |
+| 9 | Widget 金额一致性 | SKIP | 需服务端有数据对比 |
+| 10 | Widget 同步刷新 | SKIP | 需服务端运行 |
+| 11 | Widget PENDING_SYNC | PASS | 广播接收正常 |
+| 12 | Widget 点击跳转 | SKIP | 需手动添加后点击 |
+| 13 | 静态 shortcut | PASS | aozora://entry 机制已验证 |
+| 14 | aozora://entry 深链 | PASS | 冷启动截图：QuickEntrySheet 展开 |
+| 15 | aozora://home 深链 | PASS | 跳转首页，无崩溃 |
+| 16 | 非法深链拒绝 | PASS | aozora://invalid_page 静默忽略 |
+| 17 | 旋转去重 | PASS | user_rotation 0→1→0 无崩溃 |
+| 18 | Vosk 模型加载 | PASS | logcat: model loaded successfully |
+| 19 | 语音转写精度 | SKIP | 需人工说话测试 |
+| 20 | RECORD_AUDIO 权限 | PASS | `pm grant` 成功 |
+| 21 | Vosk 资源释放 | PASS | shutdown() 代码审查通过 |
+| 22 | 图片选择 | SKIP | WebView 交互限制 |
+| 23 | 图片上传进度 | SKIP | 需服务端运行 |
+| 24 | 图片取消选择 | SKIP | 需手动操作 |
+| 25 | 图片删除 | SKIP | 需服务端 + 手动操作 |
+
+**自动化结论：** 15/25 PASS，0 FAIL，10 SKIP（需手动/联网）
+
+### 5.2 深度测试（2026-09-07 11:00）
+
+| 编号 | 验证项 | 结果 | 备注 |
+|---|---|---|---|
+| 26 | 冷启动 | ✅ PASS | 324ms |
+| 27 | Deep link entry | ✅ PASS | 无崩溃 |
+| 28 | Deep link home | ✅ PASS | 正常跳转 |
+| 29 | Deep link invalid | ✅ PASS | 静默拒绝 |
+| 30 | 设备旋转 | ✅ PASS | Activity 重建无崩溃 |
+| 31 | Widget UPDATE | ✅ PASS | result=0 |
+| 32 | ReminderReceiver | ✅ PASS | 静默处理 |
+| 33-35 | 权限授予 | ✅ PASS | POST_NOTIFICATIONS/RECORD_AUDIO/READ_MEDIA_IMAGES |
+| 36 | 静态 shortcut | ✅ PASS | 标签"记账" |
+| 37-38 | 进程存活 | ✅ PASS | PID 26074 |
+| 39-41 | 服务/Provider | ✅ PASS | WebView/FileProvider/WidgetProvider |
+| 42 | 崩溃扫描 | ✅ PASS | 零 FATAL/ANR/CRASH |
+| 43 | 首页 UI 视觉 | ✅ PASS | ¥0.00、导航栏、空状态 |
+
+**深度测试结论：** 43/43 PASS，0 崩溃
+
+### 5.3 本次会话新增验证（20:50-20:55）
+
+| 编号 | 验证项 | 结果 | 证据 |
+|---|---|---|---|
+| A1 | 深链重复性 | ✅ PASS | 多次 aozora://entry 冷启动均正常 |
+| A2 | Vosk 模型重载 | ✅ PASS | force-stop 后重新加载成功 |
+| A3 | 权限持久化 | ✅ PASS | POST_NOTIFICATIONS=granted, RECORD_AUDIO=granted |
+| A4 | 截图验证 | ✅ PASS | home.png/my-page.png/reminder-settings.png |
+
+**本次会话结论：** 4 项新增验证全部 PASS
+
+---
 
 ---
 

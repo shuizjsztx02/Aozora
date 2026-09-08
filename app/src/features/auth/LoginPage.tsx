@@ -1,20 +1,33 @@
 /**
  * LoginPage — 登录页。
  *
- * 手机验证码登录 + 游客升级说明。
- * 注：真实 SMS 供应商待 D-EXEC-03 确认，当前为 UI 骨架。
+ * FIX-004 / BUG-001: 接线到 auth.getStatus + triggerSync。
+ * - 展示当前认证状态（游客/已注册用户）
+ * - "开始同步"按钮触发首次 /auth/guest 注册（通过 SyncEngine）
+ * - 手机号登录为占位（待 D-EXEC-03 确认 SMS 供应商）
  */
 
-import { useState } from 'react'
+import { useState, useEffect } from 'react'
 import { useNavigate } from 'react-router'
+import { useBridge } from '../../platform/hooks/use-bridge'
 
 export function LoginPage() {
   const navigate = useNavigate()
+  const bridge = useBridge()
   const [phone, setPhone] = useState('')
   const [code, setCode] = useState('')
   const [step, setStep] = useState<'phone' | 'code'>('phone')
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState('')
+  const [authStatus, setAuthStatus] = useState<{
+    registered: boolean
+    userId: string | null
+  } | null>(null)
+
+  // FIX-004: 加载当前认证状态
+  useEffect(() => {
+    bridge.getAuthStatus().then(setAuthStatus).catch(() => {})
+  }, [bridge])
 
   const handleSendCode = async () => {
     if (!phone || phone.length < 11) {
@@ -24,8 +37,7 @@ export function LoginPage() {
     setError('')
     setLoading(true)
     try {
-      // 开发模式：bridge 可能不支持 auth.login，直接跳转
-      // 真实 SMS 待 D-EXEC-03
+      // 手机验证码登录待 D-EXEC-03 SMS 供应商确认
       setStep('code')
     } catch {
       setError('发送验证码失败，请稍后重试')
@@ -42,7 +54,7 @@ export function LoginPage() {
     setError('')
     setLoading(true)
     try {
-      // TODO: bridge.call('auth.login', { phone, code })
+      // TODO: bridge.call('auth.login', { phone, code }) — 待 D-EXEC-03
       navigate('/home')
     } catch {
       setError('登录失败，请重试')
@@ -51,13 +63,18 @@ export function LoginPage() {
     }
   }
 
-  const handleGuestLogin = async () => {
+  const handleSyncNow = async () => {
     setLoading(true)
+    setError('')
     try {
-      // TODO: bridge.call('auth.guest', {})
-      navigate('/home')
-    } catch {
-      setError('注册失败，请重试')
+      await bridge.triggerAuthSync()
+      const status = await bridge.getAuthStatus()
+      setAuthStatus(status)
+      if (status.registered) {
+        navigate('/home')
+      }
+    } catch (e) {
+      setError(e instanceof Error ? e.message : '同步失败，请检查网络')
     } finally {
       setLoading(false)
     }
@@ -72,7 +89,29 @@ export function LoginPage() {
           <p className="text-sm text-ink2">登录后可跨设备同步数据</p>
         </div>
 
-        {/* 表单 */}
+        {/* FIX-004: 认证状态卡片 */}
+        {authStatus && (
+          <div className="glass-card p-4 mb-4">
+            <div className="text-xs text-ink3 mb-1">当前状态</div>
+            <div className="text-sm" style={{ color: 'var(--ink)' }}>
+              {authStatus.registered
+                ? `已注册（用户 ${authStatus.userId?.slice(0, 8) || '未知'}…）`
+                : '游客模式（未注册）'}
+            </div>
+            {!authStatus.registered && (
+              <button
+                onClick={handleSyncNow}
+                disabled={loading}
+                className="mt-3 w-full py-2.5 rounded-xl text-white font-medium text-sm disabled:opacity-40"
+                style={{ background: 'var(--accent)' }}
+              >
+                {loading ? '同步中...' : '立即同步并注册'}
+              </button>
+            )}
+          </div>
+        )}
+
+        {/* 表单（手机号登录占位 — 待 D-EXEC-03） */}
         <div className="glass-card p-5 space-y-4">
           {step === 'phone' ? (
             <>
@@ -128,18 +167,6 @@ export function LoginPage() {
           )}
 
           {error && <div className="text-xs text-expense text-center">{error}</div>}
-        </div>
-
-        {/* 游客入口 */}
-        <div className="mt-6 text-center">
-          <button
-            onClick={handleGuestLogin}
-            disabled={loading}
-            className="text-sm text-ink3 underline"
-            data-testid="guest-login-btn"
-          >
-            不登录，先体验一下
-          </button>
         </div>
 
         {/* 返回 */}

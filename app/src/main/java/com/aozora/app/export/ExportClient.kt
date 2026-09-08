@@ -156,7 +156,9 @@ class ExportClient(
         format = obj.getString("format"),
         status = obj.getString("status"),
         createdAt = obj.getString("created_at"),
-        expiresAt = obj.optString("expires_at", null).takeIf { it.isNotBlank() && it != "null" },
+        // 空串回退而非 null：org.json 对缺失 key + null fallback 会抛 NPE
+        // （Android 与 JVM 两侧都会），缺失/null/空串统一解析为 Kotlin null。
+        expiresAt = obj.optString("expires_at", "").takeIf { it.isNotBlank() && it != "null" },
         fileSize = if (obj.has("file_size") && !obj.isNull("file_size"))
             obj.getLong("file_size") else null,
     )

@@ -716,9 +716,9 @@ class TestResolveCategoriesValidation:
         assert resolved[1]["type"] == "income"    # valid
         assert resolved[2]["type"] == "expense"   # valid
 
-    def test_zero_categories_raises_clear_error(self):
-        """NEW-E6: empty category_names → 400 with clear message (not silent "" fallback)."""
-        from src.common.errors import AppException
+    def test_zero_categories_omits_category_id(self):
+        """R-M4-64: empty category_names → transactions without categoryId
+        (schema does not require categoryId; omitting avoids minLength:1 failure)."""
         from src.modules.ai.context import ProposalValidationContext
         from src.modules.ai.service import AIService
 
@@ -727,9 +727,11 @@ class TestResolveCategoriesValidation:
             category_names={},
         )
         raw = [{"type": "expense", "amountCents": 1000, "category": "餐饮", "bizDate": "2026-09-06"}]
-        with pytest.raises(AppException) as exc_info:
-            AIService._resolve_categories(raw, empty_ctx)
-        assert exc_info.value.code == "no_categories"
+        resolved = AIService._resolve_categories(raw, empty_ctx)
+        assert len(resolved) == 1
+        assert "categoryId" not in resolved[0]
+        assert resolved[0]["amountCents"] == 1000
+        assert resolved[0]["bizDate"] == "2026-09-06"
 
 
 class TestConcurrentParseDedup:

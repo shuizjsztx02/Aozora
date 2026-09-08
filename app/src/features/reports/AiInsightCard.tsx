@@ -129,7 +129,7 @@ export function AiInsightCard({ bridge, bookId, period }: AiInsightCardProps) {
       <div className="flex items-center gap-2 mb-2">
         <span className="text-base">✨</span>
         <h3 className="text-sm font-medium" style={{ color: 'var(--ink)' }}>AI 洞察</h3>
-        <span className="ai-badge text-[10px] px-1 py-0.5 rounded" style={{ background: 'var(--glass)', color: 'var(--accent)', border: '1px solid var(--glass-border)' }}>AI 生成</span>
+        <span className="text-[10px] px-1 py-0.5 rounded" style={{ background: 'var(--glass)', color: 'var(--accent)', border: '1px solid var(--glass-border)' }}>AI 生成</span>
         {report?.narrative_cached && (
           <span className="text-[10px] text-ink3 ml-auto">已缓存</span>
         )}

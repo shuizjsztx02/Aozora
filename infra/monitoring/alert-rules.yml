@@ -143,6 +143,11 @@ groups:
     interval: 60s
     rules:
       # ── S0: crash-free session 率跌破 99.5% ──
+      # T-M5-05ab fix (S1-4): active_devices_total is now a Gauge reporting
+      # unique devices with a heartbeat in the last 24h (not a cumulative
+      # counter). crash_reports_total is a counter incremented server-side on
+      # each POST /telemetry/crash. The ratio is dimensionally consistent:
+      # "24h crash reports / currently-active devices".
       - alert: CrashFreeRateLow
         expr: |
           (
@@ -259,19 +264,23 @@ groups:
     interval: 300s
     rules:
       # ── S0: 对账不一致 ──
-      - alert: ReconciliationInconsistency
-        expr: |
-          increase(reconciliation_inconsistency_total[1h]) > 0
-        for: 5m
-        labels:
-          severity: critical
-          team: backend
-        annotations:
-          summary: "对账发现不一致（S0）"
-          description: |
-            最近 1 小时对账任务检测到 {{ "{{" }} $value {{ "}}" }} 条不一致记录。
-            立即检查同步逻辑、mutation 应用顺序、三端 aggregator。
-          runbook_url: docs/runbooks/data-integrity.md
+      # T-M5-05ab fix (S1-6): DISABLED — record_reconciliation_inconsistency has
+      # no call site yet (reconciliation module is not implemented). Re-enable
+      # once the on-demand audit job writes to the counter; otherwise the alert
+      # would appear "healthy" forever simply because no data flows.
+      # - alert: ReconciliationInconsistency
+      #   expr: |
+      #     increase(reconciliation_inconsistency_total[1h]) > 0
+      #   for: 5m
+      #   labels:
+      #     severity: critical
+      #     team: backend
+      #   annotations:
+      #     summary: "对账发现不一致（S0）"
+      #     description: |
+      #       最近 1 小时对账任务检测到 {{ "{{" }} $value {{ "}}" }} 条不一致记录。
+      #       立即检查同步逻辑、mutation 应用顺序、三端 aggregator。
+      #     runbook_url: docs/runbooks/data-integrity.md
 
       # ── S0: 重复入账 ──
       - alert: DuplicateEntryDetected

@@ -121,8 +121,13 @@ class BridgeProtocolTest {
             BridgeCommands.EXPORT_LIST,
             BridgeCommands.EXPORT_GET,
             BridgeCommands.EXPORT_DOWNLOAD,
+            // T-M5-04c: 账号删除
+            BridgeCommands.ACCOUNT_REQUEST_DELETION_TOKEN,
+            BridgeCommands.ACCOUNT_DELETE,
+            // T-M5-05c: 应用内反馈
+            BridgeCommands.FEEDBACK_SUBMIT,
         )
-        assertEquals(44, commands.size)
+        assertEquals(47, commands.size)
         // 无重复
         assertEquals(commands.size, commands.toSet().size)
     }

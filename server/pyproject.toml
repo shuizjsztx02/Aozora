@@ -57,6 +57,9 @@ filterwarnings = [
     "ignore:.*HMAC key.*below the minimum recommended length.*:Warning",
     # asyncio.run() on Windows ProactorEventLoop leaves unclosed loop warnings
     "ignore::ResourceWarning",
+    # opentelemetry-sdk 1.26+ deprecates LoggingHandler in favor of the
+    # instrumentation package; telemetry.py uses it until we migrate.
+    "ignore:.*LoggingHandler.*deprecated.*:DeprecationWarning",
 ]
 
 [tool.ruff]

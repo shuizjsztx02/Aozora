@@ -1,6 +1,6 @@
 {
   "annotations": { "list": [] },
-  "description": "Business funnel metrics. Panels populate once server telemetry instruments signup / transaction / retention / export counters (T-M5-05b).",
+  "description": "Business funnel metrics. D1/D7 retention gauges are written once per UTC day by the in-process retention job (RETENTION_JOB_ENABLED=true, docker-compose.staging.yml); they read 'No data' until the job's first run.",
   "editable": false,
   "panels": [
     {
@@ -39,10 +39,11 @@
       "gridPos": { "h": 6, "w": 6, "x": 18, "y": 0 },
       "datasource": { "uid": "prometheus" },
       "targets": [{
-        "expr": "100 * sum(increase(business_d1_retained_total[24h])) / (sum(increase(business_signup_total[24h])) > 0)",
+        "expr": "max(business_d1_retention_rate)",
+        "instant": true,
         "legendFormat": "D1 %"
       }],
-      "fieldConfig": { "defaults": { "unit": "percent" } }
+      "fieldConfig": { "defaults": { "unit": "percent", "max": 100, "min": 0 } }
     },
     {
       "title": "Funnel (7d cohort)",
@@ -52,8 +53,8 @@
       "targets": [
         { "expr": "sum(increase(business_signup_total[7d]))", "legendFormat": "signup" },
         { "expr": "sum(increase(business_transaction_total[7d])) > 0", "legendFormat": "transacted" },
-        { "expr": "sum(increase(business_d1_retained_total[7d]))", "legendFormat": "D1" },
-        { "expr": "sum(increase(business_d7_retained_total[7d]))", "legendFormat": "D7" },
+        { "expr": "max(business_d1_retained_count)", "legendFormat": "D1 retained (latest day)" },
+        { "expr": "max(business_d7_retained_count)", "legendFormat": "D7 retained (latest day)" },
         { "expr": "sum(increase(business_export_total[7d]))", "legendFormat": "exported" }
       ]
     },
@@ -68,15 +69,27 @@
       }]
     },
     {
-      "title": "D7 Retention (%) [pending retention job]",
+      "title": "D7 Retention (%)",
       "type": "stat",
       "gridPos": { "h": 8, "w": 12, "x": 0, "y": 16 },
       "datasource": { "uid": "prometheus" },
       "targets": [{
-        "expr": "100 * sum(increase(business_d7_retained_total[7d])) / (sum(increase(business_signup_total[7d])) > 0)",
+        "expr": "max(business_d7_retention_rate)",
+        "instant": true,
         "legendFormat": "D7 %"
       }],
-      "fieldConfig": { "defaults": { "unit": "percent" } }
+      "fieldConfig": { "defaults": { "unit": "percent", "max": 100, "min": 0 } }
+    },
+    {
+      "title": "D1 / D7 Retention Trend",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 16 },
+      "datasource": { "uid": "prometheus" },
+      "targets": [
+        { "expr": "max(business_d1_retention_rate)", "legendFormat": "D1 %" },
+        { "expr": "max(business_d7_retention_rate)", "legendFormat": "D7 %" }
+      ],
+      "fieldConfig": { "defaults": { "unit": "percent", "max": 100, "min": 0 } }
     }
   ],
   "schemaVersion": 39,

@@ -13,9 +13,13 @@ interface ConfirmationCardProps {
   categories: CategoryData[]
   onConfirm: (edited: ActionProposal) => void
   onCancel: () => void
+  /** 确认执行中 */
+  submitting?: boolean
+  /** 上次执行的错误信息 */
+  error?: string | null
 }
 
-export function ConfirmationCard({ proposal, categories, onConfirm, onCancel }: ConfirmationCardProps) {
+export function ConfirmationCard({ proposal, categories, onConfirm, onCancel, submitting, error }: ConfirmationCardProps) {
   const tx = proposal.transactions?.[0]
   if (!tx) return null
   // 早期返回必须放在 hooks 之前：提取内层组件承载 hooks，避免 rules-of-hooks 报错。
@@ -25,13 +29,15 @@ export function ConfirmationCard({ proposal, categories, onConfirm, onCancel }: 
       categories={categories}
       onConfirm={onConfirm}
       onCancel={onCancel}
+      submitting={submitting}
+      error={error}
       tx={tx}
     />
   )
 }
 
 function ConfirmationCardBody({
-  proposal, categories, onConfirm, onCancel, tx,
+  proposal, categories, onConfirm, onCancel, submitting, error, tx,
 }: ConfirmationCardProps & { tx: TransactionItem }) {
   const [amountYuan, setAmountYuan] = useState((tx.amountCents / 100).toFixed(2))
   const [categoryId, setCategoryId] = useState(tx.categoryId || '')
@@ -197,11 +203,19 @@ function ConfirmationCardBody({
         </div>
       )}
 
+      {/* 错误提示 */}
+      {error && (
+        <div className="mb-3 text-xs px-3 py-2 rounded-lg" style={{ color: 'var(--expense)', background: 'rgba(231,76,60,0.1)', border: '1px solid rgba(231,76,60,0.2)' }}>
+          ❌ {error}
+        </div>
+      )}
+
       {/* 操作按钮 */}
       <div className="flex gap-2">
         <button
           onClick={onCancel}
-          className="flex-1 py-2 rounded-lg text-sm font-medium"
+          disabled={submitting}
+          className="flex-1 py-2 rounded-lg text-sm font-medium disabled:opacity-40"
           style={{
             background: 'transparent',
             color: 'var(--ink2)',
@@ -212,10 +226,11 @@ function ConfirmationCardBody({
         </button>
         <button
           onClick={handleConfirm}
-          className="flex-1 py-2 rounded-lg text-sm font-medium text-white"
+          disabled={submitting}
+          className="flex-1 py-2 rounded-lg text-sm font-medium text-white transition-opacity disabled:opacity-60"
           style={{ background: 'var(--accent)' }}
         >
-          确认记账
+          {submitting ? '记账中…' : '确认记账'}
         </button>
       </div>
     </div>

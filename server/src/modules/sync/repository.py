@@ -260,3 +260,71 @@ class SyncRepository:
         if entity_type == "budget":
             return await self.get_budget(entity_id, user_id, include_deleted)
         return None
+
+    # -- F-M3-3: Batch entity loads for pull (N+1 elimination) ---------------
+
+    async def get_entities_batch(
+        self,
+        entity_type: str,
+        entity_ids: list[uuid.UUID],
+        user_id: uuid.UUID,
+        include_deleted: bool = False,
+    ) -> dict[uuid.UUID, object]:
+        """Load multiple entities of one type in a single query.
+
+        Returns a dict mapping entity_id → entity. Only includes entities
+        that exist and are owned by the user (ownership verified).
+        """
+        if not entity_ids:
+            return {}
+
+        base_conditions = [lambda model: model.owner_id == user_id]
+        if not include_deleted:
+            if entity_type in ("category", "account"):
+                base_conditions.append(lambda model: model.archived_at.is_(None))
+            else:
+                base_conditions.append(lambda model: model.deleted_at.is_(None))
+
+        def _apply_conditions(stmt, model):
+            for cond_fn in base_conditions:
+                stmt = stmt.where(cond_fn(model))
+            return stmt
+
+        if entity_type == "book":
+            stmt = select(Book).where(Book.id.in_(entity_ids))
+            stmt = _apply_conditions(stmt, Book)
+            rows = await self.db.execute(stmt)
+            entities = {e.id: e for e in rows.scalars().all()}
+        elif entity_type == "category":
+            stmt = select(Category).where(Category.id.in_(entity_ids))
+            stmt = _apply_conditions(stmt, Category)
+            rows = await self.db.execute(stmt)
+            entities = {e.id: e for e in rows.scalars().all()}
+        elif entity_type == "account":
+            stmt = select(Account).where(Account.id.in_(entity_ids))
+            stmt = _apply_conditions(stmt, Account)
+            rows = await self.db.execute(stmt)
+            entities = {e.id: e for e in rows.scalars().all()}
+        elif entity_type == "transaction":
+            stmt = (
+                select(Transaction)
+                .join(Book, Transaction.book_id == Book.id)
+                .where(Transaction.id.in_(entity_ids), Book.owner_id == user_id)
+            )
+            if not include_deleted:
+                stmt = stmt.where(Transaction.deleted_at.is_(None), Book.deleted_at.is_(None))
+            rows = await self.db.execute(stmt)
+            entities = {e.id: e for e in rows.scalars().all()}
+        elif entity_type == "budget":
+            stmt = (
+                select(Budget)
+                .join(Book, Budget.book_id == Book.id)
+                .where(Budget.id.in_(entity_ids), Book.owner_id == user_id)
+            )
+            if not include_deleted:
+                stmt = stmt.where(Budget.deleted_at.is_(None), Book.deleted_at.is_(None))
+            rows = await self.db.execute(stmt)
+            entities = {e.id: e for e in rows.scalars().all()}
+        else:
+            return {}
+        return entities

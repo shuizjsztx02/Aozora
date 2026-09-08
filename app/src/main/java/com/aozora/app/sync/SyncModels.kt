@@ -71,6 +71,7 @@ data class ServerChange(
         val icon = entityPayload["icon"] ?: "default"
         return AccountEntity(
             id = id, ownerId = ownerId, name = name, icon = icon,
+            accountType = entityPayload["accountType"],
             archivedAt = null, version = version
         )
     }

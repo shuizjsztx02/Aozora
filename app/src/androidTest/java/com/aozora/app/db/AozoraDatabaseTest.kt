@@ -301,7 +301,7 @@ class AozoraDatabaseTest {
     fun test_insertAccount_createsPendingMutation() = runBlocking {
         val account = AccountEntity(
             id = "acc-1", ownerId = "owner-1", name = "现金",
-            icon = "cash", archivedAt = null, version = 1
+            icon = "cash", accountType = null, archivedAt = null, version = 1
         )
         repository.insertAccount(account, "m-acc-1")
 
@@ -320,7 +320,7 @@ class AozoraDatabaseTest {
     fun test_archiveAccount_createsPendingMutation() = runBlocking {
         val account = AccountEntity(
             id = "acc-arch", ownerId = "owner-1", name = "银行卡",
-            icon = "card", archivedAt = null, version = 1
+            icon = "card", accountType = null, archivedAt = null, version = 1
         )
         repository.insertAccount(account, "m-acc-arch-insert")
         repository.archiveAccount("acc-arch", "m-acc-arch")
@@ -339,14 +339,14 @@ class AozoraDatabaseTest {
     fun test_invalidAccount_doesNotWrite() = runBlocking {
         // 空 ID
         try {
-            repository.insertAccount(AccountEntity("", "o", "n", "i", null, 1), "m-bad")
+            repository.insertAccount(AccountEntity("", "o", "n", "i", null, null, 1), "m-bad")
             fail("empty id accepted")
         } catch (_: IllegalArgumentException) { }
 
         // 负数金额（如果未来有金额字段）
         // 版本为 0
         try {
-            repository.insertAccount(AccountEntity("bad", "o", "n", "i", null, 0), "m-bad")
+            repository.insertAccount(AccountEntity("bad", "o", "n", "i", null, null, 0), "m-bad")
             fail("version 0 accepted")
         } catch (_: IllegalArgumentException) { }
 

@@ -3,6 +3,8 @@ package com.aozora.app.sync
 import com.aozora.app.db.entity.PendingMutationEntity
 import org.json.JSONArray
 import org.json.JSONObject
+import java.time.Instant
+import java.time.ZoneOffset
 
 /**
  * 同步引擎的 payload 映射层（纯函数，JVM 可测）。
@@ -92,30 +94,38 @@ object SyncPayloadMapper {
     }
 
     /**
-     * 解析服务端 push 响应 JSON：
+     * 解析服务端 push 响应 JSON（`SyncService.push` 的真实契约）：
      * ```
-     * { "accepted": ["mutation_id", ...],
-     *   "rejected": [ { "mutation_id": "...", "reason": "..." }, ... ],
-     *   "next_cursor": Long }
+     * { "results": [ { "mutation_id": "...", "status": "applied"|"duplicate"|"conflict",
+     *                  "cursor": N, "version": N, "current_version": N }, ... ],
+     *   "cursor": Long }
      * ```
+     *
+     * 映射到客户端 [PushResponse]：
+     * - `applied` / `duplicate` → accepted（服务端已提交，本地可安全移除该 mutation）；
+     *   duplicate 是重推幂等命中，同样代表"已在上行"，必须移除否则本地队列永不收敛。
+     * - `conflict` → rejected（版本冲突，标记失败供上层/用户处理）。
      */
     fun parsePushResponse(json: String): PushResponse {
         val root = JSONObject(json)
         val accepted = mutableListOf<String>()
-        root.optJSONArray("accepted")?.let { arr ->
-            for (i in 0 until arr.length()) accepted += arr.optString(i)
-        }
         val rejected = mutableListOf<RejectedMutation>()
-        root.optJSONArray("rejected")?.let { arr ->
-            for (i in 0 until arr.length()) {
-                val r = arr.optJSONObject(i) ?: continue
-                rejected += RejectedMutation(
-                    mutationId = r.optString("mutation_id", ""),
-                    reason = r.optString("reason", "unknown")
-                )
+        val arr = root.optJSONArray("results") ?: JSONArray()
+        for (i in 0 until arr.length()) {
+            val r = arr.optJSONObject(i) ?: continue
+            val mutationId = r.optString("mutation_id", "")
+            if (mutationId.isEmpty()) continue
+            when (r.optString("status", "")) {
+                "applied", "duplicate" -> accepted += mutationId
+                "conflict" -> {
+                    val reason = if (r.has("current_version"))
+                        "version_conflict@${r.opt("current_version")}" else "version_conflict"
+                    rejected += RejectedMutation(mutationId, reason)
+                }
+                else -> {}  // 未知 status：保守处理，既不移除也不判失败，下轮重试
             }
         }
-        val nextCursor = root.optLong("next_cursor", 0L)
+        val nextCursor = root.optLong("cursor", 0L)
         return PushResponse(
             acceptedMutationIds = accepted,
             rejected = rejected,
@@ -133,13 +143,14 @@ object SyncPayloadMapper {
                 put("entity_id", m.entityId)
                 put("operation", m.operation)
                 if (m.expectedVersion != null) put("expected_version", m.expectedVersion)
-                put("payload", JSONObject(m.payload))
+                put("payload", toWirePayload(m.payload))
             }
             mutationsArr.put(obj)
         }
         return JSONObject().apply {
             put("mutations", mutationsArr)
             put("cursor", request.cursor)
+            if (request.pendingCount != null) put("pending_count", request.pendingCount)
         }.toString()
     }
 
@@ -242,6 +253,60 @@ object SyncPayloadMapper {
 
     private val KNOWN_ENTITY_TYPES = setOf("transaction", "book", "category", "account", "budget")
 
+    /**
+     * push（local→wire）方向：把客户端 Room 里以 camelCase 存储、且 datetime 为
+     * epoch 毫秒的 mutation payload，转换成服务端 `_apply_insert` 期望的
+     * **snake_case + ISO 8601** wire 形态。
+     *
+     * 契约对称性：pull 方向用 [snakeToCamelMap] 把服务端 snake→camel 落到 Room；
+     * 这里 push 方向做反向 camel→snake。字段名映射直接取 [SNAKE_TO_CAMEL] 的逆，
+     * 未知字段用 [camelToSnake] 启发式（与 snakeToCamel 对称），保证往返一致。
+     *
+     * 服务端 transaction/account/budget 的 insert 用直接下标读 snake 键
+     * （如 `payload["book_id"]`），camel 键会 KeyError→422；datetime 字段
+     * （occurred_at 等）服务端用 `datetime.fromisoformat`，故 epoch 毫秒必须转 ISO。
+     */
+    internal fun toWirePayload(camelJson: String): JSONObject {
+        val src = JSONObject(camelJson)
+        val out = JSONObject()
+        val keys = src.keys()
+        while (keys.hasNext()) {
+            val key = keys.next()
+            val wireKey = CAMEL_TO_SNAKE[key] ?: camelToSnake(key)
+            val raw = src.get(key)
+            // epoch 毫秒（Long）→ ISO 8601（UTC），仅限 datetime 语义字段
+            val value = if (raw is Number && key in DATETIME_FIELDS)
+                Instant.ofEpochMilli(raw.toLong()).atOffset(ZoneOffset.UTC).toString()
+            else raw
+            out.put(wireKey, value)
+        }
+        return out
+    }
+
+    /** [SNAKE_TO_CAMEL] 的逆映射（camel→snake），仅覆盖已知字段。lazy 规避 object 属性初始化顺序。 */
+    private val CAMEL_TO_SNAKE: Map<String, String> by lazy {
+        SNAKE_TO_CAMEL.entries.associate { (snake, camel) -> camel to snake }
+    }
+
+    /** payload 中以 epoch 毫秒承载、需转 ISO 的 datetime 字段（camel 形态键名）。 */
+    private val DATETIME_FIELDS = setOf(
+        "occurredAt", "createdAt", "updatedAt", "archivedAt", "deletedAt",
+    )
+
+    /** 简单驼峰转蛇形：`fooBarBaz → foo_bar_baz`。仅用于 [CAMEL_TO_SNAKE] 未覆盖的未知字段。 */
+    private fun camelToSnake(s: String): String {
+        val sb = StringBuilder()
+        for (ch in s) {
+            if (ch.isUpperCase()) {
+                if (sb.isNotEmpty()) sb.append('_')
+                sb.append(ch.lowercaseChar())
+            } else {
+                sb.append(ch)
+            }
+        }
+        return sb.toString()
+    }
+
     private val SNAKE_TO_CAMEL = mapOf(
         "id" to "id",
         "book_id" to "bookId",
@@ -273,13 +338,18 @@ object SyncPayloadMapper {
         "version" to "version"
     )
 
-    /** 将 snake_case JSON 对象转为 camelCase Map<String, String?>。 */
+    /** 将 snake_case JSON 对象转为 camelCase Map<String, String?>。
+     *
+     * 已知字段使用 [SNAKE_TO_CAMEL] 精确映射；未知字段用启发式规则
+     * `foo_bar → fooBar` 转换为 camelCase，确保未来 Room entity 新增列时
+     * 键名可直接匹配（N-M3-7 修复）。
+     */
     internal fun snakeToCamelMap(obj: JSONObject): Map<String, String?> {
         val out = LinkedHashMap<String, String?>(obj.length())
         val keys = obj.keys()
         while (keys.hasNext()) {
             val snakeKey = keys.next()
-            val camelKey = SNAKE_TO_CAMEL[snakeKey] ?: snakeKey
+            val camelKey = SNAKE_TO_CAMEL[snakeKey] ?: snakeToCamel(snakeKey)
             val raw = obj.opt(snakeKey)
             out[camelKey] = when {
                 raw == null || raw == JSONObject.NULL -> null
@@ -289,5 +359,20 @@ object SyncPayloadMapper {
             }
         }
         return out
+    }
+
+    /**
+     * 简单蛇形转驼峰：`foo_bar_baz` → `fooBarBaz`。
+     * 仅用于 [SNAKE_TO_CAMEL] 未覆盖的未知字段。
+     */
+    private fun snakeToCamel(s: String): String {
+        val sb = StringBuilder()
+        var upper = false
+        for (ch in s) {
+            if (ch == '_') { upper = true; continue }
+            sb.append(if (upper) ch.uppercaseChar() else ch)
+            upper = false
+        }
+        return sb.toString()
     }
 }

@@ -71,7 +71,7 @@ Aozora（"我们"）尊重你的隐私。本政策说明我们收集哪些数据
 
 ## 7. 联系方式
 
-如有隐私相关问题，请联系：[项目维护者]
+如有隐私相关问题，请联系：**shuizjsztx02@gmail.com**，或在 [GitHub Issues](https://github.com/shuizjsztx02/Aozora/issues) 提交问题。
 
 ---
 

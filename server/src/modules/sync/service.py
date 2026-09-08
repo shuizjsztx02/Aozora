@@ -468,15 +468,25 @@ class SyncService:
         has_more = len(changes_raw) > limit
         changes_raw = changes_raw[:limit]
 
+        # F-M3-3 fix: 按 entity_type 分组批量加载，替代逐条查询（N→5 次 DB call）
+        from collections import defaultdict
+        type_to_ids: dict[str, set[uuid.UUID]] = defaultdict(set)
+        for sc in changes_raw:
+            if str(sc.operation) != SyncOperation.DELETE.value:
+                type_to_ids[sc.entity_type].add(sc.entity_id)
+
+        batch_cache: dict[str, dict[uuid.UUID, object]] = {}
+        for etype, ids in type_to_ids.items():
+            batch_cache[etype] = await self.repo.get_entities_batch(
+                etype, list(ids), user_id, include_deleted=True,
+            )
+
         changes: list[ChangeItem] = []
         for sc in changes_raw:
             entity_data = None
             if str(sc.operation) != SyncOperation.DELETE.value:
-                # P2-11 fix: pull needs include_deleted=True to reconstruct history
-                # for entities that were later deleted
-                entity = await self.repo.get_entity(
-                    sc.entity_type, sc.entity_id, user_id, include_deleted=True,
-                )
+                cache = batch_cache.get(sc.entity_type, {})
+                entity = cache.get(sc.entity_id)
                 if entity is not None:
                     entity_data = _serialize_entity(entity)
 

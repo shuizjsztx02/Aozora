@@ -36,6 +36,10 @@ interface PendingMutationDao {
     @Query("SELECT COUNT(*) FROM pending_mutations WHERE status = 'pending'")
     suspend fun countPending(): Int
 
+    /** R-M4-31: 统计终态失败的 mutation 数量（与 pending 口径一致用于首页 SyncBadge 对齐）。 */
+    @Query("SELECT COUNT(*) FROM pending_mutations WHERE status = 'failed'")
+    suspend fun countFailed(): Int
+
     // ─── T-M3-02: sync engine queries ───
 
     /**

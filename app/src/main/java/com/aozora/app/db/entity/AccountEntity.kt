@@ -13,6 +13,7 @@ data class AccountEntity(
     val ownerId: String,
     val name: String,
     val icon: String,
+    val accountType: String?,
     val archivedAt: Long?,
     val version: Int
 )

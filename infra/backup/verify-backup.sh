@@ -131,27 +131,14 @@ cleanup() {
 }
 trap cleanup EXIT
 
-# ── 解密（如需要）──
-ACTUAL_DUMP="${DUMP_FILE}"
-if [[ "${DUMP_FILE}" == *.enc ]]; then
-  if [[ -z "${BACKUP_PASSPHRASE:-}" ]]; then
-    echo "[verify] ERROR: Backup is encrypted but BACKUP_PASSPHRASE not set" >&2
-    exit 1
-  fi
-  DECRYPTED_FILE="${DUMP_FILE%.enc}"
-  echo "[verify] Decrypting backup"
-  openssl enc -d -aes-256-cbc -pbkdf2 \
-    -in "${DUMP_FILE}" \
-    -out "${DECRYPTED_FILE}" \
-    -pass "env:BACKUP_PASSPHRASE"
-  ACTUAL_DUMP="${DECRYPTED_FILE}"
-fi
-
-# ── 校验 SHA-256 ──
-CHECKSUM_FILE="${ACTUAL_DUMP}.sha256"
+# ── 校验 SHA-256（必须在解密前，针对原始备份文件）──
+# 修复 #5.0：backup.sh 对加密备份生成的校验和文件是 .dump.enc.sha256（内容对应
+# .enc 文件）。此前在解密后用 ${ACTUAL_DUMP}.sha256（即 .dump.sha256）查找，
+# 加密备份永远找不到校验和文件，完整性校验被静默跳过。
+CHECKSUM_FILE="${DUMP_FILE}.sha256"
 if [[ -f "${CHECKSUM_FILE}" ]]; then
   echo "[verify] Verifying SHA-256 checksum"
-  BACKUP_DIRNAME="$(dirname "${ACTUAL_DUMP}")"
+  BACKUP_DIRNAME="$(dirname "${DUMP_FILE}")"
   # 不使用 2>/dev/null 吞掉所有错误;只允许 sha256sum 自身的校验失败回退到 shasum
   SHA_OK=0
   if command -v sha256sum &>/dev/null; then
@@ -168,9 +155,9 @@ if [[ -f "${CHECKSUM_FILE}" ]]; then
     echo "[verify] Checksum verification tool output was non-zero; falling back to manual comparison"
     EXPECTED=$(awk '{print $1}' "${CHECKSUM_FILE}")
     if command -v sha256sum &>/dev/null; then
-      ACTUAL=$(sha256sum "${ACTUAL_DUMP}" | awk '{print $1}')
+      ACTUAL=$(sha256sum "${DUMP_FILE}" | awk '{print $1}')
     else
-      ACTUAL=$(shasum -a 256 "${ACTUAL_DUMP}" | awk '{print $1}')
+      ACTUAL=$(shasum -a 256 "${DUMP_FILE}" | awk '{print $1}')
     fi
     if [[ "${EXPECTED}" != "${ACTUAL}" ]]; then
       echo "[verify] ERROR: Checksum mismatch!" >&2
@@ -182,6 +169,22 @@ if [[ -f "${CHECKSUM_FILE}" ]]; then
   echo "[verify] Checksum OK"
 else
   echo "[verify] WARNING: No checksum file found, skipping verification"
+fi
+
+# ── 解密（如需要）──
+ACTUAL_DUMP="${DUMP_FILE}"
+if [[ "${DUMP_FILE}" == *.enc ]]; then
+  if [[ -z "${BACKUP_PASSPHRASE:-}" ]]; then
+    echo "[verify] ERROR: Backup is encrypted but BACKUP_PASSPHRASE not set" >&2
+    exit 1
+  fi
+  DECRYPTED_FILE="${DUMP_FILE%.enc}"
+  echo "[verify] Decrypting backup"
+  openssl enc -d -aes-256-cbc -pbkdf2 \
+    -in "${DUMP_FILE}" \
+    -out "${DECRYPTED_FILE}" \
+    -pass "env:BACKUP_PASSPHRASE"
+  ACTUAL_DUMP="${DECRYPTED_FILE}"
 fi
 
 # ── 创建临时数据库 ──
@@ -228,10 +231,10 @@ fi
 # ── 表结构断言 ──
 echo "[verify] Running table assertions"
 
-# 预期 14 张业务表（T-M5-03a §验收标准）
+# 预期 19 张业务表（原 14 张 + 迁移 0008/0012/0013/0015 新增 5 张）
 # 使用空格分隔字符串代替 bash 数组以兼容 POSIX sh / ash。
-EXPECTED_TABLES="users device_sessions books categories accounts transactions budgets attachments ai_conversations ai_usage sync_changes mutation_idempotency exports user_consents"
-EXPECTED_TABLE_COUNT=14
+EXPECTED_TABLES="users device_sessions books categories accounts transactions budgets attachments ai_conversations ai_usage sync_changes mutation_idempotency exports user_consents proposal_idempotency deletion_tokens deletion_audit crash_reports feedbacks"
+EXPECTED_TABLE_COUNT=19
 
 PSQL="psql --host=${PGHOST} --port=${PGPORT} --username=${PGUSER} --dbname=${RESTORE_DB} --no-align --tuples-only"
 

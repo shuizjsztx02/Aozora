@@ -16,6 +16,7 @@ import { useState, useEffect, useCallback, useRef } from 'react'
 import { PageHeader } from '../../components/Layout'
 import { useBridge } from '../../platform/hooks/use-bridge'
 import type { ExportData, ExportFormat } from '../../platform/bridge/bridge-types'
+import { pickEntryBook } from '../../domain/books'
 import * as Money from '../../domain/money'
 
 function formatCents(cents: number): string {
@@ -41,6 +42,8 @@ interface ReconciliationResult {
 interface Book {
   id: string
   name: string
+  /** REQ-6（T7-2 契约）：true = 总账本，客户端聚合视图，服务端导出不可选 */
+  isMaster?: boolean
 }
 
 export function ExportPage() {
@@ -63,9 +66,11 @@ export function ExportPage() {
       try {
         const list = (await bridge.call('book.list', {})) as Book[]
         if (cancelled) return
-        setBooks(list)
-        if (list.length > 0 && !selectedBookIdRef.current) {
-          setSelectedBookId(list[0].id)
+        // T7-6（REQ-6）：服务端导出只支持单账本实体，总账本（客户端聚合视图）不可选
+        const exportable = list.filter(b => !b.isMaster)
+        setBooks(exportable)
+        if (exportable.length > 0 && !selectedBookIdRef.current) {
+          setSelectedBookId(pickEntryBook(exportable)!.id)
         }
       } catch (err) {
         console.error('Failed to load books:', err)
@@ -129,7 +134,7 @@ export function ExportPage() {
 
   return (
     <div className="min-h-screen">
-      <PageHeader title="数据导出" />
+      <PageHeader back />
 
       <div className="px-4 py-4 space-y-4 pb-20">
         {/* 账本选择 */}

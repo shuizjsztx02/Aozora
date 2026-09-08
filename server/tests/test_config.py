@@ -8,6 +8,17 @@ from pydantic import ValidationError
 from src.common.config import Settings, get_config, load_config, reset_config
 
 
+@pytest.fixture(autouse=True)
+def _no_dotenv(monkeypatch):
+    """Isolate from the developer's local server/.env.
+
+    Settings uses env_file=".env"; a local .env (e.g. with DATABASE_URL)
+    would silently satisfy required fields and break "missing env raises"
+    expectations. Disabling it makes this file test env vars only.
+    """
+    monkeypatch.setitem(Settings.model_config, "env_file", None)
+
+
 class TestRequiredFields:
     """The app must refuse to start without critical environment variables."""
 
@@ -52,6 +63,12 @@ class TestDefaults:
     def test_redis_url_default_none(self):
         s = Settings(database_url="sqlite+aiosqlite:///test.db")
         assert s.redis_url is None
+
+    # T-M5-05b follow-up: retention job is opt-in (only staging compose
+    # enables it) so the default must be off for dev/prod.
+    def test_retention_job_default_disabled(self):
+        s = Settings(database_url="sqlite+aiosqlite:///test.db")
+        assert s.retention_job_enabled is False
 
     def test_secret_key_default(self):
         s = Settings(database_url="sqlite+aiosqlite:///test.db")

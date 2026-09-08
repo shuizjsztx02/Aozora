@@ -22,6 +22,7 @@ import {
   type BookData,
   type CategoryData,
   type AccountData,
+  type AccountInput,
   type BudgetData,
   type PendingMutationData,
   type SyncStatusData,
@@ -45,6 +46,8 @@ import {
   type ExportDownloadResult,
   type AccountDeletionTokenResult,
   type AccountDeleteResult,
+  type FeedbackSubmitParams,
+  type FeedbackSubmitResult,
 } from './bridge-types'
 
 // Re-export BridgeError for consumers (e.g. MePage)
@@ -89,11 +92,17 @@ export class NativeBridge {
 
   constructor() {
     this.version = BRIDGE_VERSION
-    // 注册全局回调
+    // 注册全局回调。
+    // 多个实例共存时（如组件内直接 new 而非 useBridge 单例）链式调用，
+    // 响应分发给所有实例、由持有该 requestId 的实例处理——
+    // 避免后注册的实例覆写回调导致先发起的请求响应被丢弃、Promise 挂到超时。
     if (typeof window !== 'undefined') {
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const prev = (window as any).__aozoraBridgeRespond
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       ;(window as any).__aozoraBridgeRespond = (responseJson: string) => {
         this.handleResponse(responseJson)
+        if (typeof prev === 'function') prev(responseJson)
       }
     }
   }
@@ -220,9 +229,14 @@ export class NativeBridge {
     return this.call<AccountData[]>('account.list')
   }
 
-  // R-M1-43 修复：补齐 Account 写命令
-  async insertAccount(account: { id: string; ownerId: string; name: string; icon?: string; version: number }, mutationId: string): Promise<{ id: string }> {
+  // R-M1-43 修复：补齐 Account 写命令；T7-2（REQ-5）参数收敛为 AccountInput
+  async insertAccount(account: AccountInput, mutationId: string): Promise<{ id: string }> {
     return this.call('account.insert', { account, mutationId })
+  }
+
+  /** T7-2（REQ-5/决策 #4）：局部合并更新，version 必须大于当前值。 */
+  async updateAccount(account: AccountInput, mutationId: string): Promise<{ id: string }> {
+    return this.call('account.update', { account, mutationId })
   }
 
   async archiveAccount(id: string, mutationId: string): Promise<{ success: boolean }> {
@@ -573,7 +587,7 @@ export class NativeBridge {
     return this.call<ConsentRecordResult>('consent.record', {
       policyVersion: params?.policyVersion ?? 'v1',
       consentedAt: params?.consentedAt ?? Date.now(),
-      deviceId: params?.deviceId ?? '',
+      ...(params?.deviceId && { deviceId: params.deviceId }),
     })
   }
 
@@ -637,10 +651,82 @@ export class NativeBridge {
     return this.call<AccountDeleteResult>('account.delete', { confirmToken })
   }
 
+  // ─── T-M5-05c: 应用内反馈 ───
+
+  /**
+   * 提交应用内反馈。
+   *
+   * @param params.category - "bug" | "suggestion" | "other"
+   * @param params.content - 自由文本（1–4000 字符）
+   * @param params.contact - 可选联系方式
+   *
+   * 错误码：
+   * - rate_limited: 超出 5 次/小时限制
+   * - auth_lost: 登录已失效
+   * - network_error: 网络错误
+   * - server_error: 服务端错误
+   */
+  async submitFeedback(params: FeedbackSubmitParams): Promise<FeedbackSubmitResult> {
+    return this.call<FeedbackSubmitResult>('feedback.submit', { ...params })
+  }
+
+  // ─── FIX-002 / BUG-014: 触感反馈 ───
+
+  /**
+   * 触发设备震动反馈。
+   *
+   * @param kind - "success"（短震 50ms）或 "error"（长震 200ms）
+   *
+   * 非原生环境（如浏览器调试）下为 no-op。
+   */
+  async hapticFeedback(kind: 'success' | 'error' = 'success'): Promise<void> {
+    try {
+      await this.call('haptic.feedback', { kind })
+    } catch {
+      // 非原生环境下忽略
+    }
+  }
+
+  // ─── FIX-003 / BUG-015: 系统分享 ───
+
+  /**
+   * 调起系统分享菜单，分享文本内容。
+   *
+   * 非原生环境下为 no-op。
+   */
+  async shareText(text: string, subject?: string): Promise<void> {
+    try {
+      await this.call('share.text', { text, subject })
+    } catch {
+      // 非原生环境或无分享目标 — 静默忽略
+    }
+  }
+
+  // ─── FIX-004 / BUG-001: 认证状态 ───
+
+  /** 查询当前认证状态（游客/已注册、userId、deviceId）。 */
+  async getAuthStatus(): Promise<{ registered: boolean; userId: string | null; deviceId: string | null }> {
+    return this.call('auth.getStatus')
+  }
+
+  /**
+   * 同步阻塞跑完整一轮 push/pull（首次会自动 /auth/guest 注册）。
+   * 与 triggerSync（仅入队 WorkManager）区分；调用方超时需 ≥ 同步预算。
+   * 注：原名 triggerSync 与上方入队版重名（TS2393），第六轮合入时更名。
+   */
+  async triggerAuthSync(): Promise<{ outcome: string }> {
+    return this.call('auth.triggerSync')
+  }
+
   // ─── 测试辅助 ───
 
-  /** 获取当前 pending 请求数（用于测试） */
-  pendingCount(): number {
+  /** 获取当前 pending 请求数（用于测试），仅调试用，生产环境不暴露 */
+  _pendingCountForTest(): number {
     return this.pending.size
+  }
+
+  /** @deprecated 使用 _pendingCountForTest 替代；保留此名称以兼容现有测试 */
+  pendingCount(): number {
+    return this._pendingCountForTest()
   }
 }

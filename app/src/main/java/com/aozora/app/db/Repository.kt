@@ -122,6 +122,116 @@ class Repository(private val db: AozoraDatabase) {
     suspend fun getBook(id: String): BookEntity? = db.bookDao().getById(id)
     suspend fun listBooks(): List<BookEntity> = db.bookDao().listActive()
 
+    /** T7-1（REQ-5）：总账本 book id；未播种时为 null。 */
+    suspend fun getMasterBookId(): String? =
+        db.syncMetaDao().getValue(SyncMetaEntity.KEY_MASTER_BOOK_ID)
+
+    private suspend fun setMasterBookId(id: String) {
+        db.syncMetaDao().upsert(
+            SyncMetaEntity(SyncMetaEntity.KEY_MASTER_BOOK_ID, id)
+        )
+    }
+
+    /**
+     * T7-1（决策 #2）：记账目标账本 = 活跃账本中第一个非 master 的 book
+     * （listBooks 按 name 排序）；全部为 master 时回退第一个；无账本时 null。
+     */
+    suspend fun getEntryBook(): BookEntity? {
+        val books = listBooks()
+        if (books.isEmpty()) return null
+        val masterId = getMasterBookId()
+        return books.firstOrNull { it.id != masterId } ?: books.first()
+    }
+
+    // ─── 首启种子（第六轮 Bug-5.1；T7-1 扩展为双账本） ───
+
+    /**
+     * 幂等补种：默认分类 + 默认账本 + 总账本（REQ-5 决策 #1，三段各自独立判断）。
+     *
+     * 背景：此前默认数据完全依赖"服务端 guest 注册 → sync bootstrap"拉取；
+     * 真机连不通服务端时分类九宫格为空，手动记账与聊天记账都无法完成。
+     * 三段（同一事务内）：
+     * 1. 分类表为空 → 种子分类
+     * 2. 账本表为空 → 种"默认账本"（记账目标）
+     * 3. master_book_id 未设 → 种"总账本"（📊）并写键；
+     *    键存在但指向的 book 缺失/已归档 → 清键后重走补种
+     *    （同事务内以新 id 覆写键，等效"清除 + 重写"，无中间态）
+     * 约束：
+     * - id / mutationId 必须为 UUID（服务端 sync/ai 契约，server/src/modules/sync/schemas.py）
+     * - insert 同步产生 pending mutation，联网后 push 给服务端
+     * - 幂等：任一段的既有数据非空即跳过，绝不覆盖用户已有数据
+     */
+    suspend fun ensureSeedDefaults() {
+        db.withTransaction {
+            // 段 1：分类
+            if (db.categoryDao().listActive().isEmpty()) {
+                DEFAULT_EXPENSE_CATEGORIES.forEach { seedCategory(it, "expense") }
+                DEFAULT_INCOME_CATEGORIES.forEach { seedCategory(it, "income") }
+            }
+            // 段 2：默认账本
+            if (db.bookDao().listActive().isEmpty()) {
+                val book = BookEntity(
+                    id = java.util.UUID.randomUUID().toString(),
+                    ownerId = "local",
+                    name = "默认账本",
+                    icon = "📒",
+                    version = 1,
+                    archivedAt = null
+                )
+                db.bookDao().insert(book)
+                enqueueInsert("book", book.id, bookToJson(book))
+            }
+            // 段 3：总账本 + master_book_id 键
+            val masterId = db.syncMetaDao().getValue(SyncMetaEntity.KEY_MASTER_BOOK_ID)
+            val masterBook = masterId?.let { db.bookDao().getById(it) }
+            if (masterBook == null || masterBook.archivedAt != null) {
+                val master = BookEntity(
+                    id = java.util.UUID.randomUUID().toString(),
+                    ownerId = "local",
+                    name = "总账本",
+                    icon = "📊",
+                    version = 1,
+                    archivedAt = null
+                )
+                db.bookDao().insert(master)
+                enqueueInsert("book", master.id, bookToJson(master))
+                setMasterBookId(master.id)
+            }
+        }
+    }
+
+    private suspend fun seedCategory(name: String, kind: String) {
+        val cat = CategoryEntity(
+            id = java.util.UUID.randomUUID().toString(),
+            ownerId = "local",
+            bookId = null,
+            parentId = null,
+            kind = kind,
+            name = name,
+            archivedAt = null,
+            version = 1
+        )
+        db.categoryDao().insert(cat)
+        enqueueInsert("category", cat.id, categoryToJson(cat))
+    }
+
+    private suspend fun enqueueInsert(entityType: String, entityId: String, payload: String) {
+        db.pendingMutationDao().insert(
+            PendingMutationEntity(
+                mutationId = java.util.UUID.randomUUID().toString(),
+                entityType = entityType,
+                entityId = entityId,
+                operation = PendingMutationEntity.OP_INSERT,
+                payload = payload,
+                status = PendingMutationEntity.STATUS_PENDING,
+                retryCount = 0,
+                createdAt = System.currentTimeMillis(),
+                expectedVersion = null,
+                lastError = null
+            )
+        )
+    }
+
     // ─── Category ───
 
     suspend fun insertCategory(category: CategoryEntity, mutationId: String) {
@@ -169,6 +279,35 @@ class Repository(private val db: AozoraDatabase) {
                     retryCount = 0,
                     createdAt = System.currentTimeMillis(),
                     expectedVersion = null,
+                    lastError = null
+                )
+            )
+        }
+    }
+
+    /** T7-1（REQ-6）：原子事务：更新账户 + 写入 pending mutation（仿 updateBudget） */
+    suspend fun updateAccount(account: AccountEntity, mutationId: String) {
+        require(mutationId.isNotBlank()) { "mutationId is required" }
+        require(account.id.isNotBlank()) { "entity ID is required" }
+        require(account.name.isNotBlank()) { "name is required" }
+        require(account.version > 0) { "invalid version" }
+        db.withTransaction {
+            val current = db.accountDao().getById(account.id)
+            require(current != null) { "account not found" }
+            require(current.archivedAt == null) { "account is archived" }
+            require(account.version > current.version) { "version must increase" }
+            db.accountDao().update(account)
+            db.pendingMutationDao().insert(
+                PendingMutationEntity(
+                    mutationId = mutationId,
+                    entityType = "account",
+                    entityId = account.id,
+                    operation = PendingMutationEntity.OP_UPDATE,
+                    payload = accountToJson(account),
+                    status = PendingMutationEntity.STATUS_PENDING,
+                    retryCount = 0,
+                    createdAt = System.currentTimeMillis(),
+                    expectedVersion = current.version,
                     lastError = null
                 )
             )
@@ -330,6 +469,10 @@ class Repository(private val db: AozoraDatabase) {
     suspend fun countPendingMutations(): Int =
         db.pendingMutationDao().countPending()
 
+    /** R-M4-31: 统计终态失败的 mutation 数量，用于与首页 SyncBadge 口径对齐。 */
+    suspend fun countFailedMutations(): Int =
+        db.pendingMutationDao().countFailed()
+
     /** 同步引擎：将残留 syncing 状态重置为 pending（崩溃恢复）。 */
     suspend fun resetSyncingMutations() =
         db.pendingMutationDao().resetSyncingToPending()
@@ -485,7 +628,10 @@ class Repository(private val db: AozoraDatabase) {
      * 应用所有变更并推进 cursor。规则：
      * - 跳过仍有活跃 mutation 的实体（本地待处理版本优先）。
      * - insert/update：upsert（REPLACE）覆盖本地副本。
-     * - delete：transaction/book/category/account → 归档；budget → 物删。
+     * - delete → 归档/物删（N-M3-8 文档化）：
+     *   服务端统一用 deleted_at 软删，客户端按 entity 语义转换——
+     *   transaction/budget → soft delete (deletedAt)
+     *   book/category/account → archive (archivedAt)
      * - ownerId：服务端不返回 owner_id，合并时用 [ownerId] 回填。
      * - 同事务推进 cursor；不入队新 mutation。
      */
@@ -613,6 +759,7 @@ class Repository(private val db: AozoraDatabase) {
             put("ownerId", account.ownerId)
             put("name", account.name)
             put("icon", account.icon)
+            put("accountType", account.accountType ?: JSONObject.NULL)
             put("version", account.version)
         }.toString()
     }
@@ -690,6 +837,7 @@ class Repository(private val db: AozoraDatabase) {
         val version = map["version"]?.toIntOrNull() ?: 1
         return AccountEntity(
             id = id, ownerId = ownerId, name = name, icon = icon,
+            accountType = map["accountType"],
             archivedAt = null, version = version
         )
     }
@@ -729,5 +877,15 @@ class Repository(private val db: AozoraDatabase) {
         db.withTransaction {
             db.clearAllTables()
         }
+    }
+
+    companion object {
+        // 与 domain/nlu/category.ts 内置别名对齐，保证聊天短句能命中真实分类行
+        val DEFAULT_EXPENSE_CATEGORIES = listOf(
+            "餐饮", "交通", "购物", "娱乐", "居住", "医疗", "通讯", "学习"
+        )
+        val DEFAULT_INCOME_CATEGORIES = listOf(
+            "工资", "奖金", "红包收入", "退款", "报销"
+        )
     }
 }

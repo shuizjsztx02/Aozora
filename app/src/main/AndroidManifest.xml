@@ -1,5 +1,7 @@
 <manifest xmlns:android="http://schemas.android.com/apk/res/android">
     <uses-permission android:name="android.permission.INTERNET" />
+    <!-- FIX-002 / BUG-014: 触感反馈 -->
+    <uses-permission android:name="android.permission.VIBRATE" />
 
     <!-- T-M4-05a: 通知权限（Android 13+）+ 启动恢复 -->
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
@@ -27,6 +29,8 @@
     <application
         android:name=".AozoraApp"
         android:allowBackup="false"
+        android:icon="@mipmap/ic_launcher"
+        android:roundIcon="@mipmap/ic_launcher_round"
         android:dataExtractionRules="@xml/backup_rules"
         android:label="@string/app_name"
         android:networkSecurityConfig="@xml/network_security_config"

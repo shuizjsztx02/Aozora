@@ -1,0 +1,222 @@
+/**
+ * DetailPage 组件测试（第六轮 REQ-1 回归防护）。
+ *
+ * 覆盖：
+ * - 默认只展示当月流水 + 期间行右侧支出合计
+ * - 搜索框跨月份匹配（分类名/金额），展示命中数量
+ * - 点击期间标签打开年/月面板，切到上一个月
+ * - 年份 ‹ 切换后选中往年同月 → 空态
+ * - 删除走 softDeleteTransaction 且 mutationId 为 UUID（Bug-5.2 契约）
+ */
+import { describe, it, expect, vi, beforeEach } from 'vitest'
+import { render, screen, waitFor, within } from '@testing-library/react'
+import userEvent from '@testing-library/user-event'
+import { MemoryRouter } from 'react-router'
+import { DetailPage } from '../../features/ledger/DetailPage'
+import type { TransactionData, CategoryData } from '../../platform/bridge/bridge-types'
+
+const mockBridge = vi.hoisted(() => ({
+  call: vi.fn(),
+  softDeleteTransaction: vi.fn(),
+}))
+
+vi.mock('../../platform/hooks/use-bridge', () => ({
+  useBridge: () => mockBridge,
+}))
+
+// 相对"今天"构造上一个月 / 当月期间，避免用例随日期腐化
+const NOW = new Date()
+const curPeriod = `${NOW.getFullYear()}-${String(NOW.getMonth() + 1).padStart(2, '0')}`
+const prevDate = new Date(NOW.getFullYear(), NOW.getMonth() - 1, 15)
+const prevPeriod = `${prevDate.getFullYear()}-${String(prevDate.getMonth() + 1).padStart(2, '0')}`
+const curLabel = `${NOW.getFullYear()}年${NOW.getMonth() + 1}月`
+const prevLabel = `${prevDate.getFullYear()}年${prevDate.getMonth() + 1}月`
+
+const CATS: CategoryData[] = [
+  { id: 'cat-food', kind: 'expense', name: '餐饮', parentId: null, version: 1 },
+  { id: 'cat-salary', kind: 'income', name: '工资', parentId: null, version: 1 },
+]
+
+const mkTx = (over: Partial<TransactionData> & { id: string; bizDate: string }): TransactionData => ({
+  bookId: 'b1',
+  type: 'expense',
+  amountCents: 5500,
+  categoryId: 'cat-food',
+  accountId: null,
+  note: '',
+  occurredAt: new Date(`${over.bizDate}T12:00:00`).getTime(),
+  source: 'manual',
+  version: 1,
+  deletedAt: null,
+  ...over,
+})
+
+const TXS: TransactionData[] = [
+  mkTx({ id: 'tx-cur', bizDate: `${curPeriod}-03`, note: '午饭' }),
+  mkTx({ id: 'tx-prev-income', bizDate: `${prevPeriod}-05`, type: 'income', amountCents: 800000, categoryId: 'cat-salary', note: '八月工资' }),
+]
+
+const renderPage = () =>
+  render(
+    <MemoryRouter>
+      <DetailPage />
+    </MemoryRouter>
+  )
+
+describe('DetailPage', () => {
+  beforeEach(() => {
+    vi.clearAllMocks()
+    mockBridge.softDeleteTransaction.mockResolvedValue({ success: true })
+    mockBridge.call.mockImplementation((cmd: string) => {
+      if (cmd === 'book.list') return Promise.resolve([{ id: 'b1' }])
+      if (cmd === 'transaction.listByBook') return Promise.resolve(TXS)
+      if (cmd === 'category.list') return Promise.resolve(CATS)
+      return Promise.resolve([])
+    })
+  })
+
+  it('shows only current-month rows with expense total on the right', async () => {
+    renderPage()
+    expect(await screen.findByText(curLabel)).toBeInTheDocument()
+    await waitFor(() => expect(screen.getByText('午饭')).toBeInTheDocument())
+    // 上个月的工资行不可见
+    expect(screen.queryByText('八月工资')).not.toBeInTheDocument()
+    // 当月支出合计 55.00 → 整元省略小数
+    expect(screen.getByText('55')).toBeInTheDocument()
+  })
+
+  it('searches across all months and reports hit count', async () => {
+    const user = userEvent.setup()
+    renderPage()
+    await screen.findByText('午饭')
+    await user.type(screen.getByLabelText('搜索账单'), '工资')
+    await waitFor(() => expect(screen.getByText('八月工资')).toBeInTheDocument())
+    expect(screen.getByText('找到 1 笔相关记录')).toBeInTheDocument()
+    // 当月行被搜索范围过滤掉
+    expect(screen.queryByText('午饭')).not.toBeInTheDocument()
+    // 清空后恢复当月视图
+    await user.click(screen.getByLabelText('清空搜索'))
+    await waitFor(() => expect(screen.getByText('午饭')).toBeInTheDocument())
+    expect(screen.queryByText('八月工资')).not.toBeInTheDocument()
+  })
+
+  it('opens year/month picker and switches to previous month', async () => {
+    const user = userEvent.setup()
+    renderPage()
+    await screen.findByText('午饭')
+    await user.click(screen.getByLabelText('切换年份和月份'))
+    const panel = await screen.findByText('1月').then(el => el.closest('div.grid')!)
+    await user.click(within(panel as HTMLElement).getByText(`${prevDate.getMonth() + 1}月`))
+    await waitFor(() => expect(screen.getByText(prevLabel)).toBeInTheDocument())
+    expect(screen.getByText('八月工资')).toBeInTheDocument()
+    expect(screen.queryByText('午饭')).not.toBeInTheDocument()
+  })
+
+  it('switches year backwards and shows empty state for a year without records', async () => {
+    const user = userEvent.setup()
+    renderPage()
+    await screen.findByText('午饭')
+    await user.click(screen.getByLabelText('切换年份和月份'))
+    await user.click(screen.getByLabelText('上一年'))
+    const yearSpan = await screen.findByText(`${NOW.getFullYear() - 1}年`)
+    expect(yearSpan).toBeInTheDocument()
+    await user.click(screen.getByRole('button', { name: '1月' }))
+    await waitFor(() =>
+      expect(within(screen.getByTestId('empty-state')).getByText('本月暂无记录')).toBeInTheDocument()
+    )
+  })
+
+  it('deletes via wrapper with a UUID mutationId', async () => {
+    const user = userEvent.setup()
+    vi.spyOn(window, 'confirm').mockReturnValue(true)
+    renderPage()
+    await screen.findByText('午饭')
+    await user.click(screen.getAllByLabelText('删除')[0])
+    await waitFor(() => expect(mockBridge.softDeleteTransaction).toHaveBeenCalledTimes(1))
+    const [id, mutationId] = mockBridge.softDeleteTransaction.mock.calls[0]
+    expect(id).toBe('tx-cur')
+    expect(mutationId).toMatch(/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/)
+    vi.restoreAllMocks()
+  })
+})
+
+/**
+ * 第七轮 REQ-4 / T7-4：明细页标题改为账本切换入口 + 总账本聚合视图。
+ */
+describe('DetailPage 账本切换（REQ-4）', () => {
+  const mkBookTx = (bookId: string, id: string, note: string): TransactionData =>
+    mkTx({ id, bookId, note, bizDate: `${curPeriod}-03`, categoryId: 'cat-food', amountCents: 3000 })
+
+  // 模拟 BookDao.listActive 的 ORDER BY name：总账本(U+603B) 排在账本A/账本B 之前（决策 #2 坑）
+  const BOOKS = [
+    { id: 'm1', name: '总账本', icon: '📊', isMaster: true },
+    { id: 'a', name: '账本A', icon: '🅰️' },
+    { id: 'b', name: '账本B', icon: '🅱️' },
+  ]
+  const TX_A = mkBookTx('a', 'tx-a', 'A的午饭')
+  const TX_B = mkBookTx('b', 'tx-b', 'B的打车')
+
+  beforeEach(() => {
+    vi.clearAllMocks()
+    mockBridge.call.mockImplementation((cmd: string, payload?: { bookId?: string }) => {
+      if (cmd === 'book.list') return Promise.resolve(BOOKS)
+      if (cmd === 'category.list') return Promise.resolve(CATS)
+      if (cmd === 'transaction.listByBook') {
+        if (payload?.bookId === 'a') return Promise.resolve([TX_A])
+        if (payload?.bookId === 'b') return Promise.resolve([TX_B])
+        // master 自身不存流水：若被查询说明实现走错分支
+        if (payload?.bookId === 'm1') return Promise.resolve([{ ...TX_A, id: 'LEAK', note: 'LEAKED' }])
+        return Promise.resolve([])
+      }
+      return Promise.resolve([])
+    })
+  })
+
+  it('默认选中第一个非 master 账本并只显示其流水', async () => {
+    renderPage()
+    await screen.findByLabelText('切换账本')
+    // 标题位显示"账本A"（非 master），而非"总账本"
+    expect(screen.getByLabelText('切换账本')).toHaveTextContent('账本A')
+    await waitFor(() => expect(screen.getByText('A的午饭')).toBeInTheDocument())
+    expect(screen.queryByText('B的打车')).not.toBeInTheDocument()
+    expect(screen.queryByText('LEAKED')).not.toBeInTheDocument()
+    // 从不查询 master 的流水
+    const queried = mockBridge.call.mock.calls
+      .filter(c => c[0] === 'transaction.listByBook')
+      .map(c => c[1]?.bookId)
+    expect(queried).toContain('a')
+    expect(queried).not.toContain('m1')
+  })
+
+  it('切到总账本后合并展示所有普通账本流水', async () => {
+    const user = userEvent.setup()
+    renderPage()
+    await screen.findByLabelText('切换账本')
+    await user.click(screen.getByLabelText('切换账本'))
+    // 面板内 master 行带"汇总"徽标
+    const masterBtn = await screen.findByRole('button', { name: /总账本/ })
+    expect(masterBtn).toHaveTextContent('汇总')
+    await user.click(masterBtn)
+    // 合并 a + b 两账本流水，且未查询 m1
+    await waitFor(() => expect(screen.getByText('A的午饭')).toBeInTheDocument())
+    expect(screen.getByText('B的打车')).toBeInTheDocument()
+    expect(screen.queryByText('LEAKED')).not.toBeInTheDocument()
+    const queried = mockBridge.call.mock.calls
+      .filter(c => c[0] === 'transaction.listByBook')
+      .map(c => c[1]?.bookId)
+    expect(queried).toContain('a')
+    expect(queried).toContain('b')
+    expect(queried).not.toContain('m1')
+  })
+
+  it('切到账本B后只显示B的记录', async () => {
+    const user = userEvent.setup()
+    renderPage()
+    await screen.findByLabelText('切换账本')
+    await user.click(screen.getByLabelText('切换账本'))
+    await user.click(await screen.findByRole('button', { name: /账本B/ }))
+    await waitFor(() => expect(screen.getByText('B的打车')).toBeInTheDocument())
+    expect(screen.queryByText('A的午饭')).not.toBeInTheDocument()
+    expect(screen.getByLabelText('切换账本')).toHaveTextContent('账本B')
+  })
+})

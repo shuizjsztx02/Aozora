@@ -9,6 +9,8 @@ import android.webkit.WebResourceRequest
 import android.webkit.WebResourceResponse
 import android.webkit.WebViewClient
 import androidx.appcompat.app.AppCompatActivity
+import androidx.core.view.ViewCompat
+import androidx.core.view.WindowInsetsCompat
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.lifecycleScope
 import androidx.lifecycle.repeatOnLifecycle
@@ -41,6 +43,8 @@ class MainActivity : AppCompatActivity() {
     private lateinit var imagePicker: ImagePicker
     private val scope = MainScope()
     private var webViewReady = false
+    // UI-14: 状态栏真实高度（px），注入 CSS 变量 --safe-top-px
+    private var safeAreaTopPx = 0
 
     @SuppressLint("SetJavaScriptEnabled")
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -84,6 +88,8 @@ class MainActivity : AppCompatActivity() {
             override fun onPageFinished(view: WebView?, url: String?) {
                 super.onPageFinished(view, url)
                 webViewReady = true
+                // 页面重新加载后 CSS 变量丢失，需重新注入（UI-14）
+                injectSafeAreaTop()
                 // 页面加载完成后，路由深链
                 routeDeepLink()
             }
@@ -102,14 +108,27 @@ class MainActivity : AppCompatActivity() {
             imageClient = app.imageClient,
             voiceRecognitionService = app.voiceRecognitionService,
             consentStore = app.consentStore,
+            consentClient = app.consentClient,
             exportClient = app.exportClient,
             // T-M5-04c: 账号删除链路
             deletionClient = app.deletionClient,
-            tokenStore = app.tokenStore
+            tokenStore = app.tokenStore,
+            // T-M5-05c: 应用内反馈
+            feedbackClient = app.feedbackClient
         )
         webView.addJavascriptInterface(bridge, "AozoraBridge")
 
         setContentView(webView)
+        // UI-14: targetSdk 35+ 强制 edge-to-edge，WebView 顶到状态栏下。
+        // 读取状态栏 inset 并注入 CSS 变量供 .safe-top 使用（WebView 自身不消费 insets）。
+        ViewCompat.setOnApplyWindowInsetsListener(webView) { _, insets ->
+            val top = insets.getInsets(WindowInsetsCompat.Type.statusBars()).top
+            if (top != safeAreaTopPx) {
+                safeAreaTopPx = top
+                injectSafeAreaTop()
+            }
+            insets
+        }
         webView.loadUrl("https://appassets.androidplatform.net/assets/index.html")
 
         // T-M4-04b: 异步预加载 Vosk 语音识别模型（约 1-2 秒）
@@ -173,6 +192,25 @@ class MainActivity : AppCompatActivity() {
      * - aozora://reports → /reports
      * - aozora://me → /me
      */
+    /**
+     * UI-14: 把状态栏高度（px 转 dp）注入为 CSS 变量 --safe-top-px。
+     *
+     * evaluateJavascript 在页面加载完成前执行会被后续加载覆盖，
+     * 因此由 onPageFinished 与 insets 变化两处触发。
+     */
+    private fun injectSafeAreaTop() {
+        if (webViewDestroyed || !webViewReady) return
+        val dp = (safeAreaTopPx / resources.displayMetrics.density).toInt()
+        val js = """
+            (function(){
+              try {
+                document.documentElement.style.setProperty('--safe-top-px', '${dp}px');
+              } catch (e) {}
+            })();
+        """.trimIndent()
+        webView.post { webView.evaluateJavascript(js, null) }
+    }
+
     private fun routeDeepLink() {
         val route = resolveRoute() ?: return
         if (webViewDestroyed) return

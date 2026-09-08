@@ -38,6 +38,16 @@ class PushRequest(BaseModel):
         min_length=1, max_length=100,
         description="Batch of mutations (1–100)",
     )
+    # T-M5-05ab fix (S1-5): optional client-side queue-depth snapshot.
+    # Clients MAY include the number of pending (unsynced) mutations they
+    # currently hold; the server forwards this to the sync_queue_depth Gauge
+    # so SyncBacklogHigh can fire when the aggregate exceeds the threshold.
+    # Optional to preserve backward compatibility with older clients.
+    pending_count: int | None = Field(
+        default=None,
+        ge=0,
+        description="Client-side count of pending mutations not yet pushed",
+    )
 
 
 class MutationResult(BaseModel):

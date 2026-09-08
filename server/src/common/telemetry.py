@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import logging
 import os
+from datetime import UTC, datetime
 from typing import Optional
 
 from opentelemetry import metrics, trace
@@ -26,11 +27,55 @@ from opentelemetry.sdk.resources import Resource
 from opentelemetry.sdk.trace import TracerProvider
 from opentelemetry.sdk.trace.export import BatchSpanProcessor
 
+# T-M5-05ab fix (S1-1): OTLP log exporter — pushes Python logs to OTel Collector
+# → Loki. Imported lazily inside setup_telemetry so startup doesn't fail if the
+# log SDK is unavailable (the opentelemetry-exporter-otlp package bundles it).
+# T-M5-05ab fix (N-1): class name corrected — the actual class in
+# opentelemetry-exporter-otlp is OTLPLogExporter, not OTLPLogHandler.
+_OTLPLogExporter = None  # populated by setup_telemetry
+try:
+    from opentelemetry._logs import set_logger_provider
+    from opentelemetry.exporter.otlp.proto.grpc._log_exporter import (
+        OTLPLogExporter as _OTLPLogExporterCls,
+    )
+    from opentelemetry.sdk._logs import LoggerProvider, LoggingHandler
+    from opentelemetry.sdk._logs.export import BatchLogRecordProcessor
+    _OTLPLogExporter = _OTLPLogExporterCls
+except ImportError:  # pragma: no cover — exporter-otlp ships these, fallback is no-op
+    pass
+
 # Global exporters (initialized by setup_telemetry)
 _tracer: Optional[trace.Tracer] = None
 _meter: Optional[metrics.Meter] = None
 _logger: Optional[logging.Logger] = None
 _api_metrics: Optional[dict] = None
+
+# T-M5-05ab fix (S1-4): track unique device_id_hash → (last-seen timestamp, app_version)
+# so the observable gauge can report "devices seen in the last 24h".
+# T-M5-05ab fix (N-5): app_version is retained so the Grafana "Version
+# Distribution" panel can break down active devices by client version.
+_active_devices: dict[str, tuple[float, str]] = {}
+_ACTIVE_DEVICE_WINDOW_SECONDS = 86400
+
+
+def _observe_active_devices(_options):
+    """ObservableGauge callback — one Observation per device active in 24h.
+
+    T-M5-05ab fix (N-5): emits ``app_version`` as a label so Grafana can
+    show a version-distribution breakdown. The sum of all observations
+    equals the total active device count (CrashFreeRateLow denominator).
+    """
+    if not _active_devices:
+        return
+    now = datetime.now(UTC).timestamp()
+    cutoff = now - _ACTIVE_DEVICE_WINDOW_SECONDS
+    # Opportunistic prune (avoids unbounded growth).
+    stale = [k for k, (t, _) in _active_devices.items() if t <= cutoff]
+    for k in stale:
+        _active_devices.pop(k, None)
+    from opentelemetry.metrics import Observation
+    for device_id, (_ts, app_version) in _active_devices.items():
+        yield Observation(1, {"device_id": device_id, "app_version": app_version})
 
 
 def setup_telemetry(
@@ -83,6 +128,21 @@ def setup_telemetry(
     # Logger setup (Loki) - uses standard Python logging with OTLP handler
     # Loki ingestion is handled by Promtail/OTel Collector reading stdout
     _logger = logging.getLogger("aozora.telemetry")
+
+    # T-M5-05ab fix (S1-1 + N-1): attach OTLP log exporter so application logs
+    # flow through API → OTel Collector → Loki. Without this, the collector's
+    # logs pipeline has no producer and Loki stays empty.
+    if _OTLPLogExporter is not None:
+        log_exporter = _OTLPLogExporter(endpoint=otlp_endpoint, insecure=True)
+        logger_provider = LoggerProvider(resource=resource)
+        logger_provider.add_log_record_processor(BatchLogRecordProcessor(log_exporter))
+        set_logger_provider(logger_provider)
+        otel_handler = LoggingHandler(
+            level=logging.NOTSET,
+            logger_provider=logger_provider,
+        )
+        # Attach to the root "aozora" logger so all aozora.* modules are captured.
+        logging.getLogger("aozora").addHandler(otel_handler)
 
 
 def get_tracer() -> trace.Tracer:
@@ -148,9 +208,12 @@ def create_api_metrics() -> dict:
         description="Sync mutations that hit a conflict",
         unit="1",
     )
-    instruments["sync_queue_depth"] = meter.create_up_down_counter(
+    # T-M5-05ab fix (S1-5): sync_queue_depth is a Gauge reporting the latest
+    # pending-mutations snapshot provided by clients in PushRequest.pending_count.
+    # Previously an UpDownCounter with no writer, the metric stayed at 0 forever.
+    instruments["sync_queue_depth"] = meter.create_gauge(
         name="sync_queue_depth",
-        description="Aggregate pending mutations across clients",
+        description="Aggregate pending mutations across clients (latest report)",
         unit="1",
     )
     instruments["sync_duration"] = meter.create_histogram(
@@ -180,9 +243,15 @@ def create_api_metrics() -> dict:
         description="Crash reports received via POST /telemetry/crash",
         unit="1",
     )
-    instruments["active_devices"] = meter.create_up_down_counter(
+    # T-M5-05ab fix (S1-4): active_devices_total is now a Gauge reporting the
+    # count of unique devices seen in the last 24h. Previously an UpDownCounter
+    # that incremented on every heartbeat, which made CrashFreeRateLow divide a
+    # 24h window by a cumulative counter (mathematically wrong).
+    # The observable callback reads from TelemetryService._active_devices below.
+    instruments["active_devices"] = meter.create_observable_gauge(
         name="active_devices_total",
-        description="Active device count (reported by clients at startup)",
+        description="Unique devices with a heartbeat in the last 24h",
+        callbacks=[_observe_active_devices],
         unit="1",
     )
 
@@ -201,20 +270,38 @@ def create_api_metrics() -> dict:
         description="Data exports generated",
         unit="1",
     )
-    instruments["business_d1_retained"] = meter.create_counter(
-        name="business_d1_retained_total",
-        description="Users retained after 1 day",
+    # D1/D7 retention is computed nightly (00:20+ UTC) by
+    # ``src.modules.telemetry.retention``. Gauges (not counters) so a process
+    # restart re-sets the same value instead of double counting.
+    instruments["business_d1_retained"] = meter.create_gauge(
+        name="business_d1_retained_count",
+        description="D1-retained users for the latest completed UTC day (set nightly by retention job)",
         unit="1",
     )
-    instruments["business_d7_retained"] = meter.create_counter(
-        name="business_d7_retained_total",
-        description="Users retained after 7 days",
+    instruments["business_d1_retention_rate"] = meter.create_gauge(
+        name="business_d1_retention_rate",
+        description="D1 retention percentage for the latest completed UTC day (set nightly by retention job)",
+        unit="percent",
+    )
+    instruments["business_d7_retained"] = meter.create_gauge(
+        name="business_d7_retained_count",
+        description="D7-retained users for the latest completed UTC day (set nightly by retention job)",
         unit="1",
+    )
+    instruments["business_d7_retention_rate"] = meter.create_gauge(
+        name="business_d7_retention_rate",
+        description="D7 retention percentage for the latest completed UTC day (set nightly by retention job)",
+        unit="percent",
     )
 
     instruments["reconciliation_inconsistency"] = meter.create_counter(
         name="reconciliation_inconsistency_total",
-        description="Reconciliation audit mismatches",
+        description="Reconciliation audit mismatches — no caller yet; alert commented out in alert-rules.yml (T-M5-05b TODO, depends on reconciliation module)",
+        unit="1",
+    )
+    instruments["feedback"] = meter.create_counter(
+        name="feedback_total",
+        description="Beta feedback submissions via POST /telemetry/feedback",
         unit="1",
     )
     instruments["duplicate_entry"] = meter.create_counter(
@@ -261,6 +348,21 @@ def record_sync_conflict() -> None:
     _api_metrics["sync_conflict_counter"].add(1)
 
 
+def record_sync_queue_depth(pending_count: int, user_id: str | None = None) -> None:
+    """T-M5-05ab fix (S1-5): report the latest pending-mutations count.
+
+    sync_queue_depth is a Gauge, so ``set`` records the current absolute value;
+    Prometheus scrapes the last-set value per scrape window. Labels include
+    ``user_id`` (when available) so `sum(sync_queue_depth)` aggregates across
+    all clients for the SyncBacklogHigh alert.
+    """
+    if _api_metrics is None:
+        return
+    if pending_count >= 0:
+        labels = {"user_id": user_id or "unknown"}
+        _api_metrics["sync_queue_depth"].set(pending_count, labels)
+
+
 def record_ai_gateway(
     status: str = "200",
     degraded: bool = False,
@@ -287,10 +389,19 @@ def record_crash_report(app_version: str) -> None:
     _api_metrics["crash_counter"].add(1, {"app_version": app_version})
 
 
-def record_active_device(app_version: str) -> None:
+def record_active_device(app_version: str, device_id_hash: str | None = None) -> None:
+    """Mark a device as active (last-seen = now).
+
+    T-M5-05ab fix (S1-4): when ``device_id_hash`` is provided, the per-device
+    timestamp is stored so the ObservableGauge can report unique-device count.
+    T-M5-05ab fix (N-5): ``app_version`` is stored alongside the timestamp
+    so the gauge callback can emit it as a label for the Version Distribution
+    panel.
+    """
     if _api_metrics is None:
         return
-    _api_metrics["active_devices"].add(1, {"app_version": app_version})
+    if device_id_hash:
+        _active_devices[device_id_hash] = (datetime.now(UTC).timestamp(), app_version)
 
 
 def record_signup() -> None:
@@ -311,24 +422,27 @@ def record_export() -> None:
     _api_metrics["business_export"].add(1)
 
 
-def record_d1_retained() -> None:
-    """Record a user retained after 1 day.
+def set_d1_retention(count: int, rate_pct: float) -> None:
+    """Set D1 retained-user count and retention rate (percent).
 
-    TODO(T-M5-05b): wire to a scheduled task that checks D1 retention.
+    Written nightly by ``src.modules.telemetry.retention``. Gauges are
+    overwritten, so re-running the job (e.g. after a restart) is idempotent.
     """
     if _api_metrics is None:
         return
-    _api_metrics["business_d1_retained"].add(1)
+    _api_metrics["business_d1_retained"].set(count)
+    _api_metrics["business_d1_retention_rate"].set(rate_pct)
 
 
-def record_d7_retained() -> None:
-    """Record a user retained after 7 days.
+def set_d7_retention(count: int, rate_pct: float) -> None:
+    """Set D7 retained-user count and retention rate (percent).
 
-    TODO(T-M5-05b): wire to a scheduled task that checks D7 retention.
+    See :func:`set_d1_retention` for the idempotency note.
     """
     if _api_metrics is None:
         return
-    _api_metrics["business_d7_retained"].add(1)
+    _api_metrics["business_d7_retained"].set(count)
+    _api_metrics["business_d7_retention_rate"].set(rate_pct)
 
 
 def record_reconciliation_inconsistency(count: int = 1) -> None:
@@ -346,3 +460,10 @@ def record_duplicate_entry(count: int = 1) -> None:
     if _api_metrics is None:
         return
     _api_metrics["duplicate_entry"].add(count)
+
+
+def record_feedback() -> None:
+    """Record a beta feedback submission via ``POST /telemetry/feedback``."""
+    if _api_metrics is None:
+        return
+    _api_metrics["feedback"].add(1)

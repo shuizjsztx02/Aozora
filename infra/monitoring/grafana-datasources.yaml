@@ -33,13 +33,15 @@ datasources:
     url: http://tempo:3200
     editable: false
     jsonData:
+      # T-M5-05ab fix (S2-NEW-1): tag must match the span attribute name set
+      # in request_id.py ("request.id", dot-separated) — not "request_id".
       tracesToLogs:
         datasourceUid: loki
-        tags: ["request_id"]
+        tags: ["request.id"]
         filterByTraceID: true
       tracesToMetrics:
         datasourceUid: prometheus
-        tags: ["request_id"]
+        tags: ["request.id"]
         filterByTraceID: true
       nodeGraph:
         enabled: true

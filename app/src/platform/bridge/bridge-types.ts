@@ -29,6 +29,7 @@ export const BridgeCommands = {
   // Account
   ACCOUNT_LIST: 'account.list',
   ACCOUNT_INSERT: 'account.insert',
+  ACCOUNT_UPDATE: 'account.update',
   ACCOUNT_ARCHIVE: 'account.archive',
 
   // Budget
@@ -90,6 +91,15 @@ export const BridgeCommands = {
   // T-M5-04c: 账号删除
   ACCOUNT_REQUEST_DELETION_TOKEN: 'account.requestDeletionToken',
   ACCOUNT_DELETE: 'account.delete',
+
+  // T-M5-05c: 应用内反馈
+  FEEDBACK_SUBMIT: 'feedback.submit',
+
+  // FIX-002/003/004（真机修复轮）：触感 / 分享 / 认证状态
+  HAPTIC_FEEDBACK: 'haptic.feedback',
+  SHARE_TEXT: 'share.text',
+  AUTH_GET_STATUS: 'auth.getStatus',
+  AUTH_TRIGGER_SYNC: 'auth.triggerSync',
 } as const
 
 export type BridgeCommandName = typeof BridgeCommands[keyof typeof BridgeCommands]
@@ -154,6 +164,8 @@ export interface BookData {
   name: string
   icon: string
   version: number
+  /** T7-2（REQ-6，决策 #1）：true = 总账本（查询时聚合，不存流水）。 */
+  isMaster?: boolean
 }
 
 export interface BookInput {
@@ -176,6 +188,19 @@ export interface AccountData {
   id: string
   name: string
   icon: string
+  version: number
+  /** T7-2（REQ-5）：账户分类（储蓄卡/微信/…或自定义），旧行为 null。 */
+  accountType?: string | null
+}
+
+/** T7-2（REQ-5）：account.insert / account.update 共用入参。 */
+export interface AccountInput {
+  id: string
+  ownerId: string
+  name: string
+  icon?: string
+  /** 显式传 null 清空分类；键缺省保留当前值（update 局部合并语义）。 */
+  accountType?: string | null
   version: number
 }
 
@@ -474,4 +499,27 @@ export type AccountDeleteErrorCode =
   | 'invalid_token'
   | 'deletion_pending'
   | 'invalid_input'
+  | 'unavailable'
+
+// ─── T-M5-05c: 应用内反馈类型 ───
+
+export type FeedbackCategory = 'bug' | 'suggestion' | 'other'
+
+export interface FeedbackSubmitParams {
+  category: FeedbackCategory
+  content: string
+  contact?: string
+}
+
+export interface FeedbackSubmitResult {
+  id: string
+}
+
+/** feedback.submit 桥错误码。 */
+export type FeedbackSubmitErrorCode =
+  | 'auth_lost'
+  | 'rate_limited'
+  | 'invalid_input'
+  | 'network_error'
+  | 'server_error'
   | 'unavailable'

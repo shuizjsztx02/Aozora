@@ -2,15 +2,19 @@ package com.aozora.app.crashlytics
 
 import android.content.Context
 import android.os.Build
+import android.util.Log
 import com.aozora.app.auth.AuthClient
+import com.aozora.app.auth.TokenStore
 import com.aozora.app.consent.ConsentStore
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.launch
 import okhttp3.OkHttpClient
 import java.io.PrintWriter
 import java.io.StringWriter
+import java.security.MessageDigest
 import java.util.UUID
 
 /**
@@ -33,11 +37,25 @@ class CrashReporter(
     private val context: Context,
     private val crashDb: CrashReportDatabase,
     private val consentStore: ConsentStore,
+    private val tokenStore: TokenStore,
 ) {
 
     private val dao = crashDb.crashReportDao()
 
     private var previousHandler: Thread.UncaughtExceptionHandler? = null
+
+    // T-M5-05ab fix (S2-7): retain the upload scope as a class member so the
+    // caller can observe completion and the job isn't silently dropped. The
+    // SupervisorJob isolates individual-upload failures (each is caught inside
+    // the loop) — a crash in the DAO listing still surfaces via the handler.
+    private val uploadScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
+    @Volatile private var uploadJob: Job? = null
+
+    companion object {
+        private const val TAG = "CrashReporter"
+        /** 单条报告最大上传尝试次数（超过后丢弃）。 */
+        const val MAX_UPLOAD_ATTEMPTS = 5
+    }
 
     /**
      * 注册全局 handler。多次调用幂等（只替换一次）。
@@ -65,6 +83,17 @@ class CrashReporter(
         val rawMessage = throwable.message ?: ""
         val (cleanMessage, cleanStacktrace) = CrashSanitizer.sanitize(rawMessage, sw.toString())
 
+        // T-M5-05ab fix (S2-2): compute full SHA-256(device_id) at capture time
+        // so per-device rate limiting and dedup on the server can key on a
+        // 128-bit (collision-resistant) value instead of 64-bit.
+        val deviceIdHash = try {
+            val deviceId = tokenStore.deviceId
+            val digest = MessageDigest.getInstance("SHA-256").digest(deviceId.toByteArray())
+            digest.joinToString("") { "%02x".format(it) }
+        } catch (_: Exception) {
+            null
+        }
+
         val entity = CrashReportEntity(
             id = UUID.randomUUID().toString(),
             crashSignature = CrashSanitizer.signature(throwable),
@@ -75,7 +104,7 @@ class CrashReporter(
             exceptionMessage = cleanMessage,
             stacktrace = cleanStacktrace,
             reportedAt = System.currentTimeMillis(),
-            deviceIdHash = null,  // 写入时取不到 deviceIdHash，留待上传时补
+            deviceIdHash = deviceIdHash,
         )
         dao.insertBlocking(entity)
     }
@@ -92,12 +121,14 @@ class CrashReporter(
         baseUrl: String,
     ) {
         if (!consentStore.hasConsented()) return
-        val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
-        scope.launch {
+        // T-M5-05ab fix (S2-7): reuse class-member scope and track the job so
+        // AozoraApp can join/cancel it on process lifecycle events.
+        uploadJob = uploadScope.launch {
             val uploader = CrashReportUploader(baseUrl, httpClient, authClient)
             val pending = try {
                 dao.listPending()
-            } catch (_: Exception) {
+            } catch (e: Exception) {
+                Log.w(TAG, "listPending failed", e)
                 return@launch
             }
             for (report in pending) {
@@ -129,10 +160,5 @@ class CrashReporter(
         } catch (_: Exception) {
             "unknown"
         }
-    }
-
-    companion object {
-        /** 单条报告最大上传尝试次数（超过后丢弃）。 */
-        const val MAX_UPLOAD_ATTEMPTS = 5
     }
 }

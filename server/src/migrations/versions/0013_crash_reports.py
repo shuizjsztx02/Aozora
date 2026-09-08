@@ -31,7 +31,7 @@ def upgrade() -> None:
             "reported_at", sa.DateTime(timezone=True),
             nullable=False, server_default=sa.func.now(),
         ),
-        sa.Column("device_id_hash", sa.String(16), nullable=True),
+        sa.Column("device_id_hash", sa.String(64), nullable=True),
     )
     op.create_index(
         "ix_crash_reports_signature",

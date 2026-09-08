@@ -5,10 +5,11 @@
  * T-M4-04e: 图片上传成功后自动触发 AI 解析 → 批量确认卡 → 执行 add_tx_batch。
  */
 
-import { useState, useCallback, useRef, useEffect } from 'react'
+import { useState, useCallback, useRef, useEffect, useMemo } from 'react'
 import { motion, AnimatePresence } from 'framer-motion'
 import { useBridge } from '../../platform/hooks/use-bridge'
 import { useImage } from '../../platform/hooks/use-image'
+import { newUuid } from '../../platform/uuid'
 import { useImageDraftStore, useImageDraft } from '../../platform/store/image-draft-store'
 import { ImagePickerSheet } from '../image/ImagePickerSheet'
 import { ImageUploadView } from '../image/ImageUploadView'
@@ -17,6 +18,8 @@ import type { CategoryData } from '../../platform/bridge/bridge-types'
 import type { ActionProposal } from '../../domain/action-proposal'
 import * as Money from '../../domain/money'
 import { todayBizDate } from '../../domain/date'
+import { pickEntryBook } from '../../domain/books'
+import { getCategoryEmoji } from '../../components/category-emoji'
 
 interface QuickEntrySheetProps {
   categories: CategoryData[]
@@ -30,8 +33,9 @@ export function QuickEntrySheet({ categories, onClose, onSuccess }: QuickEntrySh
   const [amount, setAmount] = useState('')
   const [categoryId, setCategoryId] = useState<string>('')
   const [note, setNote] = useState('')
-  const [bizDate] = useState(() => todayBizDate('Asia/Shanghai'))
+  const [bizDate, setBizDate] = useState(() => todayBizDate('Asia/Shanghai'))
   const [submitting, setSubmitting] = useState(false)
+  const [submitError, setSubmitError] = useState<string | null>(null)
   const [showImagePicker, setShowImagePicker] = useState(false)
   const image = useImage()
   const { saveDraft, clearDraft } = useImageDraftStore()
@@ -49,17 +53,42 @@ export function QuickEntrySheet({ categories, onClose, onSuccess }: QuickEntrySh
   const parsedAttachmentRef = useRef<string | null>(null)
 
   // R-M4-55 fix: 缓存 bookId，挂载时调用一次 book.list
+  // T7-3（决策 #2）：记账目标 = 第一个非 master 账本，不能取 books[0]
   const bookIdRef = useRef<string | null>(null)
   const getBookId = useCallback(async () => {
     if (bookIdRef.current) return bookIdRef.current
-    const books = await bridge.call('book.list', {}) as { id: string }[]
-    const id = books[0]?.id
+    const books = await bridge.call('book.list', {}) as { id: string; isMaster?: boolean }[]
+    const id = pickEntryBook(books)?.id
     if (!id) throw new Error('No book found')
     bookIdRef.current = id
     return id
   }, [bridge])
 
   const filteredCats = categories.filter(c => c.kind === type)
+
+  // T7-3（REQ-3 / 决策 #6）：分类每页 10 格（2×5），末页补空占位保证两态等高
+  const catPages = useMemo(() => {
+    const pages: CategoryData[][] = []
+    for (let i = 0; i < filteredCats.length; i += 10) {
+      pages.push(filteredCats.slice(i, i + 10))
+    }
+    return pages
+  }, [filteredCats])
+  const [catPage, setCatPage] = useState(0)
+  const safeCatPage = Math.min(catPage, Math.max(0, catPages.length - 1))
+
+  // touch 横滑翻页：起点/终点 dx 阈值 ±40px
+  const swipeStartXRef = useRef<number | null>(null)
+  const handleCatTouchStart = useCallback((e: React.TouchEvent) => {
+    swipeStartXRef.current = e.touches[0]?.clientX ?? null
+  }, [])
+  const handleCatTouchEnd = useCallback((e: React.TouchEvent) => {
+    if (swipeStartXRef.current === null) return
+    const dx = (e.changedTouches[0]?.clientX ?? 0) - swipeStartXRef.current
+    swipeStartXRef.current = null
+    if (dx <= -40 && safeCatPage < catPages.length - 1) setCatPage(safeCatPage + 1)
+    else if (dx >= 40 && safeCatPage > 0) setCatPage(safeCatPage - 1)
+  }, [safeCatPage, catPages.length])
 
   // ─── T-M4-04e: 图片上传成功后自动触发解析 ───────────────────────────
 
@@ -348,26 +377,41 @@ export function QuickEntrySheet({ categories, onClose, onSuccess }: QuickEntrySh
     if (!amount || !categoryId || submitting) return
 
     setSubmitting(true)
+    setSubmitError(null)
     try {
       const amountCents = Money.fromString(amount)
       const bookId = await getBookId()
 
-      await bridge.call('transaction.insert', {
-        id: `tx_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`,
+      // T7-3（决策 #5）：input 清空时兜底今天；非今日 → occurredAt 取该日本地 12:00
+      const safeBizDate = /^\d{4}-\d{2}-\d{2}$/.test(bizDate) ? bizDate : todayBizDate('Asia/Shanghai')
+      const occurredAt = safeBizDate === todayBizDate('Asia/Shanghai')
+        ? Date.now()
+        : new Date(`${safeBizDate}T12:00:00`).getTime()
+
+      // 服务端 sync/ai 契约要求 UUID（第六轮 Bug-5.2）
+      const id = newUuid()
+      // 必须走 insertTransaction 封装：native 侧期望 {tx, mutationId} 包裹结构
+      await bridge.insertTransaction({
+        id,
         bookId,
         type,
         amountCents: amountCents as number,
         categoryId,
         accountId: null,
         note,
-        bizDate,
-        occurredAt: Date.now(),
+        bizDate: safeBizDate,
+        occurredAt,
         source: 'manual',
-      })
+      }, newUuid())
 
+      // FIX-002 / BUG-014: 记账成功短震
+      await bridge.hapticFeedback('success')
       onSuccess()
     } catch (err) {
-      console.error('Failed to insert transaction:', err)
+      // FIX-002 / BUG-014: 记账失败长震
+      await bridge.hapticFeedback('error')
+      const msg = err instanceof Error ? err.message : '未知错误'
+      setSubmitError(msg)
     } finally {
       setSubmitting(false)
     }
@@ -449,7 +493,7 @@ export function QuickEntrySheet({ categories, onClose, onSuccess }: QuickEntrySh
               {/* 收支切换 */}
               <div className="flex gap-2 px-4 mb-3">
                 <button
-                  onClick={() => { setType('expense'); setCategoryId('') }}
+                  onClick={() => { setType('expense'); setCategoryId(''); setCatPage(0) }}
                   className={`flex-1 py-2 rounded-lg text-sm font-medium transition-colors ${type === 'expense' ? 'text-white' : ''}`}
                   style={{
                     background: type === 'expense' ? 'var(--expense)' : 'transparent',
@@ -460,7 +504,7 @@ export function QuickEntrySheet({ categories, onClose, onSuccess }: QuickEntrySh
                   支出
                 </button>
                 <button
-                  onClick={() => { setType('income'); setCategoryId('') }}
+                  onClick={() => { setType('income'); setCategoryId(''); setCatPage(0) }}
                   className={`flex-1 py-2 rounded-lg text-sm font-medium transition-colors ${type === 'income' ? 'text-white' : ''}`}
                   style={{
                     background: type === 'income' ? 'var(--income)' : 'transparent',
@@ -479,53 +523,108 @@ export function QuickEntrySheet({ categories, onClose, onSuccess }: QuickEntrySh
                 </div>
               </div>
 
-              {/* 分类选择 */}
+              {/* 分类选择（REQ-3：每页 10 格 2×5 等高，>10 类横滑翻页 + 指示点） */}
               <div className="px-4 mb-3">
-                <div className="grid grid-cols-5 gap-2 max-h-32 overflow-y-auto">
-                  {filteredCats.map(cat => (
-                    <button
-                      key={cat.id}
-                      onClick={() => setCategoryId(cat.id)}
-                      className={`cat-cell text-xs ${categoryId === cat.id ? 'active' : ''}`}
-                      style={{
-                        background: categoryId === cat.id ? 'var(--glass)' : 'transparent',
-                      }}
-                    >
-                      <span className="text-lg">{getCatEmoji(cat.name)}</span>
-                      <span className="truncate max-w-full text-ink2">{cat.name}</span>
-                    </button>
-                  ))}
+                <div
+                  className="overflow-hidden"
+                  data-testid="category-pager"
+                  onTouchStart={handleCatTouchStart}
+                  onTouchEnd={handleCatTouchEnd}
+                >
+                  <div
+                    className="flex transition-transform duration-200"
+                    style={{ transform: `translateX(-${safeCatPage * 100}%)` }}
+                  >
+                    {catPages.map((page, pi) => (
+                      <div key={pi} className="w-full shrink-0 grid grid-cols-5 gap-2">
+                        {page.map(cat => (
+                          <button
+                            key={cat.id}
+                            onClick={() => setCategoryId(cat.id)}
+                            className={`cat-cell text-xs ${categoryId === cat.id ? 'active' : ''}`}
+                            style={{
+                              background: categoryId === cat.id ? 'var(--glass)' : 'transparent',
+                            }}
+                          >
+                            <span className="text-lg">{getCategoryEmoji(cat.name)}</span>
+                            <span className="truncate max-w-full text-ink2">{cat.name}</span>
+                          </button>
+                        ))}
+                        {/* 末页补空占位格，保证支出/收入两态恒为两行等高 */}
+                        {Array.from({ length: 10 - page.length }).map((_, i) => (
+                          <div key={`ph-${i}`} />
+                        ))}
+                      </div>
+                    ))}
+                  </div>
                 </div>
+                {catPages.length > 1 && (
+                  <div className="flex justify-center gap-1.5 mt-2" data-testid="category-page-dots">
+                    {catPages.map((_, i) => (
+                      <button
+                        key={i}
+                        aria-label={`分类第 ${i + 1} 页`}
+                        onClick={() => setCatPage(i)}
+                        className="rounded-full"
+                        style={{
+                          width: i === safeCatPage ? 16 : 6,
+                          height: 6,
+                          background: i === safeCatPage ? 'var(--accent)' : 'var(--glass-border)',
+                          transition: 'width 0.15s',
+                        }}
+                      />
+                    ))}
+                  </div>
+                )}
               </div>
 
-              {/* 备注 */}
+              {/* T7-3（REQ-2 / 决策 #5）：日期左、添加凭证右同行分布；有凭证/草稿时凭证块整块占行 */}
               <div className="px-4 mb-3">
-                <input
-                  type="text"
-                  value={note}
-                  onChange={e => setNote(e.target.value)}
-                  placeholder="备注（可选）"
-                  className="w-full px-3 py-2 rounded-lg text-sm outline-none"
-                  style={{ background: 'var(--glass)', color: 'var(--ink)', border: '1px solid var(--glass-border)' }}
-                />
-              </div>
-
-              {/* T-M4-04d: 附件区域 */}
-              <div className="px-4 mb-3">
+                <div className="flex items-center gap-2">
+                  <label
+                    className="flex items-center gap-1.5 py-2 px-3 rounded-full text-xs shrink-0"
+                    style={{ background: 'var(--glass)', border: '1px solid var(--glass-border)', color: 'var(--ink2)' }}
+                  >
+                    <span>📅</span>
+                    <input
+                      type="date"
+                      value={bizDate}
+                      onChange={e => setBizDate(e.target.value || todayBizDate('Asia/Shanghai'))}
+                      className="bg-transparent outline-none text-xs"
+                      style={{ color: 'var(--ink2)', border: 'none' }}
+                      data-testid="entry-date"
+                    />
+                  </label>
+                  {!(image.uploading || image.attachment || (image.error && image.error !== 'cancelled')) &&
+                    !(draft && !draft.parseError && !draft.proposal) && (
+                    <button
+                      onClick={() => setShowImagePicker(true)}
+                      disabled={!bridge.isAvailable()}
+                      className="ml-auto flex items-center gap-2 py-2 px-3 rounded-lg text-xs transition-colors disabled:opacity-40"
+                      style={{ background: 'var(--glass)', color: 'var(--ink2)', border: '1px solid var(--glass-border)' }}
+                      data-testid="attach-image-btn"
+                    >
+                      <span>📎</span>
+                      <span>添加凭证</span>
+                    </button>
+                  )}
+                </div>
                 {image.uploading || image.attachment || (image.error && image.error !== 'cancelled') ? (
-                  <ImageUploadView
-                    uploading={image.uploading}
-                    progress={image.progress}
-                    attachment={image.attachment}
-                    error={image.error}
-                    onRetry={image.retry}
-                    onClear={handleImageClear}
-                    onPickAgain={handleImagePickAgain}
-                  />
+                  <div className="mt-2">
+                    <ImageUploadView
+                      uploading={image.uploading}
+                      progress={image.progress}
+                      attachment={image.attachment}
+                      error={image.error}
+                      onRetry={image.retry}
+                      onClear={handleImageClear}
+                      onPickAgain={handleImagePickAgain}
+                    />
+                  </div>
                 ) : draft && !draft.parseError && !draft.proposal ? (
                   /* R-M4-47 fix: 草稿恢复 UI（仅上传失败时显示） */
                   <div
-                    className="rounded-xl p-3"
+                    className="mt-2 rounded-xl p-3"
                     style={{ background: 'var(--glass)', border: '1px solid var(--glass-border)' }}
                     data-testid="image-draft-recovery"
                   >
@@ -553,18 +652,19 @@ export function QuickEntrySheet({ categories, onClose, onSuccess }: QuickEntrySh
                       </button>
                     </div>
                   </div>
-                ) : (
-                  <button
-                    onClick={() => setShowImagePicker(true)}
-                    disabled={!bridge.isAvailable()}
-                    className="flex items-center gap-2 py-2 px-3 rounded-lg text-xs transition-colors disabled:opacity-40"
-                    style={{ background: 'var(--glass)', color: 'var(--ink2)', border: '1px solid var(--glass-border)' }}
-                    data-testid="attach-image-btn"
-                  >
-                    <span>📎</span>
-                    <span>添加凭证</span>
-                  </button>
-                )}
+                ) : null}
+              </div>
+
+              {/* 备注 */}
+              <div className="px-4 mb-3">
+                <input
+                  type="text"
+                  value={note}
+                  onChange={e => setNote(e.target.value)}
+                  placeholder="备注（可选）"
+                  className="w-full px-3 py-2 rounded-lg text-sm outline-none"
+                  style={{ background: 'var(--glass)', color: 'var(--ink)', border: '1px solid var(--glass-border)' }}
+                />
               </div>
 
               {/* T-M4-04e: AI 解析状态 */}
@@ -629,6 +729,17 @@ export function QuickEntrySheet({ categories, onClose, onSuccess }: QuickEntrySh
                 ))}
               </div>
 
+              {/* 错误提示 */}
+              {submitError && (
+                <div
+                  className="mx-4 mb-3 text-center text-xs py-1.5 rounded-lg"
+                  style={{ color: 'var(--expense)', background: 'var(--glass)' }}
+                  data-testid="submit-error"
+                >
+                   {submitError}
+                </div>
+              )}
+
               {/* 确认按钮 */}
               <div className="px-4">
                 <button
@@ -654,17 +765,4 @@ export function QuickEntrySheet({ categories, onClose, onSuccess }: QuickEntrySh
       </motion.div>
     </AnimatePresence>
   )
-}
-
-function getCatEmoji(name: string): string {
-  const map: Record<string, string> = {
-    '餐饮': '🍽️', '早餐': '🥐', '午餐': '🍱', '晚餐': '🍜', '零食': '🍪',
-    '交通': '🚇', '打车': '🚕', '公交': '🚌',
-    '购物': '🛍️', '日用': '🧴', '服饰': '👔',
-    '娱乐': '🎮', '电影': '🎬', '游戏': '🎲',
-    '居住': '🏠', '房租': '🏢', '水电': '💡',
-    '医疗': '🏥', '通讯': '📱', '学习': '📚',
-    '工资': '💰', '奖金': '🎁', '理财': '📈',
-  }
-  return map[name] || '💰'
 }

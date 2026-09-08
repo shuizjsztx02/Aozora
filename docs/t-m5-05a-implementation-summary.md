@@ -19,7 +19,9 @@
 - `opentelemetry-api>=1.20,<2`
 - `opentelemetry-sdk>=1.20,<2`
 - `opentelemetry-exporter-otlp>=1.20,<2`
-- `opentelemetry-instrumentation-fastapi>=0.41b0,<1`
+
+> 注：`request_id.py` 手工建 span，不使用 FastAPIInstrumentor。实现中**未**引入
+> `opentelemetry-instrumentation-fastapi`；此前版本曾错误地列入依赖清单。
 
 ### 2. Request ID 集成 ✅
 

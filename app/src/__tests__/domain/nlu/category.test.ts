@@ -53,6 +53,22 @@ describe('matchCategory — 内置别名', () => {
   })
 })
 
+// ─── 别名解析到用户真实分类 UUID（服务端契约：提案须携带真实 UUID） ───
+
+describe('matchCategory — 别名解析为真实分类', () => {
+  it('午餐 → 用户"餐饮"分类的真实 UUID，而非占位 cat-food', () => {
+    const food: Category = { id: '86d7ca76-b69b-4aa6-94a8-dce4eb73184e', ownerId: 'local', name: '餐饮', parentId: null, kind: 'expense', archivedAt: null, version: 1 }
+    const result = matchCategory('午餐 35', [food])
+    expect(result.match!.categoryId).toBe('86d7ca76-b69b-4aa6-94a8-dce4eb73184e')
+    expect(result.match!.categoryName).toBe('餐饮')
+  })
+
+  it('别名命中但用户无同名分类 → 回退占位 id（保持离线/空分类兼容）', () => {
+    const result = matchCategory('午餐 35', [])
+    expect(result.match!.categoryId).toBe('cat-food')
+  })
+})
+
 // ─── 核心用例：用户分类匹配 ───
 
 describe('matchCategory — 用户分类（优先于内置别名）', () => {

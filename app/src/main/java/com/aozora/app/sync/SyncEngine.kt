@@ -166,6 +166,11 @@ class SyncEngine(
         while (guard-- > 0) {
             val cursor = repository.getSyncCursor()
             val response = syncApi.pull(PullRequest(cursor = cursor))
+            // N-M3-11 修复：防御性校验 — pull 响应过大可能 OOM，限制为服务端 limit 上限。
+            if (response.changes.size > PullRequest.MAX_CHANGES) {
+                Log.w(TAG, "pull response too large: ${response.changes.size}, stopping")
+                break
+            }
             // N-M3-4 修复：cursor 必须推进；否则（服务端 bug / 网络劫持）终止循环，
             // 避免无限 pull 直到 MAX_PULL_PAGES 耗尽。
             if (response.nextCursor <= cursor) {
@@ -186,7 +191,7 @@ class SyncEngine(
             if (pending.isEmpty()) break
             val mutations = pending.map { SyncPayloadMapper.toMutationWire(it) }
             val cursor = repository.getSyncCursor()
-            val response = syncApi.push(PushRequest(mutations = mutations, cursor = cursor))
+            val response = syncApi.push(PushRequest(mutations = mutations, cursor = cursor, pendingCount = pendingCountSnapshot()))
             // 接受：移除对应 mutation
             if (response.acceptedMutationIds.isNotEmpty()) {
                 repository.removeAppliedMutations(response.acceptedMutationIds)

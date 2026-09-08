@@ -115,11 +115,17 @@ export function matchCategory(text: string, categories: Category[]): CategoryMat
   }
 
   // 2. 内置别名匹配
+  //    命中别名后，用目标分类名在用户真实分类里查同名项，取其 UUID。
+  //    占位 id（如 cat-food）不在服务端授权的分类 UUID 集合内，直接发给
+  //    /ai/execute 会被判为幻觉拒绝；因此真实分类存在时必须解析为真实 UUID。
   if (candidates.length === 0) {
     for (const alias of BUILTIN_ALIASES) {
       if (trimmed.includes(alias.keyword)) {
+        const realCat = categories.find(
+          (c) => c.archivedAt === null && c.name === alias.categoryName,
+        )
         candidates.push({
-          categoryId: alias.categoryId,
+          categoryId: realCat ? realCat.id : alias.categoryId,
           categoryName: alias.categoryName,
           confidence: 0.8,
           keyword: alias.keyword,

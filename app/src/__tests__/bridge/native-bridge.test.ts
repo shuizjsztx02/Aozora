@@ -53,6 +53,7 @@ describe('Bridge types — 命令完整性', () => {
     'category.list',
     'account.list',
     'account.insert',
+    'account.update',
     'account.archive',
     'budget.list',
     'budget.insert',
@@ -98,9 +99,16 @@ describe('Bridge types — 命令完整性', () => {
     // T-M5-04c: 账号删除
     'account.requestDeletionToken',
     'account.delete',
+    // T-M5-05c: 应用内反馈
+    'feedback.submit',
+    // FIX-002/003/004（真机修复轮）
+    'haptic.feedback',
+    'share.text',
+    'auth.getStatus',
+    'auth.triggerSync',
   ]
 
-  it('BridgeCommands 包含所有 46 个命令（含 AI 4 个 + T-M4-04a 权限 3 个 + 语音 2 个 + 图片 4 个 + 同意 2 个 + 导出 4 个 + 账号删除 2 个）', () => {
+  it('BridgeCommands 包含所有 52 个命令（含 AI 4 个 + T-M4-04a 权限 3 个 + 语音 2 个 + 图片 4 个 + 同意 2 个 + 导出 4 个 + 账号删除 2 个 + 反馈 1 个 + FIX 触感/分享/认证 4 个 + T7-2 账户更新 1 个）', () => {
     const actualCommands = Object.values(BridgeCommands)
     expect(actualCommands).toHaveLength(expectedCommands.length)
     for (const cmd of expectedCommands) {
@@ -132,7 +140,7 @@ describe('NativeBridge — 基础行为', () => {
   })
 
   it('pendingCount 初始为 0', () => {
-    expect(bridge.pendingCount()).toBe(0)
+    expect(bridge._pendingCountForTest()).toBe(0)
   })
 })
 
@@ -151,7 +159,7 @@ describe('NativeBridge — 与 Mock 桥交互', () => {
     vi.useFakeTimers()
     mockNative.call.mockImplementation(() => { throw new Error('native failure') })
     await expect(bridge.listBooks()).rejects.toThrow('native failure')
-    expect(bridge.pendingCount()).toBe(0)
+    expect(bridge._pendingCountForTest()).toBe(0)
     expect(vi.getTimerCount()).toBe(0)
   })
 
@@ -161,7 +169,7 @@ describe('NativeBridge — 与 Mock 桥交互', () => {
     const requestId = mockNative.call.mock.calls[0][1]
     await vi.advanceTimersByTimeAsync(10000)
     await result
-    expect(bridge.pendingCount()).toBe(0)
+    expect(bridge._pendingCountForTest()).toBe(0)
     expect(() => simulateResponse(requestId, [])).not.toThrow()
   })
 
@@ -963,6 +971,55 @@ describe('NativeBridge — T-M5-04c 账号删除', () => {
     } catch (err) {
       expect(err).toBeInstanceOf(BridgeError)
       expect((err as BridgeError).code).toBe('confirm_token_expired')
+    }
+  })
+})
+
+// ─── T-M5-05c: 应用内反馈桥命令 ───
+
+describe('NativeBridge — T-M5-05c 应用内反馈', () => {
+  let bridge: NativeBridge
+  let capturedCommand = ''
+  let capturedPayload = ''
+
+  beforeEach(() => {
+    bridge = new NativeBridge()
+    installMockBridge().call.mockImplementation((_v: number, requestId: string, cmd: string, payload: string) => {
+      capturedCommand = cmd
+      capturedPayload = payload
+      setTimeout(() => simulateResponse(requestId, { id: 'fb-uuid-1' }), 0)
+    })
+  })
+
+  it('submitFeedback 发送 feedback.submit 命令，payload 含 category/content/contact', async () => {
+    const result = await bridge.submitFeedback({ category: 'bug', content: '闪退在记账页', contact: 'user@example.com' })
+    expect(capturedCommand).toBe('feedback.submit')
+    const payload = JSON.parse(capturedPayload)
+    expect(payload.category).toBe('bug')
+    expect(payload.content).toBe('闪退在记账页')
+    expect(payload.contact).toBe('user@example.com')
+    expect(result.id).toBe('fb-uuid-1')
+  })
+
+  it('submitFeedback 不设 contact 时 payload 中 contact 为 undefined', async () => {
+    await bridge.submitFeedback({ category: 'suggestion', content: '希望支持语音备注' })
+    const payload = JSON.parse(capturedPayload)
+    expect(payload.category).toBe('suggestion')
+    expect(payload.content).toBe('希望支持语音备注')
+    expect(payload.contact).toBeUndefined()
+  })
+
+  it('submitFeedback 桥错误（rate_limited）抛出 BridgeError', async () => {
+    installMockBridge().call.mockImplementation((_v: number, requestId: string) => {
+      setTimeout(() => simulateResponse(requestId, null, false, 'rate_limited', 'Too many requests'), 0)
+    })
+    const freshBridge = new NativeBridge()
+    try {
+      await freshBridge.submitFeedback({ category: 'bug', content: 'test' })
+      expect.unreachable('should have thrown')
+    } catch (err) {
+      expect(err).toBeInstanceOf(BridgeError)
+      expect((err as BridgeError).code).toBe('rate_limited')
     }
   })
 })

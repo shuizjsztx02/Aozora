@@ -21,7 +21,8 @@ import java.io.IOException
 class HttpSyncApi(
     private val baseUrl: String,
     private val httpClient: OkHttpClient,
-    private val authClient: AuthClient
+    private val authClient: AuthClient,
+    private val userAgent: String = "Aozora-Android/unknown"
 ) : SyncApi {
 
     override suspend fun push(request: PushRequest): PushResponse {
@@ -50,6 +51,8 @@ class HttpSyncApi(
                 .post(bodyJson.toRequestBody(JSON))
                 .header("Authorization", "Bearer $token")
                 .header("Content-Type", "application/json")
+                // N-M3-10 修复：设置 User-Agent，便于服务端区分客户端版本、排查问题。
+                .header("User-Agent", userAgent)
                 .build()
             httpClient.newCall(request).execute().use { response ->
                 val bodyStr = response.body?.string().orEmpty()

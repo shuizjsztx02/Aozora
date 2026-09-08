@@ -10,10 +10,12 @@ import androidx.room.PrimaryKey
  */
 @Entity(tableName = "sync_meta")
 data class SyncMetaEntity(
-    @PrimaryKey val key: String,   // 现用 key: "sync_cursor"
+    @PrimaryKey val key: String,   // 现用 key: "sync_cursor" / "master_book_id"
     val value: String              // 字符串化；cursor 为 Long 字面量
 ) {
     companion object {
         const val KEY_CURSOR = "sync_cursor"
+        // T7-1（REQ-5）：总账本 book id，双账本种子写入；未设置时为 null。
+        const val KEY_MASTER_BOOK_ID = "master_book_id"
     }
 }

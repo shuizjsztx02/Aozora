@@ -57,9 +57,16 @@ android {
 
     buildTypes {
         debug {
-            // Debug builds can reach the local dev server via emulator loopback;
+            // Debug builds reach the dev server via emulator loopback by default;
             // network_security_config permits cleartext only for localhost/10.0.2.2.
-            buildConfigField("String", "SYNC_BASE_URL", "\"http://10.0.2.2:8000/api/v1\"")
+            // 真机 USB 联调（第六轮 Bug-5.3）：手机与 PC 网段隔离时，用
+            //   adb reverse tcp:8000 tcp:8000
+            //   .\gradlew :app:assembleDebug "-PAOZORA_DEBUG_API_BASE=http://127.0.0.1:8000/api/v1"
+            // 走 localhost 通路（NSC 已允许 localhost 明文）。
+            val debugUrl = (project.findProperty("AOZORA_DEBUG_API_BASE") as String?)
+                ?.let { if (it.startsWith("\"")) it else "\"$it\"" }
+                ?: "\"http://10.0.2.2:8000/api/v1\""
+            buildConfigField("String", "SYNC_BASE_URL", debugUrl)
         }
         release {
             isMinifyEnabled = false
@@ -87,6 +94,13 @@ android {
     }
     testOptions {
         unitTests.isIncludeAndroidResources = true
+        // 第六轮 Bug-5.1 后 AozoraApp.onCreate 执行 Room withTransaction（ensureSeedDefaults），
+        // Room 事务在 arch_disk_io 线程池运行，而 Robolectric 4.11 默认的 legacy SQLite shadow
+        // 连接表是 thread-local → "Illegal connection pointer"。NATIVE shadow 无此限制
+        // （亦为 Robolectric 4.12+ 默认模式）。
+        unitTests.all {
+            it.systemProperty("robolectric.sqliteMode", "NATIVE")
+        }
     }
 }
 
@@ -129,7 +143,7 @@ dependencies {
     testImplementation("org.jetbrains.kotlinx:kotlinx-coroutines-test:1.8.1")
 
     // T-M4-05a: Robolectric for ReminderScheduler unit tests
-    testImplementation("org.robolectric:robolectric:4.11.1")
+    testImplementation("org.robolectric:robolectric:4.12.2")
     testImplementation("androidx.test:core:1.5.0")
 
     // T-M4-04b: Vosk offline speech recognition

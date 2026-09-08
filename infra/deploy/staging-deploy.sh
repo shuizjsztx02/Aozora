@@ -159,8 +159,8 @@ log_info "Step 6/6: Verifying deployment..."
 
 # Count running containers
 CONTAINER_COUNT=$(docker compose -f docker-compose.staging.yml ps -q | wc -l)
-if [ "$CONTAINER_COUNT" -lt 7 ]; then
-    log_error "Expected at least 7 containers, found $CONTAINER_COUNT"
+if [ "$CONTAINER_COUNT" -lt 8 ]; then
+    log_error "Expected at least 8 containers, found $CONTAINER_COUNT"
     docker compose -f docker-compose.staging.yml ps
     exit 1
 fi

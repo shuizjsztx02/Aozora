@@ -111,6 +111,14 @@ class Settings(BaseSettings):
         default=True,
         validation_alias=AliasChoices("ENABLE_TELEMETRY", "enable_telemetry"),
     )
+    # T-M5-05b follow-up: in-process daily D1/D7 retention job. Default off —
+    # enabled explicitly in docker-compose.staging.yml (and production when
+    # the funnel panels are wired). Off means the gauge simply keeps "No
+    # data" (the dashboard label documents this).
+    retention_job_enabled: bool = Field(
+        default=False,
+        validation_alias=AliasChoices("RETENTION_JOB_ENABLED", "retention_job_enabled"),
+    )
 
     # --- exports ---
     # N-05: export directory. Defaults to a /tmp sub-directory (ephemeral

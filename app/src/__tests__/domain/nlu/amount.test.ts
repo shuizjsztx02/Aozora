@@ -80,17 +80,12 @@ describe('extractAmount — 拒绝日期/年份干扰', () => {
     // "2024-01-01" 应该不识别出金额，或识别为 null
     const result = extractAmount('2024-01-01 的记录')
     // 关键不变量：绝不能把年份 2024 识别为 2024 元的金额
-    // 保守策略：整个字符串无金额 → null
-    if (result !== null) {
-      expect(Money.formatYuan(result.amount)).not.toBe('2024.00')
-    }
+    expect(result).toBeNull()
   })
 
   it('YYYY年MM月DD日 不识别年份为金额', () => {
     const result = extractAmount('2024年9月3日午餐')
-    if (result !== null) {
-      expect(Money.formatYuan(result.amount)).not.toBe('2024.00')
-    }
+    expect(result).toBeNull()
   })
 
   it('N月N日 不识别月份为金额（歧义场景）', () => {

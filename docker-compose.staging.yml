@@ -59,6 +59,9 @@ services:
       LOG_LEVEL: INFO
       OTEL_ENDPOINT: http://otel-collector:4317
       ENABLE_TELEMETRY: "true"
+      # T-M5-05b follow-up: enable in-process daily D1/D7 retention job.
+      # Writes the business_d1/d7 Grafana gauges once per UTC day.
+      RETENTION_JOB_ENABLED: "true"
     depends_on:
       db:
         condition: service_healthy
@@ -103,6 +106,9 @@ services:
       - "--storage.tsdb.retention.time=30d"
       - "--web.console.libraries=/usr/share/prometheus/console_libraries"
       - "--web.console.templates=/usr/share/prometheus/consoles"
+      # T-M5-05ab fix (S1-2): enable remote-write receiver so Tempo span-metrics
+      # (metrics_generator) can push derived metrics to Prometheus.
+      - "--web.enable-remote-write-receiver"
     volumes:
       - ./infra/monitoring/prometheus.yml:/etc/prometheus/prometheus.yml:ro
       - ./infra/monitoring/alert-rules.yml:/etc/prometheus/alert-rules.yml:ro

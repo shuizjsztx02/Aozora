@@ -9,9 +9,10 @@
  * - 关闭回调
  */
 import { describe, it, expect, vi, beforeEach } from 'vitest'
-import { render, screen } from '@testing-library/react'
+import { render, screen, fireEvent } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { QuickEntrySheet } from '../../features/ledger/QuickEntrySheet'
+import { localBizDate } from '../../domain/date'
 import type { ImagePickResult } from '../../platform/bridge/bridge-types'
 
 // ─── Mocks ───
@@ -23,6 +24,8 @@ const mockBridge = vi.hoisted(() => ({
     if (cmd === 'transaction.insert') return Promise.resolve({ id: 'tx-new' })
     return Promise.resolve(null)
   }),
+  insertTransaction: vi.fn().mockResolvedValue({ id: 'tx-new', version: 1 }),
+  hapticFeedback: vi.fn().mockResolvedValue(undefined),
   isAvailable: vi.fn().mockReturnValue(true),
   pickImage: vi.fn().mockResolvedValue({
     attachmentId: 'att-1',
@@ -297,5 +300,112 @@ describe('QuickEntrySheet', () => {
 
     // parseImage should have been called with attachmentId and bookId
     expect(mockBridge.parseImage).toHaveBeenCalledWith('att-1', 'book-1')
+  })
+
+  // ─── T7-3: 分类分页（REQ-3）───
+
+  it('renders pagination dots when categories exceed 10 (REQ-3)', () => {
+    const many = Array.from({ length: 12 }, (_, i) => ({
+      id: `cat-${i}`, name: `分类${i + 1}`, kind: 'expense' as const, parentId: null, version: 1,
+    }))
+    render(
+      <QuickEntrySheet
+        categories={many}
+        onClose={onClose}
+        onSuccess={onSuccess}
+      />,
+    )
+    expect(screen.getByTestId('category-pager')).toBeTruthy()
+    const dots = screen.getByTestId('category-page-dots')
+    expect(dots.querySelectorAll('button')).toHaveLength(2)
+  })
+
+  it('hides pagination dots when categories fit one page (REQ-3)', () => {
+    render(
+      <QuickEntrySheet
+        categories={TEST_CATEGORIES}
+        onClose={onClose}
+        onSuccess={onSuccess}
+      />,
+    )
+    expect(screen.queryByTestId('category-page-dots')).toBeNull()
+  })
+
+  // ─── T7-3: 日期输入（REQ-2）───
+
+  it('submits edited bizDate with noon occurredAt for non-today dates (REQ-2)', async () => {
+    const user = userEvent.setup()
+    render(
+      <QuickEntrySheet
+        categories={TEST_CATEGORIES}
+        onClose={onClose}
+        onSuccess={onSuccess}
+      />,
+    )
+    // 默认日期 = 今天
+    const dateInput = screen.getByTestId('entry-date') as HTMLInputElement
+    expect(dateInput.value).toBe(localBizDate(Date.now(), 'Asia/Shanghai'))
+
+    // 改为前天（与 Asia/Shanghai 今天恒不同，避免时区边界抖动）
+    const targetDate = localBizDate(Date.now() - 2 * 86_400_000, 'Asia/Shanghai')
+    fireEvent.change(dateInput, { target: { value: targetDate } })
+    expect(dateInput.value).toBe(targetDate)
+
+    await user.click(screen.getByText('4'))
+    await user.click(screen.getByText('5'))
+    await user.click(screen.getByText('餐饮'))
+    await user.click(screen.getByText('记一笔'))
+
+    await vi.waitFor(() => {
+      expect(mockBridge.insertTransaction).toHaveBeenCalled()
+    })
+    const [tx] = mockBridge.insertTransaction.mock.calls[0]
+    expect(tx.bizDate).toBe(targetDate)
+    expect(tx.occurredAt).toBe(new Date(`${targetDate}T12:00:00`).getTime())
+  })
+
+  it('falls back to today when date input is cleared (REQ-2)', () => {
+    render(
+      <QuickEntrySheet
+        categories={TEST_CATEGORIES}
+        onClose={onClose}
+        onSuccess={onSuccess}
+      />,
+    )
+    const dateInput = screen.getByTestId('entry-date') as HTMLInputElement
+    fireEvent.change(dateInput, { target: { value: '' } })
+    expect(dateInput.value).toBe(localBizDate(Date.now(), 'Asia/Shanghai'))
+  })
+
+  // ─── T7-3: 记账目标 = 第一个非 master 账本（决策 #2）───
+
+  it('books into the non-master book when book.list has a master entry', async () => {
+    mockBridge.call.mockImplementationOnce((cmd: string) => {
+      if (cmd === 'book.list') {
+        return Promise.resolve([
+          { id: 'm', name: '总账本', isMaster: true },
+          { id: 'b1', name: '默认账本', isMaster: false },
+        ])
+      }
+      return Promise.resolve(null)
+    })
+    const user = userEvent.setup()
+    render(
+      <QuickEntrySheet
+        categories={TEST_CATEGORIES}
+        onClose={onClose}
+        onSuccess={onSuccess}
+      />,
+    )
+    await user.click(screen.getByText('1'))
+    await user.click(screen.getByText('0'))
+    await user.click(screen.getByText('餐饮'))
+    await user.click(screen.getByText('记一笔'))
+
+    await vi.waitFor(() => {
+      expect(mockBridge.insertTransaction).toHaveBeenCalled()
+    })
+    const [tx] = mockBridge.insertTransaction.mock.calls[0]
+    expect(tx.bookId).toBe('b1')
   })
 })

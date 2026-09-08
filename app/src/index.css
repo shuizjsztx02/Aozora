@@ -1,13 +1,13 @@
 @import "tailwindcss";
 
-/* ─── 四时主题 Token（V5.2） ─── */
+/* ─── 四时主题 Token（V5.3 - 星空夜空主题） ─── */
 /* 根节点挂 .t-dawn / .t-day / .t-dusk / .t-night 类切换 */
 
 :root {
-  /* 默认昼间主题 */
+  /* 默认昼间主题 - 保留兼容 */
   --ink: #122031;
   --ink2: #3C5069;
-  --ink3: #4A6380; /* T-M4-06a: match .t-day */
+  --ink3: #4A6380;
   --accent: #1D6CB0;
   --glass: rgba(255, 255, 255, 0.52);
   --glass-border: rgba(255, 255, 255, 0.3);
@@ -25,7 +25,7 @@
 .t-dawn {
   --ink: #1E2733;
   --ink2: #46536B;
-  --ink3: #526078; /* T-M4-06a: darken for WCAG AA ≥4.5:1 on glass */
+  --ink3: #526078;
   --accent: #D96F5A;
   --glass: rgba(255, 253, 250, 0.6);
   --glass-border: rgba(255, 200, 180, 0.3);
@@ -42,7 +42,7 @@
 .t-day {
   --ink: #122031;
   --ink2: #3C5069;
-  --ink3: #4A6380; /* T-M4-06a: darken for WCAG AA ≥4.5:1 on glass */
+  --ink3: #4A6380;
   --accent: #1D6CB0;
   --glass: rgba(255, 255, 255, 0.52);
   --glass-border: rgba(255, 255, 255, 0.3);
@@ -59,9 +59,9 @@
 .t-dusk {
   --ink: #241C36;
   --ink2: #4E4066;
-  --ink3: #554575; /* T-M4-06a: darken for WCAG AA ≥4.5:1 on glass */
+  --ink3: #554575;
   --accent: #D95F3B;
-  --glass: rgba(255, 249, 242, 0.68); /* T-M4-06a: increase opacity for contrast on gradient */
+  --glass: rgba(255, 249, 242, 0.68);
   --glass-border: rgba(200, 150, 100, 0.25);
   --income: #1E9E6A;
   --expense: #D95F3B;
@@ -72,7 +72,7 @@
   --card-shadow: 0 4px 24px rgba(80, 30, 60, 0.15);
 }
 
-/* 夜 night (20:00-04:59) */
+/* 夜 night (20:00-04:59) - 星空夜空主题 */
 .t-night {
   --ink: #EFF1F8;
   --ink2: #B6BCCF;
@@ -83,14 +83,13 @@
   --income: #4CC38A;
   --expense: #E8756A;
   --warn: #E9C56A;
-  --sky-from: #0F1628;
+  --sky-from: #0A0E1A;
   --sky-to: #1A1F3A;
-  --nav-bg: rgba(14, 19, 40, 0.8);
+  --nav-bg: rgba(10, 14, 26, 0.85);
   --card-shadow: 0 4px 24px rgba(0, 0, 0, 0.3);
 }
 
-/* ─── 基础排版 ─── */
-
+/* ─── 星空夜空全局背景 ─── */
 body {
   margin: 0;
   min-width: 320px;
@@ -100,6 +99,12 @@ body {
   color: var(--ink);
   background: linear-gradient(180deg, var(--sky-from), var(--sky-to));
   transition: color 0.3s, background 0.3s;
+}
+
+/* 星空夜空：夜间模式强制使用深色背景 */
+.t-night body,
+body.t-night {
+  background: linear-gradient(180deg, #0A0E1A 0%, #141830 40%, #1A1F3A 100%);
 }
 
 /* ─── 玻璃材质基础类 ─── */
@@ -182,7 +187,7 @@ body {
   letter-spacing: 0.2em;
 }
 
-/* ─── 天空画布 ─── */
+/* ─── 天空画布 - 星空装饰 ─── */
 
 .sky-fixed {
   position: fixed;
@@ -192,9 +197,79 @@ body {
   overflow: hidden;
 }
 
+/* 星星闪烁动画 */
+@keyframes starTwinkle {
+  0%, 100% { opacity: 0.2; transform: scale(0.8); }
+  50% { opacity: 1; transform: scale(1.2); }
+}
+
+/* 星星生成 - 随机分布 */
+.star {
+  position: absolute;
+  border-radius: 50%;
+  background: rgba(255, 255, 255, 0.8);
+  animation: starTwinkle var(--duration, 3s) ease-in-out infinite;
+  animation-delay: var(--delay, 0s);
+}
+
+/* 月亮装饰 */
+.moon-decor {
+  position: absolute;
+  top: 60px;
+  right: 40px;
+  width: 80px;
+  height: 80px;
+  border-radius: 50%;
+  background: radial-gradient(circle at 35% 35%, #FFF8E1 0%, #F5F5DC 40%, #E8E4C9 100%);
+  box-shadow: 0 0 40px rgba(255, 248, 225, 0.3), 0 0 80px rgba(255, 248, 225, 0.1);
+  animation: moonGlow 4s ease-in-out infinite;
+}
+
+@keyframes moonGlow {
+  0%, 100% { box-shadow: 0 0 40px rgba(255, 248, 225, 0.3), 0 0 80px rgba(255, 248, 225, 0.1); }
+  50% { box-shadow: 0 0 60px rgba(255, 248, 225, 0.4), 0 0 100px rgba(255, 248, 225, 0.15); }
+}
+
+/* 地平线/山峦装饰 */
+.horizon-decor {
+  position: absolute;
+  bottom: 60px;
+  left: 0;
+  right: 0;
+  height: 120px;
+  pointer-events: none;
+  opacity: 0.15;
+}
+
+.horizon-decor svg {
+  width: 100%;
+  height: 100%;
+}
+
 /* ─── 辅助 ─── */
 
+/* safe-area — Android WebView 在 edge-to-edge 下 env(safe-area-inset-top) 常为 0，
+   --safe-top-px 由 MainActivity 读取 WindowInsets 后经 evaluateJavascript 注入；
+   两者都取不到时回退 24px（UI-14 修复：回退值兜底，真实高度优先） */
+:root {
+  --safe-top-height: max(env(safe-area-inset-top, 0px), var(--safe-top-px, 0px), 24px);
+}
+.safe-top { padding-top: var(--safe-top-height); }
 .safe-bottom { padding-bottom: env(safe-area-inset-bottom, 0px); }
+
+/* UI-15: 子页返回栏吸顶。fixed 栏自带安全区 padding（状态栏区域由毛玻璃盖住），
+   页面内以等高占位块补足空间；滚动/键盘顶起时返回栏始终停在状态栏下方。 */
+.safe-header-fixed {
+  position: fixed;
+  top: 0;
+  left: 0;
+  right: 0;
+  z-index: 30;
+  padding-top: var(--safe-top-height);
+  background: var(--nav-bg);
+  backdrop-filter: blur(12px);
+  -webkit-backdrop-filter: blur(12px);
+}
 
 .text-income { color: var(--income); }
 .text-expense { color: var(--expense); }
@@ -223,13 +298,3 @@ body {
 .low-perf .sky-fixed * {
   display: none !important;
 }
-
-/*
- * R-M4-12: 大字体标记 class（由 FontScaleAdapter 检测后添加到 html）。
- * 不覆盖 font-size，让浏览器自然使用用户系统字体缩放设置。
- *
- * 当前无消费此 class 的 CSS 规则——FontScaleAdapter 仅作为信号标记存在，
- * 供未来布局适配（如调整 padding/gap 避免大字体溢出）使用。
- * 如需启用布局适配，在此处添加规则即可，例如：
- *   .text-scale-13 .chat-bubble { padding: 12px 16px; }
- */

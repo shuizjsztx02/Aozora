@@ -5,9 +5,9 @@
  * 品牌展示 → 隐私摘要 → "同意并继续" → 游客/登录选择。
  */
 
-import { useMemo, useState } from 'react'
+import { useState } from 'react'
 import { Link, useNavigate } from 'react-router'
-import { NativeBridge } from '../../platform/bridge/native-bridge'
+import { useBridge } from '../../platform/hooks/use-bridge'
 
 const ONBOARDING_KEY = 'aozora-onboarding-completed'
 const CONSENT_KEY = 'aozora-consent-completed'
@@ -19,8 +19,8 @@ export function OnboardingPage() {
   const [consenting, setConsenting] = useState(false)
   // T-M5-04a S0-3: 同意失败时保留错误并展示重试，不推进步骤。
   const [consentError, setConsentError] = useState<string | null>(null)
-  // P3-2: 稳定化 bridge 引用，避免每次渲染都新建实例。
-  const bridge = useMemo(() => new NativeBridge(), [])
+  // 使用全局 bridge 单例，避免多实例覆写全局回调导致请求挂起
+  const bridge = useBridge()
 
   const handleConsent = async () => {
     setConsenting(true)

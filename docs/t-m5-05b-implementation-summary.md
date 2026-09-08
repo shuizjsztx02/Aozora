@@ -238,6 +238,40 @@ ls build/mapping-archive/
 - ANR 上报（看板中已留位）
 - Kotlin JVM 单元测试（CrashSanitizer 的脱敏规则）
 - 将 `record_signup` / `record_transaction` / `record_export` 调用点插入到实际 routes.py
+- Android 客户端在 PushRequest 中填入 `pending_count`，让 SyncBacklogHigh 告警实际可用
+
+## T-M5-05ab 审查修复（2026-09-07）
+
+首次深度审查（`docs/review/T-M5-05ab-review.md`）发现多条指标链路断裂 / 公式错误。
+本轮修复覆盖下列 S1/S2 问题；未覆盖项（限流器多 worker、单测、nightly job 写入方）
+推迟到 T-M5-05c / T-M6-01a。
+
+### S1 — 链路 / 规范符合度
+
+| 编号 | 问题 | 修复文件 | 修复手段 |
+|---|---|---|---|
+| S1-1 | Logs 链路断裂（Loki 永远无数据） | `server/src/common/telemetry.py` | 给 `aozora` logger 挂 `OTLPLogHandler`，经 collector → Loki |
+| S1-2 | Tempo span-metrics → Prometheus 不通 | `docker-compose.staging.yml` | 给 Prometheus command 追加 `--web.enable-remote-write-receiver` |
+| S1-3 | active_devices_total 永远为 0 | `app/.../HeartbeatClient.kt`（新增）、`AozoraApp.kt` | 启动时向 `/telemetry/heartbeat` 发一次请求 |
+| S1-4 | CrashFreeRateLow 公式维度不匹配 | `telemetry.py`、`alert-rules.yml` | `active_devices_total` 改为 ObservableGauge（24h 唯一设备数），公式维度对齐 |
+| S1-5 | sync_queue_depth 永远为 0 | `sync/schemas.py`、`sync/routes.py`、`telemetry.py` | PushRequest 新增可选 `pending_count`；sync_push 调用 `record_sync_queue_depth`；instrument 改 Gauge |
+| S1-6 | 多个 record_* 无调用点 | `alert-rules.yml` | 注释掉 `ReconciliationInconsistency`（无写入方），避免"无数据=无问题"的运维错觉 |
+
+### S2 — 健壮性 / 文档
+
+| 编号 | 问题 | 修复文件 | 修复手段 |
+|---|---|---|---|
+| S2-2 | device_id_hash 熵过低（64 bit） | schemas.py / routes.py / service.py / models / migration / `CrashReporter.kt` | 扩到 64 字符（完整 SHA-256 hex）；Android 端在 captureSync 中计算 hash |
+| S2-4 | staging-deploy.sh 容器数校验 7 → 8 | `infra/deploy/staging-deploy.sh` | 改为 `CONTAINER_COUNT -lt 8` |
+| S2-5 | 实现总结声明未使用的 fastapi instrumentation | `docs/t-m5-05a-implementation-summary.md` | 移除依赖声明 |
+| S2-6 | heartbeat `db=None` 类型不安全 | `telemetry/service.py`、`telemetry/routes.py` | `TelemetryService.__init__` 接受 `AsyncSession | None`；DB 方法入口显式 guard |
+| S2-7 | CrashReporter 协程作用域泄漏 | `CrashReporter.kt` | 把 `CoroutineScope` 提升为类成员，uploadJob 暴露为 @Volatile 字段 |
+
+### 仍未修复（推迟到后续任务）
+
+- **S2-1 内存限流器多 worker**：生产部署前需切 Redis（`config.py` 已预留 `redis_url`）；staging 单 worker 下可接受。
+- **S2-3 单测**：需单独任务补 `CrashSanitizer` + `/telemetry/crash` 集成测试。
+- **S1-6 余下**：`record_d1_retained` / `record_d7_retained` / `record_reconciliation_inconsistency` 调用方（nightly job 与对账模块，超出 T-M5-05b 范围）。
 
 ---
 

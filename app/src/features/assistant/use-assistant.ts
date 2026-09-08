@@ -15,6 +15,7 @@ import type { ActionProposal } from '../../domain/action-proposal'
 import { parseInput, type ParseContext } from '../../domain/nlu/parser'
 import { buildProposalFromAiOutput, type AiParseOutput } from '../../domain/ai-proposal-builder'
 import { useBridge } from '../../platform/hooks/use-bridge'
+import { newUuid } from '../../platform/uuid'
 import type { CategoryData } from '../../platform/bridge/bridge-types'
 import type { AiValidateVerdict } from '../../platform/bridge/bridge-types'
 import type { Category } from '../../domain/types'
@@ -211,7 +212,19 @@ export function useAssistant({
   }, [bridge, categories, bookId, timezone, buildParseContext])
 
   const executeProposalInternal = useCallback(async (proposal: ActionProposal) => {
-    if (!bookId) return
+    if (!bookId) {
+      // bookId 缺失时给用户明确反馈，而非静默 return
+      const errMsg: AssistantMessage = {
+        id: 'msg_' + Date.now() + '_err',
+        role: 'assistant',
+        text: '❌ 账本未就绪，无法记账。请返回首页重试。',
+        proposalStatus: 'error',
+      }
+      setMessages(prev => [...prev, errMsg])
+      setPhase('idle')
+      setPendingProposal(null)
+      return
+    }
     setPhase('executing')
     setMessages(prev => prev.map(m =>
       m.proposal?.proposalId === proposal.proposalId
@@ -241,7 +254,7 @@ export function useAssistant({
               bizDate: tx.bizDate,
               occurredAt: Date.now(),
               source: 'nlu_ai',
-            }, `ai-exec-${txId}-${Date.now()}`)
+            }, newUuid()) // mutationId 必须为 UUID（服务端 sync 契约）
           } catch {
             // 本地写入失败不影响主流程
           }
@@ -276,10 +289,11 @@ export function useAssistant({
 
       // 触发同步
       try { await bridge.triggerSync() } catch { /* ignore */ }
-    } catch {
+    } catch (err) {
+      const errMsg = err instanceof Error ? err.message : '未知错误'
       setMessages(prev => prev.map(m =>
         m.proposal?.proposalId === proposal.proposalId
-          ? { ...m, proposalStatus: 'error' as const } : m
+          ? { ...m, proposalStatus: 'error' as const, text: `❌ 记账失败：${errMsg}` } : m
       ))
       setPhase('idle')
       setPendingProposal(null)
@@ -316,7 +330,7 @@ export function useAssistant({
 
     try {
       for (const txId of lastExecuted.transactionIds) {
-        await bridge.softDeleteTransaction(txId, `undo-${txId}-${Date.now()}`)
+        await bridge.softDeleteTransaction(txId, newUuid())
       }
       setMessages(prev => prev.map(m =>
         m.proposal?.proposalId === lastExecuted.proposal?.proposalId

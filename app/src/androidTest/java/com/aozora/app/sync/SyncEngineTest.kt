@@ -214,7 +214,7 @@ class SyncEngineTest {
         // 插入额外的 book/category/account 用于测试归档分支
         db.bookDao().insert(BookEntity("b-del", "u1", "ToDelete", "", 1, null))
         db.categoryDao().insert(CategoryEntity("c-del", "u1", null, null, "expense", "ToDelete", null, 1))
-        db.accountDao().insert(com.aozora.app.db.entity.AccountEntity("a-del", "u1", "ToDelete", "", null, 1))
+        db.accountDao().insert(com.aozora.app.db.entity.AccountEntity("a-del", "u1", "ToDelete", "", null, null, 1))
 
         // 模拟服务端 DELETE 变更
         val changes = listOf(
@@ -392,7 +392,7 @@ class SyncEngineTest {
     fun archiveAccountSyncsAsDeleteOperation() = runBlocking {
         seedBookAndCategory()
         // 直接通过 DAO 插入一个 account（避免入队 mutation）
-        db.accountDao().insert(com.aozora.app.db.entity.AccountEntity("a1", "u1", "Cash", "", null, 1))
+        db.accountDao().insert(com.aozora.app.db.entity.AccountEntity("a1", "u1", "Cash", "", null, null, 1))
 
         // 调用 archiveAccount：应创建 OP_ARCHIVE 的 pending mutation
         repo.archiveAccount("a1", "m-archive")

@@ -18,7 +18,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from src.common.database import get_db_session
 from src.common.errors import AppException
-from src.common.telemetry import record_sync_push
+from src.common.telemetry import record_sync_push, record_sync_queue_depth
 from src.models.user import User
 from src.modules.auth.dependencies import get_current_user
 from src.modules.auth.frozen import is_frozen as _is_frozen
@@ -63,6 +63,11 @@ async def sync_push(
     """Submit a batch of client mutations to be applied by the server."""
     _require_active(current_user)
     await _require_consented(current_user, db)
+    # T-M5-05ab fix (S1-5): forward client-reported queue depth to the
+    # sync_queue_depth Gauge (no-op if the client didn't send pending_count).
+    # Per-user label so `sum(sync_queue_depth)` aggregates across clients.
+    if body.pending_count is not None:
+        record_sync_queue_depth(body.pending_count, user_id=str(current_user.id))
     service = SyncService(db)
     start = time.perf_counter()
     try:

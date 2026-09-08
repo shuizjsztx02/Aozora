@@ -5,17 +5,24 @@ import androidx.work.Configuration
 import com.aozora.app.ai.AiGatewayClient
 import com.aozora.app.auth.AuthClient
 import com.aozora.app.auth.TokenStore
+import com.aozora.app.consent.ConsentClient
 import com.aozora.app.consent.ConsentStore
 import com.aozora.app.crashlytics.CrashReportDatabase
 import com.aozora.app.crashlytics.CrashReporter
+import com.aozora.app.crashlytics.HeartbeatClient
 import com.aozora.app.db.AozoraDatabase
 import com.aozora.app.db.Repository
 import com.aozora.app.export.ExportClient
+import com.aozora.app.feedback.FeedbackClient
 import com.aozora.app.image.ImageClient
 import com.aozora.app.reminder.ReminderScheduler
 import com.aozora.app.sync.HttpSyncApi
 import com.aozora.app.sync.SyncEngine
 import com.aozora.app.voice.VoiceRecognitionService
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.launch
 import okhttp3.OkHttpClient
 import java.util.concurrent.TimeUnit
 
@@ -31,6 +38,11 @@ import java.util.concurrent.TimeUnit
  * 通过 [(AozoraApp) applicationContext] 在 Activity / Worker 中取回。
  */
 class AozoraApp : Application(), Configuration.Provider {
+
+    // T-M5-05ab fix (N-4): heartbeat scope retained as a class member so the
+    // launch is not a fire-and-forget coroutine. Matches the S2-7 fix applied
+    // to CrashReporter.uploadScope.
+    private val heartbeatScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
 
     /** Lazily-built Room database singleton. */
     val database: AozoraDatabase by lazy { AozoraDatabase.getInstance(this) }
@@ -66,7 +78,8 @@ class AozoraApp : Application(), Configuration.Provider {
         HttpSyncApi(
             baseUrl = BuildConfig.SYNC_BASE_URL,
             httpClient = httpClient,
-            authClient = authClient
+            authClient = authClient,
+            userAgent = "Aozora-Android/${BuildConfig.VERSION_NAME ?: "unknown"}"
         )
     }
 
@@ -138,6 +151,15 @@ class AozoraApp : Application(), Configuration.Provider {
         ConsentStore(this)
     }
 
+    /** T-M5-05c fix (S1): 上传隐私同意到服务端（POST /consent）。在 handleConsentRecord 成功后异步调用。 */
+    val consentClient: ConsentClient by lazy {
+        ConsentClient(
+            baseUrl = BuildConfig.SYNC_BASE_URL,
+            httpClient = httpClient,
+            tokenStore = tokenStore,
+        )
+    }
+
     /** T-M5-05b: 崩溃报告本地库（独立于业务库）。 */
     val crashDb: CrashReportDatabase by lazy {
         CrashReportDatabase.getInstance(this)
@@ -149,11 +171,39 @@ class AozoraApp : Application(), Configuration.Provider {
             context = this,
             crashDb = crashDb,
             consentStore = consentStore,
+            // T-M5-05ab fix (S2-2): TokenStore 提供 device_id，CrashReporter 在
+            // captureSync 中哈希为 SHA-256 填入崩溃报告，供服务端 per-device 限流。
+            tokenStore = tokenStore,
+        )
+    }
+
+    /** T-M5-05ab fix (S1-3): 启动心跳客户端 —— 每次启动向服务端发一次 active 信号。 */
+    private val heartbeatClient: HeartbeatClient by lazy {
+        HeartbeatClient(
+            baseUrl = BuildConfig.SYNC_BASE_URL,
+            httpClient = httpClient,
+            authClient = authClient,
+            tokenStore = tokenStore,
+        )
+    }
+
+    /** T-M5-05c: 应用内反馈客户端（与 sync 共用连接池）。 */
+    val feedbackClient: FeedbackClient by lazy {
+        FeedbackClient(
+            context = this,
+            baseUrl = BuildConfig.SYNC_BASE_URL,
+            httpClient = httpClient,
+            authClient = authClient,
+            tokenStore = tokenStore,
         )
     }
 
     override fun onCreate() {
         super.onCreate()
+        // 第六轮 Bug-5.1：首启种子默认账本/分类。runBlocking 仅为首启排序保证——
+        // 后续 SyncScheduler / 聊天记账入口读取时必须已有默认数据；
+        // 实际查询/写入都在 Room 自身线程池，主线程阻塞为毫秒级，且幂等（非空即跳过）。
+        kotlinx.coroutines.runBlocking { repository.ensureSeedDefaults() }
         // T-M5-05b: 立即安装全局 UncaughtExceptionHandler —— 越早越好，
         // 任何依赖（auth、sync）尚未初始化时也可能崩溃。
         crashReporter.install()
@@ -163,6 +213,29 @@ class AozoraApp : Application(), Configuration.Provider {
             httpClient = httpClient,
             baseUrl = BuildConfig.SYNC_BASE_URL,
         )
+        // T-M5-05ab fix (S1-3 + N-4): 启动时发心跳，使用类级 heartbeatScope 保留引用。
+        heartbeatScope.launch {
+            try {
+                val version = packageManager.getPackageInfo(packageName, 0).versionName ?: "unknown"
+                heartbeatClient.send(version, consentStore.hasConsented())
+            } catch (_: Exception) {
+                // 心跳失败绝不能影响主流程。
+            }
+        }
+        // T-M5-05c fix (S1): 补发 consent —— 用户首次同意时若网络不可达，
+        // 后续冷启动会在此处重试 POST /consent，直到上传成功后标记 consentUploaded。
+        if (consentStore.hasConsented() && !consentStore.hasUploadedConsent()) {
+            heartbeatScope.launch {
+                try {
+                    val uploaded = consentClient.send("v1", System.currentTimeMillis())
+                    if (uploaded) {
+                        consentStore.markConsentUploaded()
+                    }
+                } catch (_: Exception) {
+                    // 重试失败不影响主流程，下次冷启动再试。
+                }
+            }
+        }
     }
 
     override val workManagerConfiguration: Configuration

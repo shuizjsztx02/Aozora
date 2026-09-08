@@ -23,21 +23,29 @@ object CrashSanitizer {
         "api_key", "apikey",
     )
 
-    /** 匹配 JSON 样式的 `"key": "value"` 对（message 中可能嵌入）。 */
+    /**
+     * 匹配 JSON 样式的 `"key": "value"` 对（message 中可能嵌入）。
+     * key 用通用捕获 + [isSensitiveKey] 判断：精确匹配会让 "auth_token"
+     * 这类复合参数名整段漏掉。
+     */
     private val JSON_PAIR = Regex(
-        """"(${SENSITIVE_KEYS.joinToString("|")})"\s*:\s*"([^"\\]*(?:\\.[^"\\]*)*)""",
-        RegexOption.IGNORE_CASE
+        """"([A-Za-z][A-Za-z0-9_.-]*)"\s*:\s*"([^"\\]*(?:\\.[^"\\]*)*)"""
     )
 
-    /** 匹配 URL 查询参数 `?key=value&`。 */
-    private val URL_PARAM = Regex(
-        """([?&])(${SENSITIVE_KEYS.joinToString("|")})=([^&\s]*)""",
-        RegexOption.IGNORE_CASE
+    /** 匹配 `name=value`：URL 查询参数与堆栈/日志行中的裸键值对。 */
+    private val KEY_VALUE = Regex(
+        """([?&])?([A-Za-z][A-Za-z0-9_.-]*)=([^&\s]*)"""
     )
 
     private const val REDACTED = "[REDACTED]"
     private const val MAX_MESSAGE_LENGTH = 2_000
     private const val MAX_STACKTRACE_LENGTH = 16_000
+
+    /** 键名是否为敏感键：精确命中或带 `_`/`-` 后缀限定（auth_token、set-cookie 等）。 */
+    private fun isSensitiveKey(name: String): Boolean {
+        val n = name.lowercase()
+        return SENSITIVE_KEYS.any { it == n || n.endsWith("_$it") || n.endsWith("-$it") }
+    }
 
     /** 脱敏一条崩溃的 message 与 stacktrace。 */
     fun sanitize(message: String, stacktrace: String): Pair<String, String> {
@@ -49,10 +57,12 @@ object CrashSanitizer {
     private fun redact(text: String): String {
         var out = text
         out = JSON_PAIR.replace(out) { match ->
-            """"${match.groupValues[1]}": "$REDACTED""""
+            val key = match.groupValues[1]
+            if (isSensitiveKey(key)) """"$key": "$REDACTED"""" else match.value
         }
-        out = URL_PARAM.replace(out) { match ->
-            "${match.groupValues[1]}${match.groupValues[2]}=$REDACTED"
+        out = KEY_VALUE.replace(out) { match ->
+            val (sep, key) = match.destructured
+            if (isSensitiveKey(key)) "$sep$key=$REDACTED" else match.value
         }
         return out
     }

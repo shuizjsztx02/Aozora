@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import asyncio
+import contextlib
 import logging
 import time
 from collections.abc import AsyncIterator
@@ -88,8 +90,27 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
             "AI provider not configured (AI_PROVIDER_API_KEY empty) — "
             "/ai/interpret will return 503 ai_unavailable"
         )
+    # T-M5-05b follow-up: in-process daily D1/D7 retention refresh.
+    # The OTel gauges live in this process, so the job must too. Gated by
+    # RETENTION_JOB_ENABLED (default off) — an explicitly enabled deployment
+    # opts in; test suites never run it (a background DB task racing against
+    # the StaticPool shared connection used by :memory: SQLite fixtures).
+    retention_task: asyncio.Task | None = None
+    if cfg.enable_telemetry and cfg.retention_job_enabled:
+        from src.common.database import get_session_factory
+        from src.modules.telemetry.retention import retention_loop
+
+        retention_task = asyncio.create_task(
+            retention_loop(get_session_factory()),
+            name="retention-loop",
+        )
     yield
     from src.common.database import get_engine
+
+    if retention_task is not None:
+        retention_task.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await retention_task
 
     # P1#1: close the pooled AI provider HTTP client before disposing the engine.
     from src.modules.ai.provider import close_llm_provider
@@ -128,7 +149,7 @@ app.add_middleware(
     allow_origins=cfg.cors_origin_list,
     allow_credentials=True,
     allow_methods=["*"],
-    allow_headers=["*"],
+    allow_headers=["Authorization", "Content-Type", "X-Request-Id"],
 )
 # T-M5-02b: request-body size cap (inner).
 app.add_middleware(
@@ -166,7 +187,11 @@ async def log_requests(request: Request, call_next):
         },
     )
     # T-M5-05a: record request metrics (counter, error counter, duration histogram)
-    record_request(request.method, request.url.path, response.status_code, duration_ms)
+    # T-M5-05ab fix (S2-NEW-3): use the route template (e.g. /api/v1/books/{book_id})
+    # instead of the raw URL path — the latter contains UUIDs and drives
+    # unbounded cardinality in Prometheus (one series per unique path).
+    route_path = request.scope.get("route").path if request.scope.get("route") else request.url.path
+    record_request(request.method, route_path, response.status_code, duration_ms)
     return response
 
 

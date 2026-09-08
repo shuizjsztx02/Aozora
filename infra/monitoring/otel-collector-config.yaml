@@ -30,9 +30,11 @@ exporters:
       insecure: true
 
   # Metrics → Prometheus (via OTLP)
+  # T-M5-05ab fix (S1-NEW): namespace removed — it prefixed all metric names
+  # with "aozora_" (e.g. aozora_api_requests_total), but alert-rules and all
+  # 6 Grafana dashboards query the un-prefixed names (api_requests_total).
   prometheus:
     endpoint: 0.0.0.0:8889
-    namespace: aozora
 
   # Logs → Loki (native push API; Loki 3.0 不原生监听 OTLP 4317)
   loki:

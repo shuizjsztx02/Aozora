@@ -356,6 +356,216 @@ alert-rules.yml (Prometheus 加载)
 
 ---
 
-**审查人：** Claude Code (主上下文)  
-**审查耗时：** 约 1 小时（含子代理尝试因模型配置失败转手动）  
+**审查人：** Claude Code (主上下文)
+**审查耗时：** 约 1 小时（含子代理尝试因模型配置失败转手动）
 **下次审查触发点：** 批次 A 修复提交后
+
+---
+
+## 九、修复记录（2026-09-07）
+
+首次审查后当日完成下列 S1/S2 修复，覆盖除 S2-1/S2-3/S1-6 余下外的所有问题。
+修复详情同步记录于 `docs/t-m5-05b-implementation-summary.md` § T-M5-05ab 审查修复。
+
+### 已修复
+
+| 编号 | 状态 | 关键改动 |
+|---|---|---|
+| S1-1 | ✅ | `server/src/common/telemetry.py` 给 `aozora` logger 挂 `OTLPLogHandler` → OTel Collector → Loki |
+| S1-2 | ✅ | `docker-compose.staging.yml` Prometheus 追加 `--web.enable-remote-write-receiver` |
+| S1-3 | ✅ | 新增 `HeartbeatClient.kt`；`AozoraApp.onCreate` 启动时发心跳；`active_devices_total` 改 ObservableGauge |
+| S1-4 | ✅ | `telemetry.py` 维护 24h 唯一设备窗口；告警公式维度对齐 |
+| S1-5 | ✅ | `PushRequest` 新增可选 `pending_count`；`sync_push` 调用 `record_sync_queue_depth`；instrument 改 Gauge |
+| S1-6 | ✅ | `alert-rules.yml` 注释掉 `ReconciliationInconsistency`（无写入方） |
+| S2-2 | ✅ | `device_id_hash` 扩到 64 字符（完整 SHA-256 hex）；Android 端在 `captureSync` 计算 hash |
+| S2-4 | ✅ | `staging-deploy.sh` 容器数校验 `CONTAINER_COUNT -lt 8` |
+| S2-5 | ✅ | `t-m5-05a-implementation-summary.md` 移除错误声明的 `opentelemetry-instrumentation-fastapi` 依赖 |
+| S2-6 | ✅ | `TelemetryService.__init__` 接受 `AsyncSession | None`；DB 方法入口 `assert self.db is not None` |
+| S2-7 | ✅ | `CrashReporter` 的 `CoroutineScope` 提升为类成员，`uploadJob` 暴露为 `@Volatile` 字段 |
+
+### 推迟到后续任务
+
+| 编号 | 状态 | 推迟原因 |
+|---|---|---|
+| S2-1 | ⏳ T-M6-01a | 生产部署前切 Redis；staging 单 worker 下可接受 |
+| S2-3 | ⏳ T-M5-05c | 需单独任务补 `CrashSanitizer` + `/telemetry/crash` 集成测试 |
+| S1-6 余下 | ⏳ T-M6 或 T-M5-01 后续 | `record_d1_retained` / `record_d7_retained` 需 nightly retention job；`record_reconciliation_inconsistency` 需对账模块 |
+
+### 客户端协同项（需 Android 客户端跟进）
+
+- `PushRequest.pending_count`：服务端已接受并写入 Gauge；客户端需要在 `SyncEngine.push` 中填入本地未同步 mutation 数。
+- `/telemetry/heartbeat`：客户端 `HeartbeatClient` 已实现，每次启动调用一次；服务端 `active_devices_total` 改 ObservableGauge 后，看板数据在客户端更新发布后即可出数。
+
+---
+
+## 十、二轮审查（修复验证，2026-09-07）
+
+> **审查范围：** 针对第九节修复记录中 11 项 S1/S2 修复逐一验证  
+> **审查方法：** 逐文件精读 + 链路重演 + Python import 实测 + 调用点 grep  
+> **审查结论：** **10/11 修复验证通过，1 项修复实际未生效（S1-1 类名错误）**
+
+### 10.1 修复验证总表
+
+| 编号 | 验证结果 | 说明 |
+|---|---|---|
+| S1-1 | ❌ **未生效** | `OTLPLogHandler` 类名错误，正确为 `OTLPLogExporter`；`try/except ImportError` 静默吞掉异常，handler 未挂载，Loki 仍无数据 |
+| S1-2 | ✅ 通过 | `docker-compose.staging.yml` L108 追加 `--web.enable-remote-write-receiver`，Tempo span-metrics → Prometheus 链路通 |
+| S1-3 | ✅ 通过 | `HeartbeatClient.kt` 新增；`AozoraApp.onCreate` L187-194 启动时发心跳；`X-Device-Id` header 正确传递 |
+| S1-4 | ✅ 通过 | `active_devices_total` 改 `ObservableGauge`；`_active_devices` dict 维护 24h 窗口；`_observe_active_devices` callback 正确；alert 公式维度一致 |
+| S1-5 | ✅ 通过 | `PushRequest.pending_count` 可选字段 ✅；`sync_push` L69-70 调用 `record_sync_queue_depth` ✅；instrument 改 `Gauge` ✅ |
+| S1-6 | ✅ 通过 | `ReconciliationInconsistency` alert L271-283 已注释，附说明 |
+| S2-2 | ⚠️ **部分修复** | `crash_reports` 路径完整 64 字符 ✅；但 `submit_feedback` L219 仍截断 `device_id_hash` 到 16 字符 |
+| S2-4 | ✅ 通过 | `staging-deploy.sh` L162 改为 `CONTAINER_COUNT -lt 8` |
+| S2-5 | ✅ 通过 | `t-m5-05a-implementation-summary.md` L23-24 明确声明未使用 `opentelemetry-instrumentation-fastapi` |
+| S2-6 | ✅ 通过 | `TelemetryService.__init__` 签名 `AsyncSession \| None` ✅；`record_crash`/`count_pending_for_device`/`submit_feedback` 均 guard `self.db is None` ✅ |
+| S2-7 | ✅ 通过 | `CrashReporter.uploadScope` 提升为类成员 L51 ✅；`uploadJob` 标注 `@Volatile` L52 ✅ |
+
+### 10.2 新发现问题
+
+#### 🔴 N-1 ❌ S1-1 修复未生效 — `OTLPLogHandler` 类名错误
+
+- **位置**：`server/src/common/telemetry.py` L36
+- **代码**：`from opentelemetry.exporter.otlp.proto.grpc._log_exporter import OTLPLogHandler as _OTLPLogHandlerCls`
+- **实测**：`python -c "from opentelemetry.exporter.otlp.proto.grpc._log_exporter import OTLPLogHandler"` → **ImportError**；正确类名为 `OTLPLogExporter`（已实测确认存在）
+- **后果**：
+  1. `try/except ImportError` 静默捕获 → `_OTLPLogHandler` 保持 `None`
+  2. `setup_telemetry` L127 `if _OTLPLogHandler is not None:` 为 False → 不挂 handler
+  3. `aozora` logger 无 OTLP handler → 日志不进 Collector → **Loki 仍永远无数据**
+  4. 表面上"修复了"，实际运维在 Grafana 看不到任何差异，与首次审查时状况相同
+- **修复**：L36 改为 `from opentelemetry.exporter.otlp.proto.grpc._log_exporter import OTLPLogExporter as _OTLPLogExporterCls`，L39 `_OTLPLogHandler = _OTLPLogExporterCls` → `_OTLPLogHandler = _OTLPLogExporterCls`（或统一重命名变量），L128 `_OTLPLogHandler(endpoint=...)` → `_OTLPLogExporter(endpoint=...)`
+- **严重度**：**S1**（链路断裂 — 与首次审查 S1-1 同一问题）
+
+#### 🟡 N-2 ⚠️ `submit_feedback` 中 `device_id_hash` 仍截断为 16 字符
+
+- **位置**：`server/src/modules/telemetry/service.py` L219
+- **代码**：`device_id_hash=body.device_id_hash[:16] if body.device_id_hash else None`
+- **问题**：S2-2 修复将 `crash_reports` 路径的 `device_id_hash` 扩展到完整 64 字符，但 `feedbacks` 路径的 `submit_feedback` 仍截断到 16 字符。`Feedback` model 和 `0015_feedback.py` 迁移的列定义都是 `String(16)`。
+- **影响**：feedback 表的 `device_id_hash` 仅 64-bit 熵，与 crash_reports 不一致；feedback 无法与 crash_report 通过 `device_id_hash` 做跨表关联（同一设备在两表中 hash 不同）
+- **建议**：统一扩展到 64 字符 — 修改 `Feedback` model 列定义 → 新增迁移 ALTER COLUMN → 修改 `service.py` L219 去掉 `[:16]`；或在 feedback 场景保持 16 字符但在文档中明确记录差异
+- **严重度**：**S2**（数据一致性 / 文档）
+
+#### 🟡 N-3 ⚠️ `routes.py` heartbeat 函数内冗余 `import hashlib`
+
+- **位置**：`server/src/modules/telemetry/routes.py` L85
+- **代码**：函数内 `import hashlib`，但 L18 已有模块级 `import hashlib`
+- **影响**：无功能影响（Python 缓存已导入模块）；纯粹冗余
+- **建议**：删除 L85 的 `import hashlib`
+- **严重度**：**cosmetic**
+
+#### 🟡 N-4 ⚠️ `AozoraApp.onCreate` 心跳协程作用域与 S2-7 修复不一致
+
+- **位置**：`app/src/main/java/com/aozora/app/AozoraApp.kt` L187
+- **代码**：`CoroutineScope(SupervisorJob() + Dispatchers.IO).launch { ... }` — 创建后即丢弃引用
+- **问题**：S2-7 修复了 `CrashReporter` 的相同问题（scope 提升为类成员），但 `AozoraApp` 自身的心跳协程使用了完全相同的旧模式。虽然心跳是 best-effort 且不会抛异常，但与 S2-7 的修复精神不一致。
+- **建议**：将心跳 scope 提升为 `AozoraApp` 的成员字段（与 `CrashReporter.uploadScope` 对齐），或至少在注释中说明此处丢弃引用是有意为之
+- **严重度**：**S2**（代码风格一致性）
+
+#### 🟡 N-5 ⚠️ `record_active_device` 丢弃 `app_version` — Android 版本分布看板无数据源
+
+- **位置**：`server/src/common/telemetry.py` L371-381
+- **代码**：`record_active_device(app_version, device_id_hash)` 接收 `app_version` 参数但仅记录 `device_id_hash` → timestamp，`app_version` 被丢弃
+- **影响**：`android-health.json` 看板的 "Version Distribution" 面板无数据来源。heartbeat 端点是唯一知道客户端 app_version 的入口，但版本信息未被记录到任何指标。
+- **建议**：在 `_active_devices` 中同时记录 `app_version`（如 `_active_devices[device_id_hash] = (timestamp, app_version)`），或在 ObservableGauge callback 中按 `app_version` 分组输出多个 Observation（带 `app_version` label）
+- **严重度**：**S2**（看板功能缺失）
+
+#### 🟡 N-6 ⚠️ `test_telemetry.py` 测试路径缺少 `/api/v1` 前缀
+
+- **位置**：`server/tests/test_telemetry.py` L110 等多处
+- **代码**：`client.post("/telemetry/feedback", ...)`
+- **问题**：`main.py` L192 将 router 注册到 `cfg.api_prefix`（= `/api/v1`），实际路径是 `/api/v1/telemetry/feedback`。TestClient 直接打到 ASGI app，不会自动加前缀。
+- **影响**：所有测试用例应返回 404 而非预期的 201/422/429。
+- **建议**：所有测试路径加 `/api/v1` 前缀，或使用 `TestClient(app, base_url="http://test/api/v1")`
+- **严重度**：**S2**（测试无法运行）
+
+### 10.3 链路重演（修复后）
+
+#### 链路一（修复后）：API 日志 → Loki ❌ **仍断裂**
+
+```
+API logging.getLogger("aozora") → 尝试挂 LoggingHandler
+  → OTLPLogHandler 类名错误 → ImportError → except: pass
+  → handler 未挂载 → 日志仍走 stdout → docker json-file driver
+  → × 无通道到 Collector → Loki 无数据
+```
+
+**结论：S1-1 修复未生效，Loki 链路仍断裂。**
+
+#### 链路三（修复后）：Android heartbeat → active_devices_total ✅
+
+```
+AozoraApp.onCreate → HeartbeatClient.send()
+  → POST {baseUrl}/telemetry/heartbeat + X-Device-Id header
+  → server routes.py L82-86: sha256(device_id_raw) → device_id_hash (64 chars)
+  → service.heartbeat() → record_active_device(app_version, device_id_hash)
+  → _active_devices[device_id_hash] = now()
+  → ObservableGauge callback → len(_active_devices) → active_devices_total
+  → OTLP → Collector → Prometheus → Grafana ✅
+```
+
+#### 链路四（修复后）：CrashFreeRateLow 公式 ✅
+
+```
+分子: increase(crash_reports_total[24h]) = 24h 内崩溃数（counter window）
+分母: sum(active_devices_total) = 24h 内唯一活跃设备数（ObservableGauge）
+比值: 崩溃数 / 活跃设备数 → 维度匹配 ✅
+公式: 1 - 比值 < 0.995 → crash-free rate 低于 99.5% 触发
+```
+
+**注意**：严格来说 crash-free rate 应为 "无崩溃的 session 占比"，当前公式是 "24h 崩溃总数 / 24h 活跃设备数"，一个设备多次崩溃会使比值 > 1（crash-free 为负）。但在内测规模（20-50 人）下，崩溃频率低，此近似可接受。
+
+### 10.4 修复后规范符合度（更新）
+
+| 规范要求 | 首次审查 | 修复后 |
+|---|---|---|
+| Logs 可查（Loki） | ❌ 断裂 | ❌ **仍断裂**（S1-1 类名错误） |
+| Tempo span-metrics → Prometheus | ❌ 断裂 | ✅ 通 |
+| active_devices_total 有数据 | ❌ 永远 0 | ✅ 客户端 heartbeat 就绪（待客户端发布） |
+| CrashFreeRateLow 公式正确 | ❌ 维度不匹配 | ✅ 维度匹配 |
+| sync_queue_depth 有写入方 | ❌ 永远 0 | ✅ 服务端就绪（待客户端填入 pending_count） |
+| ReconciliationInconsistency 不误导 | ❌ 无数据=假安全 | ✅ 已注释 |
+| device_id_hash 碰撞阻力 | ⚠️ 64 bit | ⚠️ crash_reports 128 bit ✅；feedbacks 仍 64 bit |
+| 容器数校验 | ⚠️ 下限 7 | ✅ 下限 8 |
+| heartbeat 类型安全 | ⚠️ db=None | ✅ AsyncSession \| None |
+| CrashReporter scope | ⚠️ 泄漏 | ✅ 类成员 + @Volatile |
+
+### 10.5 二轮审查结论
+
+**总体状态：⚠️ 条件性通过（与首次审查相同），1 项 S1 修复需立即返工。**
+
+#### 批次 A（必做，阻塞链路通畅）
+
+1. **N-1（S1-1 返工）**：`telemetry.py` L36 类名 `OTLPLogHandler` → `OTLPLogExporter`。一行改动，但不修则 Loki 永远无数据。
+2. **N-6（测试路径）**：`test_telemetry.py` 全部路径加 `/api/v1` 前缀，否则 CI 全红。
+
+#### 批次 B（建议本轮一起做）
+
+3. **N-2（feedback device_id_hash 一致性）**：统一 feedback 表 `device_id_hash` 到 64 字符，或在文档中明确记录与 crash_reports 的差异。
+4. **N-5（app_version 记录）**：让 `record_active_device` 保留 `app_version` 作为 label，否则 Android 版本分布看板永远无数据。
+5. **N-3（冗余 import）**：删除 `routes.py` L85 冗余 `import hashlib`。
+
+#### 批次 C（可推迟）
+
+6. **N-4（AozoraApp heartbeat scope）**：与 S2-7 对齐，提升 scope 为类成员。
+7. **S2-1/S2-3/S1-6 余下**（维持首次审查结论）：限流器改 Redis、补单测、nightly job 写入方。
+
+### 10.6 校验清单
+
+| 校验 | 结果 |
+|---|---|
+| `OTLPLogHandler` import 实测 | ❌ ImportError；`OTLPLogExporter` ✅ |
+| `docker-compose.staging.yml` YAML 语法 | ✅ 通过（L108 remote-write flag） |
+| `alert-rules.yml` 注释块语法 | ✅ `#` 注释不影响 YAML 解析 |
+| `staging-deploy.sh` bash -n | ✅ L162 `-lt 8` |
+| `telemetry.py` ast.parse | ✅ |
+| `service.py` ast.parse | ✅ |
+| `routes.py` ast.parse | ✅ |
+| `sync/routes.py` ast.parse | ✅ |
+| `sync/schemas.py` ast.parse | ✅ |
+| `crash_report.py` model ↔ migration 一致性 | ✅ String(64) 匹配 |
+| `feedback.py` model ↔ migration 一致性 | ✅ String(16) 匹配（但与 crash_report 不一致） |
+| `0013_crash_reports.py` revision 链 | ✅ `down_revision = "0012_account_deletion"` |
+| `0015_feedback.py` revision 链 | ✅ `down_revision = "0014_deletion_token_unique"` |
+| HeartbeatClient URL 与 server router 匹配 | ✅ `{baseUrl}/telemetry/heartbeat` |
+| CrashReporter captureSync hash 计算 | ✅ SHA-256 完整 64 hex |
+| AozoraApp.onCreate 调用顺序 | ✅ install → uploadPending → heartbeat |
+

@@ -99,8 +99,28 @@ class SyncPayloadMapperTest {
         val out = SyncPayloadMapper.snakeToCamelMap(snake)
         assertEquals("x1", out["id"])
         assertNull(out["categoryId"])
-        // 未知字段透传（snake_case 原键）
-        assertEquals("value", out["unknown_field"])
+        // N-M3-7 修复：未知字段启发式转为 camelCase（foo_bar → fooBar），
+        // 而非保留 snake_case。这确保未来服务端新增字段时，客户端 Room entity
+        // 新增对应列后键名可直接匹配。
+        assertEquals("value", out["unknownField"])
+    }
+
+    @Test
+    fun snakeToCamelMap_unknownFieldMultipleUnderscores() {
+        // 多下划线场景：new_metadata_value → newMetadataValue
+        val snake = JSONObject().put("new_metadata_value", "v1")
+        val out = SyncPayloadMapper.snakeToCamelMap(snake)
+        assertEquals("v1", out["newMetadataValue"])
+        assertFalse("old snake key should not appear", out.containsKey("new_metadata_value"))
+    }
+
+    /** P0-2 修复验证：updated_at 必须映射为 updatedAt */
+    @Test
+    fun snakeToCamelMap_updatedAtMappedCorrectly() {
+        val snake = JSONObject().put("updated_at", "2026-09-05T11:00:00+00:00")
+        val out = SyncPayloadMapper.snakeToCamelMap(snake)
+        assertEquals("2026-09-05T11:00:00+00:00", out["updatedAt"])
+        assertFalse(out.containsKey("updated_at"))
     }
 
     @Test
@@ -174,24 +194,26 @@ class SyncPayloadMapperTest {
     }
 
     @Test
-    fun parsePushResponse_parsesAcceptedRejectedAndCursor() {
+    fun parsePushResponse_mapsResultsStatusToAcceptedRejected() {
+        // 服务端真实契约：{"results":[{mutation_id,status,...}],"cursor":N}
+        // applied/duplicate → accepted；conflict → rejected。
         val json = """
             {
-              "accepted": ["m1", "m2"],
-              "rejected": [
-                {"mutation_id": "m3", "reason": "expected_version_mismatch"},
-                {"mutation_id": "m4", "reason": "not_found"}
+              "results": [
+                {"mutation_id": "m1", "status": "applied", "cursor": 10, "version": 1, "current_version": null},
+                {"mutation_id": "m2", "status": "duplicate", "cursor": 8, "version": 1, "current_version": null},
+                {"mutation_id": "m3", "status": "conflict", "cursor": null, "version": null, "current_version": 7}
               ],
-              "next_cursor": 100
+              "cursor": 10
             }
         """.trimIndent()
         val response = SyncPayloadMapper.parsePushResponse(json)
+        // applied + duplicate 都要移除（duplicate 代表已在上行，不移除则队列永不收敛）
         assertEquals(listOf("m1", "m2"), response.acceptedMutationIds)
-        assertEquals(2, response.rejected.size)
+        assertEquals(1, response.rejected.size)
         assertEquals("m3", response.rejected[0].mutationId)
-        assertEquals("expected_version_mismatch", response.rejected[0].reason)
-        assertEquals("m4", response.rejected[1].mutationId)
-        assertEquals(100L, response.nextCursor)
+        assertTrue(response.rejected[0].reason.contains("version_conflict"))
+        assertEquals(10L, response.nextCursor)
     }
 
     @Test
@@ -229,12 +251,76 @@ class SyncPayloadMapperTest {
     }
 
     @Test
+    fun buildPushRequestJson_transformsPayloadToSnakeAndIso() {
+        val req = PushRequest(
+            cursor = 14,
+            mutations = listOf(
+                MutationWire(
+                    mutationId = "m1",
+                    entityType = "transaction",
+                    entityId = "t1",
+                    operation = "insert",
+                    expectedVersion = null,
+                    // 客户端 Room 存 camelCase + epoch 毫秒
+                    payload = """{"id":"t1","bookId":"b1","amountCents":2500,""" +
+                        """"categoryId":"c1","bizDate":"2026-09-08","occurredAt":1788845613031}"""
+                )
+            )
+        )
+        val m1 = JSONObject(SyncPayloadMapper.buildPushRequestJson(req))
+            .getJSONArray("mutations").getJSONObject(0).getJSONObject("payload")
+        // wire 必须是 snake_case
+        assertEquals("b1", m1.getString("book_id"))
+        assertEquals(2500, m1.getInt("amount_cents"))
+        assertEquals("c1", m1.getString("category_id"))
+        assertEquals("2026-09-08", m1.getString("biz_date"))
+        assertFalse(m1.has("bookId"))
+        assertFalse(m1.has("occurredAt"))
+        // occurred_at 必须是 ISO（服务端 fromisoformat），可回到同一 epoch
+        val epoch = java.time.OffsetDateTime.parse(m1.getString("occurred_at")).toInstant().toEpochMilli()
+        assertEquals(1788845613031L, epoch)
+    }
+
+    @Test
     fun buildPullRequestJson_containsCursorAndLimit() {
         val req = PullRequest(cursor = 7, limit = 50)
         val out = SyncPayloadMapper.buildPullRequestJson(req)
         val root = JSONObject(out)
         assertEquals(7L, root.getLong("cursor"))
         assertEquals(50, root.getInt("limit"))
+    }
+
+    @Test
+    fun buildPushRequestJson_includesPendingCount_whenNonNull() {
+        val req = PushRequest(
+            cursor = 5,
+            mutations = listOf(
+                MutationWire(
+                    mutationId = "m1",
+                    entityType = "transaction",
+                    entityId = "t1",
+                    operation = "insert",
+                    expectedVersion = null,
+                    payload = """{"id":"t1","bookId":"b1"}"""
+                )
+            ),
+            pendingCount = 3
+        )
+        val out = SyncPayloadMapper.buildPushRequestJson(req)
+        val root = JSONObject(out)
+        assertEquals(3, root.getInt("pending_count"))
+    }
+
+    @Test
+    fun buildPushRequestJson_omitsPendingCount_whenNull() {
+        val req = PushRequest(
+            cursor = 5,
+            mutations = emptyList(),
+            pendingCount = null
+        )
+        val out = SyncPayloadMapper.buildPushRequestJson(req)
+        val root = JSONObject(out)
+        assertFalse(root.has("pending_count"))
     }
 
     // ─── P0-1 跨语言一致性测试 ───
@@ -403,5 +489,44 @@ class SyncPayloadMapperTest {
         // 不应出现 camelCase 键
         assertFalse(raw.containsKey("bookId"))
         assertFalse(raw.containsKey("createdAt"))
+    }
+
+    // ─── push wire：camel→snake + epoch→ISO（服务端 _apply_insert 读 snake/ISO） ───
+
+    @Test
+    fun toWirePayload_renamesTransactionToSnake() {
+        val camel = """{"id":"t1","bookId":"b1","type":"expense","amountCents":2500,""" +
+            """"categoryId":"c1","accountId":null,"note":"x","bizDate":"2026-09-08",""" +
+            """"occurredAt":1788845613031,"source":"manual","version":1}"""
+        val wire = SyncPayloadMapper.toWirePayload(camel)
+        // snake 键存在
+        assertEquals("b1", wire.getString("book_id"))
+        assertEquals(2500, wire.getInt("amount_cents"))
+        assertEquals("c1", wire.getString("category_id"))
+        assertEquals("2026-09-08", wire.getString("biz_date"))
+        assertTrue(wire.isNull("account_id"))
+        // camel 键不再出现
+        assertFalse(wire.has("bookId"))
+        assertFalse(wire.has("amountCents"))
+        assertFalse(wire.has("occurredAt"))
+    }
+
+    @Test
+    fun toWirePayload_convertsOccurredAtEpochToIsoRoundTrips() {
+        val camel = """{"occurredAt":1788845613031,"type":"expense"}"""
+        val wire = SyncPayloadMapper.toWirePayload(camel)
+        val iso = wire.getString("occurred_at")
+        // ISO 可被 java.time 解析，且回到同一 epoch 毫秒
+        val parsed = java.time.OffsetDateTime.parse(iso).toInstant().toEpochMilli()
+        assertEquals(1788845613031L, parsed)
+    }
+
+    @Test
+    fun toWirePayload_nonDatetimeNumberUntouched() {
+        // amount_cents 是数字但非 datetime，必须保持数字（不被当时间戳转换）
+        val camel = """{"amountCents":300,"balanceCents":9000}"""
+        val wire = SyncPayloadMapper.toWirePayload(camel)
+        assertEquals(300, wire.getInt("amount_cents"))
+        assertEquals(9000, wire.getInt("balance_cents"))
     }
 }

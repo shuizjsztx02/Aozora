@@ -48,7 +48,9 @@ data class PushRequest(
     /** 待推送 mutation 列表（已按 createdAt 升序）。 */
     val mutations: List<MutationWire>,
     /** 当前 client cursor（服务端用来识别 bootstrap 场景）。 */
-    val cursor: Long
+    val cursor: Long,
+    /** T-M5-05ab S2-5: 推送前未同步 mutation 数，供服务端聚合计算 sync_queue_depth Gauge。 */
+    val pendingCount: Int? = null
 )
 
 /**
@@ -72,7 +74,12 @@ data class MutationWire(
 data class PullRequest(
     val cursor: Long,
     val limit: Int = 200
-)
+) {
+    companion object {
+        /** N-M3-11 修复：客户端防御性上限 — 服务端 pull limit 最大 500，此处设为同值作纵深防御。 */
+        const val MAX_CHANGES = 500
+    }
+}
 
 // ─── Responses ───
 

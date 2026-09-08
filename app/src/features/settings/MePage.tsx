@@ -7,9 +7,9 @@
 
 import { useState } from 'react'
 import { useTheme, type ThemeName } from '../../design/theme'
-import { PageHeader } from '../../components/Layout'
 import { useNavigate } from 'react-router'
-import { NativeBridge, BridgeError } from '../../platform/bridge/native-bridge'
+import { BridgeError } from '../../platform/bridge/native-bridge'
+import { useBridge } from '../../platform/hooks/use-bridge'
 
 const themeOptions: { value: ThemeName; label: string; icon: string }[] = [
   { value: 'dawn', label: '晨', icon: '🌅' },
@@ -31,7 +31,8 @@ export function MePage() {
   const [deleteConfirmation, setDeleteConfirmation] = useState('')
   const [deleteInProgress, setDeleteInProgress] = useState(false)
   const [deleteError, setDeleteError] = useState<string | null>(null)
-  const bridge = new NativeBridge()
+  // 使用全局 bridge 单例，避免多实例覆写全局回调导致请求挂起
+  const bridge = useBridge()
 
   const handleDeleteAccount = async () => {
     if (deleteConfirmation !== 'DELETE') return
@@ -66,7 +67,6 @@ export function MePage() {
 
   return (
     <div className="min-h-screen">
-      <PageHeader title="我的" />
 
       <div className="px-4 py-4 space-y-4 pb-20">
         {/* 用户信息 */}
@@ -84,10 +84,10 @@ export function MePage() {
         {/* 数据管理 */}
         <div className="glass-card overflow-hidden">
           <MenuSection title="数据管理">
-            <MenuItem icon="💰" label="账户" />
-            <MenuItem icon="📒" label="账本" />
-            <MenuItem icon="📂" label="分类" />
-            <MenuItem icon="📊" label="预算" />
+            <MenuItem icon="💰" label="账户" onClick={() => navigate('/settings/accounts')} />
+            <MenuItem icon="📒" label="账本" onClick={() => navigate('/settings/books')} />
+            <MenuItem icon="📂" label="分类" onClick={() => navigate('/settings/categories')} />
+            <MenuItem icon="📊" label="预算" onClick={() => navigate('/settings/budget')} />
           </MenuSection>
         </div>
 
@@ -137,9 +137,10 @@ export function MePage() {
 
         {/* 功能入口（占位） */}
         <div className="glass-card overflow-hidden">
-          <MenuSection title="更多">
+          <MenuSection title="更多设置">
             <MenuItem icon="⏰" label="提醒设置" onClick={() => navigate('/settings/reminder')} />
             <MenuItem icon="📤" label="数据导出" onClick={() => navigate('/settings/export')} />
+            <MenuItem icon="📝" label="意见反馈" onClick={() => navigate('/settings/feedback')} />
             <MenuItem icon="🔐" label="登录与安全" badge="即将上线" />
             <MenuItem icon="ℹ️" label="关于" />
           </MenuSection>

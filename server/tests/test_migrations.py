@@ -29,7 +29,8 @@ class TestMigrationConsistency:
             "0006_budget_deleted_at", "0007_ai_usage_index",
             "0008_proposal_idempotency", "0009_attachment_user_id",
             "0010_attachment_user_id_backfill", "0011_user_consents",
-            "0012_account_deletion",
+            "0012_account_deletion", "0013_crash_reports",
+            "0014_deletion_token_unique", "0015_feedback",
         ):
             try:
                 m = importlib.import_module(f"src.migrations.versions.{rev}")
@@ -67,7 +68,8 @@ class TestMigrationConsistency:
             "0006_budget_deleted_at", "0007_ai_usage_index",
             "0008_proposal_idempotency", "0009_attachment_user_id",
             "0010_attachment_user_id_backfill", "0011_user_consents",
-            "0012_account_deletion",
+            "0012_account_deletion", "0013_crash_reports",
+            "0014_deletion_token_unique", "0015_feedback",
         ):
             try:
                 m = importlib.import_module(f"src.migrations.versions.{rev}")
@@ -130,16 +132,18 @@ class TestMigrationConsistency:
                 f"{table_name} missing CHECK constraint on amount_cents"
             )
 
-    def test_17_tables_registered(self):
-        """The schema must define exactly 17 tables.
+    def test_19_tables_registered(self):
+        """The schema must define exactly 19 tables.
 
         T-M4-02b added ``proposal_idempotency`` (migration 0008) for AI
         execute dedup, bringing the total from 13 to 14.
         T-M5-04a added ``user_consents`` (migration 0011), bringing 14 → 15.
         T-M5-04c added ``deletion_tokens`` + ``deletion_audit`` (migration 0012),
         bringing 15 → 17.
+        T-M5-05b added ``crash_reports`` (migration 0013), 17 → 18.
+        T-M5-05c added ``feedbacks`` (migration 0015), 18 → 19.
         """
-        assert len(Base.metadata.tables) == 17
+        assert len(Base.metadata.tables) == 19
 
     def test_transaction_note_column_bounded(self):
         """N-13: transactions.note must be bounded at the DB layer too.

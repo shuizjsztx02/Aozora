@@ -28,6 +28,17 @@ class ReminderReceiver : BroadcastReceiver() {
 
     @SuppressLint("MissingPermission") // hasNotificationPermission 已在上方检查
     override fun onReceive(context: Context, intent: Intent) {
+        val action = intent.action
+
+        // 设备时间/时区变更 → 重新调度所有闹钟，防止提醒漂移（R-M4-35）
+        if (action == Intent.ACTION_TIME_CHANGED
+            || action == Intent.ACTION_TIMEZONE_CHANGED
+            || action == Intent.ACTION_DATE_CHANGED
+        ) {
+            ReminderScheduler(context.applicationContext).rescheduleIfEnabled()
+            return
+        }
+
         // AlarmManager 为单次闹钟：先登记下一次触发。
         // 直接以 applicationContext 重建调度器（状态在 SharedPreferences），
         // 避免依赖 Application 类型的运行时转换。

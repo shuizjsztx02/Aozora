@@ -37,6 +37,7 @@ object BridgeCommands {
     // Account
     const val ACCOUNT_LIST = "account.list"
     const val ACCOUNT_INSERT = "account.insert"
+    const val ACCOUNT_UPDATE = "account.update"
     const val ACCOUNT_ARCHIVE = "account.archive"
 
     // Budget
@@ -99,6 +100,19 @@ object BridgeCommands {
     const val ACCOUNT_REQUEST_DELETION_TOKEN = "account.requestDeletionToken"
     const val ACCOUNT_DELETE = "account.delete"
 
+    // T-M5-05c: 应用内反馈
+    const val FEEDBACK_SUBMIT = "feedback.submit"
+
+    // FIX-002 / BUG-014: 触感反馈
+    const val HAPTIC_FEEDBACK = "haptic.feedback"
+
+    // FIX-003 / BUG-015: 系统分享
+    const val SHARE_TEXT = "share.text"
+
+    // FIX-004 / BUG-001: 认证状态
+    const val AUTH_GET_STATUS = "auth.getStatus"
+    const val AUTH_TRIGGER_SYNC = "auth.triggerSync"
+
     /**
      * T-M5-02a review: canonical list of every command constant above.
      *
@@ -112,7 +126,7 @@ object BridgeCommands {
         TX_INSERT, TX_GET, TX_LIST_BY_BOOK, TX_LIST_BY_DATE, TX_SOFT_DELETE,
         BOOK_LIST, BOOK_INSERT,
         CATEGORY_LIST,
-        ACCOUNT_LIST, ACCOUNT_INSERT, ACCOUNT_ARCHIVE,
+        ACCOUNT_LIST, ACCOUNT_INSERT, ACCOUNT_UPDATE, ACCOUNT_ARCHIVE,
         BUDGET_LIST, BUDGET_INSERT, BUDGET_UPDATE, BUDGET_DELETE,
         PM_LIST, PM_MARK_SYNCING, PM_MARK_FAILED, PM_REMOVE,
         SYNC_GET_STATUS, SYNC_TRIGGER,
@@ -126,6 +140,11 @@ object BridgeCommands {
         CONSENT_RECORD, CONSENT_STATUS,
         EXPORT_CREATE, EXPORT_LIST, EXPORT_GET, EXPORT_DOWNLOAD,
         ACCOUNT_REQUEST_DELETION_TOKEN, ACCOUNT_DELETE,
+        FEEDBACK_SUBMIT,
+        HAPTIC_FEEDBACK,
+        SHARE_TEXT,
+        AUTH_GET_STATUS,
+        AUTH_TRIGGER_SYNC,
     )
 }
 

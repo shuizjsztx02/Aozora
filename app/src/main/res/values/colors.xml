@@ -1,0 +1,9 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- App icon gradient colors (Makoto Shinkai twilight sky) -->
+    <color name="icon_sky_top">#1a1a3e</color>
+    <color name="icon_sky_mid">#3a5f8a</color>
+    <color name="icon_sky_bot">#e8956a</color>
+    <color name="icon_cloud">#ffffff</color>
+    <color name="icon_star">#ffe8a0</color>
+</resources>

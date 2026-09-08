@@ -56,11 +56,12 @@ function DuskDecor() {
 }
 
 function NightDecor() {
-  const stars = Array.from({ length: 20 }, (_, i) => ({
+  const stars = Array.from({ length: 40 }, (_, i) => ({
     left: `${(i * 37 + 13) % 100}%`,
-    top: `${(i * 23 + 7) % 60}%`,
-    size: i % 3 === 0 ? 3 : 2,
+    top: `${(i * 23 + 7) % 70}%`,
+    size: i % 5 === 0 ? 3 : i % 3 === 0 ? 2 : 1,
     delay: i * 0.3,
+    opacity: 0.3 + (i % 3) * 0.25,
   }))
 
   return (
@@ -75,11 +76,23 @@ function NightDecor() {
             width: star.size,
             height: star.size,
             background: 'rgba(255,255,255,0.8)',
+            opacity: star.opacity,
             animation: `twinkle ${2 + star.delay}s ease-in-out infinite`,
             animationDelay: `${star.delay}s`,
           }}
         />
       ))}
+      {/* 月亮 */}
+      <div className="absolute rounded-full"
+        style={{
+          top: 60,
+          right: 40,
+          width: 80,
+          height: 80,
+          background: 'radial-gradient(circle at 35% 35%, #FFF8E1 0%, #F5F5DC 40%, #E8E4C9 100%)',
+          boxShadow: '0 0 40px rgba(255,248,225,0.3), 0 0 80px rgba(255,248,225,0.1)',
+          animation: 'moonGlow 4s ease-in-out infinite',
+        }} />
       {/* 彗尾 */}
       <div className="absolute top-[10%] right-[25%] w-1 h-1 rounded-full opacity-60"
         style={{
@@ -87,6 +100,20 @@ function NightDecor() {
           boxShadow: '-20px 0 10px rgba(255,255,255,0.3), -40px 0 20px rgba(255,255,255,0.1)',
           animation: 'shootingStar 8s ease-in-out infinite',
         }} />
+      {/* 地平线/山峦 */}
+      <div className="absolute bottom-16 left-0 right-0 h-32 pointer-events-none opacity-15">
+        <svg viewBox="0 0 400 120" preserveAspectRatio="none" xmlns="http://www.w3.org/2000/svg" style={{ width: '100%', height: '100%' }}>
+          {/* 远山 */}
+          <path d="M0,80 Q50,50 100,65 T200,55 T300,70 T400,60 V120 H0 Z" fill="rgba(20,25,50,0.8)" />
+          {/* 近山 */}
+          <path d="M0,95 Q80,75 150,85 T280,80 T400,90 V120 H0 Z" fill="rgba(15,18,35,0.9)" />
+          {/* 电线杆 */}
+          <line x1="200" y1="60" x2="200" y2="100" stroke="rgba(30,35,60,0.6)" strokeWidth="2" />
+          <line x1="180" y1="65" x2="220" y2="65" stroke="rgba(30,35,60,0.6)" strokeWidth="1.5" />
+          {/* 电线 */}
+          <path d="M0,68 Q100,75 200,65 T400,70" fill="none" stroke="rgba(30,35,60,0.4)" strokeWidth="1" />
+        </svg>
+      </div>
     </>
   )
 }
@@ -133,6 +160,10 @@ export function SkyCanvas() {
           5% { opacity: 1; }
           15% { transform: translate(-100px, 50px); opacity: 0; }
           100% { opacity: 0; }
+        }
+        @keyframes moonGlow {
+          0%, 100% { box-shadow: 0 0 40px rgba(255,248,225,0.3), 0 0 80px rgba(255,248,225,0.1); }
+          50% { box-shadow: 0 0 60px rgba(255,248,225,0.4), 0 0 100px rgba(255,248,225,0.15); }
         }
         ${reducedMotion ? `
           .sky-fixed * { animation: none !important; }

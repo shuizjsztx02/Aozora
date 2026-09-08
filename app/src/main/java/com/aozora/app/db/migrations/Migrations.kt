@@ -47,3 +47,17 @@ val MIGRATION_2_3: Migration = object : Migration(2, 3) {
         )
     }
 }
+
+/**
+ * T7-1（REQ-6）Room schema 迁移。
+ *
+ * v3 → v4：
+ * - accounts 新增 accountType TEXT（nullable，支付渠道子类型）。
+ */
+val MIGRATION_3_4: Migration = object : Migration(3, 4) {
+    override fun migrate(db: SupportSQLiteDatabase) {
+        db.execSQL(
+            "ALTER TABLE `accounts` ADD COLUMN `accountType` TEXT"
+        )
+    }
+}

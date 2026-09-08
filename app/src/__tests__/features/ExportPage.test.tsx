@@ -119,6 +119,22 @@ describe('ExportPage', () => {
     expect(screen.getAllByText('¥15.00')).toHaveLength(2)
   })
 
+  // T7-6 / REQ-6：服务端导出只支持单账本实体 — 总账本（isMaster）不进下拉、不可选
+  it('excludes the master book from the export book list', async () => {
+    mockBridge.call.mockImplementation(async (cmd: string) => {
+      if (cmd === 'book.list') {
+        return [{ id: 'm1', name: '总账本', isMaster: true }, ...sampleBooks]
+      }
+      if (cmd === 'transaction.listByBook') return sampleLocalTxs
+      return []
+    })
+    renderPage()
+    await waitFor(() => expect(screen.queryByText('加载中...')).not.toBeInTheDocument())
+    expect(screen.queryByText('总账本')).not.toBeInTheDocument()
+    // 默认选中第一个普通账本
+    expect(screen.getByText('日常账本').parentElement?.querySelector('span:last-child')?.textContent).toBe('✓')
+  })
+
   it('shows reconciliation mismatch when sums differ', async () => {
     mockBridge.downloadExport.mockResolvedValue({
       localPath: '/Download/Aozora/export-book-1.json',

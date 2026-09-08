@@ -15,7 +15,7 @@ from __future__ import annotations
 import uuid
 from datetime import datetime
 
-from sqlalchemy import DateTime, Integer, String, Text
+from sqlalchemy import DateTime, String, Text
 from sqlalchemy.orm import Mapped, mapped_column
 
 from src.models.base import Base
@@ -61,8 +61,9 @@ class CrashReport(Base):
     reported_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False,
     )
-    # Optional: device id hash (SHA-256 truncated) so we can dedup reports
-    # per device without storing the real device_id.
+    # Optional: device id hash (full SHA-256 hex, 64 chars) so we can dedup
+    # reports per device without storing the real device_id.
+    # T-M5-05ab fix (S2-2): expanded from 16 to 64 chars for collision resistance.
     device_id_hash: Mapped[str | None] = mapped_column(
-        String(16), nullable=True,
+        String(64), nullable=True,
     )

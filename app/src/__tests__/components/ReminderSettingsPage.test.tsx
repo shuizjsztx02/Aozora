@@ -51,14 +51,11 @@ describe('ReminderSettingsPage', () => {
     mockBridge.onPermissionResult.mockReturnValue(() => {})
   })
 
-  it('shows loading then status', async () => {
+  it('renders immediately then updates with loaded status', async () => {
     renderPage()
-    expect(screen.getByText('加载中...')).toBeInTheDocument()
-    await waitFor(() =>
-      expect(screen.queryByText('加载中...')).not.toBeInTheDocument(),
-    )
+    // 页面结构立即渲染（不再以全屏 loading 阻塞）
     expect(screen.getByText('每日记账提醒')).toBeInTheDocument()
-    expect(mockBridge.getReminderStatus).toHaveBeenCalledTimes(1)
+    await waitFor(() => expect(mockBridge.getReminderStatus).toHaveBeenCalledTimes(1))
   })
 
   it('hides time picker when disabled', async () => {

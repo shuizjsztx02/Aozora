@@ -19,7 +19,6 @@ export function ReminderSettingsPage() {
   const [hour, setHour] = useState(21)
   const [minute, setMinute] = useState(0)
   const [hasPermission, setHasPermission] = useState(true)
-  const [loading, setLoading] = useState(true)
 
   const loadStatus = useCallback(async () => {
     try {
@@ -30,8 +29,6 @@ export function ReminderSettingsPage() {
       setHasPermission(status.notificationPermission)
     } catch (err) {
       console.error('Failed to load reminder status:', err)
-    } finally {
-      setLoading(false)
     }
   }, [bridge])
 
@@ -103,18 +100,9 @@ export function ReminderSettingsPage() {
     return unsubscribe
   }, [bridge])
 
-  if (loading) {
-    return (
-      <div className="min-h-screen">
-        <PageHeader title="提醒设置" />
-        <div className="px-4 py-8 text-center text-ink3">加载中...</div>
-      </div>
-    )
-  }
-
   return (
     <div className="min-h-screen">
-      <PageHeader title="提醒设置" />
+      <PageHeader back />
 
       <div className="px-4 py-4 space-y-4 pb-20">
         {/* 通知权限提示 */}

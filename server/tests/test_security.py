@@ -101,6 +101,65 @@ class TestRequestBodyLimit:
 
 
 # ---------------------------------------------------------------------------
+# CORS preflight (runtime) — O-R-T-M5-02-C
+# ---------------------------------------------------------------------------
+
+class TestCorsPreflight:
+    """Runtime OPTIONS preflight assertions.
+
+    The test config ships ``CORS_ORIGINS=*`` and ``main.py`` passes
+    ``allow_credentials=True``, so Starlette must echo the request Origin
+    (a literal ``*`` is invalid next to credentials) and advertise the
+    static allow-list configured in ``main.py``.
+    """
+
+    _ORIGIN = "http://localhost:5173"
+    _BASE = {"Origin": _ORIGIN, "Access-Control-Request-Method": "POST"}
+
+    def test_preflight_allowed_headers_get_200(self, client):
+        resp = client.options(
+            "/sync/push",
+            headers={
+                **self._BASE,
+                "Access-Control-Request-Headers": (
+                    "authorization, content-type, x-request-id"
+                ),
+            },
+        )
+        assert resp.status_code == 200
+        assert resp.headers["Access-Control-Allow-Origin"] == self._ORIGIN
+        assert resp.headers["Access-Control-Allow-Credentials"] == "true"
+        assert "POST" in resp.headers["Access-Control-Allow-Methods"]
+        allowed = {
+            h.strip().lower()
+            for h in resp.headers["Access-Control-Allow-Headers"].split(",")
+        }
+        assert {"authorization", "content-type", "x-request-id"} <= allowed
+
+    def test_preflight_rejects_unlisted_header(self, client):
+        """main.py allows a fixed header list — unknown headers must 400."""
+        resp = client.options(
+            "/sync/push",
+            headers={
+                **self._BASE,
+                "Access-Control-Request-Headers": "x-evil-header",
+            },
+        )
+        assert resp.status_code == 400
+
+    def test_simple_get_echoes_origin_with_vary(self, client):
+        resp = client.get("/health/live", headers={"Origin": self._ORIGIN})
+        assert resp.headers["Access-Control-Allow-Origin"] == self._ORIGIN
+        # Echoed origin must carry Vary so shared caches never serve one
+        # origin's response to another.
+        assert "Origin" in resp.headers.get("Vary", "")
+
+    def test_request_without_origin_gets_no_cors_headers(self, client):
+        resp = client.get("/health/live")
+        assert "access-control-allow-origin" not in resp.headers
+
+
+# ---------------------------------------------------------------------------
 # Docs gating
 # ---------------------------------------------------------------------------
 

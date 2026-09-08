@@ -28,7 +28,9 @@ class AIInterpretResponse(BaseModel):
     request_id: str
     task: str
     model: str
-    # json tasks → parsed dict; text tasks → str
+    # output 是最小解析结果（type/amountCents/category/note/bizDate/confidence），不是完整 ActionProposal。
+    # 由客户端组装为 ActionProposal 后，再经 POST /ai/validate 校验 → POST /ai/execute 执行。
+    # R-M4-03 契约澄清：此字段不做 ActionProposal Schema 校验，仅为中间表示。
     output: Any
     usage: AIUsageInfo
 

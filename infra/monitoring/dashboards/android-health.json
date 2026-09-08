@@ -4,7 +4,7 @@
   "editable": false,
   "panels": [
     {
-      "title": "Version Distribution",
+      "title": "Version Distribution [populates after an APK release containing HeartbeatClient]",
       "type": "piechart",
       "gridPos": { "h": 8, "w": 8, "x": 0, "y": 0 },
       "datasource": { "uid": "prometheus" },

@@ -574,12 +574,14 @@ class AIService:
         transactions = proposal_dict.get("transactions") or []
         for i, tx in enumerate(transactions):
             cat_id = tx.get("categoryId") if isinstance(tx, dict) else None
-            # S-C1 fix: 有 context 时 categoryId 缺失视为幻觉（与 TS 校验器对齐）
-            if cat_id is None or cat_id == "":
-                hallucination_errors.append({
-                    "path": f"transactions[{i}].categoryId",
-                    "message": "categoryId is required when validation context is available",
-                })
+            # R-M4-64 fix: 零分类用户（ctx.category_ids 为空）时，允许
+            # categoryId 缺失或为空 — 交易可不带分类；非空但不在集合中仍视为幻觉
+            if not cat_id or cat_id == "":
+                if ctx.category_ids:
+                    hallucination_errors.append({
+                        "path": f"transactions[{i}].categoryId",
+                        "message": "categoryId is required when validation context is available",
+                    })
             elif cat_id not in ctx.category_ids:
                 hallucination_errors.append({
                     "path": f"transactions[{i}].categoryId",
@@ -1339,15 +1341,9 @@ class AIService:
         # Determine fallback category ID: first available category.
         # We cannot know the type from context alone, so we just pick the
         # first category ID available. The user can edit in the batch card.
-        # NEW-E6 fix: 零分类时不能返回 ""（schema minLength:1 会静默失败），
-        # 必须给出明确错误。
-        if not ctx.category_names:
-            from src.common.errors import AppException
-            raise AppException(
-                400, "no_categories",
-                "No categories configured — add at least one category before parsing images",
-            )
-        fallback_category_id = next(iter(ctx.category_names.values()))
+        # R-M4-64 fix: 零分类用户时 fallback 为空，后续 resolve 循环中若无法匹配
+        # 则省略 categoryId（schema 中 categoryId 非 required，不触发 minLength:1）
+        fallback_category_id = next(iter(ctx.category_names.values()), "")
 
         # R-M4-52 fix: today in the user's timezone — same day boundary as
         # the quota system (local_day_start_utc). A UTC fallback would date
@@ -1405,11 +1401,15 @@ class AIService:
             if tx_type not in ("expense", "income"):
                 tx_type = "expense"
 
-            resolved.append({
+            tx_dict: dict = {
                 "type": tx_type,
                 "amountCents": amount_cents,
-                "categoryId": cat_id,
                 "note": str(tx.get("note", "")),
                 "bizDate": biz_date,
-            })
+            }
+            # R-M4-64 fix: 零分类用户时 cat_id 可能为空，此时省略 categoryId
+            # 键（schema 中非 required；带空字符串会触发 minLength:1 校验失败）
+            if cat_id:
+                tx_dict["categoryId"] = cat_id
+            resolved.append(tx_dict)
         return resolved

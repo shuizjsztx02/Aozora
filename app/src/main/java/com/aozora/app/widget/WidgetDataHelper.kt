@@ -66,7 +66,8 @@ object WidgetDataHelper {
             )
         }
 
-        val bookId = books[0].id
+        // T7-1（决策 #2）：记账目标账本（排除总账本），回退第一个账本
+        val bookId = (repository.getEntryBook() ?: books.first()).id
         // R-M4-29 修复：使用 Asia/Shanghai 时区，与前端 todayBizDate 一致
         val shanghaiZone = ZoneId.of("Asia/Shanghai")
         val today = LocalDate.now(shanghaiZone).format(DateTimeFormatter.ISO_LOCAL_DATE)
@@ -93,9 +94,11 @@ object WidgetDataHelper {
             (100 * monthExpenseCents / budgetCents).toInt().coerceIn(0, 100)
         } else 0
 
-        // 检查是否有待同步的 mutation
+        // R-M4-31 修复：pending + failed 汇总，与首页 SyncBadge 口径一致
         val pendingCount = repository.countPendingMutations()
-        val state = if (pendingCount > 0) WidgetState.PENDING_SYNC else WidgetState.READY
+        val failedCount = repository.countFailedMutations()
+        val hasUnsynced = pendingCount > 0 || failedCount > 0
+        val state = if (hasUnsynced) WidgetState.PENDING_SYNC else WidgetState.READY
 
         return WidgetData(
             state = state,

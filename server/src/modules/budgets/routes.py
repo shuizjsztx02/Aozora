@@ -5,7 +5,7 @@ from __future__ import annotations
 import uuid
 from typing import Annotated
 
-from fastapi import APIRouter, Depends, Query
+from fastapi import APIRouter, Depends, Path, Query
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from src.common.database import get_db_session
@@ -32,7 +32,13 @@ async def list_budgets(
 
 @router.put("/{period}", response_model=BudgetResponse)
 async def upsert_budget(
-    period: str,
+    period: Annotated[
+        str,
+        Path(
+            pattern=r"^\d{4}-\d{2}$",
+            title="Period in YYYY-MM format (e.g. 2024-01)",
+        ),
+    ],
     body: BudgetUpsert,
     current_user: Annotated[User, Depends(get_current_user)] = ...,
     db: Annotated[AsyncSession, Depends(get_db_session)] = ...,
@@ -45,7 +51,13 @@ async def upsert_budget(
 
 @router.put("/{period}/category/{category_id}", response_model=BudgetResponse)
 async def upsert_category_budget(
-    period: str,
+    period: Annotated[
+        str,
+        Path(
+            pattern=r"^\d{4}-\d{2}$",
+            title="Period in YYYY-MM format (e.g. 2024-01)",
+        ),
+    ],
     category_id: uuid.UUID,
     body: BudgetUpsert,
     current_user: Annotated[User, Depends(get_current_user)] = ...,

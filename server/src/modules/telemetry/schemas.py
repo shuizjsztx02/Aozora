@@ -11,7 +11,6 @@ from typing import Annotated
 
 from pydantic import BaseModel, Field
 
-
 # ── POST /telemetry/crash ───────────────────────────────────────────────
 
 class CrashReportRequest(BaseModel):
@@ -33,8 +32,8 @@ class CrashReportRequest(BaseModel):
     stacktrace: Annotated[str, Field(max_length=16_000)]
     reported_at: datetime
     device_id_hash: Annotated[str | None, Field(
-        default=None, max_length=16,
-        description="SHA-256(device_id)[:16] — optional device dedup key",
+        default=None, max_length=64,
+        description="SHA-256(device_id) — optional device dedup key (full 64-char hex)",
     )]
 
 
@@ -53,3 +52,39 @@ class HeartbeatRequest(BaseModel):
 
 class HeartbeatResponse(BaseModel):
     ack: bool = True
+
+
+# ── POST /telemetry/feedback ────────────────────────────────────────────
+
+class FeedbackRequest(BaseModel):
+    """Feedback body from the in-app feedback form.
+
+    ``content`` is the free-form text (required). ``category`` is one of
+    ``bug``, ``suggestion``, ``other``. ``contact`` is optional and
+    self-supplied. All text fields are re-capped by the service layer.
+    """
+
+    category: Annotated[str, Field(
+        min_length=1, max_length=16,
+        description="One of: bug, suggestion, other",
+    )]
+    content: Annotated[str, Field(
+        min_length=1, max_length=4_000,
+        description="Free-form feedback text (no PII)",
+    )]
+    contact: Annotated[str | None, Field(
+        default=None, max_length=128,
+        description="Optional self-supplied contact (email / handle)",
+    )]
+    app_version: Annotated[str, Field(max_length=32)]
+    android_version: Annotated[str, Field(max_length=16)]
+    device_model: Annotated[str, Field(max_length=64)]
+    device_id_hash: Annotated[str | None, Field(
+        default=None, max_length=64,
+        description="SHA-256(device_id) — optional device dedup key (full 64-char hex)",
+    )]
+
+
+class FeedbackResponse(BaseModel):
+    id: str
+    received: bool = True

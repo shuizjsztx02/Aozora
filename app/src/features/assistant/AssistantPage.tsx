@@ -13,6 +13,7 @@ import { ConfirmationCard } from './ConfirmationCard'
 import { UndoToast } from './UndoToast'
 import type { CategoryData } from '../../platform/bridge/bridge-types'
 import type { ActionProposal } from '../../domain/action-proposal'
+import { pickEntryBook } from '../../domain/books'
 
 export function AssistantPage() {
   const bridge = useBridge()
@@ -35,7 +36,9 @@ export function AssistantPage() {
   useEffect(() => {
     bridge.listCategories().then(setCategories).catch(() => {})
     bridge.listBooks().then(books => {
-      if (books.length > 0) setBookId(books[0].id)
+      // 决策 #2 / T7-6：聊天记账目标 = 第一个非 master 账本，禁止误选总账本
+      const entry = pickEntryBook(books)
+      if (entry) setBookId(entry.id)
     }).catch(() => {})
   }, [bridge])
 
@@ -98,8 +101,8 @@ export function AssistantPage() {
   }, [voiceIsRecording, voiceStartRecording, voiceStopRecording])
 
   return (
-    <div className="flex flex-col h-screen" style={{ background: 'var(--bg)' }}>
-      <PageHeader title="AI 助手" />
+    <div className="flex flex-col h-screen safe-top" style={{ background: 'var(--bg)' }}>
+      <PageHeader back />
 
       {/* 消息列表 */}
       <div
@@ -182,30 +185,16 @@ export function AssistantPage() {
           </div>
         )}
 
-        {/* 确认卡 */}
-        {phase === 'confirming' && pendingProposal && (
+        {/* 确认卡 — confirming 和 executing 阶段都显示 */}
+        {(phase === 'confirming' || phase === 'executing') && pendingProposal && (
           <ConfirmationCard
             proposal={pendingProposal}
             categories={categories}
             onConfirm={handleConfirmEdited}
             onCancel={cancelProposal}
+            submitting={phase === 'executing'}
+            error={messages.filter(m => m.proposalStatus === 'error').pop()?.text || null}
           />
-        )}
-
-        {/* 执行中 */}
-        {phase === 'executing' && (
-          <div className="flex justify-start mb-3">
-            <div
-              className="px-3 py-2 rounded-xl text-sm"
-              style={{
-                background: 'var(--glass)',
-                color: 'var(--ink2)',
-                border: '1px solid var(--glass-border)',
-              }}
-            >
-              正在记账…
-            </div>
-          </div>
         )}
       </div>
 

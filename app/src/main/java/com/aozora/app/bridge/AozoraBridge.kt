@@ -3,10 +3,12 @@ package com.aozora.app.bridge
 import android.webkit.JavascriptInterface
 import android.webkit.WebView
 import com.aozora.app.ai.AiGatewayClient
+import com.aozora.app.consent.ConsentClient
 import com.aozora.app.consent.ConsentStore
 import com.aozora.app.db.Repository
 import com.aozora.app.db.entity.*
 import com.aozora.app.export.ExportClient
+import com.aozora.app.feedback.FeedbackClient
 import com.aozora.app.image.ImageClient
 import com.aozora.app.image.ImagePicker
 import com.aozora.app.permission.PermissionManager
@@ -54,10 +56,14 @@ class AozoraBridge(
     private val imageClient: ImageClient? = null,
     private val voiceRecognitionService: VoiceRecognitionService? = null,
     private val consentStore: ConsentStore? = null,
+    // T-M5-05c fix (S1): 上传同意记录到服务端。
+    private val consentClient: ConsentClient? = null,
     private val exportClient: ExportClient? = null,
     // T-M5-04c: 账号删除。
     private val deletionClient: com.aozora.app.deletion.DeletionClient? = null,
-    private val tokenStore: com.aozora.app.auth.TokenStore? = null
+    private val tokenStore: com.aozora.app.auth.TokenStore? = null,
+    // T-M5-05c: 应用内反馈。
+    private val feedbackClient: FeedbackClient? = null
 ) {
     // NEW-R6-2 fix: 追踪当前活跃的 parse Job，以便取消
     @Volatile
@@ -123,6 +129,7 @@ class AozoraBridge(
             // Account
             BridgeCommands.ACCOUNT_LIST -> handleAccountList(requestId)
             BridgeCommands.ACCOUNT_INSERT -> handleAccountInsert(requestId, payload)
+            BridgeCommands.ACCOUNT_UPDATE -> handleAccountUpdate(requestId, payload)
             BridgeCommands.ACCOUNT_ARCHIVE -> handleAccountArchive(requestId, payload)
 
             // Budget
@@ -185,6 +192,19 @@ class AozoraBridge(
             BridgeCommands.ACCOUNT_REQUEST_DELETION_TOKEN -> handleAccountRequestDeletionToken(requestId)
             BridgeCommands.ACCOUNT_DELETE -> handleAccountDelete(requestId, payload)
 
+            // T-M5-05c: 应用内反馈
+            BridgeCommands.FEEDBACK_SUBMIT -> handleFeedbackSubmit(requestId, payload)
+
+            // FIX-002 / BUG-014: 触感反馈
+            BridgeCommands.HAPTIC_FEEDBACK -> handleHapticFeedback(requestId, payload)
+
+            // FIX-003 / BUG-015: 系统分享
+            BridgeCommands.SHARE_TEXT -> handleShareText(requestId, payload)
+
+            // FIX-004 / BUG-001: 认证状态
+            BridgeCommands.AUTH_GET_STATUS -> handleAuthGetStatus(requestId)
+            BridgeCommands.AUTH_TRIGGER_SYNC -> handleAuthTriggerSync(requestId)
+
             else -> BridgeResponse.error(requestId, "unknown_command", "Unknown command: $command")
         }
     }
@@ -243,11 +263,14 @@ class AozoraBridge(
 
     private suspend fun handleBookList(requestId: String): BridgeResponse {
         val books = repository.listBooks()
+        val masterId = repository.getMasterBookId()
         val arr = org.json.JSONArray()
         for (b in books) {
             arr.put(JSONObject().apply {
                 put("id", b.id); put("ownerId", b.ownerId); put("name", b.name)
                 put("icon", b.icon); put("version", b.version)
+                // T7-1（REQ-5）：透出总账本标记，前端记账入口据此排除
+                put("isMaster", b.id == masterId)
             })
         }
         return BridgeResponse.success(requestId, arr.toString())
@@ -288,6 +311,8 @@ class AozoraBridge(
         for (a in accs) {
             arr.put(JSONObject().apply {
                 put("id", a.id); put("name", a.name); put("icon", a.icon); put("version", a.version)
+                // T7-1（REQ-6）：支付渠道子类型，可为 null
+                put("accountType", a.accountType ?: JSONObject.NULL)
             })
         }
         return BridgeResponse.success(requestId, arr.toString())
@@ -301,10 +326,32 @@ class AozoraBridge(
             ownerId = aObj.getString("ownerId"),
             name = aObj.getString("name"),
             icon = aObj.optString("icon", "account"),
+            accountType = BridgePayload.optionalString(aObj, "accountType"),
             archivedAt = null,
             version = BridgePayload.version(aObj)
         )
         repository.insertAccount(account, mutationId)
+        return BridgeResponse.success(requestId, JSONObject().put("id", account.id).toString())
+    }
+
+    /** T7-1（REQ-6）：仿 handleBudgetUpdate 局部合并 — 缺省字段沿用当前值。 */
+    private suspend fun handleAccountUpdate(requestId: String, p: JSONObject): BridgeResponse {
+        val aObj = p.getJSONObject("account")
+        val mutationId = p.getString("mutationId")
+        val current = repository.getAccount(aObj.getString("id"))
+            ?: throw IllegalArgumentException("account not found")
+        val account = AccountEntity(
+            id = aObj.getString("id"),
+            ownerId = current.ownerId,
+            name = BridgePayload.optionalString(aObj, "name") ?: current.name,
+            icon = BridgePayload.optionalString(aObj, "icon") ?: current.icon,
+            // 显式传 null 可清空 accountType；键缺省则保留当前值
+            accountType = if (aObj.has("accountType"))
+                BridgePayload.optionalString(aObj, "accountType") else current.accountType,
+            archivedAt = current.archivedAt,
+            version = BridgePayload.version(aObj)
+        )
+        repository.updateAccount(account, mutationId)
         return BridgeResponse.success(requestId, JSONObject().put("id", account.id).toString())
     }
 
@@ -972,8 +1019,8 @@ class AozoraBridge(
     /**
      * 记录隐私政策同意。
      *
-     * 写入 Room user_consent 表 + ConsentStore（SharedPreferences）。
-     * 服务端同步在认证后通过 SyncEngine 完成。
+     * 写入 Room user_consent 表 + ConsentStore（SharedPreferences），
+     * 然后异步调用 [ConsentClient.send] 将同意记录上传到服务端 POST /consent。
      */
     private suspend fun handleConsentRecord(requestId: String, p: JSONObject): BridgeResponse {
         val store = consentStore
@@ -982,14 +1029,15 @@ class AozoraBridge(
         // 防止恶意 JS 注入超长字符串写爆 Room / 服务端。
         val policyVersion = p.optString("policyVersion", "v1").take(32)
         val consentedAt = p.optLong("consentedAt", System.currentTimeMillis())
-        // deviceId 同样受服务端 128 字符限制约束。
-        val deviceId = p.optString("deviceId", "").take(128)
+        // deviceId 参数来自前端，可能是空串（旧版前端不传）。
+        // 实际用于服务端关联的 device_id 以 TokenStore 中的真实 UUID 为准。
+        val _deviceIdParam = p.optString("deviceId", "").take(128)
 
         // 写入 Room
         val consentId = java.util.UUID.randomUUID().toString()
         val entity = com.aozora.app.db.entity.UserConsentEntity(
             id = consentId,
-            deviceId = deviceId,
+            deviceId = _deviceIdParam,
             policyVersion = policyVersion,
             consentedAt = consentedAt
         )
@@ -997,6 +1045,23 @@ class AozoraBridge(
 
         // 写入 SharedPreferences（快速检查用）
         store.markConsented()
+
+        // T-M5-05c fix (S1): 将同意记录上传到服务端 POST /consent。
+        // 使用 tokenStore.deviceId（真实 UUID），不用前端传入的空值。
+        // 失败不阻断 onboarding，但会保留 hasUploadedConsent=false 以便
+        // AozoraApp.onCreate 在下次冷启动时重试。
+        // T-fix: 上传不能阻塞 bridge 响应——服务端不可达时（如 debug 包的
+        // 10.0.2.2 地址在真机上挂起），会拖到前端 10s 超时、onboarding 卡死。
+        // 本地持久化（Room + SharedPreferences）已完成即算同意成功，
+        // 上传改为 fire-and-forget，失败由冷启动重试兜底。
+        if (consentClient != null && tokenStore != null) {
+            scope.launch(Dispatchers.IO) {
+                val uploaded = consentClient.send(policyVersion, consentedAt)
+                if (uploaded) {
+                    store.markConsentUploaded()
+                }
+            }
+        }
 
         val data = JSONObject().apply {
             put("id", consentId)
@@ -1228,6 +1293,54 @@ class AozoraBridge(
         webView.post { webView.evaluateJavascript(js, null) }
     }
 
+    // ─── T-M5-05c: 应用内反馈 handler ───
+
+    /**
+     * 提交应用内反馈。
+     *
+     * Payload:
+     *   - category: "bug" | "suggestion" | "other"（必填）
+     *   - content: 自由文本 1–4000 字符（必填）
+     *   - contact: 可选联系方式（≤ 128 字符）
+     *
+     * 返回: { id: string }（服务端分配的 UUID）
+     */
+    private suspend fun handleFeedbackSubmit(
+        requestId: String,
+        p: JSONObject
+    ): BridgeResponse {
+        val client = feedbackClient
+            ?: return BridgeResponse.error(requestId, "unavailable", "feedback client not injected")
+        val category = p.optString("category", "").ifBlank {
+            return BridgeResponse.error(requestId, "invalid_input", "Missing required field: category")
+        }
+        if (category !in listOf("bug", "suggestion", "other")) {
+            return BridgeResponse.error(requestId, "invalid_input", "category must be one of: bug, suggestion, other")
+        }
+        val content = p.optString("content", "").ifBlank {
+            return BridgeResponse.error(requestId, "invalid_input", "Missing required field: content")
+        }
+        if (content.length > 4000) {
+            return BridgeResponse.error(requestId, "invalid_input", "content exceeds 4000 character limit")
+        }
+        val contact = p.optString("contact", "").ifBlank { null }
+        return try {
+            val id = client.submit(category, content, contact)
+            val data = JSONObject().put("id", id)
+            BridgeResponse.success(requestId, data.toString())
+        } catch (e: FeedbackClient.FeedbackError.AuthLost) {
+            BridgeResponse.error(requestId, "auth_lost", e.message ?: "authentication required")
+        } catch (e: FeedbackClient.FeedbackError.RateLimited) {
+            BridgeResponse.error(requestId, "rate_limited", "Feedback rate limit exceeded (5 per hour)")
+        } catch (e: FeedbackClient.FeedbackError.BadRequest) {
+            BridgeResponse.error(requestId, "invalid_input", e.detail)
+        } catch (e: FeedbackClient.FeedbackError.Network) {
+            BridgeResponse.error(requestId, "network_error", e.message ?: "network error")
+        } catch (e: FeedbackClient.FeedbackError.ServerError) {
+            BridgeResponse.error(requestId, "server_error", "server error: HTTP ${e.httpCode}")
+        }
+    }
+
     private fun respond(response: BridgeResponse) {
         // CR-05 fix: wrap in try-catch to prevent exceptions from causing
         // permanent Promise hangs on the TypeScript side. If WebView is
@@ -1243,6 +1356,102 @@ class AozoraBridge(
             }
         } catch (_: Exception) {
             // post() failed — drop response
+        }
+    }
+
+    // ─── FIX-004 / BUG-001: 认证状态 ───
+
+    private fun handleAuthGetStatus(requestId: String): BridgeResponse {
+        val ts = tokenStore
+        val obj = JSONObject()
+        if (ts == null) {
+            obj.put("registered", false)
+            obj.put("userId", JSONObject.NULL)
+            obj.put("deviceId", JSONObject.NULL)
+        } else {
+            obj.put("registered", ts.isRegistered)
+            obj.put("userId", ts.getUserId() ?: JSONObject.NULL)
+            obj.put("deviceId", ts.deviceId)
+        }
+        return BridgeResponse.success(requestId, obj.toString())
+    }
+
+    private suspend fun handleAuthTriggerSync(requestId: String): BridgeResponse {
+        val engine = syncEngine
+            ?: return BridgeResponse.error(requestId, "unavailable", "sync engine not injected")
+        return try {
+            val outcome = engine.runOnce()
+            val obj = JSONObject().put("outcome", outcome.name)
+            BridgeResponse.success(requestId, obj.toString())
+        } catch (e: Exception) {
+            BridgeResponse.error(requestId, "internal_error", e.message ?: "sync failed")
+        }
+    }
+
+    // ─── FIX-002 / BUG-014: 触感反馈 ───
+
+    private fun handleHapticFeedback(requestId: String, p: JSONObject): BridgeResponse {
+        val kind = p.optString("kind", "success")
+        val ctx = syncContext ?: return BridgeResponse.error(requestId, "unavailable", "no context")
+        val vibrator = if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.S) {
+            val manager = ctx.getSystemService(android.content.Context.VIBRATOR_MANAGER_SERVICE)
+                as? android.os.VibratorManager
+            manager?.defaultVibrator
+        } else {
+            @Suppress("DEPRECATION")
+            ctx.getSystemService(android.content.Context.VIBRATOR_SERVICE) as? android.os.Vibrator
+        }
+        if (vibrator == null || !vibrator.hasVibrator()) {
+            return BridgeResponse.success(requestId, JSONObject().put("ok", true).toString())
+        }
+        when (kind) {
+            "error" -> {
+                // 长震 200ms，暗示失败
+                if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.O) {
+                    vibrator.vibrate(
+                        android.os.VibrationEffect.createOneShot(200, android.os.VibrationEffect.DEFAULT_AMPLITUDE)
+                    )
+                } else {
+                    @Suppress("DEPRECATION")
+                    vibrator.vibrate(200)
+                }
+            }
+            else -> {
+                // 短震 50ms，暗示成功
+                if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.O) {
+                    vibrator.vibrate(
+                        android.os.VibrationEffect.createOneShot(50, android.os.VibrationEffect.DEFAULT_AMPLITUDE)
+                    )
+                } else {
+                    @Suppress("DEPRECATION")
+                    vibrator.vibrate(50)
+                }
+            }
+        }
+        return BridgeResponse.success(requestId, JSONObject().put("ok", true).toString())
+    }
+
+    // ─── FIX-003 / BUG-015: 系统分享 ───
+
+    private fun handleShareText(requestId: String, p: JSONObject): BridgeResponse {
+        val text = p.optString("text", "").ifBlank {
+            return BridgeResponse.error(requestId, "invalid_input", "Missing required field: text")
+        }
+        val subject = p.optString("subject", "Aozora 统计")
+        val ctx = syncContext ?: return BridgeResponse.error(requestId, "unavailable", "no context")
+        val intent = android.content.Intent(android.content.Intent.ACTION_SEND).apply {
+            type = "text/plain"
+            putExtra(android.content.Intent.EXTRA_SUBJECT, subject)
+            putExtra(android.content.Intent.EXTRA_TEXT, text)
+            addFlags(android.content.Intent.FLAG_ACTIVITY_NEW_TASK)
+        }
+        return try {
+            ctx.startActivity(android.content.Intent.createChooser(intent, "分享到").apply {
+                addFlags(android.content.Intent.FLAG_ACTIVITY_NEW_TASK)
+            })
+            BridgeResponse.success(requestId, JSONObject().put("ok", true).toString())
+        } catch (e: Exception) {
+            BridgeResponse.error(requestId, "internal_error", e.message ?: "share failed")
         }
     }
 
