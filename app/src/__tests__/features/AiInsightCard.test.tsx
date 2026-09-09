@@ -1,11 +1,12 @@
 /**
- * AiInsightCard 测试 — T-M4-03c 客户端洞察展示。
+ * AiInsightCard 测试 — T-M4-03c 客户端洞察展示 + T10-7 修复（决策 #8）。
  *
- * 覆盖：缓存行为、离线降级、加载/错误状态、叙述展开。
+ * 覆盖：缓存行为（TTL 5min）、刷新按钮 bypass 缓存、离线降级、加载/错误状态、
+ * 叙述展开、空数据诊断（去同步按钮调用链、localCount=0 不显示提示）。
  */
 
 import { describe, it, expect, beforeEach, vi } from 'vitest'
-import { render, screen, waitFor } from '@testing-library/react'
+import { render, screen, waitFor, fireEvent } from '@testing-library/react'
 import { AiInsightCard } from '../../features/reports/AiInsightCard'
 import type { AiReportResponse } from '../../platform/bridge/bridge-types'
 import type { NativeBridge } from '../../platform/bridge/native-bridge'
@@ -43,6 +44,7 @@ function makeBridge(report?: AiReportResponse, error?: Error): NativeBridge {
   return {
     call,
     isAvailable: () => true,
+    triggerAuthSync: vi.fn().mockResolvedValue({ outcome: 'OK' }),
   } as unknown as NativeBridge
 }
 
@@ -154,5 +156,118 @@ describe('AiInsightCard', () => {
     await waitFor(() => {
       expect(screen.getByText('已缓存')).toBeInTheDocument()
     })
+  })
+
+  // ─── T10-7 / 决策 #8：TTL 5min + 刷新 + 空数据诊断 ───
+
+  it('TTL 5 分钟：过期 6 分钟的缓存重新请求', async () => {
+    const cache = { 'book-1:2026-09': { data: makeReport(), timestamp: Date.now() - 6 * 60 * 1000 } }
+    localStorage.setItem('ai-insight-cache', JSON.stringify(cache))
+
+    const bridge = makeBridge(makeReport({ transaction_count: 99 }))
+    render(<AiInsightCard bridge={bridge} bookId="book-1" period="2026-09" />)
+
+    await waitFor(() => {
+      expect(screen.getByText('99')).toBeInTheDocument()
+    })
+    expect(bridge.call).toHaveBeenCalled()
+  })
+
+  it('TTL 5 分钟：3 分钟内的缓存仍命中', async () => {
+    const cache = { 'book-1:2026-09': { data: makeReport(), timestamp: Date.now() - 3 * 60 * 1000 } }
+    localStorage.setItem('ai-insight-cache', JSON.stringify(cache))
+
+    const bridge = makeBridge(makeReport({ transaction_count: 99 }))
+    render(<AiInsightCard bridge={bridge} bookId="book-1" period="2026-09" />)
+
+    await waitFor(() => {
+      expect(screen.getByText('42')).toBeInTheDocument()
+    })
+    expect(bridge.call).not.toHaveBeenCalled()
+  })
+
+  it('刷新按钮 bypass 新鲜缓存重查', async () => {
+    const cache = { 'book-1:2026-09': { data: makeReport(), timestamp: Date.now() } }
+    localStorage.setItem('ai-insight-cache', JSON.stringify(cache))
+
+    const bridge = makeBridge(makeReport({ transaction_count: 99 }))
+    render(<AiInsightCard bridge={bridge} bookId="book-1" period="2026-09" />)
+    await waitFor(() => expect(screen.getByText('42')).toBeInTheDocument())
+    expect(bridge.call).not.toHaveBeenCalled()
+
+    fireEvent.click(screen.getByText('刷新'))
+
+    await waitFor(() => {
+      expect(screen.getByText('99')).toBeInTheDocument()
+    })
+    expect(bridge.call).toHaveBeenCalledWith('ai.report', { bookId: 'book-1', period: '2026-09' }, { timeoutMs: 30000 })
+  })
+
+  it('云端 0 笔且本地有交易 → 提示 + 去同步按钮', async () => {
+    const bridge = makeBridge(makeReport({ transaction_count: 0 }))
+    render(<AiInsightCard bridge={bridge} bookId="book-1" period="2026-09" localCount={5} />)
+
+    await waitFor(() => {
+      expect(screen.getByText('去同步')).toBeInTheDocument()
+    })
+    expect(screen.getByText('云端暂无本期数据（本地 5 笔待同步时请先同步）')).toBeInTheDocument()
+    expect(screen.queryByText('暂无 AI 分析')).not.toBeInTheDocument()
+  })
+
+  it('localCount=0 时不显示去同步提示', async () => {
+    const bridge = makeBridge(makeReport({ transaction_count: 0 }))
+    render(<AiInsightCard bridge={bridge} bookId="book-1" period="2026-09" localCount={0} />)
+
+    await waitFor(() => {
+      expect(screen.getByText('暂无 AI 分析')).toBeInTheDocument()
+    })
+    expect(screen.queryByText('去同步')).not.toBeInTheDocument()
+  })
+
+  it('去同步成功 → triggerAuthSync → 清缓存重查', async () => {
+    const bridge = makeBridge(makeReport({ transaction_count: 0 }))
+    render(<AiInsightCard bridge={bridge} bookId="book-1" period="2026-09" localCount={5} />)
+    await waitFor(() => expect(screen.getByText('去同步')).toBeInTheDocument())
+    expect(bridge.call).toHaveBeenCalledTimes(1)
+
+    fireEvent.click(screen.getByText('去同步'))
+
+    await waitFor(() => {
+      expect(bridge.triggerAuthSync).toHaveBeenCalledTimes(1)
+    })
+    await waitFor(() => {
+      expect(bridge.call).toHaveBeenCalledTimes(2)
+    })
+    // 重查结果写回缓存
+    const cache = JSON.parse(localStorage.getItem('ai-insight-cache')!)
+    expect(cache['book-1:2026-09']).toBeTruthy()
+  })
+
+  it('同步未完成（非 OK）→ 红条提示且不重查', async () => {
+    const bridge = makeBridge(makeReport({ transaction_count: 0 }))
+    bridge.triggerAuthSync = vi.fn().mockResolvedValue({ outcome: 'RETRYABLE' })
+    render(<AiInsightCard bridge={bridge} bookId="book-1" period="2026-09" localCount={5} />)
+    await waitFor(() => expect(screen.getByText('去同步')).toBeInTheDocument())
+
+    fireEvent.click(screen.getByText('去同步'))
+
+    await waitFor(() => {
+      expect(screen.getByText('同步未完成，请稍后重试')).toBeInTheDocument()
+    })
+    expect(bridge.call).toHaveBeenCalledTimes(1)
+  })
+
+  it('去同步抛错 → 显示错误信息', async () => {
+    const bridge = makeBridge(makeReport({ transaction_count: 0 }))
+    bridge.triggerAuthSync = vi.fn().mockRejectedValue(new Error('网络错误'))
+    render(<AiInsightCard bridge={bridge} bookId="book-1" period="2026-09" localCount={5} />)
+    await waitFor(() => expect(screen.getByText('去同步')).toBeInTheDocument())
+
+    fireEvent.click(screen.getByText('去同步'))
+
+    await waitFor(() => {
+      expect(screen.getByText('网络错误')).toBeInTheDocument()
+    })
+    expect(bridge.call).toHaveBeenCalledTimes(1)
   })
 })

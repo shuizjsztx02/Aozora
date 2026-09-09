@@ -337,7 +337,7 @@ describe('QuickEntrySheet', () => {
     expect(screen.queryByTestId('category-page-dots')).toBeNull()
   })
 
-  // ─── T7-3: 日期输入（REQ-2）───
+  // ─── T7-3: 日期输入（REQ-2）/ T10-2: 自绘日历弹层 ───
 
   it('submits edited bizDate with noon occurredAt for non-today dates (REQ-2)', async () => {
     const user = userEvent.setup()
@@ -348,14 +348,18 @@ describe('QuickEntrySheet', () => {
         onSuccess={onSuccess}
       />,
     )
-    // 默认日期 = 今天
-    const dateInput = screen.getByTestId('entry-date') as HTMLInputElement
-    expect(dateInput.value).toBe(localBizDate(Date.now(), 'Asia/Shanghai'))
+    // 默认日期 = 今天（entry-date 现为 DateField 胶囊，值见 data-date）
+    const today = localBizDate(Date.now(), 'Asia/Shanghai')
+    expect(screen.getByTestId('entry-date')).toHaveAttribute('data-date', today)
 
-    // 改为前天（与 Asia/Shanghai 今天恒不同，避免时区边界抖动）
-    const targetDate = localBizDate(Date.now() - 2 * 86_400_000, 'Asia/Shanghai')
-    fireEvent.change(dateInput, { target: { value: targetDate } })
-    expect(dateInput.value).toBe(targetDate)
+    // 选下月 10 日（恒 ≠ 今天，避免"今天恰逢所选日"的时点抖动；面板切一个月）
+    const y = Number(today.slice(0, 4))
+    const m = Number(today.slice(5, 7))
+    const targetDate = m === 12 ? `${y + 1}-01-10` : `${today.slice(0, 4)}-${String(m + 1).padStart(2, '0')}-10`
+    fireEvent.click(screen.getByTestId('entry-date'))
+    fireEvent.click(screen.getByLabelText('下个月'))
+    fireEvent.click(screen.getByTestId(`date-cell-${targetDate}`))
+    expect(screen.getByTestId('entry-date')).toHaveAttribute('data-date', targetDate)
 
     await user.click(screen.getByText('4'))
     await user.click(screen.getByText('5'))
@@ -370,7 +374,7 @@ describe('QuickEntrySheet', () => {
     expect(tx.occurredAt).toBe(new Date(`${targetDate}T12:00:00`).getTime())
   })
 
-  it('falls back to today when date input is cleared (REQ-2)', () => {
+  it('面板内「回今天」恢复为今天日期 (REQ-2)', () => {
     render(
       <QuickEntrySheet
         categories={TEST_CATEGORIES}
@@ -378,9 +382,19 @@ describe('QuickEntrySheet', () => {
         onSuccess={onSuccess}
       />,
     )
-    const dateInput = screen.getByTestId('entry-date') as HTMLInputElement
-    fireEvent.change(dateInput, { target: { value: '' } })
-    expect(dateInput.value).toBe(localBizDate(Date.now(), 'Asia/Shanghai'))
+    const today = localBizDate(Date.now(), 'Asia/Shanghai')
+    // 先选一天（今天 + 3 恒 ≠ 今天）；若该日在次月视图则切一月再点
+    fireEvent.click(screen.getByTestId('entry-date'))
+    const plus3 = localBizDate(Date.now() + 3 * 86_400_000, 'Asia/Shanghai')
+    const cell = screen.getByTestId(`date-cell-${plus3}`)
+    if (cell.hasAttribute('disabled')) {
+      fireEvent.click(screen.getByLabelText('下个月'))
+    }
+    fireEvent.click(screen.getByTestId(`date-cell-${plus3}`))
+    // 回今天
+    fireEvent.click(screen.getByTestId('entry-date'))
+    fireEvent.click(screen.getByTestId('date-today'))
+    expect(screen.getByTestId('entry-date')).toHaveAttribute('data-date', today)
   })
 
   // ─── T7-3: 记账目标 = 第一个非 master 账本（决策 #2）───

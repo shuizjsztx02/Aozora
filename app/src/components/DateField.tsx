@@ -1,13 +1,14 @@
 /**
  * 自绘日期输入（第十轮 REQ-18 / 设计决策 #2）。
  *
- * 替换系统 `<input type="date">`：Android WebView 弹 Material 对话框，
+ * 替换系统原生日期控件（date input）：Android WebView 弹 Material 对话框，
  * 样式与语言均不可控。本组件为 App 风格中文日历弹层。
  *
  * 值语义与原生控件一致：受控 ISO 'YYYY-MM-DD' 字符串，onChange 只会
  * 给出合法日期（点日格/回今天），宿主无需再做清空兜底。
  */
 import { useState } from 'react'
+import { createPortal } from 'react-dom'
 import { todayBizDate } from '../domain/date'
 
 const TZ = 'Asia/Shanghai'
@@ -110,9 +111,12 @@ export default function DateField({ value, onChange, testId, className = '' }: D
         <span>{displayLabel(value)}</span>
       </button>
 
-      {open && (
-        <>
-          <div className="fixed inset-0 z-[60]" onClick={() => setOpen(false)} data-testid="date-mask" aria-hidden />
+      {open &&
+        // portal 到 body：宿主链路上的 transform/backdrop-filter 祖先（记账弹层
+        // motion.div、.sheet-glass）会成为 fixed 的 containing block，弹层必须脱离
+        createPortal(
+          <>
+            <div className="fixed inset-0 z-[60] bg-black/30" onClick={() => setOpen(false)} data-testid="date-mask" aria-hidden />
           <div
             className="glass-card fixed left-1/2 top-1/2 z-[70] w-[300px] max-w-[92vw] -translate-x-1/2 -translate-y-1/2 p-3"
             style={{ boxShadow: 'var(--card-shadow)' }}
@@ -202,8 +206,9 @@ export default function DateField({ value, onChange, testId, className = '' }: D
               </button>
             </div>
           </div>
-        </>
-      )}
+          </>,
+          document.body,
+        )}
     </div>
   )
 }

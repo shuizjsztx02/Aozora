@@ -13,6 +13,7 @@
   --glass-border: rgba(255, 255, 255, 0.3);
   --income: #1E9E6A;
   --expense: #D95F3B;
+  --balance: #2E7CF6;
   --warn: #A8730F;
   --sky-from: #87CEEB;
   --sky-to: #E0F4FF;
@@ -31,6 +32,7 @@
   --glass-border: rgba(255, 200, 180, 0.3);
   --income: #1E9E6A;
   --expense: #D95F3B;
+  --balance: #2E7CF6;
   --warn: #A8730F;
   --sky-from: #FFB88C;
   --sky-to: #FFE4D6;
@@ -48,6 +50,7 @@
   --glass-border: rgba(255, 255, 255, 0.3);
   --income: #1E9E6A;
   --expense: #D95F3B;
+  --balance: #2E7CF6;
   --warn: #A8730F;
   --sky-from: #87CEEB;
   --sky-to: #E0F4FF;
@@ -65,6 +68,7 @@
   --glass-border: rgba(200, 150, 100, 0.25);
   --income: #1E9E6A;
   --expense: #D95F3B;
+  --balance: #2E7CF6;
   --warn: #E9C56A;
   --sky-from: #E8756A;
   --sky-to: #2D1B4E;
@@ -82,6 +86,7 @@
   --glass-border: rgba(100, 120, 180, 0.2);
   --income: #4CC38A;
   --expense: #E8756A;
+  --balance: #6FA8FF;
   --warn: #E9C56A;
   --sky-from: #0A0E1A;
   --sky-to: #1A1F3A;

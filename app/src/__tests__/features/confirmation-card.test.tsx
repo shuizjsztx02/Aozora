@@ -211,7 +211,7 @@ describe('ConfirmationCard — 编辑态（第八轮控件全集不回归）', (
     const secondary = screen.getByTestId('secondary-cats')
     expect(secondary.textContent).toContain('午饭')
     expect(secondary.textContent).toContain('晚饭')
-    expect(screen.getByTestId('card-date')).toHaveValue('2026-09-08')
+    expect(screen.getByTestId('card-date')).toHaveAttribute('data-date', '2026-09-08')
     expect(screen.getByTestId('card-note')).toHaveValue('午饭')
   })
 
@@ -309,7 +309,8 @@ describe('ConfirmationCard — 编辑态（第八轮控件全集不回归）', (
   it('改日期 → 即时提交新 bizDate', async () => {
     const { onEditCommit } = renderCard()
     await toEdit()
-    fireEvent.change(screen.getByTestId('card-date'), { target: { value: '2026-09-05' } })
+    fireEvent.click(screen.getByTestId('card-date'))
+    fireEvent.click(screen.getByTestId('date-cell-2026-09-05'))
     expect(onEditCommit).toHaveBeenCalledTimes(1)
     expect(onEditCommit.mock.calls[0][0].transactions[0].bizDate).toBe('2026-09-05')
   })

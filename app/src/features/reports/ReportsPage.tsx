@@ -3,18 +3,23 @@
  *
  * 月度统计、分类占比环图、每日趋势、预算执行、环比。
  * 数据来源：Room + domain/aggregator.ts（纯本地）。
+ *
+ * 第十轮 REQ-21（T10-5）：期间切换（复用 PeriodPanel）+ 账本下拉（过滤 master）。
+ * period / bookId 为 state，月度概览 / AI 洞察 / 分享文案 / 预算 / 趋势全部跟随。
  */
 
-import { useState, useEffect, useCallback } from 'react'
+import { useState, useEffect, useCallback, useMemo } from 'react'
 import { PageHeader } from '../../components/Layout'
 import { EmptyState } from '../../components/StateViews'
-import { PieChart, Pie, Cell, LineChart, Line, XAxis, YAxis, Tooltip, ResponsiveContainer } from 'recharts'
+import { PieChart, Pie, Cell, LineChart, Line, BarChart, Bar, XAxis, YAxis, Tooltip, ResponsiveContainer } from 'recharts'
 import { useBridge } from '../../platform/hooks/use-bridge'
 import { groupByCategory, sumTransactions } from '../../domain/aggregator'
 import * as Money from '../../domain/money'
-import type { TransactionData, CategoryData } from '../../platform/bridge/bridge-types'
+import type { TransactionData, CategoryData, BookData } from '../../platform/bridge/bridge-types'
 import { toDomainTransaction } from '../../domain/types'
 import { pickEntryBook } from '../../domain/books'
+import { CategoryIcon } from '../../components/CategoryIcon'
+import { PeriodPanel } from '../../components/PeriodPanel'
 import { useChartColors } from '../../design/theme'
 import { AiInsightCard } from './AiInsightCard'
 
@@ -22,52 +27,163 @@ function formatCents(cents: number): string {
   return Money.formatDisplay(Money.cents(cents))
 }
 
+function currentPeriod(): string {
+  const now = new Date()
+  return `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}`
+}
+
+function periodLabel(period: string): string {
+  const [y, m] = period.split('-')
+  return `${y}年${parseInt(m)}月`
+}
+
+function shiftMonth(period: string, delta: number): string {
+  const [y, m] = period.split('-').map(Number)
+  const d = new Date(y, m - 1 + delta, 1)
+  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}`
+}
+
+/** budget.list 返回行（本页面消费的最小字段集） */
+interface BudgetRow {
+  amountCents: number
+  period: string
+  budgetType: string
+  categoryId: string | null
+}
+
+/** T10-6（REQ-22 决策 #7）：趋势卡三系列键 + 配色（结余走新 --balance token） */
+type SeriesKey = 'expense' | 'income' | 'balance'
+const SERIES_COLOR: Record<SeriesKey, string> = {
+  expense: 'var(--expense)',
+  income: 'var(--income)',
+  balance: 'var(--balance)',
+}
+const SERIES_LABEL: Record<SeriesKey, string> = {
+  expense: '支出',
+  income: '收入',
+  balance: '结余',
+}
+/** 逐日零填充数据点 */
+interface TrendPoint {
+  date: string   // MM-DD（X 轴）
+  ymd: string     // YYYY-MM-DD（浮层展示）
+  day: number
+  expense: number
+  income: number
+  balance: number
+}
+
+/**
+ * period 全月逐日零填充（T10-6 / REQ-22 决策 #7）。
+ * 当月截至今天（未来日不画）；非当月取满月。balance = 当日净额（income − expense）。
+ * txs 须已按 period 过滤（调用方保证）——按 bizDate 的 DD 落入对应日。
+ */
+export function buildDailySeries(period: string, txs: TransactionData[]): TrendPoint[] {
+  const [y, m] = period.split('-').map(Number)
+  const today = new Date()
+  const isCurrentMonth = today.getFullYear() === y && today.getMonth() === m - 1
+  const lastDay = isCurrentMonth ? today.getDate() : new Date(y, m, 0).getDate()
+  const mm = String(m).padStart(2, '0')
+  const rows: TrendPoint[] = Array.from({ length: lastDay }, (_, i) => {
+    const dd = String(i + 1).padStart(2, '0')
+    return { date: `${mm}-${dd}`, ymd: `${y}-${mm}-${dd}`, day: i + 1, expense: 0, income: 0, balance: 0 }
+  })
+  for (const tx of txs) {
+    const idx = parseInt(tx.bizDate.slice(8), 10) - 1  // txs 已按 period 过滤 → DD
+    if (idx < 0 || idx >= rows.length) continue
+    if (tx.type === 'expense') rows[idx].expense += tx.amountCents
+    else if (tx.type === 'income') rows[idx].income += tx.amountCents
+  }
+  for (const r of rows) r.balance = r.income - r.expense
+  return rows
+}
+
 export function ReportsPage() {
   const bridge = useBridge()
   const chartColors = useChartColors()
-  const period = (() => {
-    const now = new Date()
-    return `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}`
-  })()
+  const [period, setPeriod] = useState(currentPeriod)
+  const [pickerOpen, setPickerOpen] = useState(false)
+  const [pickerYear, setPickerYear] = useState(() => new Date().getFullYear())
   const [bookId, setBookId] = useState<string | null>(null)
-  const [txs, setTxs] = useState<TransactionData[]>([])
+  const [books, setBooks] = useState<BookData[]>([])
+  const [bookPickerOpen, setBookPickerOpen] = useState(false)
+  const [allTxs, setAllTxs] = useState<TransactionData[]>([])
   const [categories, setCategories] = useState<CategoryData[]>([])
-  const [budget, setBudget] = useState<{ amountCents: number } | null>(null)
+  const [budgets, setBudgets] = useState<BudgetRow[]>([])
   const [tab, setTab] = useState<'expense' | 'income'>('expense')
   const [loading, setLoading] = useState(true)
 
+  // T10-6（REQ-22）趋势卡独立控件：折线三系列显隐 / 柱状单选 / 逐点弹框。
+  // 收支胶囊 tab 仅继续控制分类占比环图，不再控制趋势卡（决策 #7）。
+  const [trendMode, setTrendMode] = useState<'line' | 'bar'>('line')
+  const [visible, setVisible] = useState<Record<SeriesKey, boolean>>({ expense: true, income: true, balance: true })
+  const [barSeries, setBarSeries] = useState<SeriesKey>('expense')
+  const [activeDay, setActiveDay] = useState<TrendPoint | null>(null)
+
+  // 账本流水按 bookId 加载（全量存 state，period 过滤派生，切月不重拉）
+  const loadTxsForBook = useCallback(async (id: string) => {
+    const [allTxs, budgets] = await Promise.all([
+      bridge.call('transaction.listByBook', { bookId: id }) as Promise<TransactionData[]>,
+      bridge.call('budget.list', { bookId: id }) as Promise<BudgetRow[]>,
+    ])
+    setAllTxs(allTxs.filter(tx => tx.deletedAt === null))
+    setBudgets(budgets)
+  }, [bridge])
+
   const loadData = useCallback(async () => {
+    setLoading(true)
     try {
       // 决策 #2 / T7-6：展示目标 = 非 master 账本；T9-5b（决策 #3）default_book_id 优先
-      const [books, meta] = await Promise.all([
-        bridge.call('book.list', {}) as Promise<{ id: string; isMaster?: boolean }[]>,
+      const [bs, cats, meta] = await Promise.all([
+        bridge.call('book.list', {}) as Promise<BookData[]>,
+        bridge.call('category.list', {}) as Promise<CategoryData[]>,
         bridge.getMeta(['default_book_id']).catch(() => ({}) as Record<string, string | null>),
       ])
-      const id = pickEntryBook(books, meta['default_book_id'] ?? null)?.id ?? null
-      if (!id) return
-      setBookId(id)
-
-      const [allTxs, cats, budgets] = await Promise.all([
-        bridge.call('transaction.listByBook', { bookId: id }) as Promise<TransactionData[]>,
-        bridge.call('category.list', {}) as Promise<CategoryData[]>,
-        // R-M4-30 修复：传递 bookId，与 Kotlin 侧 budget.list 契约一致
-        bridge.call('budget.list', { bookId: id }) as Promise<{ amountCents: number; period: string; budgetType: string; categoryId: string | null }[]>,
-      ])
-
-      const monthTxs = allTxs.filter(tx => tx.bizDate.startsWith(period) && tx.deletedAt === null)
-      setTxs(monthTxs)
+      setBooks(bs)
       setCategories(cats)
-
-      const monthBudget = budgets.find(b => b.period === period && b.budgetType === 'monthly' && !b.categoryId)
-      setBudget(monthBudget ? { amountCents: monthBudget.amountCents } : null)
+      const id = pickEntryBook(bs, meta['default_book_id'] ?? null)?.id ?? null
+      setBookId(id)
+      if (!id) {
+        setAllTxs([])
+        setBudgets([])
+      } else {
+        await loadTxsForBook(id)
+      }
     } catch (err) {
       console.error('Failed to load reports:', err)
     } finally {
       setLoading(false)
     }
-  }, [bridge, period])
+  }, [bridge, loadTxsForBook])
 
   useEffect(() => { loadData() }, [loadData])
+
+  const handleSelectBook = async (id: string) => {
+    setBookPickerOpen(false)
+    setBookId(id)
+    setLoading(true)
+    try {
+      await loadTxsForBook(id)
+    } catch (err) {
+      console.error('Failed to load book:', err)
+    } finally {
+      setLoading(false)
+    }
+  }
+
+  // period 派生：切月只重过滤，不重新拉取
+  const txs = useMemo(
+    () => allTxs.filter(tx => tx.bizDate.startsWith(period)),
+    [allTxs, period],
+  )
+  const budget = useMemo(() => {
+    const mb = budgets.find(b => b.period === period && b.budgetType === 'monthly' && !b.categoryId)
+    return mb ? { amountCents: mb.amountCents } : null
+  }, [budgets, period])
+
+  const selectedBook = books.find(b => b.id === bookId)
+  // 账本下拉：总账本不提供（决策 #6 — fact pack 按单账本构建，聚合视图无云端对应物）
+  const selectableBooks = books.filter(b => !b.isMaster)
 
   // 统计
   const stats = sumTransactions(txs.map(toDomainTransaction))
@@ -88,15 +204,8 @@ export function ReportsPage() {
     }
   }).sort((a, b) => b.value - a.value)
 
-  // 每日趋势
-  const dailyData = new Map<string, number>()
-  for (const tx of txs.filter(t => t.type === tab)) {
-    const day = tx.bizDate.slice(8) // DD
-    dailyData.set(day, (dailyData.get(day) ?? 0) + tx.amountCents)
-  }
-  const trendData = Array.from(dailyData.entries())
-    .map(([day, amount]) => ({ day: `${parseInt(day)}日`, amount }))
-    .sort((a, b) => a.day.localeCompare(b.day))
+  // 每日趋势（T10-6 / REQ-22 决策 #7）：逐日零填充；从收支 tab 解耦——tab 仅控制上方分类环图。
+  const daily = useMemo(() => buildDailySeries(period, txs), [period, txs])
 
   return (
     <div className="min-h-screen">
@@ -130,6 +239,94 @@ export function ReportsPage() {
         }
       />
 
+      {/* ─── 账本切换（REQ-21 / T10-5，决策 #6：过滤 master、内联实现不抽组件） ─── */}
+      <div className="relative px-4 pt-1">
+        <button
+          onClick={() => setBookPickerOpen(v => !v)}
+          className="flex items-center gap-1 text-base font-semibold active:opacity-60"
+          style={{ color: 'var(--ink)' }}
+          aria-label="切换账本"
+          aria-expanded={bookPickerOpen}
+        >
+          {selectedBook && <CategoryIcon icon={selectedBook.icon} name={selectedBook.name} fallback="📒" className="text-lg" />}
+          <span>{selectedBook?.name ?? '选择账本'}</span>
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.4" strokeLinecap="round" strokeLinejoin="round" style={{ opacity: 0.5 }}><polyline points="6 9 12 15 18 9" /></svg>
+        </button>
+
+        {bookPickerOpen && (
+          <>
+            <div className="fixed inset-0 z-10" onClick={() => setBookPickerOpen(false)} aria-hidden />
+            <div
+              className="glass-card absolute left-4 right-4 top-full z-20 mt-1 p-2"
+              style={{ boxShadow: 'var(--card-shadow)' }}
+            >
+              {selectableBooks.map(b => {
+                const active = b.id === bookId
+                return (
+                  <button
+                    key={b.id}
+                    onClick={() => handleSelectBook(b.id)}
+                    className="flex w-full items-center gap-2 rounded-lg px-3 py-2.5 text-left text-[15px] font-medium transition-colors"
+                    style={{
+                      background: active ? 'var(--accent)' : 'transparent',
+                      color: active ? 'white' : 'var(--ink)',
+                    }}
+                  >
+                    <CategoryIcon icon={b.icon} name={b.name} fallback="📒" />
+                    <span className="flex-1 truncate">{b.name}</span>
+                  </button>
+                )
+              })}
+            </div>
+          </>
+        )}
+      </div>
+
+      {/* ─── 期间行：‹ 2026年9月 › + 年月选择面板（REQ-21，复用 PeriodPanel） ─── */}
+      <div className="relative px-4">
+        <div
+          className="flex items-center justify-between py-2"
+          style={{ borderBottom: '1px solid var(--glass-border)' }}
+        >
+          <div className="flex items-center gap-1">
+            <button
+              onClick={() => setPeriod(shiftMonth(period, -1))}
+              className="flex items-center justify-center w-8 h-8 rounded-full active:opacity-60"
+              style={{ color: 'var(--ink)' }}
+              aria-label="上个月"
+            >
+              <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round"><polyline points="15 18 9 12 15 6" /></svg>
+            </button>
+            <button
+              onClick={() => { setPickerYear(parseInt(period)); setPickerOpen(v => !v) }}
+              className="flex items-center gap-1 px-2 py-1 text-[17px] font-semibold active:opacity-60"
+              style={{ color: 'var(--ink)' }}
+              aria-label="切换年份和月份"
+            >
+              {periodLabel(period)}
+              <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.4" strokeLinecap="round" strokeLinejoin="round" style={{ opacity: 0.5 }}><polyline points="6 9 12 15 18 9" /></svg>
+            </button>
+            <button
+              onClick={() => setPeriod(shiftMonth(period, 1))}
+              className="flex items-center justify-center w-8 h-8 rounded-full active:opacity-60"
+              style={{ color: 'var(--ink)' }}
+              aria-label="下个月"
+            >
+              <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round"><polyline points="9 18 15 12 9 6" /></svg>
+            </button>
+          </div>
+        </div>
+
+        <PeriodPanel
+          open={pickerOpen}
+          onClose={() => setPickerOpen(false)}
+          year={pickerYear}
+          onYearChange={setPickerYear}
+          period={period}
+          onPick={(p) => { setPeriod(p); setPickerOpen(false) }}
+        />
+      </div>
+
       <div className="px-4 py-4 space-y-4 pb-20">
         {loading ? (
           <div className="flex justify-center py-12">
@@ -157,7 +354,7 @@ export function ReportsPage() {
             </div>
 
             {/* AI 洞察 */}
-            <AiInsightCard bridge={bridge} bookId={bookId} period={period} />
+            <AiInsightCard bridge={bridge} bookId={bookId} period={period} localCount={txs.length} />
 
             {/* 收支切换 */}
             <div className="flex gap-2">
@@ -220,36 +417,151 @@ export function ReportsPage() {
               </div>
             )}
 
-            {/* 每日趋势 */}
-            {trendData.length > 0 && (
-              <div className="glass-card p-4">
-                <h3 className="text-sm font-medium mb-3" style={{ color: 'var(--ink)' }}>每日趋势</h3>
-                <div className="h-32">
-                  <ResponsiveContainer width="100%" height="100%">
-                    <LineChart data={trendData}>
-                      <XAxis dataKey="day" tick={{ fontSize: 10, fill: 'var(--ink3)' }} axisLine={false} tickLine={false} />
+            {/* 每日趋势（T10-6 / REQ-22 决策 #7）：折线三系列 + 柱状单选 + 逐点弹框 */}
+            <div className="glass-card p-4">
+              <div className="flex items-center justify-between mb-3">
+                <h3 className="text-sm font-medium" style={{ color: 'var(--ink)' }}>每日趋势</h3>
+                <div className="flex gap-1">
+                  {(['line', 'bar'] as const).map(mode => (
+                    <button
+                      key={mode}
+                      onClick={() => { setTrendMode(mode); setActiveDay(null) }}
+                      className="px-2 py-1 rounded-md text-[11px] font-medium transition-colors"
+                      style={{
+                        background: trendMode === mode ? 'var(--accent)' : 'var(--glass)',
+                        color: trendMode === mode ? 'white' : 'var(--ink2)',
+                      }}
+                      aria-label={mode === 'line' ? '折线模式' : '柱状模式'}
+                    >
+                      {mode === 'line' ? '曲线' : '柱状'}
+                    </button>
+                  ))}
+                </div>
+              </div>
+
+              <div className="h-40 relative">
+                <ResponsiveContainer width="100%" height="100%">
+                  {trendMode === 'line' ? (
+                    <LineChart
+                      data={daily}
+                      onClick={(state) => {
+                        // recharts 3.x：图表级 onClick 给 activeTooltipIndex（MouseHandlerDataParam 无 activePayload）
+                        const i = state?.activeTooltipIndex
+                        setActiveDay(typeof i === 'number' ? (daily[i] ?? null) : null)
+                      }}
+                    >
+                      <XAxis dataKey="date" tick={{ fontSize: 10, fill: 'var(--ink3)' }} interval="preserveStartEnd" axisLine={false} tickLine={false} minTickGap={16} />
                       <YAxis hide />
                       <Tooltip
                         formatter={(value) => formatCents(Number(value))}
                         contentStyle={{ background: 'var(--glass)', border: '1px solid var(--glass-border)', borderRadius: 8 }}
                       />
-                      <Line
-                        type="monotone"
-                        dataKey="amount"
-                        stroke={tab === 'expense' ? 'var(--expense)' : 'var(--income)'}
-                        strokeWidth={2}
-                        dot={false}
-                      />
+                      {visible.expense && <Line type="monotone" dataKey="expense" name="支出" stroke={SERIES_COLOR.expense} strokeWidth={2} dot={{ r: 2, strokeWidth: 0 }} activeDot={{ r: 4 }} isAnimationActive={false} />}
+                      {visible.income && <Line type="monotone" dataKey="income" name="收入" stroke={SERIES_COLOR.income} strokeWidth={2} dot={{ r: 2, strokeWidth: 0 }} activeDot={{ r: 4 }} isAnimationActive={false} />}
+                      {visible.balance && <Line type="monotone" dataKey="balance" name="结余" stroke={SERIES_COLOR.balance} strokeWidth={2} dot={{ r: 2, strokeWidth: 0 }} activeDot={{ r: 4 }} isAnimationActive={false} />}
                     </LineChart>
-                  </ResponsiveContainer>
-                </div>
+                  ) : (
+                    <BarChart
+                      data={daily}
+                      onClick={(state) => {
+                        const i = state?.activeTooltipIndex
+                        setActiveDay(typeof i === 'number' ? (daily[i] ?? null) : null)
+                      }}
+                    >
+                      <XAxis dataKey="date" tick={{ fontSize: 10, fill: 'var(--ink3)' }} interval="preserveStartEnd" axisLine={false} tickLine={false} minTickGap={16} />
+                      <YAxis hide />
+                      <Tooltip
+                        cursor={{ fill: 'var(--glass)' }}
+                        formatter={(value) => formatCents(Number(value))}
+                        contentStyle={{ background: 'var(--glass)', border: '1px solid var(--glass-border)', borderRadius: 8 }}
+                      />
+                      <Bar
+                        dataKey={barSeries}
+                        name={SERIES_LABEL[barSeries]}
+                        fill={SERIES_COLOR[barSeries]}
+                        isAnimationActive={false}
+                        onClick={(data) => {
+                          const p = (data as { payload?: TrendPoint })?.payload
+                          if (p) setActiveDay(p)
+                        }}
+                      />
+                    </BarChart>
+                  )}
+                </ResponsiveContainer>
+
+                {/* 逐点弹框浮层 */}
+                {activeDay && (
+                  <div
+                    className="glass-card absolute top-1 right-1 p-2 text-[11px]"
+                    style={{ boxShadow: 'var(--card-shadow)' }}
+                    data-testid="trend-callout"
+                  >
+                    <div className="flex items-center justify-between gap-3">
+                      <span className="font-semibold" style={{ color: 'var(--ink)' }}>{activeDay.ymd}</span>
+                      <button onClick={() => setActiveDay(null)} aria-label="关闭" style={{ color: 'var(--ink3)' }}>✕</button>
+                    </div>
+                    <div className="mt-1 space-y-0.5">
+                      {trendMode === 'line' ? (
+                        (['expense', 'income', 'balance'] as SeriesKey[])
+                          .filter(k => visible[k])
+                          .map(k => (
+                            <div key={k} className="flex items-center justify-between gap-3">
+                              <span style={{ color: SERIES_COLOR[k] }}>{SERIES_LABEL[k]}</span>
+                              <span className="money-num" style={{ color: SERIES_COLOR[k] }}>
+                                {k === 'balance' && activeDay.balance < 0 ? '-' : ''}{formatCents(Math.abs(activeDay[k]))}
+                              </span>
+                            </div>
+                          ))
+                      ) : (
+                        <div className="flex items-center justify-between gap-3">
+                          <span style={{ color: SERIES_COLOR[barSeries] }}>{SERIES_LABEL[barSeries]}</span>
+                          <span className="money-num" style={{ color: SERIES_COLOR[barSeries] }}>
+                            {barSeries === 'balance' && activeDay.balance < 0 ? '-' : ''}{formatCents(Math.abs(activeDay[barSeries]))}
+                          </span>
+                        </div>
+                      )}
+                    </div>
+                  </div>
+                )}
               </div>
-            )}
+
+              {/* 图例：line = 三系列显隐 toggle；bar = 单选系列 */}
+              <div className="flex gap-2 mt-3">
+                {(['expense', 'income', 'balance'] as SeriesKey[]).map(k => {
+                  const on = trendMode === 'line' ? visible[k] : barSeries === k
+                  return (
+                    <button
+                      key={k}
+                      onClick={() => {
+                        if (trendMode === 'line') setVisible(v => ({ ...v, [k]: !v[k] }))
+                        else setBarSeries(k)
+                        setActiveDay(null)
+                      }}
+                      className="flex items-center gap-1 px-2 py-1 rounded-md text-[11px] font-medium transition-colors"
+                      style={{
+                        background: on ? SERIES_COLOR[k] : 'var(--glass)',
+                        color: on ? 'white' : 'var(--ink3)',
+                      }}
+                      aria-pressed={on}
+                      data-testid={`trend-legend-${k}`}
+                    >
+                      <span className="w-2 h-2 rounded-full" style={{ background: on ? 'white' : SERIES_COLOR[k] }} />
+                      {SERIES_LABEL[k]}
+                    </button>
+                  )
+                })}
+              </div>
+
+              {/* 空态：全月零交易仍渲染零线 + 小字 */}
+              {daily.every(d => d.expense === 0 && d.income === 0) && (
+                <div className="text-center text-xs mt-2" style={{ color: 'var(--ink3)' }}>本期暂无记账</div>
+              )}
+            </div>
 
             {/* 预算执行 */}
             {budget && tab === 'expense' && (
               <div className="glass-card p-4">
-                <h3 className="text-sm font-medium mb-2" style={{ color: 'var(--ink)' }}>本月预算</h3>
+                <h3 className="text-sm font-medium mb-2" style={{ color: 'var(--ink)' }}>{periodLabel(period)}预算</h3>
                 <div className="flex justify-between text-xs text-ink3 mb-1">
                   <span>{formatCents(budgetSpentCents)}</span>
                   <span>{formatCents(budget.amountCents)}</span>

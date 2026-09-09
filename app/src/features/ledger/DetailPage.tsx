@@ -17,6 +17,7 @@ import { useBridge } from '../../platform/hooks/use-bridge'
 import { newUuid } from '../../platform/uuid'
 import { pickEntryBook } from '../../domain/books'
 import { CategoryIcon } from '../../components/CategoryIcon'
+import { PeriodPanel } from '../../components/PeriodPanel'
 import type { BookData, TransactionData, CategoryData } from '../../platform/bridge/bridge-types'
 import * as Money from '../../domain/money'
 
@@ -286,55 +287,15 @@ export function DetailPage() {
           </div>
         </div>
 
-        {/* 年/月选择面板 */}
-        {pickerOpen && (
-          <>
-            <div className="fixed inset-0 z-10" onClick={() => setPickerOpen(false)} aria-hidden />
-            <div
-              className="glass-card absolute left-4 right-4 top-full z-20 mt-1 p-3"
-              style={{ boxShadow: 'var(--card-shadow)' }}
-            >
-              <div className="flex items-center justify-between mb-2">
-                <button
-                  onClick={() => setPickerYear(y => y - 1)}
-                  className="w-8 h-8 rounded-full flex items-center justify-center active:opacity-60"
-                  style={{ color: 'var(--ink)' }}
-                  aria-label="上一年"
-                >
-                  <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round"><polyline points="15 18 9 12 15 6" /></svg>
-                </button>
-                <span className="text-[15px] font-semibold" style={{ color: 'var(--ink)' }}>{pickerYear}年</span>
-                <button
-                  onClick={() => setPickerYear(y => y + 1)}
-                  className="w-8 h-8 rounded-full flex items-center justify-center active:opacity-60"
-                  style={{ color: 'var(--ink)' }}
-                  aria-label="下一年"
-                >
-                  <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round"><polyline points="9 18 15 12 9 6" /></svg>
-                </button>
-              </div>
-              <div className="grid grid-cols-4 gap-2">
-                {Array.from({ length: 12 }, (_, i) => i + 1).map(m => {
-                  const p = `${pickerYear}-${String(m).padStart(2, '0')}`
-                  const active = p === period
-                  return (
-                    <button
-                      key={m}
-                      onClick={() => { setPeriod(p); setPickerOpen(false) }}
-                      className="py-2 rounded-lg text-sm font-medium transition-colors"
-                      style={{
-                        background: active ? 'var(--accent)' : 'var(--glass)',
-                        color: active ? 'white' : 'var(--ink2)',
-                      }}
-                    >
-                      {m}月
-                    </button>
-                  )
-                })}
-              </div>
-            </div>
-          </>
-        )}
+        {/* 年/月选择面板（T10-5：抽共享组件） */}
+        <PeriodPanel
+          open={pickerOpen}
+          onClose={() => setPickerOpen(false)}
+          year={pickerYear}
+          onYearChange={setPickerYear}
+          period={period}
+          onPick={(p) => { setPeriod(p); setPickerOpen(false) }}
+        />
       </div>
 
       {/* ─── 搜索框（匹配全部月份的账单卡片） ─── */}
