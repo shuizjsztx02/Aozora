@@ -30,3 +30,10 @@ server/.env
 server/.pytest_tmp/
 app/src/main/assets/vosk-model-small-cn/
 src/main/assets/vosk-model-small-cn/
+
+# 本地测试产物（构建日志/临时截图/uvicorn 日志，不入库）
+/build-apk*.log
+/*.png
+/screenshots/
+/tmp-shots/
+server/.uvicorn-*.log
