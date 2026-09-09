@@ -22,6 +22,7 @@ import androidx.core.content.ContextCompat
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.cancelAndJoin
@@ -1621,7 +1622,11 @@ class AozoraBridge(
         val engine = syncEngine
             ?: return BridgeResponse.error(requestId, "unavailable", "sync engine not injected")
         return try {
-            val outcome = engine.runOnce()
+            // T10-8 收口修复：本 handler 在 scope(Main) 上执行，而 runOnce 的
+            // ensureValidAccessToken→doRefresh 及 push/pull 均为阻塞 HTTP——
+            // SyncWorker 路径自带后台线程，bridge 手动触发必须显式切 IO，
+            // 否则 NetworkOnMainThreadException。
+            val outcome = withContext(Dispatchers.IO) { engine.runOnce() }
             val obj = JSONObject().put("outcome", outcome.name)
             BridgeResponse.success(requestId, obj.toString())
         } catch (e: Exception) {

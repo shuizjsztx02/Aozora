@@ -36,6 +36,11 @@ class TxSource(str, enum.Enum):
     MANUAL = "manual"
     LOCAL_NLU = "local_nlu"
     AI_GATEWAY = "ai_gateway"
+    # T10-8 收口：对齐客户端 Repository.kt 合法集（nlu_* 此前 push 恒 422 毒丸；
+    # 'scheduled' 随第十一轮 T11-4 定时记账引入）
+    NLU_LOCAL = "nlu_local"
+    NLU_AI = "nlu_ai"
+    IMPORT = "import"
 
 
 class Book(Base, AuditMixin, VersionedMixin, SoftDeleteMixin):

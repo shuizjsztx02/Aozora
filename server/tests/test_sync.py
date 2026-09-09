@@ -1864,6 +1864,37 @@ class TestPayloadValidation:
         assert resp.status_code == 422
 
     @pytest.mark.asyncio
+    @pytest.mark.parametrize("src", ["manual", "nlu_local", "nlu_ai", "import"])
+    async def test_insert_transaction_client_sources_accepted(self, auth_client, src):
+        """T10-8 收口：客户端 Repository 合法 source 集 push 必须通过（nlu_ai 毒丸修复）。"""
+        ctx = auth_client
+        resp = ctx["client"].post(
+            "/sync/push",
+            json={
+                "mutations": [
+                    {
+                        "mutation_id": str(uuid.uuid4()),
+                        "entity_type": "transaction",
+                        "operation": "insert",
+                        "entity_id": str(uuid.uuid4()),
+                        "payload": {
+                            "book_id": str(ctx["book_a"].id),
+                            "type": "expense",
+                            "amount_cents": 1000,
+                            "category_id": str(ctx["cat_expense_a"].id),
+                            "source": src,
+                            "biz_date": "2026-09-04",
+                            "occurred_at": "2026-09-04T12:00:00+08:00",
+                        },
+                    }
+                ],
+            },
+            headers=_auth_header(ctx["user_a"].id),
+        )
+        assert resp.status_code == 200
+        assert resp.json()["results"][0]["status"] == "applied"
+
+    @pytest.mark.asyncio
     async def test_insert_transaction_invalid_biz_date_rejected(self, auth_client):
         ctx = auth_client
         resp = ctx["client"].post(
