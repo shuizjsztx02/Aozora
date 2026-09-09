@@ -21,6 +21,8 @@ import { BooksPage } from '../features/settings/BooksPage'
 import { CategoriesPage } from '../features/settings/CategoriesPage'
 import { BudgetPage } from '../features/settings/BudgetPage'
 import { SavingsPage } from '../features/settings/SavingsPage'
+import { SecurityPage } from '../features/settings/SecurityPage'
+import { AboutPage } from '../features/settings/AboutPage'
 import { AssistantPage } from '../features/assistant/AssistantPage'
 import { OnboardingPage, isOnboardingCompleted } from '../features/onboarding/OnboardingPage'
 import { LoginPage } from '../features/auth/LoginPage'
@@ -102,6 +104,8 @@ export function Router() {
         <Route path="/settings/categories" element={<ProtectedRoute><AppLayout><CategoriesPage /></AppLayout></ProtectedRoute>} />
         <Route path="/settings/budget" element={<ProtectedRoute><AppLayout><BudgetPage /></AppLayout></ProtectedRoute>} />
         <Route path="/settings/savings" element={<ProtectedRoute><AppLayout><SavingsPage /></AppLayout></ProtectedRoute>} />
+        <Route path="/settings/security" element={<ProtectedRoute><AppLayout><SecurityPage /></AppLayout></ProtectedRoute>} />
+        <Route path="/settings/about" element={<ProtectedRoute><AppLayout><AboutPage /></AppLayout></ProtectedRoute>} />
         <Route path="*" element={<DefaultRoute />} />
       </Routes>
     </HashRouter>

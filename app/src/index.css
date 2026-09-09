@@ -148,6 +148,8 @@ body.t-night {
   border-radius: 12px;
   cursor: pointer;
   transition: background 0.15s;
+  /* T9-1（UI-18）：锁定格高下限 ≈ 实测内容高，占位/真实格等高 */
+  min-height: 64px;
 }
 
 .cat-cell:hover,

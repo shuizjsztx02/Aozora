@@ -14,6 +14,9 @@ import { MemoryRouter } from 'react-router'
 import { BudgetPage } from '../../features/settings/BudgetPage'
 
 const mockBridge = vi.hoisted(() => ({
+  // T9-5b（REQ-11）：meta.get/set mock（默认无默认选择）
+  getMeta: vi.fn().mockResolvedValue({}),
+  setMeta: vi.fn().mockResolvedValue({ success: true }),
   call: vi.fn(),
   insertBudget: vi.fn(),
   deleteBudget: vi.fn(),

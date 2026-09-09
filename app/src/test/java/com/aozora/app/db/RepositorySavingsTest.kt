@@ -39,6 +39,41 @@ class RepositorySavingsTest {
         )
 
     @Test
+    fun period_roundTrips() = runBlocking {
+        repository.insertSavingsGoal(
+            goal("g1").copy(periodValue = 3, periodUnit = "week")
+        )
+        val g = repository.listSavingsGoals()[0]
+        assertEquals(3, g.periodValue)
+        assertEquals("week", g.periodUnit)
+    }
+
+    @Test
+    fun period_nullMeansNoPeriod() = runBlocking {
+        repository.insertSavingsGoal(goal("g1")) // 默认两列 null
+        val g = repository.listSavingsGoals()[0]
+        assertNull(g.periodValue)
+        assertNull(g.periodUnit)
+    }
+
+    @Test
+    fun insert_rejectsInvalidPeriodUnit() = runBlocking {
+        var threw = false
+        try { repository.insertSavingsGoal(goal("g1").copy(periodValue = 2, periodUnit = "decade")) }
+        catch (e: IllegalArgumentException) { threw = true }
+        assertTrue(threw)
+    }
+
+    @Test
+    fun insert_rejectsHalfProvidedPeriod() = runBlocking {
+        // 只给 value 不给 unit（或反之）→ 拒绝
+        var threw = false
+        try { repository.insertSavingsGoal(goal("g1").copy(periodValue = 5)) }
+        catch (e: IllegalArgumentException) { threw = true }
+        assertTrue(threw)
+    }
+
+    @Test
     fun insert_thenList() = runBlocking {
         repository.insertSavingsGoal(goal("g1"))
         val list = repository.listSavingsGoals()

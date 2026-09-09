@@ -31,9 +31,12 @@ export function BudgetPage() {
   const load = useCallback(async () => {
     try {
       // budget.list 需要 bookId（Kotlin 侧为必填），先取 book 再并行查预算与分类
-      // 决策 #2 / T7-6：预算只挂普通账本（pickEntryBook = 第一个非 master）
-      const books = await bridge.call('book.list', {}) as { id: string; isMaster?: boolean }[]
-      const bookId = pickEntryBook(books)?.id
+      // 决策 #2 / T7-6：预算只挂普通账本；T9-5b（决策 #3）default_book_id 优先
+      const [books, meta] = await Promise.all([
+        bridge.call('book.list', {}) as Promise<{ id: string; isMaster?: boolean }[]>,
+        bridge.getMeta(['default_book_id']).catch(() => ({}) as Record<string, string | null>),
+      ])
+      const bookId = pickEntryBook(books, meta['default_book_id'] ?? null)?.id
       if (bookId) {
         ;(window as any).__aozoraBookId = bookId
       }

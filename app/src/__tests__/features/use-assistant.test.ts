@@ -56,8 +56,8 @@ function txProposal(overrides: Partial<ActionProposal> = {}): ActionProposal {
   }
 }
 
-function setup(bookId: string | null = 'book-1') {
-  return renderHook(() => useAssistant({ categories: [], bookId, timezone: TZ }))
+function setup(bookId: string | null = 'book-1', defaultAccountId: string | null = null) {
+  return renderHook(() => useAssistant({ categories: [], bookId, defaultAccountId, timezone: TZ }))
 }
 
 describe('use-assistant — 免确认本地记账（T8-6）', () => {
@@ -202,5 +202,76 @@ describe('use-assistant — 免确认本地记账（T8-6）', () => {
     const last = result.current.messages[result.current.messages.length - 1]
     expect(last.text).toBe('你好呀')
     expect(result.current.phase).toBe('idle')
+  })
+
+  // ─── T9-7（REQ-15）：默认账户填充与账户编辑链路 ───
+
+  it('提案未带账户 → defaultAccountId 兜底进 insertTransaction payload', async () => {
+    vi.mocked(parseInput).mockReturnValue(txProposal())
+    const { result } = setup('book-1', 'acc-def')
+
+    await act(async () => { await result.current.submitInput('吃饭678') })
+    await waitFor(() => expect(result.current.cardStatus).toBe('committed'))
+
+    const [tx] = mockBridge.insertTransaction.mock.calls[0]
+    expect(tx.accountId).toBe('acc-def')
+  })
+
+  it('提案自带账户 → 优先于 defaultAccountId', async () => {
+    const p = txProposal()
+    p.transactions![0].accountId = 'acc-own'
+    vi.mocked(parseInput).mockReturnValue(p)
+    const { result } = setup('book-1', 'acc-def')
+
+    await act(async () => { await result.current.submitInput('吃饭678') })
+    await waitFor(() => expect(result.current.cardStatus).toBe('committed'))
+
+    const [tx] = mockBridge.insertTransaction.mock.calls[0]
+    expect(tx.accountId).toBe('acc-own')
+  })
+
+  it('卡编辑换账户 → softDelete 旧 + insert 新且 accountId 更新', async () => {
+    vi.mocked(parseInput).mockReturnValue(txProposal())
+    const { result } = setup('book-1', 'acc-def')
+
+    await act(async () => { await result.current.submitInput('吃饭678') })
+    await waitFor(() => expect(result.current.cardStatus).toBe('committed'))
+    const writtenId = mockBridge.insertTransaction.mock.calls[0][0].id as string
+
+    const edited = txProposal()
+    edited.transactions![0].accountId = 'acc-new'
+    await act(async () => { await result.current.editProposal(edited) })
+
+    expect(mockBridge.softDeleteTransaction).toHaveBeenCalledTimes(1)
+    expect(mockBridge.softDeleteTransaction.mock.calls[0][0]).toBe(writtenId)
+    const [tx2] = mockBridge.insertTransaction.mock.calls[1]
+    expect(tx2.accountId).toBe('acc-new')
+  })
+
+  it('编辑显式选「不使用账户」（null）→ 落 null，不被默认账户重新填充', async () => {
+    vi.mocked(parseInput).mockReturnValue(txProposal())
+    const { result } = setup('book-1', 'acc-def')
+
+    await act(async () => { await result.current.submitInput('吃饭678') })
+    await waitFor(() => expect(result.current.cardStatus).toBe('committed'))
+    expect(mockBridge.insertTransaction.mock.calls[0][0].accountId).toBe('acc-def')
+
+    const edited = txProposal()
+    edited.transactions![0].accountId = null
+    await act(async () => { await result.current.editProposal(edited) })
+
+    const [tx2] = mockBridge.insertTransaction.mock.calls[1]
+    expect(tx2.accountId).toBeNull()
+  })
+
+  it('defaultAccountId 为 null 且提案无账户 → payload accountId null（无账户用户不受影响）', async () => {
+    vi.mocked(parseInput).mockReturnValue(txProposal())
+    const { result } = setup('book-1', null)
+
+    await act(async () => { await result.current.submitInput('吃饭678') })
+    await waitFor(() => expect(result.current.cardStatus).toBe('committed'))
+
+    const [tx] = mockBridge.insertTransaction.mock.calls[0]
+    expect(tx.accountId).toBeNull()
   })
 })

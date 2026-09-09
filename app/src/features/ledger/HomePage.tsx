@@ -109,9 +109,12 @@ export function HomePage() {
   const loadData = useCallback(async () => {
     setLoadError(null)
     try {
-      // 决策 #2 / T7-6：展示目标 = 第一个非 master 账本（总账本自身不存流水）
-      const books = await bridge.call('book.list', {}) as { id: string; isMaster?: boolean }[]
-      const bookId = pickEntryBook(books)?.id
+      // 决策 #2 / T7-6：展示目标 = 非 master 账本；T9-5b（决策 #3）default_book_id 优先
+      const [books, meta] = await Promise.all([
+        bridge.call('book.list', {}) as Promise<{ id: string; isMaster?: boolean }[]>,
+        bridge.getMeta(['default_book_id']).catch(() => ({}) as Record<string, string | null>),
+      ])
+      const bookId = pickEntryBook(books, meta['default_book_id'] ?? null)?.id
       if (!bookId) {
         setLoadError('账本未就绪')
         return
@@ -148,8 +151,14 @@ export function HomePage() {
   const todayExpense = sumTransactions(todayTxs.map(toDomainTransaction))
   const monthExpense = sumTransactions(monthTxs.map(toDomainTransaction))
 
+  // 第十轮 REQ-17（决策 #1）：预算进度只统计"计入预算"交易（!== false 口径，
+  // 缺省=计入，兼容旧数据）；"今日/本月支出"总额不过滤。
+  const budgetMonthExpense = sumTransactions(
+    monthTxs.filter(tx => tx.includeInBudget !== false).map(toDomainTransaction)
+  )
+
   const budgetProgress = budget
-    ? Math.min(100, Math.round((monthExpense.totalExpense as number) / budget.amountCents * 100))
+    ? Math.min(100, Math.round((budgetMonthExpense.totalExpense as number) / budget.amountCents * 100))
     : 0
 
   return (

@@ -90,14 +90,16 @@ export function DetailPage() {
   const loadData = useCallback(async () => {
     setLoading(true)
     try {
-      const [bs, cats] = await Promise.all([
+      const [bs, cats, meta] = await Promise.all([
         bridge.call('book.list', {}) as Promise<BookData[]>,
         bridge.call('category.list', {}) as Promise<CategoryData[]>,
+        // T9-5b（REQ-11 决策 #3）：默认账本优先
+        bridge.getMeta(['default_book_id']).catch(() => ({} as Record<string, string | null>)),
       ])
       setBooks(bs)
       setCategories(cats)
-      // 默认选中第一个非 master 账本（决策 #2，避开"总账本"排序坑）
-      const entry = pickEntryBook(bs)
+      // 默认选中 default_book_id 命中的非 master 账本；未设则第一个非 master（决策 #2/#3）
+      const entry = pickEntryBook(bs, meta['default_book_id'] ?? null)
       setSelectedBookId(entry?.id ?? null)
       if (entry) {
         await loadTxs(entry.id, bs)
@@ -181,14 +183,14 @@ export function DetailPage() {
       <div className="relative px-4 pt-2 pb-1">
         <button
           onClick={() => setBookPickerOpen(v => !v)}
-          className="flex items-center gap-1 text-[26px] font-bold active:opacity-60"
+          className="flex items-center gap-1 text-base font-semibold active:opacity-60"
           style={{ color: 'var(--ink)' }}
           aria-label="切换账本"
           aria-expanded={bookPickerOpen}
         >
-          {selectedBook && <span>{selectedBook.icon}</span>}
+          {selectedBook && <CategoryIcon icon={selectedBook.icon} name={selectedBook.name} fallback="📒" className="text-lg" />}
           <span>{selectedBook?.name ?? '选择账本'}</span>
-          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.4" strokeLinecap="round" strokeLinejoin="round" style={{ opacity: 0.5 }}><polyline points="6 9 12 15 18 9" /></svg>
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.4" strokeLinecap="round" strokeLinejoin="round" style={{ opacity: 0.5 }}><polyline points="6 9 12 15 18 9" /></svg>
         </button>
 
         {/* 账本列表面板（复用年/月面板的 fixed 遮罩 + glass-card 样式） */}
@@ -211,7 +213,7 @@ export function DetailPage() {
                       color: active ? 'white' : 'var(--ink)',
                     }}
                   >
-                    <span>{b.icon}</span>
+                    <CategoryIcon icon={b.icon} name={b.name} fallback="📒" />
                     <span className="flex-1 truncate">{b.name}</span>
                     {b.isMaster && (
                       <span

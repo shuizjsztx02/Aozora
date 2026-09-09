@@ -32,10 +32,14 @@ data class ServerChange(
         val occurredAt = entityPayload["occurredAt"]?.toLongOrNull() ?: return null
         val note = entityPayload["note"] ?: ""
         val source = entityPayload["source"] ?: "manual"
+        // 服务端 transaction 无 includeInBudget 列（决策 #1）→ 缺省 true（计入）；
+        // 实际本地值由 Repository.applyServerChanges 在 upsert 前防冲刷保留。
+        val includeInBudget = entityPayload["includeInBudget"]?.toBoolean() ?: true
         return TransactionEntity(
             id = id, bookId = bookId, categoryId = categoryId, accountId = accountId,
             amountCents = amountCents, type = type, bizDate = bizDate,
             occurredAt = occurredAt, note = note, source = source, version = version,
+            includeInBudget = includeInBudget,
             deletedAt = null
         )
     }

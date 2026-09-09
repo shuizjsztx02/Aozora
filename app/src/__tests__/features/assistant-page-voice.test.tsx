@@ -30,6 +30,10 @@ const mockVoice = vi.hoisted(() => ({
 const mockBridge = vi.hoisted(() => ({
   listCategories: vi.fn().mockResolvedValue([]),
   listBooks: vi.fn().mockResolvedValue([{ id: 'book-1', name: '默认账本' }]),
+  // T9-7（REQ-15）：账户列表 mock（默认无账户，选择器传 null）
+  listAccounts: vi.fn().mockResolvedValue([]),
+  // T9-5b（REQ-11）：meta.get mock（默认无默认选择）
+  getMeta: vi.fn().mockResolvedValue({}),
   insertTransaction: vi.fn().mockResolvedValue({ id: 'tx-1' }),
   triggerSync: vi.fn().mockResolvedValue(undefined),
   interpretAI: vi.fn().mockResolvedValue(null),
@@ -49,6 +53,8 @@ const mockAssistant = vi.hoisted(() => ({
   submitInput: vi.fn(),
   editProposal: vi.fn(),
   undoExecution: vi.fn(),
+  // T9-8（REQ-16）：页面解构此方法（图片批量链路完成后追加消息）
+  appendAssistantMessage: vi.fn(),
 }))
 
 vi.mock('../../platform/hooks/use-voice', () => ({

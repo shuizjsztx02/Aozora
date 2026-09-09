@@ -110,6 +110,16 @@ export const BridgeCommands = {
   SHARE_TEXT: 'share.text',
   AUTH_GET_STATUS: 'auth.getStatus',
   AUTH_TRIGGER_SYNC: 'auth.triggerSync',
+
+  // 第十轮 T10-3（REQ-19，决策 #4）：登录与安全（手机号登录/登出/资料）
+  AUTH_LOGIN: 'auth.login',
+  AUTH_LOGOUT: 'auth.logout',
+  AUTH_ME: 'auth.me',
+  AUTH_UPDATE_PROFILE: 'auth.updateProfile',
+
+  // T9-5a（REQ-11，决策 #1）：本地展示元数据（默认选择 + 列表顺序，存 sync_meta，不上行）
+  META_GET: 'meta.get',
+  META_SET: 'meta.set',
 } as const
 
 export type BridgeCommandName = typeof BridgeCommands[keyof typeof BridgeCommands]
@@ -150,6 +160,8 @@ export interface TransactionData {
   bizDate: string
   occurredAt: number
   source: 'manual' | 'nlu_local' | 'nlu_ai' | 'import'
+  /** 第十轮 REQ-17（决策 #1）：是否计入预算；缺省 = 计入（!== false 口径）。 */
+  includeInBudget?: boolean
   version: number
   deletedAt: number | null
 }
@@ -165,7 +177,24 @@ export interface TransactionInput {
   bizDate: string
   occurredAt: number
   source: 'manual' | 'nlu_local' | 'nlu_ai' | 'import'
+  /** 手动记账显式传值（QuickEntrySheet 按钮初始 false）；聊天/批量不传 → 计入。 */
+  includeInBudget?: boolean
   version?: number
+}
+
+/** 第十轮 T10-3（REQ-19，决策 #4）：auth.login 响应。 */
+export interface AuthLoginResult {
+  userId: string
+  isNewUser: boolean
+}
+
+/** auth.me / auth.updateProfile 响应 = 服务端 MeResponse 透传（snake_case 时间戳）。 */
+export interface MeData {
+  id: string
+  nickname: string | null
+  phone: string | null
+  status: string
+  timezone: string
 }
 
 export interface BookData {
@@ -176,6 +205,8 @@ export interface BookData {
   version: number
   /** T7-2（REQ-6，决策 #1）：true = 总账本（查询时聚合，不存流水）。 */
   isMaster?: boolean
+  /** T9-5a（REQ-11，决策 #2）：true = 系统默认记账账本（master 恒不为 true）。 */
+  isDefault?: boolean
 }
 
 export interface BookInput {
@@ -213,13 +244,17 @@ export interface IconPickResult {
   size: number
 }
 
-/** 第八轮 REQ-7：存钱目标（仅本地）。 */
+/** 第八轮 REQ-7：存钱目标（仅本地）；T9-4（REQ-14）增存款期限。 */
 export interface SavingsGoalData {
   id: string
   name: string
   targetCents: number
   currentCents: number
   icon: string | null
+  /** 存款期限数值；null = 无期限 */
+  periodValue: number | null
+  /** 期限单位，仅此二值 */
+  periodUnit: 'week' | 'month' | null
   createdAt: number
   updatedAt: number
   version: number
@@ -233,6 +268,9 @@ export interface SavingsGoalInput {
   targetCents: number
   currentCents?: number
   icon?: string | null
+  /** value+unit 成对给或成对省；native 校验 unit 二值 + 范围（周 1-521 / 月 1-120） */
+  periodValue?: number | null
+  periodUnit?: 'week' | 'month' | null
   createdAt?: number
   version: number
 }
@@ -244,6 +282,8 @@ export interface AccountData {
   version: number
   /** T7-2（REQ-5）：账户分类（储蓄卡/微信/…或自定义），旧行为 null。 */
   accountType?: string | null
+  /** T9-5a（REQ-11，决策 #2）：true = 系统默认账户。 */
+  isDefault?: boolean
 }
 
 /** T7-2（REQ-5）：account.insert / account.update 共用入参。 */

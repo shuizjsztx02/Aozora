@@ -18,6 +18,7 @@ import type { CategoryData, BookData, AccountData } from '../../platform/bridge/
 import type { ActionProposal } from '../../domain/action-proposal'
 import * as Money from '../../domain/money'
 import { todayBizDate } from '../../domain/date'
+import DateField from '../../components/DateField'
 import { pickEntryBook, pickDefaultAccount } from '../../domain/books'
 import { CategoryIcon } from '../../components/CategoryIcon'
 
@@ -54,40 +55,51 @@ export function QuickEntrySheet({ categories, onClose, onSuccess }: QuickEntrySh
 
   // R-M4-55 fix: 缓存 bookId，挂载时调用一次 book.list
   // T7-3（决策 #2）：记账目标 = 第一个非 master 账本，不能取 books[0]
+  // T9-5b（REQ-11 决策 #3）：default_book_id（meta）命中且非 master 时优先
   const bookIdRef = useRef<string | null>(null)
+  const defaultIdsRef = useRef<{ book: string | null; account: string | null }>({ book: null, account: null })
   const getBookId = useCallback(async () => {
     if (bookIdRef.current) return bookIdRef.current
     const books = await bridge.call('book.list', {}) as { id: string; isMaster?: boolean }[]
-    const id = pickEntryBook(books)?.id
+    const id = pickEntryBook(books, defaultIdsRef.current.book)?.id
     if (!id) throw new Error('No book found')
     bookIdRef.current = id
     return id
   }, [bridge])
 
-  // 第八轮 REQ-9：账本 / 账户选择器。不设即按默认填充（默认账本 = pickEntryBook，
-  // 默认账户 = 第一个账户，无账户则 null）。getBookId 仅供图片解析/batch 路径用默认。
+  // 第八轮 REQ-9：账本 / 账户选择器。不设即按默认填充（默认账本/账户 =
+  // meta default_*_id 优先，未设则 pickEntryBook / 第一个账户，无则 null）。
+  // getBookId 仅供图片解析/batch 路径用默认。
   const [books, setBooks] = useState<BookData[]>([])
   const [accounts, setAccounts] = useState<AccountData[]>([])
   const [selectedBookId, setSelectedBookId] = useState<string | null>(null)
   const [selectedAccountId, setSelectedAccountId] = useState<string | null>(null)
-  const [openPicker, setOpenPicker] = useState<'book' | 'account' | null>(null)
+  const [openPicker, setOpenPicker] = useState<'book' | 'account' | 'budget' | null>(null)
+  // 第十轮 REQ-17（决策 #1）：手动记账初始"不计入预算"（用户明确要求），可切换；
+  // 聊天/图片批量路径不传该字段 → native 缺省计入。
+  const [includeInBudget, setIncludeInBudget] = useState(false)
 
   useEffect(() => {
     let cancelled = false
-    bridge.listBooks()
-      .then(list => {
-        if (cancelled) return
-        setBooks(list)
-        setSelectedBookId(pickEntryBook(list)?.id ?? null)
-      })
-      .catch(() => { /* 列表加载失败时保持默认，提交仍可回退 getBookId */ })
-    bridge.listAccounts()
-      .then(list => {
-        if (cancelled) return
-        setAccounts(list)
-        setSelectedAccountId(pickDefaultAccount(list)?.id ?? null)
-      })
-      .catch(() => {})
+    // T9-5b：列表与默认 meta 一次并发取回（native list 已整形顺序，这里只补 defaultId）
+    Promise.all([
+      bridge.listBooks().catch(() => null),
+      bridge.listAccounts().catch(() => null),
+      bridge.getMeta(['default_book_id', 'default_account_id']).catch(() => ({}) as Record<string, string | null>),
+    ]).then(([bookList, accountList, meta]) => {
+      if (cancelled) return
+      const defBookId = meta['default_book_id'] ?? null
+      const defAccountId = meta['default_account_id'] ?? null
+      defaultIdsRef.current = { book: defBookId, account: defAccountId }
+      if (bookList) {
+        setBooks(bookList)
+        setSelectedBookId(pickEntryBook(bookList, defBookId)?.id ?? null)
+      }
+      if (accountList) {
+        setAccounts(accountList)
+        setSelectedAccountId(pickDefaultAccount(accountList, defAccountId)?.id ?? null)
+      }
+    })
     return () => { cancelled = true }
   }, [bridge])
 
@@ -98,6 +110,13 @@ export function QuickEntrySheet({ categories, onClose, onSuccess }: QuickEntrySh
   const accountLabel = selectedAccountId
     ? (accounts.find(a => a.id === selectedAccountId)?.name || '账户')
     : (accounts.length > 0 ? '不使用账户' : '无账户')
+  // T9-6（决策 #6）：按钮/下拉显示所选实体 icon（照片版经 CategoryIcon 渲染）
+  const currentBook = selectedBookId
+    ? books.find(b => b.id === selectedBookId)
+    : pickEntryBook(books)
+  const currentAccount = selectedAccountId
+    ? accounts.find(a => a.id === selectedAccountId)
+    : undefined
 
   const filteredCats = categories.filter(c => c.kind === type)
 
@@ -438,6 +457,7 @@ export function QuickEntrySheet({ categories, onClose, onSuccess }: QuickEntrySh
         bizDate: safeBizDate,
         occurredAt,
         source: 'manual',
+        includeInBudget,
       }, newUuid())
 
       // FIX-002 / BUG-014: 记账成功短震
@@ -451,7 +471,7 @@ export function QuickEntrySheet({ categories, onClose, onSuccess }: QuickEntrySh
     } finally {
       setSubmitting(false)
     }
-  }, [amount, categoryId, type, note, bizDate, bridge, getBookId, selectedBookId, selectedAccountId, submitting, onSuccess])
+  }, [amount, categoryId, type, note, bizDate, bridge, getBookId, selectedBookId, selectedAccountId, includeInBudget, submitting, onSuccess])
 
   const displayAmount = amount || '0'
 
@@ -569,7 +589,7 @@ export function QuickEntrySheet({ categories, onClose, onSuccess }: QuickEntrySh
                     style={{ background: 'var(--glass)', color: 'var(--ink2)', border: '1px solid var(--glass-border)' }}
                     data-testid="entry-book-picker"
                   >
-                    <span>📒</span>
+                    <CategoryIcon icon={currentBook?.icon} name={bookLabel} fallback="📒" />
                     <span className="max-w-[7rem] truncate">{bookLabel}</span>
                     <span aria-hidden style={{ opacity: 0.6 }}>▾</span>
                   </button>
@@ -580,8 +600,20 @@ export function QuickEntrySheet({ categories, onClose, onSuccess }: QuickEntrySh
                     style={{ background: 'var(--glass)', color: 'var(--ink2)', border: '1px solid var(--glass-border)' }}
                     data-testid="entry-account-picker"
                   >
-                    <span>💳</span>
+                    <CategoryIcon icon={currentAccount?.icon} name={accountLabel} fallback="💳" />
                     <span className="max-w-[7rem] truncate">{accountLabel}</span>
+                    <span aria-hidden style={{ opacity: 0.6 }}>▾</span>
+                  </button>
+                  {/* 第十轮 REQ-17：是否计入预算（初始不计入） */}
+                  <button
+                    type="button"
+                    onClick={() => setOpenPicker(openPicker === 'budget' ? null : 'budget')}
+                    className="flex items-center gap-1.5 px-3 py-1.5 rounded-full text-xs transition-colors"
+                    style={{ background: 'var(--glass)', color: 'var(--ink2)', border: '1px solid var(--glass-border)' }}
+                    data-testid="entry-budget-picker"
+                  >
+                    <span aria-hidden>📊</span>
+                    <span>{includeInBudget ? '计入预算' : '不计入预算'}</span>
                     <span aria-hidden style={{ opacity: 0.6 }}>▾</span>
                   </button>
                 </div>
@@ -603,7 +635,10 @@ export function QuickEntrySheet({ categories, onClose, onSuccess }: QuickEntrySh
                           className="w-full text-left px-3 py-2 rounded-lg text-sm flex items-center justify-between"
                           style={{ color: selectedBookId === b.id ? 'var(--accent)' : 'var(--ink2)' }}
                         >
-                          <span>{b.icon} {b.name || '账本'}</span>
+                          <span className="flex items-center gap-1.5 min-w-0">
+                            <CategoryIcon icon={b.icon} name={b.name || '账本'} fallback="📒" />
+                            <span className="truncate">{b.name || '账本'}</span>
+                          </span>
                           {selectedBookId === b.id && <span>✓</span>}
                         </button>
                       ))
@@ -634,8 +669,33 @@ export function QuickEntrySheet({ categories, onClose, onSuccess }: QuickEntrySh
                         className="w-full text-left px-3 py-2 rounded-lg text-sm flex items-center justify-between"
                         style={{ color: selectedAccountId === a.id ? 'var(--accent)' : 'var(--ink2)' }}
                       >
-                        <span>{a.icon} {a.name}</span>
+                        <span className="flex items-center gap-1.5 min-w-0">
+                          <CategoryIcon icon={a.icon} name={a.name} fallback="💰" />
+                          <span className="truncate">{a.name}</span>
+                        </span>
                         {selectedAccountId === a.id && <span>✓</span>}
+                      </button>
+                    ))}
+                  </div>
+                )}
+
+                {openPicker === 'budget' && (
+                  <div
+                    className="mt-2 rounded-xl p-1"
+                    style={{ background: 'var(--glass)', border: '1px solid var(--glass-border)' }}
+                    data-testid="entry-budget-list"
+                  >
+                    {[true, false].map(v => (
+                      <button
+                        key={String(v)}
+                        type="button"
+                        onClick={() => { setIncludeInBudget(v); setOpenPicker(null) }}
+                        className="w-full text-left px-3 py-2 rounded-lg text-sm flex items-center justify-between"
+                        style={{ color: includeInBudget === v ? 'var(--accent)' : 'var(--ink2)' }}
+                        data-testid={v ? 'entry-budget-include' : 'entry-budget-exclude'}
+                      >
+                        <span>{v ? '计入预算' : '不计入预算'}</span>
+                        {includeInBudget === v && <span>✓</span>}
                       </button>
                     ))}
                   </div>
@@ -669,9 +729,18 @@ export function QuickEntrySheet({ categories, onClose, onSuccess }: QuickEntrySh
                             <span className="truncate max-w-full text-ink2">{cat.name}</span>
                           </button>
                         ))}
-                        {/* 末页补空占位格，保证支出/收入两态恒为两行等高 */}
+                        {/* 末页补隐形占位格（与真实格同构，T9-1/UI-18：空 div 行高为 0 等于没补） */}
                         {Array.from({ length: 10 - page.length }).map((_, i) => (
-                          <div key={`ph-${i}`} />
+                          <div
+                            key={`ph-${i}`}
+                            data-testid="cat-cell-placeholder"
+                            className="cat-cell text-xs"
+                            style={{ visibility: 'hidden' }}
+                            aria-hidden
+                          >
+                            <CategoryIcon name="占" className="text-lg" />
+                            <span className="text-xs">占</span>
+                          </div>
                         ))}
                       </div>
                     ))}
@@ -700,20 +769,12 @@ export function QuickEntrySheet({ categories, onClose, onSuccess }: QuickEntrySh
               {/* T7-3（REQ-2 / 决策 #5）：日期左、添加凭证右同行分布；有凭证/草稿时凭证块整块占行 */}
               <div className="px-4 mb-3">
                 <div className="flex items-center gap-2">
-                  <label
-                    className="flex items-center gap-1.5 py-2 px-3 rounded-full text-xs shrink-0"
-                    style={{ background: 'var(--glass)', border: '1px solid var(--glass-border)', color: 'var(--ink2)' }}
-                  >
-                    <span>📅</span>
-                    <input
-                      type="date"
-                      value={bizDate}
-                      onChange={e => setBizDate(e.target.value || todayBizDate('Asia/Shanghai'))}
-                      className="bg-transparent outline-none text-xs"
-                      style={{ color: 'var(--ink2)', border: 'none' }}
-                      data-testid="entry-date"
-                    />
-                  </label>
+                  <DateField
+                    value={bizDate}
+                    onChange={v => setBizDate(v)}
+                    testId="entry-date"
+                    className="shrink-0"
+                  />
                   {!(image.uploading || image.attachment || (image.error && image.error !== 'cancelled')) &&
                     !(draft && !draft.parseError && !draft.proposal) && (
                     <button

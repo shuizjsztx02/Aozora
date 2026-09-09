@@ -19,6 +19,9 @@ data class TransactionEntity(
     val bizDate: String,        // YYYY-MM-DD 用户时区
     val occurredAt: Long,       // UTC ms timestamp
     val source: String,         // manual | nlu_local | nlu_ai | import
+    // 第十轮 REQ-17（决策 #1）：是否计入预算。实体默认 true（存量数据、聊天/
+    // 图片批量记账维持现状）；仅 QuickEntrySheet 手动记账可显式传 false。
+    val includeInBudget: Boolean = true,
     val version: Int,
     val deletedAt: Long?        // UTC ms or null（软删除）
 )

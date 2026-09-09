@@ -45,6 +45,25 @@ class RefreshRequest(BaseModel):
     device_id: str = Field(max_length=DEVICE_ID_MAX_LENGTH)
 
 
+# T10-3（REQ-19）: PATCH /me 请求体。nickname 服务端最终校验（strip 后 1–64，
+# 拒绝空白）；users.nickname 为 String(64)，超长在 schema 层即 422（N-26 先例）。
+class UpdateProfileRequest(BaseModel):
+    nickname: str = Field(max_length=64)
+
+    @field_validator("nickname", mode="before")
+    @classmethod
+    def _strip_first(cls, v: object) -> object:
+        # mode="before" → 先 strip，后续 max_length 校验的是 strip 后的值。
+        return v.strip() if isinstance(v, str) else v
+
+    @field_validator("nickname")
+    @classmethod
+    def _check_blank(cls, v: str) -> str:
+        if not v:
+            raise ValueError("nickname must not be blank")
+        return v
+
+
 # ---------------------------------------------------------------------------
 # Responses
 # ---------------------------------------------------------------------------

@@ -12,23 +12,26 @@ interface CategoryIconProps {
   name: string
   /** 追加到外层容器的 class（尺寸/圆角等由调用方控制）。 */
   className?: string
+  /** icon 为空时的回退（默认按名映射 getCategoryEmoji）；账本/账户等非常规分类传固定 emoji。 */
+  fallback?: string
 }
 
-export function CategoryIcon({ icon, name, className }: CategoryIconProps) {
+export function CategoryIcon({ icon, name, className, fallback }: CategoryIconProps) {
   if (icon && icon.startsWith('data:')) {
     return (
       <img
         src={icon}
         alt=""
         className={`object-cover ${className ?? ''}`}
-        style={{ width: '1em', height: '1em' }}
+        // T9-3（REQ-12B）：1.25em 向 emoji 视觉尺寸看齐；圆形 + 行中对齐与 emoji 观感统一
+        style={{ width: '1.25em', height: '1.25em', borderRadius: '50%', display: 'inline-block', verticalAlign: 'middle' }}
         aria-hidden
       />
     )
   }
   return (
     <span className={className} aria-hidden>
-      {icon || getCategoryEmoji(name)}
+      {icon || fallback || getCategoryEmoji(name)}
     </span>
   )
 }

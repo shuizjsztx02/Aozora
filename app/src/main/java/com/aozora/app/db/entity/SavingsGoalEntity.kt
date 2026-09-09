@@ -20,6 +20,8 @@ data class SavingsGoalEntity(
     val targetCents: Long,       // 目标金额（整数分）
     val currentCents: Long,      // 已存金额（整数分）
     val icon: String?,           // emoji 图标，可空
+    val periodValue: Int? = null, // 存款期限数值（T9-4/REQ-14），null=无期限
+    val periodUnit: String? = null, // 期限单位：'week' | 'month'（应用层校验仅此二值）
     val createdAt: Long,         // UTC ms
     val updatedAt: Long,         // UTC ms
     val archivedAt: Long?,       // 删除=归档；UTC ms or null

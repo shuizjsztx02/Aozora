@@ -38,9 +38,12 @@ export function ReportsPage() {
 
   const loadData = useCallback(async () => {
     try {
-      // 决策 #2 / T7-6：展示目标 = 第一个非 master 账本（总账本自身不存流水）
-      const books = await bridge.call('book.list', {}) as { id: string; isMaster?: boolean }[]
-      const id = pickEntryBook(books)?.id ?? null
+      // 决策 #2 / T7-6：展示目标 = 非 master 账本；T9-5b（决策 #3）default_book_id 优先
+      const [books, meta] = await Promise.all([
+        bridge.call('book.list', {}) as Promise<{ id: string; isMaster?: boolean }[]>,
+        bridge.getMeta(['default_book_id']).catch(() => ({}) as Record<string, string | null>),
+      ])
+      const id = pickEntryBook(books, meta['default_book_id'] ?? null)?.id ?? null
       if (!id) return
       setBookId(id)
 
@@ -68,6 +71,12 @@ export function ReportsPage() {
 
   // 统计
   const stats = sumTransactions(txs.map(toDomainTransaction))
+
+  // 第十轮 REQ-17（决策 #1）：预算执行卡只统计"计入预算"的支出（!== false 口径）；
+  // 页面其余总额/趋势/占比不受该标记影响。
+  const budgetSpentCents = txs
+    .filter(tx => tx.type === 'expense' && tx.includeInBudget !== false)
+    .reduce((sum, tx) => sum + tx.amountCents, 0)
 
   // 分类占比
   const categoryData = groupByCategory(txs.map(toDomainTransaction), tab).map(b => {
@@ -242,15 +251,15 @@ export function ReportsPage() {
               <div className="glass-card p-4">
                 <h3 className="text-sm font-medium mb-2" style={{ color: 'var(--ink)' }}>本月预算</h3>
                 <div className="flex justify-between text-xs text-ink3 mb-1">
-                  <span>{formatCents(stats.totalExpense as number)}</span>
+                  <span>{formatCents(budgetSpentCents)}</span>
                   <span>{formatCents(budget.amountCents)}</span>
                 </div>
                 <div className="h-3 rounded-full overflow-hidden" style={{ background: 'var(--glass-border)' }}>
                   <div
                     className="h-full rounded-full transition-all"
                     style={{
-                      width: `${Math.min(100, Math.round((stats.totalExpense as number) / budget.amountCents * 100))}%`,
-                      background: (stats.totalExpense as number) > budget.amountCents ? 'var(--expense)' : 'var(--accent)',
+                      width: `${Math.min(100, Math.round(budgetSpentCents / budget.amountCents * 100))}%`,
+                      background: budgetSpentCents > budget.amountCents ? 'var(--expense)' : 'var(--accent)',
                     }}
                   />
                 </div>

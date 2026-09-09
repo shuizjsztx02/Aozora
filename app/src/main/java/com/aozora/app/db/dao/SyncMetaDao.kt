@@ -14,4 +14,7 @@ interface SyncMetaDao {
 
     @Query("SELECT value FROM sync_meta WHERE `key` = :key")
     suspend fun getValue(key: String): String?
+
+    @Query("DELETE FROM sync_meta WHERE `key` = :key")
+    suspend fun delete(key: String)
 }

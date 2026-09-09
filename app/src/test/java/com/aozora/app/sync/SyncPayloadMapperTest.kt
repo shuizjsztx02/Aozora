@@ -528,5 +528,12 @@ class SyncPayloadMapperTest {
         val wire = SyncPayloadMapper.toWirePayload(camel)
         assertEquals(300, wire.getInt("amount_cents"))
         assertEquals(9000, wire.getInt("balance_cents"))
+        // T10-1（决策 #1）：布尔未知字段走同一启发式 includeInBudget→include_in_budget，
+        // 值保持布尔不炸（服务端 _apply_insert 白名单不读 → 静默忽略）
+        val wire2 = SyncPayloadMapper.toWirePayload(
+            """{"amountCents":300,"includeInBudget":false}"""
+        )
+        assertFalse(wire2.getBoolean("include_in_budget"))
+        assertFalse(wire2.has("includeInBudget"))
     }
 }

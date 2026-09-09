@@ -1,18 +1,23 @@
 /**
  * AccountsPage — 账户管理页。
  *
- * 列表展示 + 新增账户 + 编辑已有账户（T7-5 / REQ-5：名称 + 分类 + 图标）。
+ * 列表展示 + 新增账户 + 编辑已有账户（T7-5 / REQ-5：名称 + 分类 + 图标）
+ * + T9-5b（REQ-11）：默认勾选（radio 语义）与长按 ↑↓ 排序模式（决策 #4）。
+ * 顺序/默认写 sync_meta（meta.set）；列表顺序与 isDefault 由 native
+ * account.list 出口统一整形（决策 #2），前端不再重排。排序模式下禁用进编辑。
  */
 
-import { useState, useEffect, useCallback, useMemo } from 'react'
+import { useState, useEffect, useCallback, useMemo, useRef } from 'react'
 import { PageHeader } from '../../components/Layout'
 import { useBridge } from '../../platform/hooks/use-bridge'
 import { newUuid } from '../../platform/uuid'
+import { CategoryIcon } from '../../components/CategoryIcon'
+import { IconPicker } from '../../components/IconPicker'
 import type { AccountData } from '../../platform/bridge/bridge-types'
+import { META_KEY_ACCOUNT_ORDER, META_KEY_DEFAULT_ACCOUNT_ID, serializeIdOrder } from '../../domain/meta'
 
 /** REQ-5：预置账户分类；用户可经"+ 自定义"追加，取消选择即不填（accountType null）。 */
 const DEFAULT_ACCOUNT_TYPES = ['储蓄卡', '信用卡', '花呗', '微信', '支付宝', '现金', '余额宝', '零钱通']
-const ACCOUNT_ICONS = ['🏦', '💳', '📱', '🪙', '💵', '🧧', '🥡', '💰']
 
 export function AccountsPage() {
   const bridge = useBridge()
@@ -24,12 +29,15 @@ export function AccountsPage() {
   const [showForm, setShowForm] = useState(false)
   const [editing, setEditing] = useState<AccountData | null>(null)
   const [name, setName] = useState('')
-  const [icon, setIcon] = useState('💰')
-  const [customIcon, setCustomIcon] = useState('')
+  // T9-6（REQ-13）：图标值并入共享 IconPicker — emoji/自定义文本/照片 data URI 单一受控值
+  const [icon, setIcon] = useState<string | null>('💰')
   const [accountType, setAccountType] = useState('')
   const [addedTypes, setAddedTypes] = useState<string[]>([])
   const [showTypeInput, setShowTypeInput] = useState(false)
   const [typeInput, setTypeInput] = useState('')
+
+  // T9-5b（REQ-11）：长按 500ms 进入排序模式（决策 #4）
+  const [reorderMode, setReorderMode] = useState(false)
 
   const load = useCallback(async () => {
     try {
@@ -53,17 +61,12 @@ export function AccountsPage() {
   }, [accounts, addedTypes])
 
   const openForm = (acc: AccountData | null) => {
+    if (reorderMode) return // 排序模式禁用进编辑（决策 #4）
     setError(null)
     setEditing(acc)
     setName(acc?.name ?? '')
-    if (acc && acc.icon && !ACCOUNT_ICONS.includes(acc.icon)) {
-      // 非预置图标（自定义数据）回填到自定义文本框
-      setIcon('')
-      setCustomIcon(acc.icon)
-    } else {
-      setIcon(acc?.icon || '💰')
-      setCustomIcon('')
-    }
+    // 非预置值（旧自定义文本 / 照片 data URI）由 IconPicker 自动回填对应控件
+    setIcon(acc?.icon ?? '💰')
     setAccountType(acc?.accountType ?? '')
     setAddedTypes([])
     setShowTypeInput(false)
@@ -97,7 +100,7 @@ export function AccountsPage() {
       setError('该账户名已存在')
       return
     }
-    const finalIcon = customIcon.trim() || icon
+    const finalIcon = icon || '💰'
     try {
       // 必须走 NativeBridge 封装：native 侧期望 {account, mutationId} 包裹结构，且 ownerId 必填
       if (editing) {
@@ -122,37 +125,174 @@ export function AccountsPage() {
     }
   }
 
+  /** 勾默认（单选语义=覆写同键）。 */
+  const handleSetDefault = async (acc: AccountData) => {
+    setError(null)
+    try {
+      await bridge.setMeta(META_KEY_DEFAULT_ACCOUNT_ID, acc.id)
+      await load()
+    } catch (err) {
+      console.error('Failed to set default account:', err)
+      setError('设置默认账户失败，请重试')
+    }
+  }
+
+  /** ↑↓ 一次移一格：交换相邻两项后全量写 order。 */
+  const handleMove = async (index: number, dir: -1 | 1) => {
+    const target = index + dir
+    if (target < 0 || target >= accounts.length) return
+    const ids = accounts.map(a => a.id)
+    ;[ids[index], ids[target]] = [ids[target], ids[index]]
+    setError(null)
+    try {
+      await bridge.setMeta(META_KEY_ACCOUNT_ORDER, serializeIdOrder(ids))
+      await load()
+    } catch (err) {
+      console.error('Failed to persist account order:', err)
+      setError('保存顺序失败，请重试')
+    }
+  }
+
+  // ─── 长按手势（决策 #4）；本页面行有 click→编辑，长按触发后需吞掉同手势的 click ───
+  const pressRef = useRef<{ timer: number; x: number; y: number } | null>(null)
+  const suppressClickRef = useRef(false)
+  const onRowPointerDown = (e: React.PointerEvent) => {
+    if (reorderMode || showForm) return
+    const startX = e.clientX
+    const startY = e.clientY
+    const timer = window.setTimeout(() => {
+      suppressClickRef.current = true
+      setReorderMode(true)
+    }, 500)
+    pressRef.current = { timer, x: startX, y: startY }
+  }
+  const onRowPointerMove = (e: React.PointerEvent) => {
+    const p = pressRef.current
+    if (!p) return
+    if (Math.abs(e.clientX - p.x) > 10 || Math.abs(e.clientY - p.y) > 10) {
+      window.clearTimeout(p.timer)
+      pressRef.current = null
+    }
+  }
+  const onRowPointerUp = () => {
+    if (pressRef.current) {
+      window.clearTimeout(pressRef.current.timer)
+      pressRef.current = null
+    }
+  }
+  const takeSuppressedClick = (): boolean => {
+    if (suppressClickRef.current) {
+      suppressClickRef.current = false
+      return true
+    }
+    return false
+  }
+  useEffect(() => () => {
+    if (pressRef.current) window.clearTimeout(pressRef.current.timer)
+  }, [])
+
   return (
     <div className="min-h-screen">
       <PageHeader back />
 
       <div className="px-4 py-4 space-y-4 pb-20">
-        {/* 账户列表 — 点击行进入编辑（REQ-5） */}
+        {/* 排序/默认说明（决策 #4 文案） */}
+        {!reorderMode
+          ? <div className="text-xs text-center" style={{ color: 'var(--ink3)' }}>勾选的行为默认选择，长按可行调整顺序</div>
+          : (
+            <div className="flex items-center justify-between">
+              <span className="text-xs" style={{ color: 'var(--ink3)' }}>排序模式：↑↓ 调整顺序</span>
+              <button
+                onClick={() => setReorderMode(false)}
+                className="text-xs px-3 py-1.5 rounded-lg font-medium text-white"
+                style={{ background: 'var(--accent)' }}
+                data-testid="account-reorder-done"
+              >
+                完成
+              </button>
+            </div>
+          )}
+
+        {/* 账户列表 — 普通模式点击行进入编辑（REQ-5）；排序模式点不动（决策 #4） */}
         <div className="glass-card overflow-hidden">
           {accounts.length === 0 && !loading ? (
             <div className="px-4 py-8 text-center text-sm text-ink3">暂无账户，点击下方添加</div>
           ) : accounts.length > 0 ? (
             accounts.map((acc, i) => (
-              <button
+              <div
                 key={acc.id}
-                type="button"
-                onClick={() => openForm(acc)}
+                role="button"
+                onClick={() => { if (!takeSuppressedClick()) openForm(acc) }}
                 className={`w-full flex items-center gap-3 px-4 py-3 text-left ${i < accounts.length - 1 ? 'row-line' : ''}`}
+                onPointerDown={onRowPointerDown}
+                onPointerMove={onRowPointerMove}
+                onPointerUp={onRowPointerUp}
+                onPointerCancel={onRowPointerUp}
+                data-testid={`account-row-${acc.id}`}
               >
-                <span className="text-lg">{acc.icon || '💰'}</span>
+                {/* T9-6（决策 #6）：照片 icon 走 CategoryIcon，防 data URI 裸文本乱码 */}
+                <CategoryIcon icon={acc.icon} name={acc.name} fallback="💰" className="text-lg" />
                 <span className="text-sm flex-1" style={{ color: 'var(--ink)' }}>
                   {acc.name}
                   {acc.accountType ? <span className="text-ink3"> ({acc.accountType})</span> : null}
+                  {/* T9-5b：默认徽标 */}
+                  {acc.isDefault && (
+                    <span
+                      className="text-[10px] px-1.5 py-0.5 rounded-full ml-2"
+                      style={{ background: 'var(--glass)', color: 'var(--accent)' }}
+                      data-testid={`account-default-badge-${acc.id}`}
+                    >
+                      默认
+                    </span>
+                  )}
                 </span>
-              </button>
+                {/* 排序模式：↑↓；普通模式：默认勾选（radio 语义） */}
+                {reorderMode ? (
+                  <div className="flex gap-1 shrink-0">
+                    <button
+                      type="button"
+                      onClick={e => { e.stopPropagation(); void handleMove(i, -1) }}
+                      disabled={i === 0}
+                      className="w-8 h-8 rounded-lg text-sm disabled:opacity-30"
+                      style={{ background: 'var(--glass)', color: 'var(--ink2)', border: '1px solid var(--glass-border)' }}
+                      data-testid={`account-move-up-${acc.id}`}
+                      aria-label={`上移 ${acc.name}`}
+                    >
+                      ↑
+                    </button>
+                    <button
+                      type="button"
+                      onClick={e => { e.stopPropagation(); void handleMove(i, 1) }}
+                      disabled={i === accounts.length - 1}
+                      className="w-8 h-8 rounded-lg text-sm disabled:opacity-30"
+                      style={{ background: 'var(--glass)', color: 'var(--ink2)', border: '1px solid var(--glass-border)' }}
+                      data-testid={`account-move-down-${acc.id}`}
+                      aria-label={`下移 ${acc.name}`}
+                    >
+                      ↓
+                    </button>
+                  </div>
+                ) : (
+                  <label className="flex items-center shrink-0" onClick={e => e.stopPropagation()}>
+                    <input
+                      type="checkbox"
+                      checked={!!acc.isDefault}
+                      onChange={() => { void handleSetDefault(acc) }}
+                      className="w-4 h-4"
+                      data-testid={`account-default-${acc.id}`}
+                      aria-label={`设为默认账户 ${acc.name}`}
+                    />
+                  </label>
+                )}
+              </div>
             ))
           ) : (
             <div className="px-4 py-3 text-xs text-ink3">加载中…</div>
           )}
         </div>
 
-        {/* 添加按钮 */}
-        {!showForm && (
+        {/* 添加按钮（排序模式下隐藏，防混写） */}
+        {!showForm && !reorderMode && (
           <button
             onClick={() => openForm(null)}
             className="w-full py-3 rounded-lg text-sm font-medium transition-colors"
@@ -217,39 +357,8 @@ export function AccountsPage() {
                 style={{ background: 'var(--glass)', color: 'var(--ink)', border: '1px solid var(--glass-border)' }}
               />
             )}
-            {/* 账户图标：预设 + 自定义文本框（≤4 字符，非空时优先生效） */}
-            <div className="flex flex-wrap gap-2">
-              {ACCOUNT_ICONS.map(ic => {
-                const selected = !customIcon && icon === ic
-                return (
-                  <button
-                    key={ic}
-                    type="button"
-                    onClick={() => { setCustomIcon(''); setIcon(ic) }}
-                    className="w-10 h-10 rounded-lg flex items-center justify-center text-lg transition-colors"
-                    style={{
-                      background: selected ? 'var(--accent)' : 'var(--glass)',
-                      border: selected ? '2px solid var(--accent)' : '1px solid var(--glass-border)',
-                    }}
-                  >
-                    {ic}
-                  </button>
-                )
-              })}
-            </div>
-            <div className="flex items-center gap-2">
-              <span className="text-xs shrink-0" style={{ color: 'var(--ink3)' }}>自定义图标</span>
-              <input
-                type="text"
-                value={customIcon}
-                onChange={e => setCustomIcon(e.target.value.slice(0, 4))}
-                maxLength={4}
-                placeholder="≤4 字符"
-                data-testid="custom-icon-input"
-                className="w-20 px-3 py-1.5 rounded-lg text-sm outline-none"
-                style={{ background: 'var(--glass)', color: 'var(--ink)', border: '1px solid var(--glass-border)' }}
-              />
-            </div>
+            {/* T9-6（REQ-13）：图标区换共享 IconPicker（emoji 宫格 + 照片 + ≤4 字符自定义文本） */}
+            <IconPicker icon={icon} onChange={setIcon} customText name={name} fallback="💰" />
             {error && (
               <div className="text-xs" style={{ color: 'var(--expense)' }}>{error}</div>
             )}

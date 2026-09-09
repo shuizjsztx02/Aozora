@@ -20,6 +20,7 @@ from .schemas import (
     PhoneLoginResponse,
     RefreshRequest,
     TokenResponse,
+    UpdateProfileRequest,
 )
 from .service import AuthService
 
@@ -118,3 +119,19 @@ async def get_me(
 ):
     """R-M2-27: return the authenticated user's own profile."""
     return MeResponse.model_validate(current_user)
+
+
+@me_router.patch("/me", response_model=MeResponse)
+async def patch_me(
+    body: UpdateProfileRequest,
+    db: Annotated[AsyncSession, Depends(get_db_session)],
+    current_user: Annotated[User, Depends(get_current_user)] = ...,
+):
+    """T10-3（REQ-19）: update the authenticated user's profile (nickname).
+
+    鉴权与 GET /me 一致（get_current_user）；session 由 get_db_session 依赖
+    在同一请求内复用，get_current_user 返回的 user 即挂在该 session 上。
+    """
+    service = AuthService(db)
+    user = await service.update_profile(current_user, body.nickname)
+    return MeResponse.model_validate(user)

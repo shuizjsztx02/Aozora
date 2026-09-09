@@ -29,6 +29,9 @@ export function SavingsPage() {
   const [newName, setNewName] = useState('')
   const [newTarget, setNewTarget] = useState('')
   const [newIcon, setNewIcon] = useState('🐷')
+  // T9-4（REQ-14）：存款时间（可选）。unit=null（再点一次取消选中）或不填数值 = 不设期限
+  const [newPeriod, setNewPeriod] = useState('')
+  const [newPeriodUnit, setNewPeriodUnit] = useState<'week' | 'month' | null>('week')
 
   // 存入交互：记录正在存入的目标 id 与金额输入
   const [depositId, setDepositId] = useState<string | null>(null)
@@ -55,12 +58,33 @@ export function SavingsPage() {
       setError('目标金额需大于 0')
       return
     }
+    // 存款时间校验（决策 #8）：数值 + 单位 chip 选中才生效（两 chip 皆取消 = 不设期限）；
+    // 生效时按单位限范围：周 1-521 / 月 1-120
+    let periodValue: number | null = null
+    let periodUnit: 'week' | 'month' | null = null
+    if (newPeriod.trim() && newPeriodUnit) {
+      const n = Number(newPeriod.trim())
+      if (!Number.isInteger(n) || n < 1) {
+        setError('存款时间需为正整数')
+        return
+      }
+      const max = newPeriodUnit === 'week' ? 521 : 120
+      if (n > max) {
+        setError(`存款时间过长（最多 ${max}${newPeriodUnit === 'week' ? '周' : '个月'}）`)
+        return
+      }
+      periodValue = n
+      periodUnit = newPeriodUnit
+    }
     try {
       await bridge.insertSavingsGoal({
         id: newUuid(), ownerId: 'local', name: newName.trim(),
-        targetCents, currentCents: 0, icon: newIcon, version: 1,
+        targetCents, currentCents: 0, icon: newIcon,
+        periodValue, periodUnit,
+        version: 1,
       })
       setNewName(''); setNewTarget(''); setNewIcon('🐷'); setShowAdd(false)
+      setNewPeriod(''); setNewPeriodUnit('week')
       await load()
     } catch (err) {
       console.error('Failed to add savings goal:', err)
@@ -124,6 +148,11 @@ export function SavingsPage() {
                 <div className="flex items-center gap-2">
                   <span className="text-xl">{g.icon || '🐷'}</span>
                   <span className="text-sm font-medium flex-1 truncate" style={{ color: 'var(--ink)' }}>{g.name}</span>
+                  {g.periodValue != null && g.periodUnit && (
+                    <span className="text-xs shrink-0" style={{ color: 'var(--ink3)' }} data-testid={`savings-period-${g.id}`}>
+                      ⏳ {g.periodValue}{g.periodUnit === 'week' ? '周' : '个月'}
+                    </span>
+                  )}
                   <span className="text-xs money-num" style={{ color: 'var(--ink2)' }}>
                     {Money.formatDisplay(Money.cents(g.currentCents))} / {Money.formatDisplay(Money.cents(g.targetCents))}
                   </span>
@@ -226,9 +255,40 @@ export function SavingsPage() {
                 </button>
               ))}
             </div>
+            {/* T9-4（REQ-14）：存款时间（可选）= 数值 + 周/月 chip；再点已选 chip 取消 = 不设期限 */}
+            <div>
+              <div className="text-xs mb-1" style={{ color: 'var(--ink3)' }}>存款时间（可选）</div>
+              <div className="flex gap-2 items-center">
+                <input
+                  type="text"
+                  inputMode="numeric"
+                  value={newPeriod}
+                  onChange={e => setNewPeriod(e.target.value.replace(/[^\d]/g, ''))}
+                  placeholder="如 12"
+                  className="w-24 px-3 py-2 rounded-lg text-sm outline-none"
+                  style={{ background: 'var(--glass)', color: 'var(--ink)', border: '1px solid var(--glass-border)' }}
+                  data-testid="savings-new-period"
+                />
+                {(['week', 'month'] as const).map(u => (
+                  <button
+                    key={u}
+                    onClick={() => setNewPeriodUnit(newPeriodUnit === u ? null : u)}
+                    className="px-3 py-1.5 rounded-lg text-xs"
+                    style={{
+                      background: newPeriodUnit === u ? 'var(--accent)' : 'var(--glass)',
+                      color: newPeriodUnit === u ? 'white' : 'var(--ink2)',
+                      border: '1px solid var(--glass-border)',
+                    }}
+                    data-testid={`savings-period-unit-${u}`}
+                  >
+                    {u === 'week' ? '周' : '个月'}
+                  </button>
+                ))}
+              </div>
+            </div>
             <div className="flex gap-2">
               <button
-                onClick={() => { setShowAdd(false); setNewName(''); setNewTarget(''); setError(null) }}
+                onClick={() => { setShowAdd(false); setNewName(''); setNewTarget(''); setNewPeriod(''); setNewPeriodUnit('week'); setError(null) }}
                 className="flex-1 py-2 rounded-lg text-sm"
                 style={{ background: 'var(--glass)', color: 'var(--ink2)' }}
               >

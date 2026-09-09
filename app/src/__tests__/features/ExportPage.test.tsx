@@ -18,6 +18,9 @@ import { MemoryRouter } from 'react-router'
 import { ExportPage } from '../../features/settings/ExportPage'
 
 const mockBridge = vi.hoisted(() => ({
+  // T9-5b（REQ-11）：meta.get/set mock（默认无默认选择）
+  getMeta: vi.fn().mockResolvedValue({}),
+  setMeta: vi.fn().mockResolvedValue({ success: true }),
   call: vi.fn(),
   createExport: vi.fn(),
   listExports: vi.fn(),

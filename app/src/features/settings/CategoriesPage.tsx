@@ -9,10 +9,9 @@
 import { useState, useEffect, useCallback } from 'react'
 import { PageHeader } from '../../components/Layout'
 import { useBridge } from '../../platform/hooks/use-bridge'
-import { BridgeError } from '../../platform/bridge/native-bridge'
 import { newUuid } from '../../platform/uuid'
 import { CategoryIcon } from '../../components/CategoryIcon'
-import { EmojiPicker } from '../../components/EmojiPicker'
+import { IconPicker } from '../../components/IconPicker'
 import type { CategoryData } from '../../platform/bridge/bridge-types'
 
 export function CategoriesPage() {
@@ -145,18 +144,6 @@ function CategoryEditor({
   const [saving, setSaving] = useState(false)
   const [error, setError] = useState<string | null>(null)
 
-  const pickPhoto = useCallback(async () => {
-    setError(null)
-    try {
-      const r = await bridge.pickIcon('gallery')
-      setIcon(r.dataUri)
-    } catch (e) {
-      if (e instanceof BridgeError && e.code === 'cancelled') return
-      if (e instanceof BridgeError && e.code === 'unavailable') { setError('当前环境不支持选择照片'); return }
-      setError('照片选择失败，请重试')
-    }
-  }, [bridge])
-
   const handleSave = useCallback(async () => {
     if (!name.trim()) { setError('请填写分类名称'); return }
     setSaving(true)
@@ -203,41 +190,7 @@ function CategoryEditor({
           {isEdit ? '编辑分类' : `新建${editing.base.kind === 'expense' ? '支出' : '收入'}分类`}
         </div>
 
-        {/* 图标预览 + 选择 */}
-        <div className="flex items-center gap-3">
-          <div
-            className="flex items-center justify-center w-14 h-14 rounded-full text-2xl shrink-0"
-            style={{ background: 'var(--glass)', border: '1px solid var(--glass-border)' }}
-          >
-            <CategoryIcon icon={icon} name={name || '?'} className="text-2xl" />
-          </div>
-          <div className="flex flex-col gap-2">
-            <button
-              type="button"
-              onClick={pickPhoto}
-              className="text-xs px-3 py-2 rounded-lg"
-              style={{ background: 'var(--glass)', color: 'var(--ink2)', border: '1px solid var(--glass-border)' }}
-              data-testid="icon-pick-photo"
-            >
-              🖼️ 从相册选择照片
-            </button>
-            {icon && (
-              <button
-                type="button"
-                onClick={() => setIcon(null)}
-                className="text-xs px-3 py-1 rounded-lg"
-                style={{ color: 'var(--ink3)' }}
-                data-testid="icon-clear"
-              >
-                清除自定义图标
-              </button>
-            )}
-          </div>
-        </div>
-
-        <EmojiPicker selected={icon && !icon.startsWith('data:') ? icon : ''} onPick={e => setIcon(e)} />
-
-        {/* 名称 */}
+        {/* 名称（T9-3/REQ-12：名称、上级分类在上，图标选择在下） */}
         <input
           type="text"
           value={name}
@@ -285,6 +238,9 @@ function CategoryEditor({
               ))}
           </div>
         </div>
+
+        {/* 图标选择（T9-6：抽入共享 IconPicker，行为不变） */}
+        <IconPicker icon={icon} onChange={setIcon} name={name || '?'} />
 
         {error && (
           <div className="text-xs px-3 py-2 rounded-lg" style={{ background: 'rgba(220,38,38,0.1)', color: '#dc2626' }}>

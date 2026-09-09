@@ -122,6 +122,21 @@ class Repository(private val db: AozoraDatabase) {
     suspend fun getBook(id: String): BookEntity? = db.bookDao().getById(id)
     suspend fun listBooks(): List<BookEntity> = db.bookDao().listActive()
 
+    /**
+     * T9-5a（REQ-11）：同步 meta 键值读写（sync_meta 表）。
+     * key 白名单校验在桥 handler 层（AozoraBridge.handleMetaSet），此处为通用存取。
+     */
+    suspend fun getMeta(key: String): String? = db.syncMetaDao().getValue(key)
+
+    suspend fun setMeta(key: String, value: String) {
+        db.syncMetaDao().upsert(SyncMetaEntity(key, value))
+    }
+
+    /** T10-3（决策 #4）：删除指定 meta 键（登出先清清身份键，双保险于 clearAllData）。 */
+    suspend fun deleteMeta(key: String) {
+        db.syncMetaDao().delete(key)
+    }
+
     /** T7-1（REQ-5）：总账本 book id；未播种时为 null。 */
     suspend fun getMasterBookId(): String? =
         db.syncMetaDao().getValue(SyncMetaEntity.KEY_MASTER_BOOK_ID)
@@ -133,14 +148,77 @@ class Repository(private val db: AozoraDatabase) {
     }
 
     /**
-     * T7-1（决策 #2）：记账目标账本 = 活跃账本中第一个非 master 的 book
-     * （listBooks 按 name 排序）；全部为 master 时回退第一个；无账本时 null。
+     * T7-1（决策 #2）+ T9-5a（决策 #3）：记账目标账本。
+     * 优先 default_book_id（须存在、未归档、非 master），否则活跃账本中
+     * 第一个非 master 的 book（listBooks 按 name 排序）；全部为 master 时回退第一个。
      */
     suspend fun getEntryBook(): BookEntity? {
         val books = listBooks()
         if (books.isEmpty()) return null
         val masterId = getMasterBookId()
+        getDefaultBookId()
+            ?.let { def -> books.firstOrNull { it.id == def && it.id != masterId } }
+            ?.let { return it }
         return books.firstOrNull { it.id != masterId } ?: books.first()
+    }
+
+    /** T9-5a（REQ-11）：默认账本 id（未设置时 null）。 */
+    suspend fun getDefaultBookId(): String? =
+        db.syncMetaDao().getValue(SyncMetaEntity.KEY_DEFAULT_BOOK_ID)
+
+    /**
+     * T9-5a（决策 #3）：默认账户实体。
+     * default_account_id 命中且未归档 → 用它；否则回退第一个活跃账户（id 升序）；
+     * 无账户时 null。
+     */
+    suspend fun getDefaultAccount(): AccountEntity? {
+        val accs = listAccounts()
+        if (accs.isEmpty()) return null
+        db.syncMetaDao().getValue(SyncMetaEntity.KEY_DEFAULT_ACCOUNT_ID)
+            ?.let { def -> accs.firstOrNull { it.id == def } }
+            ?.let { return it }
+        return accs.first()
+    }
+
+    /**
+     * T9-5a（决策 #2）：book.list UI 出口 —— 按 book_order 整形后的列表。
+     * 总账本恒列首位；order 数组内的项按序在前，未列项按 name 序垫后。
+     */
+    suspend fun listBooksForUi(): List<BookEntity> {
+        val masterId = getMasterBookId()
+        return applyOrder(listBooks(), { it.id }, getMeta(SyncMetaEntity.KEY_BOOK_ORDER), masterId)
+    }
+
+    /** T9-5a（决策 #2）：account.list UI 出口 —— 按 account_order 整形（无 master 特例）。 */
+    suspend fun listAccountsForUi(): List<AccountEntity> =
+        applyOrder(listAccounts(), { it.id }, getMeta(SyncMetaEntity.KEY_ACCOUNT_ORDER), null)
+
+    /**
+     * 列表整形：orderJson（JSON id 数组）内列出的项按序在前，其余按原序垫后；
+     * headId（如总账本）无论是否在 order 中恒列首位。orderJson 非法 → 原序返回。
+     */
+    private fun <T> applyOrder(
+        items: List<T>,
+        idOf: (T) -> String,
+        orderJson: String?,
+        headId: String?
+    ): List<T> {
+        val head = items.firstOrNull { headId != null && idOf(it) == headId }
+        val rest = items.filterNot { it === head }
+        val ordered = if (orderJson == null) rest else try {
+            val arr = org.json.JSONArray(orderJson)
+            val remaining = rest.toMutableList()
+            val picked = ArrayList<T>(rest.size)
+            for (i in 0 until arr.length()) {
+                val id = arr.optString(i, null) ?: continue
+                val idx = remaining.indexOfFirst { idOf(it) == id }
+                if (idx >= 0) picked.add(remaining.removeAt(idx))
+            }
+            picked + remaining
+        } catch (e: org.json.JSONException) {
+            rest
+        }
+        return listOfNotNull(head) + ordered
     }
 
     // ─── 首启种子（第六轮 Bug-5.1；T7-1 扩展为双账本） ───
@@ -321,11 +399,26 @@ class Repository(private val db: AozoraDatabase) {
 
     suspend fun getSavingsGoal(id: String): SavingsGoalEntity? = db.savingsGoalDao().getById(id)
 
+    /**
+     * T9-4（REQ-14/决策 #8）：存款期限底线校验——unit 仅 'week'|'month'，
+     * value/unit 必须成对（同空或同非空）。bridge 侧 parseSavingsPeriod 已做
+     * 范围校验（周 1-521 / 月 1-120），此处防任何写入路径绕过。
+     */
+    private fun requireValidSavingsPeriod(goal: SavingsGoalEntity) {
+        require((goal.periodValue == null) == (goal.periodUnit == null)) {
+            "periodValue/periodUnit must be provided together"
+        }
+        require(goal.periodUnit == null || goal.periodUnit == "week" || goal.periodUnit == "month") {
+            "invalid periodUnit: ${goal.periodUnit}"
+        }
+    }
+
     suspend fun insertSavingsGoal(goal: SavingsGoalEntity) {
         require(goal.id.isNotBlank() && goal.name.isNotBlank()) { "goal id/name required" }
         require(goal.targetCents >= 1) { "targetCents must be positive" }
         require(goal.currentCents >= 0) { "currentCents must be non-negative" }
         require(goal.version > 0 && goal.archivedAt == null) { "invalid goal insert" }
+        requireValidSavingsPeriod(goal)
         db.savingsGoalDao().insert(goal)
     }
 
@@ -333,6 +426,7 @@ class Repository(private val db: AozoraDatabase) {
         require(goal.id.isNotBlank() && goal.name.isNotBlank()) { "goal id/name required" }
         require(goal.targetCents >= 1) { "targetCents must be positive" }
         require(goal.currentCents >= 0) { "currentCents must be non-negative" }
+        requireValidSavingsPeriod(goal)
         db.withTransaction {
             val current = db.savingsGoalDao().getById(goal.id)
             require(current != null) { "savings goal not found" }
@@ -756,7 +850,10 @@ class Repository(private val db: AozoraDatabase) {
                             )
                         } else {
                             val entity = change.toTransaction() ?: continue
-                            db.transactionDao().upsertFromSync(entity)
+                            // 服务端 Transaction 无 includeInBudget 列：保留本地标记，避免被 pull 冲刷
+                            // （第十轮决策 #1，镜像 category.icon 防冲刷写法）
+                            val localFlag = db.transactionDao().getById(entity.id)?.includeInBudget
+                            db.transactionDao().upsertFromSync(entity.copy(includeInBudget = localFlag ?: entity.includeInBudget))
                         }
                     }
                     "book" -> {
@@ -767,7 +864,13 @@ class Repository(private val db: AozoraDatabase) {
                             )
                         } else {
                             val entity = change.toBook(ownerId) ?: continue
-                            db.bookDao().upsertFromSync(entity)
+                            // 服务端 icon ≤64 字符：照片版本地专属，本地 data: 而服务端非 data: → 保留本地（决策 #7②）
+                            val localIcon = db.bookDao().getById(entity.id)?.icon
+                            val mergedIcon = if (
+                                localIcon != null && localIcon.startsWith("data:") &&
+                                !entity.icon.startsWith("data:")
+                            ) localIcon else entity.icon
+                            db.bookDao().upsertFromSync(entity.copy(icon = mergedIcon))
                         }
                     }
                     "category" -> {
@@ -789,7 +892,13 @@ class Repository(private val db: AozoraDatabase) {
                             )
                         } else {
                             val entity = change.toAccount(ownerId) ?: continue
-                            db.accountDao().upsertFromSync(entity)
+                            // 同 book：本地照片 icon 不被 pull 冲刷（决策 #7②）
+                            val localIcon = db.accountDao().getById(entity.id)?.icon
+                            val mergedIcon = if (
+                                localIcon != null && localIcon.startsWith("data:") &&
+                                !entity.icon.startsWith("data:")
+                            ) localIcon else entity.icon
+                            db.accountDao().upsertFromSync(entity.copy(icon = mergedIcon))
                         }
                     }
                     "budget" -> {
@@ -822,6 +931,10 @@ class Repository(private val db: AozoraDatabase) {
             put("bizDate", tx.bizDate)
             put("occurredAt", tx.occurredAt)
             put("source", tx.source)
+            // 第十轮 REQ-17（决策 #1 同步安全）：服务端 _apply_insert 白名单不读
+            // 该键 → 静默忽略（accountType 先例）；经 toWirePayload 自动转
+            // include_in_budget，push 不炸。
+            put("includeInBudget", tx.includeInBudget)
             put("version", tx.version)
         }.toString()
     }
@@ -831,7 +944,8 @@ class Repository(private val db: AozoraDatabase) {
             put("id", book.id)
             put("ownerId", book.ownerId)
             put("name", book.name)
-            put("icon", book.icon)
+            // 照片版 icon（data: URI 可达 48KB）超服务端 64 上限 → 键省略，防毒丸（决策 #7①）
+            if (book.icon.length <= ICON_WIRE_MAX_LEN) put("icon", book.icon)
             put("version", book.version)
         }.toString()
     }
@@ -855,7 +969,8 @@ class Repository(private val db: AozoraDatabase) {
             put("id", account.id)
             put("ownerId", account.ownerId)
             put("name", account.name)
-            put("icon", account.icon)
+            // 同 bookToJson：照片 icon 超长省略键，防 push 422（决策 #7①）
+            if (account.icon.length <= ICON_WIRE_MAX_LEN) put("icon", account.icon)
             put("accountType", account.accountType ?: JSONObject.NULL)
             put("version", account.version)
         }.toString()
@@ -889,10 +1004,13 @@ class Repository(private val db: AozoraDatabase) {
         val note = map["note"] ?: ""
         val source = map["source"] ?: "manual"
         val version = map["version"]?.toIntOrNull() ?: 1
+        // 第十轮决策 #1：服务端永不返回该键 → 缺省 true（计入）。
+        val includeInBudget = map["includeInBudget"]?.toBoolean() ?: true
         return TransactionEntity(
             id = id, bookId = bookId, categoryId = categoryId, accountId = accountId,
             amountCents = amountCents, type = type, bizDate = bizDate,
             occurredAt = occurredAt, note = note, source = source, version = version,
+            includeInBudget = includeInBudget,
             deletedAt = null
         )
     }
@@ -985,5 +1103,8 @@ class Repository(private val db: AozoraDatabase) {
         val DEFAULT_INCOME_CATEGORIES = listOf(
             "工资", "奖金", "红包收入", "退款", "报销"
         )
+        /** 服务端 book/account icon 列上限（String(64)，_validate_name 强校验）——
+         *  照片 data URI 超长 push 必 422 成毒丸，见第九轮决策 #7。 */
+        private const val ICON_WIRE_MAX_LEN = 64
     }
 }

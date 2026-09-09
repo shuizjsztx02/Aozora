@@ -7,6 +7,7 @@
 import { useState, useCallback } from 'react'
 import type { ActionProposal, TransactionItem } from '../../domain/action-proposal'
 import type { CategoryData } from '../../platform/bridge/bridge-types'
+import DateField from '../../components/DateField'
 
 interface BatchConfirmationCardProps {
   proposal: ActionProposal
@@ -277,16 +278,11 @@ function BatchTxRow({ tx, index, categories, onUpdate, onRemove }: BatchTxRowPro
           {/* Date */}
           <div className="flex items-center gap-1">
             <label className="text-xs w-10" style={{ color: 'var(--ink3)' }}>日期</label>
-            <input
-              type="date"
+            <DateField
               value={tx.bizDate}
-              onChange={e => onUpdate(index, { bizDate: e.target.value })}
-              className="flex-1 px-2 py-1 rounded text-xs"
-              style={{
-                background: 'var(--glass)',
-                color: 'var(--ink)',
-                border: '1px solid var(--glass-border)',
-              }}
+              onChange={v => onUpdate(index, { bizDate: v })}
+              testId={`batch-date-${index}`}
+              className="flex-1 min-w-0"
             />
           </div>
 

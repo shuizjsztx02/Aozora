@@ -1,7 +1,9 @@
 package com.aozora.app.auth
 
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
+import kotlinx.coroutines.withContext
 import okhttp3.MediaType.Companion.toMediaType
 import okhttp3.OkHttpClient
 import okhttp3.Request
@@ -63,6 +65,132 @@ open class AuthClient(
 
     /** 当前 user_id；未注册时返回 null。 */
     open fun currentUserId(): String? = tokenStore.getUserId()
+
+    /** 服务端业务类 HTTP 失败（4xx 非 auth_lost 语义），供桥 handler 翻译错误码。 */
+    class AuthApiError(val httpCode: Int, message: String) : IOException(message)
+
+    /** POST /auth/login 结果。 */
+    data class LoginResult(val userId: String, val isNewUser: Boolean)
+
+    // ─── 第十轮 T10-3（REQ-19）：登录 / 登出 / 资料 ───
+    // 以下公开方法由桥 handler（Main 线程 scope）直接调用，网络为同步 OkHttp，
+    // 故各自包 Dispatchers.IO。
+
+    /**
+     * 手机号 + 验证码登录（未注册号码自动注册）。
+     * 成功：token 对写 TokenStore（Keystore 路径同 registerGuest）+ user_id 覆盖
+     * （guest → 正式账号是**不同 user**，切换即换云身份）。
+     * 401 → [AuthApiError]（验证码错误）；其余非 2xx → [AuthApiError]。
+     */
+    suspend fun login(phone: String, code: String): LoginResult = withContext(Dispatchers.IO) {
+        val body = JSONObject().apply {
+            put("phone", phone)
+            put("verification_code", code)
+            put("device_id", tokenStore.deviceId)
+        }
+        val request = Request.Builder()
+            .url("$baseUrl/auth/login")
+            .post(body.toString().toRequestBody(JSON))
+            .header("Content-Type", "application/json")
+            .build()
+        httpClient.newCall(request).execute().use { response ->
+            if (!response.isSuccessful) {
+                // 401 = 验证码错误（可重试，不代表本地会话失效）；不 clearAuth。
+                throw AuthApiError(response.code, "login failed: HTTP ${response.code}")
+            }
+            val payload = response.body?.string()
+                ?: throw AuthApiError(-1, "login: empty body")
+            val json = JSONObject(payload)
+            val tokens = json.getJSONObject("tokens")
+            try {
+                tokenStore.saveTokens(
+                    accessToken = tokens.getString("access_token"),
+                    refreshToken = tokens.getString("refresh_token"),
+                    expiresAtSec = nowSec() + tokens.getLong("expires_in"),
+                    userId = json.getString("user_id"),
+                    markRegistered = true
+                )
+            } catch (e: KeystoreCrypto.KeystoreUnavailableException) {
+                // 同 registerGuest P1-2：Keystore 写失败 → AuthLost 触发上层清理
+                throw AuthLostException("failed to save tokens after login", e)
+            }
+            LoginResult(
+                userId = json.getString("user_id"),
+                isNewUser = json.optBoolean("is_new_user", false)
+            )
+        }
+    }
+
+    /**
+     * 登出：POST /auth/logout 吊销本设备会话（refresh_token + device_id），
+     * 随后**必清本地会话**（clearAuth）——网络失败也不保留半死状态。
+     * 云端业务数据保留；本地清理由桥 handler 的 clearAllData 负责。
+     */
+    suspend fun logout() = withContext(Dispatchers.IO) {
+        try {
+            val refreshToken = tokenStore.getRefreshToken()
+            if (refreshToken != null) {
+                val body = JSONObject().apply {
+                    put("refresh_token", refreshToken)
+                    put("device_id", tokenStore.deviceId)
+                }
+                val request = Request.Builder()
+                    .url("$baseUrl/auth/logout")
+                    .post(body.toString().toRequestBody(JSON))
+                    .header("Content-Type", "application/json")
+                    .build()
+                // 尽力而为：401/404（会话已失效）等非 2xx 忽略
+                runCatching { httpClient.newCall(request).execute().use { it.close() } }
+            }
+        } finally {
+            clearAuth()
+        }
+    }
+
+    /**
+     * GET /me — 当前用户资料（id/nickname/phone/status/timezone…）。
+     * token 语义沿用 [ensureValidAccessToken]（过期自动刷新；4xx → [AuthLostException]）。
+     */
+    suspend fun me(): JSONObject = withContext(Dispatchers.IO) {
+        val access = ensureValidAccessToken()
+        val request = Request.Builder()
+            .url("$baseUrl/me")
+            .get()
+            .header("Authorization", "Bearer $access")
+            .build()
+        httpClient.newCall(request).execute().use { response ->
+            when {
+                response.code == 401 -> throw AuthLostException("me: HTTP 401")
+                !response.isSuccessful -> throw AuthApiError(response.code, "me: HTTP ${response.code}")
+                else -> JSONObject(response.body?.string() ?: throw AuthApiError(-1, "me: empty body"))
+            }
+        }
+    }
+
+    /**
+     * PATCH /me — 更新昵称；成功返回服务端 MeResponse JSON。
+     * 401 → [AuthLostException]；4xx（校验失败等）→ [AuthApiError]。
+     */
+    suspend fun updateProfile(nickname: String): JSONObject = withContext(Dispatchers.IO) {
+        val access = ensureValidAccessToken()
+        val body = JSONObject().put("nickname", nickname)
+        val request = Request.Builder()
+            .url("$baseUrl/me")
+            .patch(body.toString().toRequestBody(JSON))
+            .header("Content-Type", "application/json")
+            .header("Authorization", "Bearer $access")
+            .build()
+        httpClient.newCall(request).execute().use { response ->
+            when {
+                response.code == 401 -> throw AuthLostException("updateProfile: HTTP 401")
+                !response.isSuccessful ->
+                    throw AuthApiError(response.code, "updateProfile: HTTP ${response.code}")
+                else -> JSONObject(
+                    response.body?.string() ?: throw AuthApiError(-1, "updateProfile: empty body")
+                )
+            }
+        }
+    }
 
     // ─── internal ───
 

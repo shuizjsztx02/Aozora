@@ -124,6 +124,18 @@ object BridgeCommands {
     const val AUTH_GET_STATUS = "auth.getStatus"
     const val AUTH_TRIGGER_SYNC = "auth.triggerSync"
 
+    // 第十轮 T10-3（REQ-19，决策 #4）：登录与安全 —— 手机号登录 / 登出 / 资料。
+    const val AUTH_LOGIN = "auth.login"
+    const val AUTH_LOGOUT = "auth.logout"
+    const val AUTH_ME = "auth.me"
+    const val AUTH_UPDATE_PROFILE = "auth.updateProfile"
+
+    // T9-5a（REQ-11/决策 #1）：本地展示元数据（默认账本/账户、列表顺序）。
+    // 存 sync_meta 白名单键（default_book_id/default_account_id/book_order/account_order），
+    // 不加实体列、不上行——避免 bootstrap 冲刷与 push 契约污染。
+    const val META_GET = "meta.get"
+    const val META_SET = "meta.set"
+
     /**
      * T-M5-02a review: canonical list of every command constant above.
      *
@@ -158,6 +170,8 @@ object BridgeCommands {
         SHARE_TEXT,
         AUTH_GET_STATUS,
         AUTH_TRIGGER_SYNC,
+        AUTH_LOGIN, AUTH_LOGOUT, AUTH_ME, AUTH_UPDATE_PROFILE,
+        META_GET, META_SET,
     )
 }
 

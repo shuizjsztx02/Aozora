@@ -52,6 +52,8 @@ import {
   type AccountDeleteResult,
   type FeedbackSubmitParams,
   type FeedbackSubmitResult,
+  type AuthLoginResult,
+  type MeData,
 } from './bridge-types'
 
 // Re-export BridgeError for consumers (e.g. MePage)
@@ -755,6 +757,53 @@ export class NativeBridge {
    */
   async triggerAuthSync(): Promise<{ outcome: string }> {
     return this.call('auth.triggerSync')
+  }
+
+  // ─── 第十轮 T10-3（REQ-19）：登录与安全 ───
+
+  /**
+   * 手机号 + 验证码登录（未注册号码自动注册）。
+   * 成功后 native 已写 token（user 身份切换为手机号账号）；
+   * 调用方须随后 triggerAuthSync()（新账号云端为空 → bootstrap 清本地重建）。
+   * 错误码：invalid_input / invalid_code / server_rejected / auth_lost / network_error。
+   */
+  async loginAuth(phone: string, code: string): Promise<AuthLoginResult> {
+    return this.call('auth.login', { phone, code })
+  }
+
+  /**
+   * 登出：吊销本设备会话 + 清本地 token + 清全部本地业务数据（云端保留）。
+   * 调用方成功后 navigate('/onboarding', { replace: true })。
+   * 错误码：wipe_failed（本地数据清理失败，必须提示用户）。
+   */
+  async logoutAuth(): Promise<{ success: boolean }> {
+    return this.call('auth.logout')
+  }
+
+  /** GET /me 透传（id/nickname/phone/status/timezone…）。401 → auth_lost。 */
+  async getMe(): Promise<MeData> {
+    return this.call('auth.me')
+  }
+
+  /** PATCH /me 更新昵称；native 成功后镜像写 sync_meta display_name（离线可读）。 */
+  async updateProfile(nickname: string): Promise<MeData> {
+    return this.call('auth.updateProfile', { nickname })
+  }
+
+  // ─── T9-5a（REQ-11）：本地展示元数据（sync_meta 白名单键） ───
+
+  /**
+   * 批量读 meta。key 限 native 白名单（default_book_id / default_account_id /
+   * book_order / account_order / avatar_uri / display_name），未设置的键返回 null。
+   */
+  async getMeta(keys: string[]): Promise<Record<string, string | null>> {
+    const r = await this.call<{ values?: Record<string, string | null> }>('meta.get', { keys })
+    return r.values ?? {}
+  }
+
+  /** 写单个 meta 键（native 校验白名单 + 分键上限：order/default 8KB、avatar_uri 64KB、display_name 64 字符）。 */
+  async setMeta(key: string, value: string): Promise<{ success: boolean }> {
+    return this.call('meta.set', { key, value })
   }
 
   // ─── 测试辅助 ───

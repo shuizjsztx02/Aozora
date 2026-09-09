@@ -63,7 +63,9 @@ class AozoraBridge(
     private val deletionClient: com.aozora.app.deletion.DeletionClient? = null,
     private val tokenStore: com.aozora.app.auth.TokenStore? = null,
     // T-M5-05c: 应用内反馈。
-    private val feedbackClient: FeedbackClient? = null
+    private val feedbackClient: FeedbackClient? = null,
+    // 第十轮 T10-3（REQ-19）：登录/登出/资料（auth.* 四命令）。
+    private val authClient: com.aozora.app.auth.AuthClient? = null
 ) {
     // NEW-R6-2 fix: 追踪当前活跃的 parse Job，以便取消
     @Volatile
@@ -205,6 +207,12 @@ class AozoraBridge(
             BridgeCommands.AUTH_GET_STATUS -> handleAuthGetStatus(requestId)
             BridgeCommands.AUTH_TRIGGER_SYNC -> handleAuthTriggerSync(requestId)
 
+            // 第十轮 T10-3（REQ-19）：登录与安全
+            BridgeCommands.AUTH_LOGIN -> handleAuthLogin(requestId, payload)
+            BridgeCommands.AUTH_LOGOUT -> handleAuthLogout(requestId)
+            BridgeCommands.AUTH_ME -> handleAuthMe(requestId)
+            BridgeCommands.AUTH_UPDATE_PROFILE -> handleAuthUpdateProfile(requestId, payload)
+
             // 第八轮 REQ-8：分类自定义 + 照片图标；REQ-7：存钱目标
             BridgeCommands.CATEGORY_INSERT -> handleCategoryInsert(requestId, payload)
             BridgeCommands.CATEGORY_UPDATE -> handleCategoryUpdate(requestId, payload)
@@ -213,6 +221,10 @@ class AozoraBridge(
             BridgeCommands.SAVINGS_INSERT -> handleSavingsInsert(requestId, payload)
             BridgeCommands.SAVINGS_UPDATE -> handleSavingsUpdate(requestId, payload)
             BridgeCommands.SAVINGS_ARCHIVE -> handleSavingsArchive(requestId, payload)
+
+            // T9-5a（REQ-11/决策 #1）：本地展示元数据（默认选择 + 列表顺序，存 sync_meta）
+            BridgeCommands.META_GET -> handleMetaGet(requestId, payload)
+            BridgeCommands.META_SET -> handleMetaSet(requestId, payload)
 
             else -> BridgeResponse.error(requestId, "unknown_command", "Unknown command: $command")
         }
@@ -234,6 +246,9 @@ class AozoraBridge(
             bizDate = txObj.getString("bizDate"),
             occurredAt = BridgePayload.safeLong(txObj, "occurredAt"),
             source = txObj.getString("source"),
+            // 第十轮 REQ-17（决策 #1）：聊天/批量路径不传 → 缺省计入；
+            // 仅 QuickEntrySheet 显式传值（其按钮初始为 false）。
+            includeInBudget = txObj.optBoolean("includeInBudget", true),
             version = BridgePayload.version(txObj),
             deletedAt = null
         )
@@ -271,8 +286,10 @@ class AozoraBridge(
     // ─── Book handlers ───
 
     private suspend fun handleBookList(requestId: String): BridgeResponse {
-        val books = repository.listBooks()
+        // T9-5a（决策 #2）：出口按 book_order 整形（总账本恒首位），并透出 isDefault
+        val books = repository.listBooksForUi()
         val masterId = repository.getMasterBookId()
+        val defaultId = repository.getDefaultBookId()
         val arr = org.json.JSONArray()
         for (b in books) {
             arr.put(JSONObject().apply {
@@ -280,6 +297,8 @@ class AozoraBridge(
                 put("icon", b.icon); put("version", b.version)
                 // T7-1（REQ-5）：透出总账本标记，前端记账入口据此排除
                 put("isMaster", b.id == masterId)
+                // master 恒首位且不可记账 → 永不标默认
+                put("isDefault", b.id == defaultId && b.id != masterId)
             })
         }
         return BridgeResponse.success(requestId, arr.toString())
@@ -300,6 +319,36 @@ class AozoraBridge(
         return BridgeResponse.success(requestId, JSONObject().put("id", book.id).toString())
     }
 
+    // ─── T9-5a（REQ-11 / 决策 #1）：sync_meta 展示元数据 ───
+    // 键白名单与值格式校验抽到 MetaWhitelist（纯函数，JVM 可测）。
+
+    private suspend fun handleMetaGet(requestId: String, p: JSONObject): BridgeResponse {
+        val keys = p.optJSONArray("keys") ?: org.json.JSONArray()
+        val values = JSONObject()
+        for (i in 0 until keys.length()) {
+            val key = keys.optString(i, null) ?: continue
+            if (!MetaWhitelist.isAllowed(key)) {
+                throw IllegalArgumentException("meta key not allowed: $key")
+            }
+            values.put(key, repository.getMeta(key) ?: JSONObject.NULL)
+        }
+        return BridgeResponse.success(requestId, JSONObject().put("values", values).toString())
+    }
+
+    private suspend fun handleMetaSet(requestId: String, p: JSONObject): BridgeResponse {
+        val key = p.getString("key")
+        if (!MetaWhitelist.isAllowed(key)) {
+            throw IllegalArgumentException("meta key not allowed: $key")
+        }
+        val value = if (p.isNull("value")) null else p.getString("value")
+        if (value == null) {
+            throw IllegalArgumentException("meta value must be a string")
+        }
+        MetaWhitelist.validateValue(key, value)
+        repository.setMeta(key, value)
+        return BridgeResponse.success(requestId, JSONObject().put("success", true).toString())
+    }
+
     // ─── Category / Account / Budget handlers ───
 
     private suspend fun handleCategoryList(requestId: String): BridgeResponse {
@@ -316,13 +365,16 @@ class AozoraBridge(
     }
 
     private suspend fun handleAccountList(requestId: String): BridgeResponse {
-        val accs = repository.listAccounts()
+        // T9-5a（决策 #2）：出口按 account_order 整形，并透出 isDefault
+        val accs = repository.listAccountsForUi()
+        val defaultId = repository.getMeta(SyncMetaEntity.KEY_DEFAULT_ACCOUNT_ID)
         val arr = org.json.JSONArray()
         for (a in accs) {
             arr.put(JSONObject().apply {
                 put("id", a.id); put("name", a.name); put("icon", a.icon); put("version", a.version)
                 // T7-1（REQ-6）：支付渠道子类型，可为 null
                 put("accountType", a.accountType ?: JSONObject.NULL)
+                put("isDefault", a.id == defaultId)
             })
         }
         return BridgeResponse.success(requestId, arr.toString())
@@ -458,6 +510,25 @@ class AozoraBridge(
 
     // ─── 第八轮 REQ-7：存钱目标（仅本地，无 mutation 入队） ───
 
+    /**
+     * T9-4（REQ-14）：解析存款期限。value/unit 必须成对出现或成对缺省；
+     * unit 仅 'week' | 'month'（决策 #8）；value 1-521（周）/ 1-120（月）。
+     * 返回 (periodValue, periodUnit)，非法时抛 IllegalArgumentException → error 响应。
+     */
+    private fun parseSavingsPeriod(g: JSONObject): Pair<Int?, String?> {
+        val hasValue = g.has("periodValue") && !g.isNull("periodValue")
+        val hasUnit = g.has("periodUnit") && !g.isNull("periodUnit")
+        if (!hasValue && !hasUnit) return null to null
+        require(hasValue && hasUnit) { "periodValue/periodUnit must be provided together" }
+        val unit = g.getString("periodUnit")
+        require(unit == "week" || unit == "month") { "invalid periodUnit: $unit" }
+        val value = g.getInt("periodValue")
+        require(value >= 1 && value <= if (unit == "week") 521 else 120) {
+            "periodValue $value out of range for $unit"
+        }
+        return value to unit
+    }
+
     private suspend fun handleSavingsList(requestId: String): BridgeResponse {
         val arr = org.json.JSONArray()
         for (g in repository.listSavingsGoals()) {
@@ -465,6 +536,8 @@ class AozoraBridge(
                 put("id", g.id); put("name", g.name)
                 put("targetCents", g.targetCents); put("currentCents", g.currentCents)
                 put("icon", g.icon ?: JSONObject.NULL)
+                put("periodValue", g.periodValue ?: JSONObject.NULL)
+                put("periodUnit", g.periodUnit ?: JSONObject.NULL)
                 put("createdAt", g.createdAt); put("updatedAt", g.updatedAt); put("version", g.version)
             })
         }
@@ -474,6 +547,7 @@ class AozoraBridge(
     private suspend fun handleSavingsInsert(requestId: String, p: JSONObject): BridgeResponse {
         val g = p.getJSONObject("goal")
         val now = System.currentTimeMillis()
+        val (periodValue, periodUnit) = parseSavingsPeriod(g)
         val entity = SavingsGoalEntity(
             id = g.getString("id"),
             ownerId = g.optString("ownerId", "local"),
@@ -481,6 +555,8 @@ class AozoraBridge(
             targetCents = g.getLong("targetCents"),
             currentCents = if (g.has("currentCents")) g.getLong("currentCents") else 0L,
             icon = BridgePayload.optionalString(g, "icon"),
+            periodValue = periodValue,
+            periodUnit = periodUnit,
             createdAt = if (g.has("createdAt")) g.getLong("createdAt") else now,
             updatedAt = now,
             archivedAt = null,
@@ -494,6 +570,13 @@ class AozoraBridge(
         val g = p.getJSONObject("goal")
         val current = repository.getSavingsGoal(g.getString("id"))
             ?: throw IllegalArgumentException("savings goal not found")
+        // 局部合并：键缺省保留原值；显式 null（has && isNull）= 清除期限
+        val period: Pair<Int?, String?> =
+            if (!g.has("periodValue") && !g.has("periodUnit")) {
+                current.periodValue to current.periodUnit
+            } else {
+                parseSavingsPeriod(g)
+            }
         val entity = SavingsGoalEntity(
             id = current.id,
             ownerId = current.ownerId,
@@ -501,6 +584,8 @@ class AozoraBridge(
             targetCents = if (g.has("targetCents")) g.getLong("targetCents") else current.targetCents,
             currentCents = if (g.has("currentCents")) g.getLong("currentCents") else current.currentCents,
             icon = if (g.has("icon")) BridgePayload.optionalString(g, "icon") else current.icon,
+            periodValue = period.first,
+            periodUnit = period.second,
             createdAt = current.createdAt,
             updatedAt = System.currentTimeMillis(),
             archivedAt = current.archivedAt,
@@ -1544,6 +1629,112 @@ class AozoraBridge(
         }
     }
 
+    // ─── 第十轮 T10-3（REQ-19）：登录与安全 ───
+
+    /** auth.login {phone, code} → {userId, isNewUser}；前端成功后自行 triggerAuthSync。 */
+    private suspend fun handleAuthLogin(requestId: String, p: JSONObject): BridgeResponse {
+        val client = authClient
+            ?: return BridgeResponse.error(requestId, "unavailable", "auth client not injected")
+        val phone = p.optString("phone", "").trim()
+        val code = p.optString("code", "").trim()
+        // 入参形态先行拦截（与服务端 PhoneLoginRequest 同规则），避免把脏输入打到网络层
+        if (!Regex("\\d{11}").matches(phone) || !Regex("\\d{4,8}").matches(code)) {
+            return BridgeResponse.error(requestId, "invalid_input", "phone/code format invalid")
+        }
+        return try {
+            val result = client.login(phone, code)
+            val obj = JSONObject()
+                .put("userId", result.userId)
+                .put("isNewUser", result.isNewUser)
+            BridgeResponse.success(requestId, obj.toString())
+        } catch (e: com.aozora.app.auth.AuthClient.AuthApiError) {
+            when {
+                e.httpCode == 401 ->
+                    BridgeResponse.error(requestId, "invalid_code", "验证码不正确或已过期")
+                e.httpCode in 400..499 ->
+                    BridgeResponse.error(requestId, "server_rejected", e.message ?: "login rejected")
+                else ->
+                    BridgeResponse.error(requestId, "network_error", e.message ?: "login failed")
+            }
+        } catch (e: com.aozora.app.auth.AuthClient.AuthLostException) {
+            BridgeResponse.error(requestId, "auth_lost", e.message ?: "auth lost")
+        } catch (e: java.io.IOException) {
+            BridgeResponse.error(requestId, "network_error", e.message ?: "network error")
+        }
+    }
+
+    /**
+     * auth.logout {} —— 顺序（决策 #4）：logout 远端（AuthClient 内部必清 token）
+     * → 清 meta 身份键（display_name/avatar_uri）→ clearAllData 清全部本地业务数据。
+     * 云端数据保留，重新登录该手机号可拉回；跳转由前端处理。
+     */
+    private suspend fun handleAuthLogout(requestId: String): BridgeResponse {
+        val client = authClient
+            ?: return BridgeResponse.error(requestId, "unavailable", "auth client not injected")
+        client.logout()
+        repository.deleteMeta(SyncMetaEntity.KEY_DISPLAY_NAME)
+        repository.deleteMeta(SyncMetaEntity.KEY_AVATAR_URI)
+        return try {
+            repository.clearAllData()
+            BridgeResponse.success(requestId, JSONObject().put("success", true).toString())
+        } catch (t: Throwable) {
+            // 同账号删除先例（T-M5-04c review #5）：DB 清空失败必须冒泡，
+            // 否则本地数据残留却被报告为已退出。
+            android.util.Log.e("AozoraBridge", "clearAllData failed on logout", t)
+            BridgeResponse.error(requestId, "wipe_failed", t.message ?: "failed to clear local data")
+        }
+    }
+
+    /** auth.me {} → 透传服务端 MeResponse {id, nickname, phone, status, timezone, …}。 */
+    private suspend fun handleAuthMe(requestId: String): BridgeResponse {
+        val client = authClient
+            ?: return BridgeResponse.error(requestId, "unavailable", "auth client not injected")
+        return try {
+            BridgeResponse.success(requestId, client.me().toString())
+        } catch (e: com.aozora.app.auth.AuthClient.AuthLostException) {
+            BridgeResponse.error(requestId, "auth_lost", e.message ?: "auth lost")
+        } catch (e: com.aozora.app.auth.AuthClient.AuthApiError) {
+            BridgeResponse.error(
+                requestId,
+                if (e.httpCode > 0) "server_error" else "network_error",
+                e.message ?: "me failed"
+            )
+        } catch (e: java.io.IOException) {
+            BridgeResponse.error(requestId, "network_error", e.message ?: "network error")
+        }
+    }
+
+    /**
+     * auth.updateProfile {nickname} → PATCH /me；成功后把昵称镜像写 sync_meta
+     * display_name（离线可读，仅本地——决策 #4）。
+     */
+    private suspend fun handleAuthUpdateProfile(requestId: String, p: JSONObject): BridgeResponse {
+        val client = authClient
+            ?: return BridgeResponse.error(requestId, "unavailable", "auth client not injected")
+        val nickname = p.optString("nickname", "").trim()
+        if (nickname.isEmpty() || nickname.length > 64) {
+            return BridgeResponse.error(requestId, "invalid_input", "nickname must be 1–64 characters")
+        }
+        return try {
+            val me = client.updateProfile(nickname)
+            repository.setMeta(SyncMetaEntity.KEY_DISPLAY_NAME, nickname)
+            BridgeResponse.success(requestId, me.toString())
+        } catch (e: com.aozora.app.auth.AuthClient.AuthLostException) {
+            BridgeResponse.error(requestId, "auth_lost", e.message ?: "auth lost")
+        } catch (e: com.aozora.app.auth.AuthClient.AuthApiError) {
+            when {
+                e.httpCode == 422 ->
+                    BridgeResponse.error(requestId, "invalid_input", e.message ?: "nickname rejected")
+                e.httpCode > 0 ->
+                    BridgeResponse.error(requestId, "server_error", e.message ?: "update failed")
+                else ->
+                    BridgeResponse.error(requestId, "network_error", e.message ?: "network error")
+            }
+        } catch (e: java.io.IOException) {
+            BridgeResponse.error(requestId, "network_error", e.message ?: "network error")
+        }
+    }
+
     // ─── FIX-002 / BUG-014: 触感反馈 ───
 
     private fun handleHapticFeedback(requestId: String, p: JSONObject): BridgeResponse {
@@ -1620,6 +1811,7 @@ class AozoraBridge(
             put("accountId", tx.accountId ?: JSONObject.NULL); put("note", tx.note)
             put("bizDate", tx.bizDate); put("occurredAt", tx.occurredAt)
             put("source", tx.source); put("version", tx.version)
+            put("includeInBudget", tx.includeInBudget)
             put("deletedAt", tx.deletedAt ?: JSONObject.NULL)
         }.toString()
     }

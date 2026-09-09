@@ -5,11 +5,12 @@
  * T-M5-04c: 新增"删除账号"按钮与二次确认对话框。
  */
 
-import { useState } from 'react'
+import { useEffect, useState } from 'react'
 import { useTheme, type ThemeName } from '../../design/theme'
 import { useNavigate } from 'react-router'
 import { BridgeError } from '../../platform/bridge/native-bridge'
 import { useBridge } from '../../platform/hooks/use-bridge'
+import { APP_VERSION } from '../../platform/app-version'
 
 const themeOptions: { value: ThemeName; label: string; icon: string }[] = [
   { value: 'dawn', label: '晨', icon: '🌅' },
@@ -33,6 +34,37 @@ export function MePage() {
   const [deleteError, setDeleteError] = useState<string | null>(null)
   // 使用全局 bridge 单例，避免多实例覆写全局回调导致请求挂起
   const bridge = useBridge()
+
+  // ─── 第十轮 T10-3（REQ-19 / 决策 #5）：用户卡动态化 ───
+  const [registered, setRegistered] = useState(false)
+  const [userId, setUserId] = useState<string | null>(null)
+  const [displayName, setDisplayName] = useState<string | null>(null)
+  const [avatarUri, setAvatarUri] = useState<string | null>(null)
+  const [phoneMasked, setPhoneMasked] = useState<string | null>(null)
+
+  useEffect(() => {
+    let cancelled = false
+    void (async () => {
+      try {
+        const [status, meta] = await Promise.all([
+          bridge.getAuthStatus(),
+          bridge.getMeta(['display_name', 'avatar_uri']).catch(() => ({}) as Record<string, string | null>),
+        ])
+        if (cancelled) return
+        setRegistered(status.registered)
+        setUserId(status.userId)
+        setDisplayName(meta['display_name'] || null)
+        setAvatarUri(meta['avatar_uri'] || null)
+        if (status.registered) {
+          try {
+            const me = await bridge.getMe()
+            if (!cancelled && me.phone) setPhoneMasked(`${me.phone.slice(0, 3)}****${me.phone.slice(-4)}`)
+          } catch { /* 离线/auth_lost → 副行回退 userId 前 8 位 */ }
+        }
+      } catch { /* 桥不可用时保留静态兜底文案 */ }
+    })()
+    return () => { cancelled = true }
+  }, [bridge])
 
   const handleDeleteAccount = async () => {
     if (deleteConfirmation !== 'DELETE') return
@@ -69,17 +101,38 @@ export function MePage() {
     <div className="min-h-screen">
 
       <div className="px-4 py-4 space-y-4 pb-20">
-        {/* 用户信息 */}
-        <div className="glass-card p-4 flex items-center gap-4">
-          <div className="w-12 h-12 rounded-full flex items-center justify-center text-2xl"
-            style={{ background: 'var(--glass)', border: '1px solid var(--glass-border)' }}>
-            👤
+        {/* 用户信息（T10-3：点击进"登录与安全"，展示动态化 — 决策 #5） */}
+        <button
+          type="button"
+          onClick={() => navigate('/settings/security')}
+          className="glass-card p-4 w-full flex items-center gap-4 text-left transition-colors hover:opacity-80"
+          data-testid="me-user-card"
+        >
+          {avatarUri ? (
+            <img
+              src={avatarUri}
+              alt="头像"
+              className="w-12 h-12 rounded-full object-cover shrink-0"
+              style={{ border: '1px solid var(--glass-border)' }}
+            />
+          ) : (
+            <div className="w-12 h-12 rounded-full flex items-center justify-center text-2xl"
+              style={{ background: 'var(--glass)', border: '1px solid var(--glass-border)' }}>
+              👤
+            </div>
+          )}
+          <div className="min-w-0 flex-1">
+            <div className="text-base font-medium truncate" style={{ color: 'var(--ink)' }}>
+              {displayName ?? (registered ? 'Aozora 用户' : '游客模式')}
+            </div>
+            <div className="text-xs text-ink3">
+              {registered
+                ? (phoneMasked ?? `用户 ${userId?.slice(0, 8) ?? '未知'}…`)
+                : '未登录'}
+            </div>
           </div>
-          <div>
-            <div className="text-base font-medium" style={{ color: 'var(--ink)' }}>Aozora 用户</div>
-            <div className="text-xs text-ink3">游客模式</div>
-          </div>
-        </div>
+          <span className="text-ink3 text-xs">›</span>
+        </button>
 
         {/* 数据管理 */}
         <div className="glass-card overflow-hidden">
@@ -142,8 +195,8 @@ export function MePage() {
             <MenuItem icon="⏰" label="提醒设置" onClick={() => navigate('/settings/reminder')} />
             <MenuItem icon="📤" label="数据导出" onClick={() => navigate('/settings/export')} />
             <MenuItem icon="📝" label="意见反馈" onClick={() => navigate('/settings/feedback')} />
-            <MenuItem icon="🔐" label="登录与安全" badge="即将上线" />
-            <MenuItem icon="ℹ️" label="关于" />
+            <MenuItem icon="🔐" label="登录与安全" onClick={() => navigate('/settings/security')} />
+            <MenuItem icon="ℹ️" label="关于" onClick={() => navigate('/settings/about')} />
           </MenuSection>
         </div>
 
@@ -162,9 +215,9 @@ export function MePage() {
           </MenuSection>
         </div>
 
-        {/* 版本 */}
+        {/* 版本（T10-4：读 APP_VERSION 常量，发布时随 build.gradle 同步） */}
         <div className="text-center text-xs text-ink3 py-4">
-          Aozora v0.1.0
+          Aozora v{APP_VERSION}
         </div>
 
         {/* T-M5-04c: 删除账号二次确认对话框 */}

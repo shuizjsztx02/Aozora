@@ -41,7 +41,8 @@ export interface TransactionItem {
   amountCents: number
   categoryId?: string
   categoryPath?: string[]
-  accountId?: string
+  /** T9-7（REQ-15）：null = 显式「不使用账户」；undefined = 未指定（写入侧兜底默认账户）。 */
+  accountId?: string | null
   bizDate: string
   note: string
 }
@@ -211,8 +212,9 @@ function validateTransactionItem(
     }
   }
 
-  if (tx.accountId !== undefined && (typeof tx.accountId !== 'string' || tx.accountId.length === 0)) {
-    errors.push(err(`${prefix}.accountId`, 'must be non-empty string when present'))
+  // T9-7：null = 显式「不使用账户」，合法（与 undefined「未指定」区分）
+  if (tx.accountId !== undefined && tx.accountId !== null && (typeof tx.accountId !== 'string' || tx.accountId.length === 0)) {
+    errors.push(err(`${prefix}.accountId`, 'must be null or non-empty string when present'))
   }
 
   if (context) {

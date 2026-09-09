@@ -2,13 +2,13 @@
  * LoginPage — 登录页。
  *
  * FIX-004 / BUG-001: 接线到 auth.getStatus + triggerSync。
- * - 展示当前认证状态（游客/已注册用户）
- * - "开始同步"按钮触发首次 /auth/guest 注册（通过 SyncEngine）
- * - 手机号登录为占位（待 D-EXEC-03 确认 SMS 供应商）
+ * 第十轮 T10-3（REQ-19）: 手机号 + 验证码登录接真桥（auth.login）；
+ * dev 环境验证码为服务端固定码 dev_auth_code（默认 000000），SMS 供应商仍待 D-EXEC-03。
  */
 
 import { useState, useEffect } from 'react'
 import { useNavigate } from 'react-router'
+import { BridgeError } from '../../platform/bridge/native-bridge'
 import { useBridge } from '../../platform/hooks/use-bridge'
 
 export function LoginPage() {
@@ -54,10 +54,29 @@ export function LoginPage() {
     setError('')
     setLoading(true)
     try {
-      // TODO: bridge.call('auth.login', { phone, code }) — 待 D-EXEC-03
-      navigate('/home')
-    } catch {
-      setError('登录失败，请重试')
+      // 第十轮 T10-3（决策 #4）：真调 auth.login → 成功后同步一轮
+      // （新账号云端为空 → bootstrap 清本地重建，与 UI 提示一致）
+      await bridge.loginAuth(phone, code)
+      try {
+        await bridge.triggerAuthSync()
+      } catch { /* 同步失败不阻断跳转，下次进首页会再触发 */ }
+      navigate('/home', { replace: true })
+    } catch (e) {
+      const message =
+        e instanceof BridgeError
+          ? e.code === 'invalid_code'
+            ? '验证码不正确或已过期，请重试'
+            : e.code === 'auth_lost'
+            ? '登录状态异常，请重试'
+            : e.code === 'network_error'
+            ? '网络错误，请检查网络连接后重试'
+            : e.code === 'server_rejected'
+            ? '登录被拒绝，请稍后重试'
+            : e.code === 'invalid_input'
+            ? '手机号或验证码格式不正确'
+            : e.message || '登录失败，请重试'
+          : '登录失败，请重试'
+      setError(message)
     } finally {
       setLoading(false)
     }
@@ -87,6 +106,9 @@ export function LoginPage() {
         <div className="text-center mb-8">
           <h1 className="text-2xl font-bold mb-1" style={{ color: 'var(--ink)' }}>登录</h1>
           <p className="text-sm text-ink2">登录后可跨设备同步数据</p>
+          {/* dev 演示环境固定验证码（server config dev_auth_code，默认 000000；
+              SMS 供应商接入前一直有效 — D-EXEC-03） */}
+          <p className="text-xs text-ink3 mt-2" data-testid="dev-code-hint">演示环境验证码：000000</p>
         </div>
 
         {/* FIX-004: 认证状态卡片 */}

@@ -16,6 +16,9 @@ import { DetailPage } from '../../features/ledger/DetailPage'
 import type { TransactionData, CategoryData } from '../../platform/bridge/bridge-types'
 
 const mockBridge = vi.hoisted(() => ({
+  // T9-5b（REQ-11）：meta.get/set mock（默认无默认选择）
+  getMeta: vi.fn().mockResolvedValue({}),
+  setMeta: vi.fn().mockResolvedValue({ success: true }),
   call: vi.fn(),
   softDeleteTransaction: vi.fn(),
 }))

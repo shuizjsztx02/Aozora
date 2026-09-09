@@ -48,6 +48,9 @@ interface UseAssistantOptions {
   categories: CategoryData[]
   bookId: string | null
   timezone: string
+  /** T9-7（REQ-15）：默认账户 id（meta.default_account_id 优先，AssistantPage 经
+   * pickDefaultAccount 解析后传入）；提案未指定账户时落库兜底用它。 */
+  defaultAccountId: string | null
 }
 
 interface UseAssistantReturn {
@@ -62,6 +65,8 @@ interface UseAssistantReturn {
   /** 卡片编辑保存：softDelete 旧笔 + insert 新（编辑 = 替换写）。 */
   editProposal: (edited: ActionProposal) => Promise<void>
   undoExecution: () => Promise<void>
+  /** T9-8（REQ-16）：页面级链路（图片批量卡）完成后追加一条助手文本消息。 */
+  appendAssistantMessage: (text: string) => void
 }
 
 const CONFIDENCE_THRESHOLD = 0.8
@@ -72,6 +77,7 @@ export function useAssistant({
   categories,
   bookId,
   timezone,
+  defaultAccountId,
 }: UseAssistantOptions): UseAssistantReturn {
   const bridge = useBridge()
   const [messages, setMessages] = useState<AssistantMessage[]>([])
@@ -145,7 +151,9 @@ export function useAssistant({
         type: tx.type,
         amountCents: tx.amountCents,
         categoryId: tx.categoryId || '',
-        accountId: tx.accountId || null,
+        // T9-7（REQ-15）：提案未点名账户（字段缺失）→ 兜底默认账户；
+        // 卡片编辑显式选「不使用账户」（accountId=null）→ 尊重 null，不被默认覆盖。
+        accountId: tx.accountId === undefined ? defaultAccountId : tx.accountId,
         note: tx.note,
         bizDate: tx.bizDate,
         occurredAt,
@@ -154,7 +162,7 @@ export function useAssistant({
       ids.push(id)
     }
     return ids
-  }, [bridge, bookId, timezone])
+  }, [bridge, bookId, timezone, defaultAccountId])
 
   const pushBookMissingError = useCallback((proposalId?: string) => {
     const errMsg: AssistantMessage = {
@@ -397,9 +405,19 @@ export function useAssistant({
     setPhase('idle')
   }, [bridge, stopUndoTimer])
 
+  /** T9-8：图片批量链路等页面级流程完成后落一条普通助手消息（不进状态机）。 */
+  const appendAssistantMessage = useCallback((text: string) => {
+    setMessages(prev => [...prev, {
+      id: 'msg_' + Date.now() + '_appended',
+      role: 'assistant' as const,
+      text,
+      proposalStatus: 'committed' as const,
+    }])
+  }, [])
+
   return {
     messages, phase, activeProposal, cardStatus, undoRemaining, isSlow,
-    submitInput, editProposal, undoExecution,
+    submitInput, editProposal, undoExecution, appendAssistantMessage,
   }
 }
 

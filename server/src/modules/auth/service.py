@@ -165,6 +165,22 @@ class AuthService:
         return count
 
     # ------------------------------------------------------------------
+    # Profile
+    # ------------------------------------------------------------------
+
+    async def update_profile(self, user: User, nickname: str) -> User:
+        """T10-3（REQ-19）：更新昵称。
+
+        调用方保证 nickname 已通过 schema 校验（strip 后 1–64）。
+        flush 后显式 refresh：``updated_at`` 的 onupdate=func.now() 使该列在
+        ORM 侧过期，响应序列化若触发同步 lazy-load 会 MissingGreenlet。
+        """
+        user.nickname = nickname
+        await self.db.flush()
+        await self.db.refresh(user)
+        return user
+
+    # ------------------------------------------------------------------
     # Internals
     # ------------------------------------------------------------------
 

@@ -28,6 +28,9 @@ const mockBridge = vi.hoisted(() => ({
   // T8-5（REQ-9）：挂载预取账本/账户列表
   listBooks: vi.fn().mockResolvedValue([{ id: 'book-1', name: '默认账本', version: 1 }]),
   listAccounts: vi.fn().mockResolvedValue([]),
+  // T9-5b（REQ-11）：默认选择 meta 读取
+  getMeta: vi.fn().mockResolvedValue({}),
+  setMeta: vi.fn().mockResolvedValue({ success: true }),
   hapticFeedback: vi.fn().mockResolvedValue(undefined),
   isAvailable: vi.fn().mockReturnValue(true),
   pickImage: vi.fn().mockResolvedValue({
@@ -492,5 +495,70 @@ describe('QuickEntrySheet', () => {
     const list = screen.getByTestId('entry-book-list')
     expect(list.textContent).toContain('默认账本')
     expect(list.textContent).not.toContain('总账本')
+  })
+
+  // ─── T9-1: 宫格占位格等高（UI-18）───
+
+  it('income tab with 5 categories renders 5 same-structure cat-cell placeholders (UI-18)', async () => {
+    const user = userEvent.setup()
+    const cats = [
+      ...TEST_CATEGORIES,
+      ...[2, 3, 4, 5].map(i => ({
+        id: `cat-inc-${i}`, name: `收入分类${i}`, kind: 'income' as const, parentId: null, version: 1,
+      })),
+    ] // income 共 5 类：工资 + 4 个
+    render(
+      <QuickEntrySheet categories={cats} onClose={onClose} onSuccess={onSuccess} />,
+    )
+    await user.click(screen.getByText('收入'))
+    const placeholders = screen.getAllByTestId('cat-cell-placeholder')
+    expect(placeholders).toHaveLength(5)
+    // 占位格必须与真实格同构（带 cat-cell class 撑起行高），否则等于没补
+    for (const ph of placeholders) {
+      expect(ph.classList.contains('cat-cell')).toBe(true)
+    }
+  })
+
+  // ─── T10-1: 预算计入标记（REQ-17，决策 #1）───
+
+  it('submits includeInBudget=false by default (REQ-17)', async () => {
+    const user = userEvent.setup()
+    render(
+      <QuickEntrySheet categories={TEST_CATEGORIES} onClose={onClose} onSuccess={onSuccess} />,
+    )
+    // 按钮初始文案 = 不计入预算（用户明确要求）
+    expect(screen.getByTestId('entry-budget-picker').textContent).toContain('不计入预算')
+
+    await user.click(screen.getByText('1'))
+    await user.click(screen.getByText('0'))
+    await user.click(screen.getByText('餐饮'))
+    await user.click(screen.getByText('记一笔'))
+
+    await vi.waitFor(() => {
+      expect(mockBridge.insertTransaction).toHaveBeenCalled()
+    })
+    const [tx] = mockBridge.insertTransaction.mock.calls[0]
+    expect(tx.includeInBudget).toBe(false)
+  })
+
+  it('submits includeInBudget=true after switching via picker (REQ-17)', async () => {
+    const user = userEvent.setup()
+    render(
+      <QuickEntrySheet categories={TEST_CATEGORIES} onClose={onClose} onSuccess={onSuccess} />,
+    )
+    await user.click(screen.getByTestId('entry-budget-picker'))
+    await user.click(screen.getByTestId('entry-budget-include'))
+    expect(screen.getByTestId('entry-budget-picker').textContent).toContain('计入预算')
+
+    await user.click(screen.getByText('1'))
+    await user.click(screen.getByText('0'))
+    await user.click(screen.getByText('餐饮'))
+    await user.click(screen.getByText('记一笔'))
+
+    await vi.waitFor(() => {
+      expect(mockBridge.insertTransaction).toHaveBeenCalled()
+    })
+    const [tx] = mockBridge.insertTransaction.mock.calls[0]
+    expect(tx.includeInBudget).toBe(true)
   })
 })

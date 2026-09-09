@@ -64,13 +64,17 @@ export function ExportPage() {
     let cancelled = false
     ;(async () => {
       try {
-        const list = (await bridge.call('book.list', {})) as Book[]
+        const [list, meta] = await Promise.all([
+          bridge.call('book.list', {}) as Promise<Book[]>,
+          // T9-5b（REQ-11 决策 #3）：默认账本优先
+          bridge.getMeta(['default_book_id']).catch(() => ({}) as Record<string, string | null>),
+        ])
         if (cancelled) return
         // T7-6（REQ-6）：服务端导出只支持单账本实体，总账本（客户端聚合视图）不可选
         const exportable = list.filter(b => !b.isMaster)
         setBooks(exportable)
         if (exportable.length > 0 && !selectedBookIdRef.current) {
-          setSelectedBookId(pickEntryBook(exportable)!.id)
+          setSelectedBookId(pickEntryBook(exportable, meta['default_book_id'] ?? null)!.id)
         }
       } catch (err) {
         console.error('Failed to load books:', err)

@@ -8,13 +8,18 @@
  * - 编辑态同名检测排除自身
  * - 失败时错误可见、表单与输入保留
  */
-import { describe, it, expect, vi, beforeEach } from 'vitest'
-import { render, screen, waitFor } from '@testing-library/react'
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
+import { render, screen, waitFor, fireEvent, act } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { MemoryRouter } from 'react-router'
 import { AccountsPage } from '../../features/settings/AccountsPage'
 
 const mockBridge = vi.hoisted(() => ({
+  // T9-5b（REQ-11）：meta.get/set mock（默认无默认选择）
+  getMeta: vi.fn().mockResolvedValue({}),
+  setMeta: vi.fn().mockResolvedValue({ success: true }),
+  // T9-6（REQ-13）：IconPicker 照片选择
+  pickIcon: vi.fn(),
   call: vi.fn(),
   insertAccount: vi.fn(),
   updateAccount: vi.fn(),
@@ -120,5 +125,114 @@ describe('AccountsPage', () => {
     await waitFor(() => expect(screen.getByText(/创建账户失败/)).toBeInTheDocument())
     // 表单保持打开，输入保留
     expect(screen.getByPlaceholderText('账户名称')).toBeInTheDocument()
+  })
+})
+
+// ─── T9-5b（REQ-11）：默认勾选 + 长按排序 ───
+
+describe('AccountsPage · 排序与默认（REQ-11）', () => {
+  const TWO = [
+    { id: 'a1', name: '微信', icon: '💬', version: 1, accountType: null },
+    { id: 'a2', name: '支付宝', icon: '💰', version: 1, accountType: null },
+  ]
+
+  beforeEach(() => {
+    vi.clearAllMocks()
+    mockBridge.call.mockResolvedValue(TWO)
+    mockBridge.setMeta.mockResolvedValue({ success: true })
+  })
+  afterEach(() => {
+    vi.useRealTimers()
+  })
+
+  it('checking default calls setMeta(default_account_id, id)', async () => {
+    const user = userEvent.setup()
+    renderPage()
+    await user.click(await screen.findByTestId('account-default-a1'))
+    expect(mockBridge.setMeta).toHaveBeenCalledWith('default_account_id', 'a1')
+  })
+
+  it('isDefault row renders 默认 badge', async () => {
+    mockBridge.call.mockResolvedValue([{ ...TWO[0], isDefault: true }, TWO[1]])
+    renderPage()
+    const badge = await screen.findByTestId('account-default-badge-a1')
+    expect(badge.textContent).toBe('默认')
+  })
+
+  it('long press 500ms enters reorder mode; plain click still opens edit', async () => {
+    renderPage()
+    const row = await screen.findByTestId('account-row-a2')
+    vi.useFakeTimers()
+    fireEvent.pointerDown(row, { clientX: 10, clientY: 10 })
+    act(() => { vi.advanceTimersByTime(500) })
+    fireEvent.pointerUp(row)
+    vi.useRealTimers()
+    fireEvent.click(row) // 长按后跟随的 click 应被吞掉，不进编辑
+    expect(screen.getByTestId('account-reorder-done')).toBeInTheDocument()
+    expect(screen.queryByTestId('account-form')).toBeNull()
+  })
+
+  it('↑ moves a row and persists the full id order', async () => {
+    renderPage()
+    const row = await screen.findByTestId('account-row-a2')
+    vi.useFakeTimers()
+    fireEvent.pointerDown(row, { clientX: 10, clientY: 10 })
+    act(() => { vi.advanceTimersByTime(500) })
+    fireEvent.pointerUp(row)
+    vi.useRealTimers()
+    fireEvent.click(screen.getByTestId('account-move-up-a2'))
+    await waitFor(() =>
+      expect(mockBridge.setMeta).toHaveBeenCalledWith('account_order', JSON.stringify(['a2', 'a1']))
+    )
+  })
+})
+
+// ─── T9-6（REQ-13）：共享 IconPicker — 自定义文本覆写 emoji + 相册照片 ───
+
+describe('AccountsPage · 图标选择（REQ-13）', () => {
+  beforeEach(() => {
+    vi.clearAllMocks()
+    mockBridge.call.mockResolvedValue([])
+    mockBridge.insertAccount.mockResolvedValue({ id: 'acc-new' })
+    mockBridge.pickIcon.mockResolvedValue({ dataUri: 'data:image/jpeg;base64,QVJD', size: 4 })
+  })
+
+  it('custom icon text overrides the emoji default in the payload', async () => {
+    const user = userEvent.setup()
+    renderPage()
+    await user.click(await screen.findByText('＋ 添加账户'))
+    await user.type(screen.getByPlaceholderText('账户名称'), '食堂卡')
+    // 决策 #5：文本框非空优先于 emoji（初始 '💰' 让位）
+    await user.type(screen.getByTestId('custom-icon-input'), '🍱')
+    await user.click(screen.getByRole('button', { name: '添加' }))
+
+    await waitFor(() => expect(mockBridge.insertAccount).toHaveBeenCalledTimes(1))
+    expect(mockBridge.insertAccount.mock.calls[0][0].icon).toBe('🍱')
+  })
+
+  it('gallery photo icon lands as data: URI in the payload', async () => {
+    const user = userEvent.setup()
+    renderPage()
+    await user.click(await screen.findByText('＋ 添加账户'))
+    await user.type(screen.getByPlaceholderText('账户名称'), '相册户')
+    await user.click(screen.getByTestId('icon-pick-photo'))
+    await waitFor(() => expect(mockBridge.pickIcon).toHaveBeenCalledWith('gallery'))
+    await user.click(screen.getByRole('button', { name: '添加' }))
+
+    await waitFor(() => expect(mockBridge.insertAccount).toHaveBeenCalledTimes(1))
+    expect(mockBridge.insertAccount.mock.calls[0][0].icon).toBe('data:image/jpeg;base64,QVJD')
+  })
+
+  it('existing non-preset icon is backfilled into the custom text box on edit', async () => {
+    mockBridge.call.mockResolvedValue([
+      { id: 'a1', name: '旧卡片', icon: '🏦', version: 1, accountType: null },
+    ])
+    const user = userEvent.setup()
+    renderPage()
+    await user.click(await screen.findByText('旧卡片'))
+    // 🏦 不在 emoji 宫格 → 回填自定义文本框（保留"非预置回填"逻辑）
+    await waitFor(() =>
+      expect(screen.getByTestId('custom-icon-input')).toHaveValue('🏦')
+    )
   })
 })

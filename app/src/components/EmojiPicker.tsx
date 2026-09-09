@@ -3,7 +3,8 @@
  * 网格展示常用 emoji，点击回调选中；受控（selected 高亮）。
  */
 
-const EMOJI = [
+/** 导出供 IconPicker 判定「当前值是否为宫格 emoji」（非宫格值回填自定义文本框）。 */
+export const EMOJI = [
   // 餐饮
   '🍽️', '🍜', '', '🥐', '🍕', '🍔', '☕', '🍰',
   // 交通

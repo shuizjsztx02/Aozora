@@ -657,3 +657,40 @@ class TestMeEndpoint:
             "/me", headers={"Authorization": "Bearer not-a-real-token"},
         )
         assert resp.status_code == 401
+
+
+class TestPatchMeEndpoint:
+    """T10-3（REQ-19）: PATCH /me updates the current user's nickname."""
+
+    def _guest_headers(self, auth_client, device_id="test-device-patch"):
+        resp = auth_client.post("/auth/guest", json={"device_id": device_id})
+        tokens = resp.json()["tokens"]
+        return {"Authorization": f"Bearer {tokens['access_token']}"}
+
+    def test_update_nickname_returns_me_response(self, auth_client):
+        headers = self._guest_headers(auth_client)
+        resp = auth_client.patch("/me", json={"nickname": "  新昵称  "}, headers=headers)
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["nickname"] == "新昵称"  # strip 后落库
+        # GET /me 读回同一值（持久化生效，而非仅响应体）
+        me = auth_client.get("/me", headers=headers)
+        assert me.json()["nickname"] == "新昵称"
+
+    def test_blank_nickname_rejected(self, auth_client):
+        headers = self._guest_headers(auth_client, device_id="test-device-patch-blank")
+        resp = auth_client.patch("/me", json={"nickname": "   "}, headers=headers)
+        assert resp.status_code == 422
+
+    def test_overlong_nickname_rejected(self, auth_client):
+        headers = self._guest_headers(auth_client, device_id="test-device-patch-len")
+        resp = auth_client.patch("/me", json={"nickname": "x" * 65}, headers=headers)
+        assert resp.status_code == 422
+        # 64 + 空白 strip 后恰 64 → 合法（String(64) 边界）
+        resp = auth_client.patch("/me", json={"nickname": "x" * 64 + " "}, headers=headers)
+        assert resp.status_code == 200
+        assert resp.json()["nickname"] == "x" * 64
+
+    def test_patch_me_without_token_rejected(self, auth_client):
+        resp = auth_client.patch("/me", json={"nickname": "abc"})
+        assert resp.status_code == 401

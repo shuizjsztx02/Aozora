@@ -45,6 +45,9 @@ class MainActivity : AppCompatActivity() {
     private var webViewReady = false
     // UI-14: 状态栏真实高度（px），注入 CSS 变量 --safe-top-px
     private var safeAreaTopPx = 0
+    // T9-8（REQ-16）：IME 键盘高度（px），注入 CSS 变量 --ime-bottom-px；
+    // 不持久化——键盘开合瞬变，每次派发都是新鲜值
+    private var imeBottomPx = 0
 
     @SuppressLint("SetJavaScriptEnabled")
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -94,6 +97,8 @@ class MainActivity : AppCompatActivity() {
                 webViewReady = true
                 // 页面重新加载后 CSS 变量丢失，需重新注入（UI-14）
                 injectSafeAreaTop()
+                // T9-8：--ime-bottom-px 同样随页面重载丢失，重注入当前值
+                injectImeBottom()
                 // 第八轮 #1：页面就绪后再请求一次 insets 派发，确保拿到真实状态栏高度
                 ViewCompat.requestApplyInsets(webView)
                 // 页面加载完成后，路由深链
@@ -120,7 +125,9 @@ class MainActivity : AppCompatActivity() {
             deletionClient = app.deletionClient,
             tokenStore = app.tokenStore,
             // T-M5-05c: 应用内反馈
-            feedbackClient = app.feedbackClient
+            feedbackClient = app.feedbackClient,
+            // 第十轮 T10-3（REQ-19）: auth.login/logout/me/updateProfile
+            authClient = app.authClient
         )
         webView.addJavascriptInterface(bridge, "AozoraBridge")
 
@@ -136,6 +143,13 @@ class MainActivity : AppCompatActivity() {
                 safeAreaTopPx = top
                 persistSafeAreaTop(top)
                 injectSafeAreaTop()
+            }
+            // T9-8（REQ-16）：targetSdk 36 强制 edge-to-edge，IME 不缩放 WebView 视口，
+            // 键盘高度需手动注入 --ime-bottom-px（聊天页据此顶起输入框）
+            val imeBottom = insets.getInsets(WindowInsetsCompat.Type.ime()).bottom
+            if (imeBottom != imeBottomPx) {
+                imeBottomPx = imeBottom
+                injectImeBottom()
             }
             insets
         }
@@ -229,6 +243,26 @@ class MainActivity : AppCompatActivity() {
     private fun persistSafeAreaTop(px: Int) {
         getSharedPreferences("aozora_prefs", MODE_PRIVATE)
             .edit().putInt("safe_area_top_px", px).apply()
+    }
+
+    /**
+     * T9-8（REQ-16）: 把 IME 键盘高度（px 转 dp，ceil 同 --safe-top-px 法）注入
+     * CSS 变量 --ime-bottom-px，并派发合成 resize 事件——聊天页监听 resize 做
+     * 消息跟随滚动。0 时清 0（键盘收起恢复布局）。
+     */
+    private fun injectImeBottom() {
+        if (webViewDestroyed || !webViewReady) return
+        val density = resources.displayMetrics.density
+        val dp = kotlin.math.ceil(imeBottomPx / density).toInt()
+        val js = """
+            (function(){
+              try {
+                document.documentElement.style.setProperty('--ime-bottom-px', '${dp}px');
+                window.dispatchEvent(new Event('resize'));
+              } catch (e) {}
+            })();
+        """.trimIndent()
+        webView.post { webView.evaluateJavascript(js, null) }
     }
 
     private fun routeDeepLink() {

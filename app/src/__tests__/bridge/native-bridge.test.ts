@@ -114,9 +114,17 @@ describe('Bridge types — 命令完整性', () => {
     'share.text',
     'auth.getStatus',
     'auth.triggerSync',
+    // T10-3（REQ-19）：登录与安全
+    'auth.login',
+    'auth.logout',
+    'auth.me',
+    'auth.updateProfile',
+    // T9-5a（REQ-11）：本地展示元数据
+    'meta.get',
+    'meta.set',
   ]
 
-  it('BridgeCommands 包含所有 59 个命令（含 AI 4 个 + 权限 3 个 + 语音 2 个 + 图片 4 个 + 同意 2 个 + 导出 4 个 + 账号删除 2 个 + 反馈 1 个 + FIX 4 个 + T7-2 账户更新 1 个 + 第八轮分类/图标/存钱 7 个）', () => {
+  it('BridgeCommands 包含所有 65 个命令（含 AI 4 个 + 权限 3 个 + 语音 2 个 + 图片 4 个 + 同意 2 个 + 导出 4 个 + 账号删除 2 个 + 反馈 1 个 + FIX 4 个 + T7-2 账户更新 1 个 + 第八轮分类/图标/存钱 7 个 + T9-5a meta 2 个 + T10-3 auth 4 个）', () => {
     const actualCommands = Object.values(BridgeCommands)
     expect(actualCommands).toHaveLength(expectedCommands.length)
     for (const cmd of expectedCommands) {

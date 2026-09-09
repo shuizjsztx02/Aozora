@@ -89,3 +89,32 @@ val MIGRATION_4_5: Migration = object : Migration(4, 5) {
         )
     }
 }
+
+/**
+ * 第九轮（REQ-14 存款时间）Room schema 迁移。
+ *
+ * v5 → v6：
+ * - savings_goals 新增 periodValue INTEGER / periodUnit TEXT（均可空，
+ *   列序与 SavingsGoalEntity 一致：icon 之后、createdAt 之前）。
+ */
+val MIGRATION_5_6: Migration = object : Migration(5, 6) {
+    override fun migrate(db: SupportSQLiteDatabase) {
+        db.execSQL("ALTER TABLE `savings_goals` ADD COLUMN `periodValue` INTEGER")
+        db.execSQL("ALTER TABLE `savings_goals` ADD COLUMN `periodUnit` TEXT")
+    }
+}
+
+/**
+ * 第十轮（REQ-17 预算计入标记）Room schema 迁移。
+ *
+ * v6 → v7：
+ * - transactions 新增 includeInBudget INTEGER NOT NULL DEFAULT 1
+ *   （存量行=计入，预算行为不变；仅 QuickEntrySheet 手动记账可传 0）。
+ */
+val MIGRATION_6_7: Migration = object : Migration(6, 7) {
+    override fun migrate(db: SupportSQLiteDatabase) {
+        db.execSQL(
+            "ALTER TABLE `transactions` ADD COLUMN `includeInBudget` INTEGER NOT NULL DEFAULT 1"
+        )
+    }
+}
