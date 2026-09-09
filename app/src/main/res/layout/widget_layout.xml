@@ -56,7 +56,33 @@
             android:text="0 笔"
             android:textColor="#888888"
             android:textSize="11sp"
-            android:layout_marginTop="2dp" />
+            android:layout_marginTop="2dp"
+            android:visibility="gone" />
+
+        <!-- 本月支出行（T11-2 决策 #5，默认隐藏，bindViews 按 widget_config 控制） -->
+        <LinearLayout
+            android:id="@+id/widget_month_expense"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:orientation="horizontal"
+            android:layout_marginTop="8dp"
+            android:gravity="center_vertical"
+            android:visibility="gone">
+            <TextView
+                android:layout_width="0dp"
+                android:layout_height="wrap_content"
+                android:layout_weight="1"
+                android:text="本月支出"
+                android:textColor="#888888"
+                android:textSize="11sp" />
+            <TextView
+                android:id="@+id/widget_month_expense_text"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:text="¥0.00"
+                android:textColor="#666666"
+                android:textSize="11sp" />
+        </LinearLayout>
 
         <!-- 预算进度行 -->
         <LinearLayout

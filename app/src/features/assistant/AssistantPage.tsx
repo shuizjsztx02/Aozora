@@ -7,6 +7,7 @@
  */
 
 import { useState, useRef, useEffect, useCallback } from 'react'
+import { useNavigate } from 'react-router'
 import { PageHeader } from '../../components/Layout'
 import { useBridge } from '../../platform/hooks/use-bridge'
 import { useVoice } from '../../platform/hooks/use-voice'
@@ -15,11 +16,30 @@ import { ConfirmationCard } from './ConfirmationCard'
 import { BatchConfirmationCard } from '../ledger/BatchConfirmationCard'
 import { UndoToast } from './UndoToast'
 import type { ActionProposal } from '../../domain/action-proposal'
-import type { AccountData, CategoryData } from '../../platform/bridge/bridge-types'
+import type { AccountData, CategoryData, PersonaData } from '../../platform/bridge/bridge-types'
 import { pickDefaultAccount, pickEntryBook } from '../../domain/books'
+import { resolveActivePersona } from '../../domain/personas'
+
+/** T11-6（REQ-27 / 决策 #7）：meta.user_profile → 注入管线画像。
+ *  只保留非空字符串字段；坏 JSON/非对象/全空 → null（interpretAI 不带 context）。 */
+function parseProfile(raw: string | null | undefined): Record<string, string> | null {
+  if (!raw) return null
+  try {
+    const v: unknown = JSON.parse(raw)
+    if (typeof v !== 'object' || v === null || Array.isArray(v)) return null
+    const out: Record<string, string> = {}
+    for (const [k, val] of Object.entries(v as Record<string, unknown>)) {
+      if (typeof val === 'string' && val.trim()) out[k] = val.trim()
+    }
+    return Object.keys(out).length > 0 ? out : null
+  } catch {
+    return null
+  }
+}
 
 export function AssistantPage() {
   const bridge = useBridge()
+  const navigate = useNavigate()
   const {
     isRecording: voiceIsRecording,
     partialText: voicePartialText,
@@ -35,6 +55,11 @@ export function AssistantPage() {
   const [accounts, setAccounts] = useState<AccountData[]>([])
   const [defaultAccountId, setDefaultAccountId] = useState<string | null>(null)
   const [bookName, setBookName] = useState('')
+  // T11-6（REQ-27）：用户画像（meta.user_profile 解析后），喂给在线 AI context 注入。
+  const [profile, setProfile] = useState<Record<string, string> | null>(null)
+  // T11-7（REQ-28 / 决策 #8）：聊天角色——header 显示当前角色名 + context.persona 注入；
+  // active_persona_id 缺失/失效回退"小贝"→第一条（resolveActivePersona 统一口径）。
+  const [activePersona, setActivePersona] = useState<PersonaData | null>(null)
   const [inputText, setInputText] = useState('')
   const scrollRef = useRef<HTMLDivElement>(null)
   const prevFinalTextRef = useRef('')
@@ -48,8 +73,12 @@ export function AssistantPage() {
     Promise.all([
       bridge.listBooks(),
       bridge.listAccounts(),
-      bridge.getMeta(['default_book_id', 'default_account_id']).catch(() => ({}) as Record<string, string | null>),
-    ]).then(([books, accountList, meta]) => {
+      // T11-6/T11-7：同批读 user_profile + active_persona_id → 在线 AI 注入画像与角色
+      bridge.getMeta(['default_book_id', 'default_account_id', 'user_profile', 'active_persona_id'])
+        .catch(() => ({}) as Record<string, string | null>),
+      // T11-7（REQ-28）：加载全部角色，按 active_persona_id 解析当前角色
+      bridge.listPersonas().catch(() => [] as PersonaData[]),
+    ]).then(([books, accountList, meta, personas]) => {
       const entry = pickEntryBook(books, meta['default_book_id'] ?? null)
       if (entry) {
         setBookId(entry.id)
@@ -57,6 +86,8 @@ export function AssistantPage() {
       }
       setAccounts(accountList)
       setDefaultAccountId(pickDefaultAccount(accountList, meta['default_account_id'] ?? null)?.id ?? null)
+      setProfile(parseProfile(meta['user_profile']))
+      setActivePersona(resolveActivePersona(personas, meta['active_persona_id'] ?? null))
     }).catch(() => {})
   }, [bridge])
 
@@ -75,6 +106,9 @@ export function AssistantPage() {
     categories,
     bookId,
     defaultAccountId,
+    profile,
+    // T11-7（REQ-28）：当前角色 → context.persona（离线本地 NLU 不消费，仅在线生效）
+    persona: activePersona ? { name: activePersona.name, text: activePersona.persona } : null,
     // C-B4 fix: 使用设备时区替代硬编码
     timezone: Intl.DateTimeFormat().resolvedOptions().timeZone || 'Asia/Shanghai',
   })
@@ -223,7 +257,23 @@ export function AssistantPage() {
         paddingBottom: 'calc(env(safe-area-inset-bottom, 0px) + var(--ime-bottom-px, 0px))',
       }}
     >
-      <PageHeader back />
+      {/* T11-7（REQ-28）：header 显示当前角色名 + 右上角色管理入口 → /settings/personas */}
+      <PageHeader
+        back
+        title={activePersona?.name}
+        right={
+          <button
+            type="button"
+            onClick={() => navigate('/settings/personas')}
+            className="text-sm px-2 py-1 rounded-lg"
+            style={{ color: 'var(--accent)', border: '1px solid var(--accent)' }}
+            data-testid="persona-manage-button"
+            aria-label="角色管理"
+          >
+            👤 角色
+          </button>
+        }
+      />
 
       {/* 消息列表 */}
       <div

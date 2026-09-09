@@ -59,9 +59,11 @@ class AiGatewayClient(
             AiError("Authentication lost", cause)
     }
 
-    /** POST /ai/interpret — 自然语言 → ActionProposal. */
-    suspend fun interpret(input: String): String =
-        executeAuthorized("$baseUrl/ai/interpret", buildInterpretRequest(input))
+    /** POST /ai/interpret — 自然语言 → ActionProposal.
+     *  T11-6（决策 #7）：contextJson = 桥 payload.context 原样序列化（{persona, profile}）；
+     *  null 时 body 不带该键，服务端保持旧行为。 */
+    suspend fun interpret(input: String, contextJson: String? = null): String =
+        executeAuthorized("$baseUrl/ai/interpret", buildInterpretRequest(input, contextJson))
 
     /** POST /ai/validate — 验证 ActionProposal. */
     suspend fun validate(proposalJson: String, bookId: String): String =
@@ -89,8 +91,11 @@ class AiGatewayClient(
 
     // ─── internal ────────────────────────────────────────────────────────
 
-    private fun buildInterpretRequest(input: String): String =
-        JSONObject().put("input", input).toString()
+    private fun buildInterpretRequest(input: String, contextJson: String?): String {
+        val body = JSONObject().put("input", input)
+        if (contextJson != null) body.put("context", JSONObject(contextJson))
+        return body.toString()
+    }
 
     private fun buildValidateRequest(proposalJson: String, bookId: String): String {
         val proposal = JSONObject(proposalJson)

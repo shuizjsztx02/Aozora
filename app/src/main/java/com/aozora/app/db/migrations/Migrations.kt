@@ -118,3 +118,51 @@ val MIGRATION_6_7: Migration = object : Migration(6, 7) {
         )
     }
 }
+
+/**
+ * 第十一轮（REQ-26 定时记账 + REQ-28 聊天角色）Room schema 迁移（决策 #1/#4/#8）。
+ *
+ * v7 → v8：一张迁移建两表（镜像 MIGRATION_4_5 双表先例）。
+ * - scheduled_rules：定时记账规则，仅本地不同步。
+ * - chat_personas：聊天角色，仅本地不同步（命令与种子在 T11-7）。
+ * 列序/类型须与实体一致，否则 Room 打开时 schema 校验失败。
+ */
+val MIGRATION_7_8: Migration = object : Migration(7, 8) {
+    override fun migrate(db: SupportSQLiteDatabase) {
+        db.execSQL(
+            "CREATE TABLE IF NOT EXISTS `scheduled_rules` (" +
+                "`id` TEXT NOT NULL, " +
+                "`ownerId` TEXT NOT NULL, " +
+                "`type` TEXT NOT NULL, " +
+                "`name` TEXT NOT NULL, " +
+                "`amountCents` INTEGER NOT NULL, " +
+                "`bookId` TEXT NOT NULL, " +
+                "`categoryId` TEXT NOT NULL, " +
+                "`accountId` TEXT, " +
+                "`includeInBudget` INTEGER NOT NULL, " +
+                "`note` TEXT NOT NULL, " +
+                "`repeat` TEXT NOT NULL, " +
+                "`startDate` TEXT NOT NULL, " +
+                "`endDate` TEXT, " +
+                "`enabled` INTEGER NOT NULL, " +
+                "`lastRunDate` TEXT, " +
+                "`createdAt` INTEGER NOT NULL, " +
+                "`updatedAt` INTEGER NOT NULL, " +
+                "`archivedAt` INTEGER, " +
+                "`version` INTEGER NOT NULL, " +
+                "PRIMARY KEY(`id`))"
+        )
+        db.execSQL(
+            "CREATE TABLE IF NOT EXISTS `chat_personas` (" +
+                "`id` TEXT NOT NULL, " +
+                "`name` TEXT NOT NULL, " +
+                "`avatar` TEXT, " +
+                "`persona` TEXT NOT NULL, " +
+                "`createdAt` INTEGER NOT NULL, " +
+                "`updatedAt` INTEGER NOT NULL, " +
+                "`archivedAt` INTEGER, " +
+                "`version` INTEGER NOT NULL, " +
+                "PRIMARY KEY(`id`))"
+        )
+    }
+}

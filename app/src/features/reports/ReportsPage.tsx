@@ -6,6 +6,9 @@
  *
  * 第十轮 REQ-21（T10-5）：期间切换（复用 PeriodPanel）+ 账本下拉（过滤 master）。
  * period / bookId 为 state，月度概览 / AI 洞察 / 分享文案 / 预算 / 趋势全部跟随。
+ *
+ * 第十一轮 REQ-25（T11-3，决策 #6）：右上 📅 切换 chart/calendar 两态；
+ * calendar 态隐藏图卡区、共享 period/bookId state 与派生 txs——零新增桥调用。
  */
 
 import { useState, useEffect, useCallback, useMemo } from 'react'
@@ -22,6 +25,7 @@ import { CategoryIcon } from '../../components/CategoryIcon'
 import { PeriodPanel } from '../../components/PeriodPanel'
 import { useChartColors } from '../../design/theme'
 import { AiInsightCard } from './AiInsightCard'
+import { CalendarView } from './CalendarView'
 
 function formatCents(cents: number): string {
   return Money.formatDisplay(Money.cents(cents))
@@ -112,6 +116,8 @@ export function ReportsPage() {
   const [budgets, setBudgets] = useState<BudgetRow[]>([])
   const [tab, setTab] = useState<'expense' | 'income'>('expense')
   const [loading, setLoading] = useState(true)
+  // T11-3（REQ-25，决策 #6）：图表/日历两态；两态共享 period/bookId state 与派生 txs
+  const [view, setView] = useState<'chart' | 'calendar'>('chart')
 
   // T10-6（REQ-22）趋势卡独立控件：折线三系列显隐 / 柱状单选 / 逐点弹框。
   // 收支胶囊 tab 仅继续控制分类占比环图，不再控制趋势卡（决策 #7）。
@@ -211,31 +217,41 @@ export function ReportsPage() {
     <div className="min-h-screen">
       <PageHeader
         right={
-          <button
-            onClick={() => {
-              const month = period.replace('-', '年') + '月'
-              const topCat = categoryData[0]
-              const lines = [
-                `【Aozora ${month}记账统计】`,
-                `支出：${formatCents(stats.totalExpense as number)}`,
-                `收入：${formatCents(stats.totalIncome as number)}`,
-                `结余：${Money.formatSigned(stats.balance)}`,
-              ]
-              if (topCat) {
-                lines.push(`最大支出分类：${topCat.name}（${formatCents(topCat.value)}）`)
-              }
-              if (budget) {
-                const spent = stats.totalExpense as number
-                const pct = Math.round((spent / budget.amountCents) * 100)
-                lines.push(`预算进度：${pct}%（${formatCents(spent)} / ${formatCents(budget.amountCents)}）`)
-              }
-              bridge.shareText(lines.join('\n'), `Aozora ${month}统计`)
-            }}
-            className="px-2 text-lg"
-            aria-label="分享"
-          >
-            📤
-          </button>
+          <div className="flex items-center">
+            <button
+              onClick={() => setView(v => (v === 'chart' ? 'calendar' : 'chart'))}
+              className="px-2 text-lg"
+              aria-label="切换日历视图"
+              data-testid="toggle-calendar-view"
+            >
+              📅
+            </button>
+            <button
+              onClick={() => {
+                const month = period.replace('-', '年') + '月'
+                const topCat = categoryData[0]
+                const lines = [
+                  `【Aozora ${month}记账统计】`,
+                  `支出：${formatCents(stats.totalExpense as number)}`,
+                  `收入：${formatCents(stats.totalIncome as number)}`,
+                  `结余：${Money.formatSigned(stats.balance)}`,
+                ]
+                if (topCat) {
+                  lines.push(`最大支出分类：${topCat.name}（${formatCents(topCat.value)}）`)
+                }
+                if (budget) {
+                  const spent = stats.totalExpense as number
+                  const pct = Math.round((spent / budget.amountCents) * 100)
+                  lines.push(`预算进度：${pct}%（${formatCents(spent)} / ${formatCents(budget.amountCents)}）`)
+                }
+                bridge.shareText(lines.join('\n'), `Aozora ${month}统计`)
+              }}
+              className="px-2 text-lg"
+              aria-label="分享"
+            >
+              📤
+            </button>
+          </div>
         }
       />
 
@@ -332,6 +348,9 @@ export function ReportsPage() {
           <div className="flex justify-center py-12">
             <div className="w-8 h-8 rounded-full border-2 border-t-transparent animate-spin" style={{ borderColor: 'var(--accent)', borderTopColor: 'transparent' }} />
           </div>
+        ) : view === 'calendar' ? (
+          /* T11-3（REQ-25，决策 #6）：日历态隐藏图卡区，共享 period/bookId 与派生 txs */
+          <CalendarView txs={txs} categories={categories} period={period} />
         ) : (
           <>
             {/* 月度概览 */}

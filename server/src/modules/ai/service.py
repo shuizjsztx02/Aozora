@@ -36,6 +36,7 @@ from .prompts import (
     PromptTemplate,
     get_template,
     render_messages,
+    render_messages_with_context,
 )
 from .provider import LLMProvider, ProviderError, ProviderResult
 from .schemas import (
@@ -179,7 +180,9 @@ class AIService:
             )
 
         model = tpl.model or self._cfg.ai_provider_model
-        messages = render_messages(tpl, req.input)
+        # T11-6（REQ-27 / 决策 #7）：context（画像/人设）渲染进 system 尾部；
+        # 无 context 时与 render_messages 等价，REPORT 月报路径不受影响。
+        messages = render_messages_with_context(tpl, req.input, req.context)
         started = time.perf_counter()
 
         result: ProviderResult | None = None

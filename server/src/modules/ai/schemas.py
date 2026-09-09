@@ -15,7 +15,8 @@ MAX_INPUT_CHARS = 500
 
 class AIInterpretRequest(BaseModel):
     input: str = Field(min_length=1, max_length=MAX_INPUT_CHARS)
-    # Accepted but unused in v1 — reserved for T-M4-02/03 context passing.
+    # T11-6（决策 #7）启用：{persona:{name,text}|null, profile:{...}|null} →
+    # render_messages_with_context 拼入 system 尾部（各段 ≤2000 截断、反注入前缀）。
     context: dict[str, Any] | None = None
 
 

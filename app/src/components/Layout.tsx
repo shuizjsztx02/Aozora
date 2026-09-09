@@ -33,8 +33,9 @@ interface PageHeaderProps {
 export function PageHeader({ title, back, right }: PageHeaderProps) {
   const navigate = useNavigate()
 
-  // 无标题 + 无返回 = 不渲染
-  if (!title && !back) return null
+  // 无标题 + 无返回 + 无右侧内容 = 不渲染
+  // （T11-3 修复：此前漏判 right，ReportsPage 的 📤/📅 顶栏按钮从未渲染过）
+  if (!title && !back && !right) return null
 
   // UI-15：子页返回栏（有返回、无标题）吸顶——fixed 栏自带安全区，
   // 文档流内用等高占位块补足初始空间，滚动时内容从毛玻璃栏下方穿过。

@@ -18,6 +18,7 @@ import com.aozora.app.sync.SyncEngine
 import com.aozora.app.sync.SyncScheduler
 import com.aozora.app.sync.SyncState
 import com.aozora.app.voice.VoiceRecognitionService
+import com.aozora.app.widget.AozoraWidgetProvider
 import androidx.core.content.ContextCompat
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -105,7 +106,9 @@ class AozoraBridge(
 
     // ─── 命令分发 ───
 
-    private suspend fun dispatch(
+    // internal（非 private）：JVM 单测直调 dispatch 验证 widget 刷新挂钩（R-M4-21 先例，
+    // 与 bindViews/loadData 同模式）；不改变外部调用面。
+    internal suspend fun dispatch(
         requestId: String,
         command: String,
         payload: JSONObject
@@ -223,9 +226,24 @@ class AozoraBridge(
             BridgeCommands.SAVINGS_UPDATE -> handleSavingsUpdate(requestId, payload)
             BridgeCommands.SAVINGS_ARCHIVE -> handleSavingsArchive(requestId, payload)
 
+            // 第十一轮 T11-4（REQ-26 / 决策 #4）：定时记账规则（仅本地，规则不入队）
+            BridgeCommands.SCHEDULED_LIST -> handleScheduledList(requestId)
+            BridgeCommands.SCHEDULED_INSERT -> handleScheduledInsert(requestId, payload)
+            BridgeCommands.SCHEDULED_UPDATE -> handleScheduledUpdate(requestId, payload)
+            BridgeCommands.SCHEDULED_ARCHIVE -> handleScheduledArchive(requestId, payload)
+
+            // 第十一轮 T11-7（REQ-28 / 决策 #8）：聊天角色（仅本地，角色不入队）
+            BridgeCommands.PERSONA_LIST -> handlePersonaList(requestId)
+            BridgeCommands.PERSONA_INSERT -> handlePersonaInsert(requestId, payload)
+            BridgeCommands.PERSONA_UPDATE -> handlePersonaUpdate(requestId, payload)
+            BridgeCommands.PERSONA_ARCHIVE -> handlePersonaArchive(requestId, payload)
+
             // T9-5a（REQ-11/决策 #1）：本地展示元数据（默认选择 + 列表顺序，存 sync_meta）
             BridgeCommands.META_GET -> handleMetaGet(requestId, payload)
             BridgeCommands.META_SET -> handleMetaSet(requestId, payload)
+
+            // 第十一轮 T11-2（REQ-24 / 决策 #5）：桌面小组件手动刷新
+            BridgeCommands.WIDGET_REFRESH -> handleWidgetRefresh(requestId)
 
             else -> BridgeResponse.error(requestId, "unknown_command", "Unknown command: $command")
         }
@@ -254,6 +272,8 @@ class AozoraBridge(
             deletedAt = null
         )
         repository.insertTransaction(tx, mutationId)
+        // T11-2（决策 #5）：本地记账即时刷新桌面组件（补 v0 缺口）
+        notifyWidgetUpdate()
         return BridgeResponse.success(
             requestId,
             JSONObject().put("id", tx.id).put("version", tx.version).toString()
@@ -281,6 +301,8 @@ class AozoraBridge(
 
     private suspend fun handleTxSoftDelete(requestId: String, p: JSONObject): BridgeResponse {
         repository.softDeleteTransaction(p.getString("id"), p.getString("mutationId"))
+        // T11-2（决策 #5）：删改同样即时刷新（今日/本月聚合随之变化）
+        notifyWidgetUpdate()
         return BridgeResponse.success(requestId, JSONObject().put("success", true).toString())
     }
 
@@ -348,6 +370,21 @@ class AozoraBridge(
         MetaWhitelist.validateValue(key, value)
         repository.setMeta(key, value)
         return BridgeResponse.success(requestId, JSONObject().put("success", true).toString())
+    }
+
+    // ─── 第十一轮 T11-2（REQ-24 / 决策 #5）：桌面小组件刷新 ───
+
+    /** 配置页"立即刷新"：裸 dispatch → 广播 UPDATE → provider 重读 meta+Room 重绘。 */
+    private fun handleWidgetRefresh(requestId: String): BridgeResponse {
+        val ctx = syncContext
+            ?: return BridgeResponse.error(requestId, "unavailable", "context not injected")
+        AozoraWidgetProvider.requestUpdate(ctx)
+        return BridgeResponse.success(requestId, JSONObject().put("success", true).toString())
+    }
+
+    /** 本地写交易后的即时刷新挂钩；context 未注入（如测试构造）时静默跳过。 */
+    private fun notifyWidgetUpdate() {
+        syncContext?.let { AozoraWidgetProvider.requestUpdate(it) }
     }
 
     // ─── Category / Account / Budget handlers ───
@@ -601,6 +638,151 @@ class AozoraBridge(
         return BridgeResponse.success(requestId, JSONObject().put("success", true).toString())
     }
 
+    // ─── 第十一轮 T11-4（REQ-26 / 决策 #4）：定时记账规则（镜像 savings 模式） ───
+    // payload 形状 {rule: {...}}；枚举/日期合法性由 Repository.requireValidScheduledRule
+    // 统一把关（invalid → IllegalArgumentException → invalid_input）。
+
+    private suspend fun handleScheduledList(requestId: String): BridgeResponse {
+        val arr = org.json.JSONArray()
+        for (r in repository.listScheduledRules()) {
+            arr.put(JSONObject().apply {
+                put("id", r.id); put("ownerId", r.ownerId)
+                put("type", r.type); put("name", r.name); put("amountCents", r.amountCents)
+                put("bookId", r.bookId); put("categoryId", r.categoryId)
+                put("accountId", r.accountId ?: JSONObject.NULL)
+                put("includeInBudget", r.includeInBudget); put("note", r.note)
+                put("repeat", r.repeat)
+                put("startDate", r.startDate); put("endDate", r.endDate ?: JSONObject.NULL)
+                put("enabled", r.enabled); put("lastRunDate", r.lastRunDate ?: JSONObject.NULL)
+                put("createdAt", r.createdAt); put("updatedAt", r.updatedAt); put("version", r.version)
+            })
+        }
+        return BridgeResponse.success(requestId, arr.toString())
+    }
+
+    private suspend fun handleScheduledInsert(requestId: String, p: JSONObject): BridgeResponse {
+        val r = p.getJSONObject("rule")
+        val now = System.currentTimeMillis()
+        val entity = ScheduledRuleEntity(
+            id = r.getString("id"),
+            ownerId = r.optString("ownerId", "local"),
+            type = r.getString("type"),
+            name = r.getString("name"),
+            amountCents = BridgePayload.safeLong(r, "amountCents"),
+            bookId = r.getString("bookId"),
+            categoryId = r.getString("categoryId"),
+            accountId = BridgePayload.optionalString(r, "accountId"),
+            includeInBudget = r.optBoolean("includeInBudget", true),
+            note = r.optString("note", ""),
+            repeat = r.getString("repeat"),
+            startDate = r.getString("startDate"),
+            endDate = BridgePayload.optionalString(r, "endDate"),
+            enabled = r.optBoolean("enabled", true),
+            lastRunDate = null,
+            createdAt = if (r.has("createdAt")) r.getLong("createdAt") else now,
+            updatedAt = now,
+            archivedAt = null,
+            version = BridgePayload.version(r)
+        )
+        repository.insertScheduledRule(entity)
+        return BridgeResponse.success(requestId, JSONObject().put("id", entity.id).toString())
+    }
+
+    /** 局部合并 update：键缺省保留原值；accountId/endDate 显式 null = 清除（同 savings 期限语义）。 */
+    private suspend fun handleScheduledUpdate(requestId: String, p: JSONObject): BridgeResponse {
+        val r = p.getJSONObject("rule")
+        val current = repository.getScheduledRule(r.getString("id"))
+            ?: throw IllegalArgumentException("scheduled rule not found")
+        val entity = ScheduledRuleEntity(
+            id = current.id,
+            ownerId = current.ownerId,
+            type = BridgePayload.optionalString(r, "type") ?: current.type,
+            name = BridgePayload.optionalString(r, "name") ?: current.name,
+            amountCents = if (r.has("amountCents")) BridgePayload.safeLong(r, "amountCents") else current.amountCents,
+            bookId = BridgePayload.optionalString(r, "bookId") ?: current.bookId,
+            categoryId = BridgePayload.optionalString(r, "categoryId") ?: current.categoryId,
+            accountId = if (r.has("accountId")) BridgePayload.optionalString(r, "accountId") else current.accountId,
+            includeInBudget = if (r.has("includeInBudget")) r.getBoolean("includeInBudget") else current.includeInBudget,
+            note = if (r.has("note")) r.getString("note") else current.note,
+            repeat = BridgePayload.optionalString(r, "repeat") ?: current.repeat,
+            startDate = BridgePayload.optionalString(r, "startDate") ?: current.startDate,
+            endDate = if (r.has("endDate")) BridgePayload.optionalString(r, "endDate") else current.endDate,
+            enabled = if (r.has("enabled")) r.getBoolean("enabled") else current.enabled,
+            // lastRunDate 引擎专管，用户编辑不可触碰
+            lastRunDate = current.lastRunDate,
+            createdAt = current.createdAt,
+            updatedAt = System.currentTimeMillis(),
+            archivedAt = current.archivedAt,
+            version = BridgePayload.version(r)
+        )
+        repository.updateScheduledRule(entity)
+        return BridgeResponse.success(requestId, JSONObject().put("id", entity.id).toString())
+    }
+
+    private suspend fun handleScheduledArchive(requestId: String, p: JSONObject): BridgeResponse {
+        repository.archiveScheduledRule(p.getString("id"))
+        return BridgeResponse.success(requestId, JSONObject().put("success", true).toString())
+    }
+
+    // ─── 第十一轮 T11-7（REQ-28 / 决策 #8）：聊天角色（镜像 scheduled 模式） ───
+    // payload 形状 {persona: {...}}（内层另有 persona=人设文本字段，同名不同层）；
+    // 昵称 ≤16 / 人设 ≤2000 校验由 Repository.requireValidChatPersona 统一把关。
+    // 当前角色指针 = meta.active_persona_id，读写走既有 meta.* 命令，不新增通道。
+
+    private suspend fun handlePersonaList(requestId: String): BridgeResponse {
+        val arr = org.json.JSONArray()
+        for (e in repository.listChatPersonas()) {
+            arr.put(JSONObject().apply {
+                put("id", e.id); put("name", e.name)
+                put("avatar", e.avatar ?: JSONObject.NULL)
+                put("persona", e.persona)
+                put("createdAt", e.createdAt); put("updatedAt", e.updatedAt); put("version", e.version)
+            })
+        }
+        return BridgeResponse.success(requestId, arr.toString())
+    }
+
+    private suspend fun handlePersonaInsert(requestId: String, p: JSONObject): BridgeResponse {
+        val o = p.getJSONObject("persona")
+        val now = System.currentTimeMillis()
+        val entity = ChatPersonaEntity(
+            id = o.getString("id"),
+            name = o.getString("name"),
+            avatar = BridgePayload.optionalString(o, "avatar"),
+            persona = o.optString("persona", ""),
+            createdAt = if (o.has("createdAt")) o.getLong("createdAt") else now,
+            updatedAt = now,
+            archivedAt = null,
+            version = BridgePayload.version(o)
+        )
+        repository.insertChatPersona(entity)
+        return BridgeResponse.success(requestId, JSONObject().put("id", entity.id).toString())
+    }
+
+    /** 局部合并 update：键缺省保留原值；avatar 显式 null = 清除（同 scheduled 语义）。 */
+    private suspend fun handlePersonaUpdate(requestId: String, p: JSONObject): BridgeResponse {
+        val o = p.getJSONObject("persona")
+        val current = repository.getChatPersona(o.getString("id"))
+            ?: throw IllegalArgumentException("chat persona not found")
+        val entity = ChatPersonaEntity(
+            id = current.id,
+            name = BridgePayload.optionalString(o, "name") ?: current.name,
+            avatar = if (o.has("avatar")) BridgePayload.optionalString(o, "avatar") else current.avatar,
+            persona = BridgePayload.optionalString(o, "persona") ?: current.persona,
+            createdAt = current.createdAt,
+            updatedAt = System.currentTimeMillis(),
+            archivedAt = current.archivedAt,
+            version = BridgePayload.version(o)
+        )
+        repository.updateChatPersona(entity)
+        return BridgeResponse.success(requestId, JSONObject().put("id", entity.id).toString())
+    }
+
+    private suspend fun handlePersonaArchive(requestId: String, p: JSONObject): BridgeResponse {
+        repository.archiveChatPersona(p.getString("id"))
+        return BridgeResponse.success(requestId, JSONObject().put("success", true).toString())
+    }
+
 
     private suspend fun handleBudgetInsert(requestId: String, p: JSONObject): BridgeResponse {
         val bObj = p.getJSONObject("budget")
@@ -623,12 +805,14 @@ class AozoraBridge(
         val mutationId = p.getString("mutationId")
         val current = repository.getBudget(bObj.getString("id"))
             ?: throw IllegalArgumentException("budget not found")
+        // T11-1（REQ-23 编辑）：budgetType/period 亦可改（缺省沿用当前值）；
+        // 两者须成对提交（改类型必须带新 period），形态合法性由 Repository.updateBudget 校验。
         val budget = BudgetEntity(
             id = bObj.getString("id"),
             bookId = current.bookId,
-            budgetType = current.budgetType,
+            budgetType = BridgePayload.optionalString(bObj, "budgetType") ?: current.budgetType,
             categoryId = if (bObj.has("categoryId") && !bObj.isNull("categoryId")) bObj.getString("categoryId") else current.categoryId,
-            period = current.period,
+            period = BridgePayload.optionalString(bObj, "period") ?: current.period,
             amountCents = BridgePayload.safeLong(bObj, "amountCents"),
             version = BridgePayload.version(bObj)
         )
@@ -817,8 +1001,11 @@ class AozoraBridge(
         // C-M4 fix: 缺失字段 → invalid_input，非 internal_error
         val input = p.optString("input", null)
             ?: return BridgeResponse.error(requestId, "invalid_input", "Missing required field: input")
+        // T11-6（决策 #7）：context（{persona, profile}）原样透传给 gateway；
+        // 缺失/非对象 → null，body 不带该键，服务端行为与旧版一致。
+        val contextJson = p.optJSONObject("context")?.toString()
         return try {
-            val resultJson = client.interpret(input)
+            val resultJson = client.interpret(input, contextJson)
             BridgeResponse.success(requestId, resultJson)
         } catch (e: AiGatewayClient.AiError.Timeout) {
             BridgeResponse.error(requestId, "timeout", "AI interpret request timed out")

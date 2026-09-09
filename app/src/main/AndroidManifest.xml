@@ -75,6 +75,11 @@
             </intent-filter>
         </receiver>
 
+        <!-- 第十一轮 T11-4: 定时记账每日闹钟回调（REQ-26/决策 #4） -->
+        <receiver
+            android:name=".scheduled.ScheduledTxReceiver"
+            android:exported="false" />
+
         <!-- T-M4-05b: 桌面小组件 -->
         <receiver
             android:name=".widget.AozoraWidgetProvider"

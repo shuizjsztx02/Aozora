@@ -24,7 +24,7 @@ import { useBridge } from '../../platform/hooks/use-bridge'
 import { newUuid } from '../../platform/uuid'
 import { todayBizDate } from '../../domain/date'
 import type { CategoryData } from '../../platform/bridge/bridge-types'
-import type { AiValidateVerdict } from '../../platform/bridge/bridge-types'
+import type { AiInterpretContext, AiValidateVerdict } from '../../platform/bridge/bridge-types'
 import type { Category } from '../../domain/types'
 
 export interface AssistantMessage {
@@ -51,6 +51,13 @@ interface UseAssistantOptions {
   /** T9-7（REQ-15）：默认账户 id（meta.default_account_id 优先，AssistantPage 经
    * pickDefaultAccount 解析后传入）；提案未指定账户时落库兜底用它。 */
   defaultAccountId: string | null
+  /** T11-6（REQ-27 / 决策 #7）：用户画像（meta.user_profile 解析后的非空字段集）；
+   * 在线 AI 路径拼入 context.profile，本地 NLU 路径忽略。 */
+  profile?: Record<string, string> | null
+  /** T11-7（REQ-28 / 决策 #7/#8）：当前聊天角色 {name, text}；非空即拼入
+   *  context.persona（服务端 render_messages_with_context 反注入前缀后追加 system 尾）。
+   *  离线本地 NLU 路径忽略——人设仅在线 AI 网关生效（已知限制）。 */
+  persona?: { name: string; text: string } | null
 }
 
 interface UseAssistantReturn {
@@ -78,6 +85,8 @@ export function useAssistant({
   bookId,
   timezone,
   defaultAccountId,
+  profile = null,
+  persona = null,
 }: UseAssistantOptions): UseAssistantReturn {
   const bridge = useBridge()
   const [messages, setMessages] = useState<AssistantMessage[]>([])
@@ -267,8 +276,18 @@ export function useAssistant({
 
     // 2. 尝试 AI
     if (needsAI && isOnline() && bridge.isAvailable()) {
+      // T11-6/T11-7（决策 #7）：画像与人设任一非空才拼 context；两者皆缺 → 传 null，
+      // 桥侧省略 context 键，服务端行为与旧版一致。本地 NLU 路径不消费。
+      const hasProfile = !!profile && Object.keys(profile).length > 0
+      const aiContext: AiInterpretContext | null =
+        hasProfile || persona
+          ? {
+              profile: hasProfile ? profile : null,
+              persona: persona ? { name: persona.name, text: persona.text } : null,
+            }
+          : null
       try {
-        const aiResult = await bridge.interpretAI(text.trim())
+        const aiResult = await bridge.interpretAI(text.trim(), aiContext)
         if (aiResult?.output) {
           const o = aiResult.output as Record<string, unknown>
           const aiOutput: AiParseOutput = {
@@ -337,7 +356,7 @@ export function useAssistant({
     setPhase('idle')
     isSubmittingRef.current = false
   }, [
-    bridge, categories, bookId, timezone, buildParseContext,
+    bridge, categories, bookId, timezone, profile, persona, buildParseContext,
     commitProposalInternal, stopUndoTimer,
   ])
 

@@ -122,9 +122,21 @@ describe('Bridge types — 命令完整性', () => {
     // T9-5a（REQ-11）：本地展示元数据
     'meta.get',
     'meta.set',
+    // T11-2（REQ-24）：桌面小组件刷新
+    'widget.refresh',
+    // T11-4/T11-5（REQ-26）：定时记账规则
+    'scheduled.list',
+    'scheduled.insert',
+    'scheduled.update',
+    'scheduled.archive',
+    // T11-7（REQ-28）：聊天角色
+    'persona.list',
+    'persona.insert',
+    'persona.update',
+    'persona.archive',
   ]
 
-  it('BridgeCommands 包含所有 65 个命令（含 AI 4 个 + 权限 3 个 + 语音 2 个 + 图片 4 个 + 同意 2 个 + 导出 4 个 + 账号删除 2 个 + 反馈 1 个 + FIX 4 个 + T7-2 账户更新 1 个 + 第八轮分类/图标/存钱 7 个 + T9-5a meta 2 个 + T10-3 auth 4 个）', () => {
+  it('BridgeCommands 包含所有 74 个命令（含 AI 4 个 + 权限 3 个 + 语音 2 个 + 图片 4 个 + 同意 2 个 + 导出 4 个 + 账号删除 2 个 + 反馈 1 个 + FIX 4 个 + T7-2 账户更新 1 个 + 第八轮分类/图标/存钱 7 个 + T9-5a meta 2 个 + T10-3 auth 4 个 + T11-2 widget 1 个 + T11-4 scheduled 4 个 + T11-7 persona 4 个）', () => {
     const actualCommands = Object.values(BridgeCommands)
     expect(actualCommands).toHaveLength(expectedCommands.length)
     for (const cmd of expectedCommands) {
@@ -567,6 +579,29 @@ describe('NativeBridge — T-M4-02c AI 助手对话', () => {
     const payload = JSON.parse(capturedPayload)
     expect(payload.input).toBe('午饭 12.5')
     expect(result.output).toBeDefined()
+  })
+
+  // T11-6（REQ-27 / 决策 #7）：context 注入管线
+  it('interpretAI 带 context → payload 含 context={profile, persona}（原样对象）', async () => {
+    const result = await bridge.interpretAI('午饭 12.5', {
+      profile: { nickname: '老板', communicationStyle: '简洁直接' },
+      persona: null,
+    })
+    expect(capturedCommand).toBe('ai.interpret')
+    const payload = JSON.parse(capturedPayload)
+    expect(payload.input).toBe('午饭 12.5')
+    expect(payload.context).toEqual({
+      profile: { nickname: '老板', communicationStyle: '简洁直接' },
+      persona: null,
+    })
+    expect(result.output).toBeDefined()
+  })
+
+  it('interpretAI context=null/省略 → payload 不带 context 键（服务端旧行为）', async () => {
+    await bridge.interpretAI('午饭 12.5', null)
+    expect(JSON.parse(capturedPayload)).toEqual({ input: '午饭 12.5' })
+    await bridge.interpretAI('午饭 12.5')
+    expect(JSON.parse(capturedPayload)).toEqual({ input: '午饭 12.5' })
   })
 
   it('validateProposal → ai.validate 命令，payload 含 proposal 和 book_id', async () => {

@@ -21,7 +21,11 @@ import { BooksPage } from '../features/settings/BooksPage'
 import { CategoriesPage } from '../features/settings/CategoriesPage'
 import { BudgetPage } from '../features/settings/BudgetPage'
 import { SavingsPage } from '../features/settings/SavingsPage'
+import { ScheduledPage } from '../features/settings/ScheduledPage'
 import { SecurityPage } from '../features/settings/SecurityPage'
+import { WidgetSettingsPage } from '../features/settings/WidgetSettingsPage'
+import { UserSettingsPage } from '../features/settings/UserSettingsPage'
+import { PersonasPage } from '../features/settings/PersonasPage'
 import { AboutPage } from '../features/settings/AboutPage'
 import { AssistantPage } from '../features/assistant/AssistantPage'
 import { OnboardingPage, isOnboardingCompleted } from '../features/onboarding/OnboardingPage'
@@ -104,7 +108,14 @@ export function Router() {
         <Route path="/settings/categories" element={<ProtectedRoute><AppLayout><CategoriesPage /></AppLayout></ProtectedRoute>} />
         <Route path="/settings/budget" element={<ProtectedRoute><AppLayout><BudgetPage /></AppLayout></ProtectedRoute>} />
         <Route path="/settings/savings" element={<ProtectedRoute><AppLayout><SavingsPage /></AppLayout></ProtectedRoute>} />
+        {/* 第十一轮 T11-5（REQ-26 / 决策 #9）：定时记账规则管理 */}
+        <Route path="/settings/scheduled" element={<ProtectedRoute><AppLayout><ScheduledPage /></AppLayout></ProtectedRoute>} />
         <Route path="/settings/security" element={<ProtectedRoute><AppLayout><SecurityPage /></AppLayout></ProtectedRoute>} />
+        <Route path="/settings/widget" element={<ProtectedRoute><AppLayout><WidgetSettingsPage /></AppLayout></ProtectedRoute>} />
+        {/* 第十一轮 T11-6（REQ-27 / 决策 #9）：用户设定（画像编辑 → AI context） */}
+        <Route path="/settings/user-prefs" element={<ProtectedRoute><AppLayout><UserSettingsPage /></AppLayout></ProtectedRoute>} />
+        {/* 第十一轮 T11-7（REQ-28 / 决策 #8）：聊天角色管理（入口在聊天页 header） */}
+        <Route path="/settings/personas" element={<ProtectedRoute><AppLayout><PersonasPage /></AppLayout></ProtectedRoute>} />
         <Route path="/settings/about" element={<ProtectedRoute><AppLayout><AboutPage /></AppLayout></ProtectedRoute>} />
         <Route path="*" element={<DefaultRoute />} />
       </Routes>

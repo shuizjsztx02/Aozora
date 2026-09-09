@@ -31,6 +31,7 @@ const mockBridge = vi.hoisted(() => ({
   listBooks: vi.fn().mockResolvedValue([{ id: 'book-1', name: '默认账本', isMaster: false }]),
   listAccounts: vi.fn().mockResolvedValue([]),
   getMeta: vi.fn().mockResolvedValue({}),
+  listPersonas: vi.fn().mockResolvedValue([]),
   pickImage: vi.fn().mockResolvedValue({ attachmentId: 'att-1', mimeType: 'image/jpeg', fileSize: 12345 }),
   parseImage: vi.fn(),
   executeProposal: vi.fn().mockResolvedValue({ transaction_ids: ['t1', 't2'], undo_window_seconds: 0 }),

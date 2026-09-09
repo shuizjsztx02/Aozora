@@ -1864,9 +1864,10 @@ class TestPayloadValidation:
         assert resp.status_code == 422
 
     @pytest.mark.asyncio
-    @pytest.mark.parametrize("src", ["manual", "nlu_local", "nlu_ai", "import"])
+    @pytest.mark.parametrize("src", ["manual", "nlu_local", "nlu_ai", "import", "scheduled"])
     async def test_insert_transaction_client_sources_accepted(self, auth_client, src):
-        """T10-8 收口：客户端 Repository 合法 source 集 push 必须通过（nlu_ai 毒丸修复）。"""
+        """T10-8 收口 + T11-4：客户端 Repository 合法 source 集 push 必须通过
+        （nlu_ai 毒丸修复；'scheduled' = 定时记账引擎生成的交易上行）。"""
         ctx = auth_client
         resp = ctx["client"].post(
             "/sync/push",

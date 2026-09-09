@@ -45,6 +45,20 @@ object BridgeCommands {
     const val SAVINGS_UPDATE = "savings.update"
     const val SAVINGS_ARCHIVE = "savings.archive"
 
+    // 第十一轮 T11-4（REQ-26 / 决策 #4）：定时记账规则（仅本地，不同步；
+    // 引擎生成的交易走正常 mutation 上行）。前端调用面随 T11-5 接入。
+    const val SCHEDULED_LIST = "scheduled.list"
+    const val SCHEDULED_INSERT = "scheduled.insert"
+    const val SCHEDULED_UPDATE = "scheduled.update"
+    const val SCHEDULED_ARCHIVE = "scheduled.archive"
+
+    // 第十一轮 T11-7（REQ-28 / 决策 #8）：聊天角色（仅本地，不同步，镜像 savings/
+    // scheduled 模式）。当前角色指针走 meta.get/set 的 active_persona_id 键。
+    const val PERSONA_LIST = "persona.list"
+    const val PERSONA_INSERT = "persona.insert"
+    const val PERSONA_UPDATE = "persona.update"
+    const val PERSONA_ARCHIVE = "persona.archive"
+
     // Account
     const val ACCOUNT_LIST = "account.list"
     const val ACCOUNT_INSERT = "account.insert"
@@ -136,6 +150,9 @@ object BridgeCommands {
     const val META_GET = "meta.get"
     const val META_SET = "meta.set"
 
+    // 第十一轮 T11-2（REQ-24 / 决策 #5）：桌面小组件手动刷新（配置页保存后即时重绘）。
+    const val WIDGET_REFRESH = "widget.refresh"
+
     /**
      * T-M5-02a review: canonical list of every command constant above.
      *
@@ -151,6 +168,8 @@ object BridgeCommands {
         CATEGORY_LIST, CATEGORY_INSERT, CATEGORY_UPDATE,
         ICON_PICK,
         SAVINGS_LIST, SAVINGS_INSERT, SAVINGS_UPDATE, SAVINGS_ARCHIVE,
+        SCHEDULED_LIST, SCHEDULED_INSERT, SCHEDULED_UPDATE, SCHEDULED_ARCHIVE,
+        PERSONA_LIST, PERSONA_INSERT, PERSONA_UPDATE, PERSONA_ARCHIVE,
         ACCOUNT_LIST, ACCOUNT_INSERT, ACCOUNT_UPDATE, ACCOUNT_ARCHIVE,
         BUDGET_LIST, BUDGET_INSERT, BUDGET_UPDATE, BUDGET_DELETE,
         PM_LIST, PM_MARK_SYNCING, PM_MARK_FAILED, PM_REMOVE,
@@ -172,6 +191,7 @@ object BridgeCommands {
         AUTH_TRIGGER_SYNC,
         AUTH_LOGIN, AUTH_LOGOUT, AUTH_ME, AUTH_UPDATE_PROFILE,
         META_GET, META_SET,
+        WIDGET_REFRESH,
     )
 }
 

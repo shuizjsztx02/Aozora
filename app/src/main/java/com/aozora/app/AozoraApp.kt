@@ -16,6 +16,8 @@ import com.aozora.app.export.ExportClient
 import com.aozora.app.feedback.FeedbackClient
 import com.aozora.app.image.ImageClient
 import com.aozora.app.reminder.ReminderScheduler
+import com.aozora.app.scheduled.ScheduledTxEngine
+import com.aozora.app.scheduled.ScheduledTxReceiver
 import com.aozora.app.sync.HttpSyncApi
 import com.aozora.app.sync.SyncEngine
 import com.aozora.app.voice.VoiceRecognitionService
@@ -203,7 +205,19 @@ class AozoraApp : Application(), Configuration.Provider {
         // 第六轮 Bug-5.1：首启种子默认账本/分类。runBlocking 仅为首启排序保证——
         // 后续 SyncScheduler / 聊天记账入口读取时必须已有默认数据；
         // 实际查询/写入都在 Room 自身线程池，主线程阻塞为毫秒级，且幂等（非空即跳过）。
-        kotlinx.coroutines.runBlocking { repository.ensureSeedDefaults() }
+        kotlinx.coroutines.runBlocking {
+            repository.ensureSeedDefaults()
+            // T11-7（REQ-28 决策 #8）：内置 5 聊天角色播种（personas_seeded 标记，
+            // 删光不重播）；紧挨账本/分类种子，保证聊天页首帧即有角色可加载。
+            repository.ensureSeedPersonas()
+            // T11-1（REQ-23 决策 #2）：预算沿用冷启动触发点；开关非 '1' 时立即返回，幂等。
+            repository.ensureBudgetCarryover()
+            // T11-4（REQ-26 决策 #4）：冷启动补跑当日到期规则（漏日不补，已知限制）；
+            // 与每日 08:00 闹钟经 lastRunDate 当日去重，重复触发天然幂等。
+            ScheduledTxEngine(repository).runDueToday()
+        }
+        // T11-4：定时记账闹钟链起点（重启恢复由 BootReceiver 承担；链式续命见 Receiver）
+        ScheduledTxReceiver.scheduleNext(this)
         // T-M5-05b: 立即安装全局 UncaughtExceptionHandler —— 越早越好，
         // 任何依赖（auth、sync）尚未初始化时也可能崩溃。
         crashReporter.install()

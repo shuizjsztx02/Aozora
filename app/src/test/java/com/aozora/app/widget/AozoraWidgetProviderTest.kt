@@ -104,17 +104,83 @@ class AozoraWidgetProviderTest {
         assertEquals(View.VISIBLE, root.findViewById<View>(R.id.widget_sync_hint).visibility)
     }
 
+    // ─── T11-2（REQ-24 / 决策 #5）：config 控元素可见性 + tapAction 深链 ───
+
+    @Test
+    fun bindViews_monthExpenseOn_showsRowWithAmount() {
+        val cfg = WidgetConfig(showMonthExpense = true)
+        val views = AozoraWidgetProvider.bindViews(
+            context,
+            data(WidgetDataHelper.WidgetState.READY, monthExpenseCents = 88_880, config = cfg)
+        )
+        val root = views.apply(context, null)
+        assertEquals(View.VISIBLE, root.findViewById<View>(R.id.widget_month_expense).visibility)
+        assertEquals(
+            "¥888.80",
+            root.findViewById<TextView>(R.id.widget_month_expense_text).text.toString()
+        )
+    }
+
+    @Test
+    fun bindViews_monthExpenseOff_hidesRow() {
+        val views = AozoraWidgetProvider.bindViews(
+            context, data(WidgetDataHelper.WidgetState.READY, monthExpenseCents = 88_880)
+        )
+        val root = views.apply(context, null)
+        assertEquals(View.GONE, root.findViewById<View>(R.id.widget_month_expense).visibility)
+    }
+
+    @Test
+    fun bindViews_todayCountOff_hidesCount() {
+        val cfg = WidgetConfig(showTodayCount = false)
+        val views = AozoraWidgetProvider.bindViews(
+            context, data(WidgetDataHelper.WidgetState.READY, todayCount = 3, config = cfg)
+        )
+        val root = views.apply(context, null)
+        assertEquals(View.GONE, root.findViewById<View>(R.id.widget_today_count).visibility)
+    }
+
+    @Test
+    fun bindViews_budgetOff_hidesRowEvenWithBudgetPresent() {
+        val cfg = WidgetConfig(showBudget = false)
+        val views = AozoraWidgetProvider.bindViews(
+            context,
+            data(
+                WidgetDataHelper.WidgetState.READY,
+                budgetCents = 200_000, budgetProgress = 42, config = cfg
+            )
+        )
+        val root = views.apply(context, null)
+        assertEquals(View.GONE, root.findViewById<View>(R.id.widget_budget_row).visibility)
+    }
+
+    @Test
+    fun buildOpenIntent_entry_carriesDeeplinkData() {
+        val intent = AozoraWidgetProvider.buildOpenIntent(context, "entry")
+        assertEquals("aozora", intent.data?.scheme)
+        assertEquals("entry", intent.data?.host)
+    }
+
+    @Test
+    fun buildOpenIntent_home_hasNoData() {
+        assertNull(AozoraWidgetProvider.buildOpenIntent(context, "home").data)
+    }
+
     private fun data(
         state: WidgetDataHelper.WidgetState,
         todayExpenseCents: Long = 0,
         todayCount: Int = 0,
         budgetCents: Long? = null,
-        budgetProgress: Int = 0
+        budgetProgress: Int = 0,
+        monthExpenseCents: Long = 0,
+        config: WidgetConfig = WidgetConfig(),
     ) = WidgetDataHelper.WidgetData(
         state = state,
         todayExpenseCents = todayExpenseCents,
         todayCount = todayCount,
         budgetCents = budgetCents,
-        budgetProgress = budgetProgress
+        budgetProgress = budgetProgress,
+        monthExpenseCents = monthExpenseCents,
+        config = config,
     )
 }

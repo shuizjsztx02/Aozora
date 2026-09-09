@@ -5,6 +5,7 @@ import com.aozora.app.db.entity.*
 import com.aozora.app.sync.FailedMutation
 import com.aozora.app.sync.ServerChange
 import com.aozora.app.sync.SyncChangeOp
+import org.json.JSONException
 import org.json.JSONObject
 import java.time.LocalDate
 
@@ -30,7 +31,9 @@ class Repository(private val db: AozoraDatabase) {
         require(tx.id.isNotBlank() && tx.bookId.isNotBlank() && tx.categoryId.isNotBlank()) { "entity IDs are required" }
         require(tx.amountCents in 1..9007199254740991L) { "amountCents must be a positive safe integer" }
         require(tx.type in setOf("income", "expense")) { "invalid transaction type" }
-        require(tx.source in setOf("manual", "nlu_local", "nlu_ai", "import")) { "invalid source" }
+        // 第十一轮 T11-4（REQ-26/决策 #4）：+'scheduled'（定时引擎生成）；服务端
+        // TxSource 同步取并集（server/src/models/ledger.py），否则 push 恒 422 毒丸。
+        require(tx.source in setOf("manual", "nlu_local", "nlu_ai", "import", "scheduled")) { "invalid source" }
         require(tx.version > 0 && tx.deletedAt == null) { "invalid insert version or deletion state" }
         require(Regex("\\d{4}-\\d{2}-\\d{2}").matches(tx.bizDate)) { "invalid bizDate" }
         require(runCatching { LocalDate.parse(tx.bizDate) }.isSuccess) { "invalid bizDate" }
@@ -444,6 +447,146 @@ class Repository(private val db: AozoraDatabase) {
         }
     }
 
+    // ─── Scheduled Rules（第十一轮 REQ-26 / 决策 #4，仅本地不同步） ───
+    //
+    // 刻意：方法签名不含 mutationId、不写 pending_mutations（镜像上方 Savings
+    // 段的毒丸理由）。引擎按规则生成的交易才走正常 mutation 上行。
+    // clearAllData() 经 clearAllTables 覆盖本表；clearAllEntities()（bootstrap
+    // 重建）不清——规则是设备本地配置，与服务端数据重建无关（同 savings_goals）。
+
+    suspend fun listScheduledRules(): List<ScheduledRuleEntity> = db.scheduledRuleDao().listActive()
+
+    suspend fun getScheduledRule(id: String): ScheduledRuleEntity? = db.scheduledRuleDao().getById(id)
+
+    /**
+     * 规则底线校验——repeat/type 枚举、日期格式与 endDate≥startDate 成序。
+     * 桥层（handleScheduledInsert/Update）只做形状与必填解析，枚举与成序
+     * 在此唯一把关（镜像 requireValidSavingsPeriod 的"防绕过"定位）。
+     */
+    private fun requireValidScheduledRule(rule: ScheduledRuleEntity) {
+        require(rule.id.isNotBlank() && rule.name.isNotBlank()) { "rule id/name required" }
+        require(rule.amountCents in 1..9007199254740991L) { "amountCents must be a positive safe integer" }
+        require(rule.type in setOf("income", "expense")) { "invalid rule type: ${rule.type}" }
+        require(rule.repeat in setOf("daily", "weekly", "monthly", "yearly")) { "invalid repeat: ${rule.repeat}" }
+        require(isoDateOrNullOr(rule.startDate)) { "invalid startDate: ${rule.startDate}" }
+        if (rule.endDate != null) {
+            require(isoDateOrNullOr(rule.endDate)) { "invalid endDate: ${rule.endDate}" }
+            require(LocalDate.parse(rule.endDate) >= LocalDate.parse(rule.startDate)) {
+                "endDate must not precede startDate"
+            }
+        }
+        if (rule.lastRunDate != null) {
+            require(isoDateOrNullOr(rule.lastRunDate)) { "invalid lastRunDate: ${rule.lastRunDate}" }
+        }
+    }
+
+    private fun isoDateOrNullOr(value: String): Boolean =
+        Regex("\\d{4}-\\d{2}-\\d{2}").matches(value) && runCatching { LocalDate.parse(value) }.isSuccess
+
+    suspend fun insertScheduledRule(rule: ScheduledRuleEntity) {
+        require(rule.version > 0 && rule.archivedAt == null) { "invalid rule insert" }
+        requireValidScheduledRule(rule)
+        db.scheduledRuleDao().insert(rule)
+    }
+
+    suspend fun updateScheduledRule(rule: ScheduledRuleEntity) {
+        requireValidScheduledRule(rule)
+        db.withTransaction {
+            val current = db.scheduledRuleDao().getById(rule.id)
+            require(current != null) { "scheduled rule not found" }
+            require(current.archivedAt == null) { "scheduled rule is archived" }
+            require(rule.version > current.version) { "version must increase" }
+            db.scheduledRuleDao().update(rule)
+        }
+    }
+
+    suspend fun archiveScheduledRule(id: String) {
+        db.withTransaction {
+            val current = db.scheduledRuleDao().getById(id)
+            require(current != null && current.archivedAt == null) { "scheduled rule not found or already archived" }
+            db.scheduledRuleDao().archive(id, System.currentTimeMillis())
+        }
+    }
+
+    // ─── Chat Personas（第十一轮 REQ-28 / 决策 #8，仅本地不同步） ───
+    //
+    // 刻意：方法签名不含 mutationId、不写 pending_mutations（镜像 Savings/Scheduled
+    // 段的毒丸理由）。clearAllData() 经 clearAllTables 覆盖本表；clearAllEntities()
+    // （bootstrap 重建）不清——角色是设备本地配置，与服务端数据重建无关（同 savings_goals）。
+
+    /**
+     * T11-7（决策 #8）：内置 5 角色幂等播种，标记 = meta personas_seeded='1'：
+     * 首装播种；升级安装（键缺失）补种；用户删光后 mark 仍为 '1' → 不重播
+     * （删除即意愿，镜像 master_book_id 的"自管键"模式，不开放前端写）。
+     * 种子角色全部可编辑——mark 只锁"重播"，不锁行。
+     */
+    suspend fun ensureSeedPersonas() {
+        if (getMeta(SyncMetaEntity.KEY_PERSONAS_SEEDED) == "1") return
+        db.withTransaction {
+            if (db.chatPersonaDao().listActive().isEmpty()) {
+                val now = System.currentTimeMillis()
+                SEED_PERSONAS.forEach { (name, avatar, text) ->
+                    db.chatPersonaDao().insert(
+                        ChatPersonaEntity(
+                            id = java.util.UUID.randomUUID().toString(),
+                            name = name,
+                            avatar = avatar,
+                            persona = text,
+                            createdAt = now,
+                            updatedAt = now,
+                            archivedAt = null,
+                            version = 1
+                        )
+                    )
+                }
+            }
+            setMeta(SyncMetaEntity.KEY_PERSONAS_SEEDED, "1")
+        }
+    }
+
+    suspend fun listChatPersonas(): List<ChatPersonaEntity> = db.chatPersonaDao().listActive()
+
+    suspend fun getChatPersona(id: String): ChatPersonaEntity? = db.chatPersonaDao().getById(id)
+
+    /**
+     * 角色底线校验——昵称 1–16 字、人设文本 ≤2000 字（决策 #8）。
+     * 桥层只做形状解析，长度上限在此唯一把关（镜像 requireValidScheduledRule）。
+     */
+    private fun requireValidChatPersona(persona: ChatPersonaEntity) {
+        require(persona.id.isNotBlank() && persona.name.isNotBlank()) { "persona id/name required" }
+        require(persona.name.length <= MAX_PERSONA_NAME_LEN) {
+            "persona name too long (max $MAX_PERSONA_NAME_LEN chars)"
+        }
+        require(persona.persona.length <= MAX_PERSONA_TEXT_LEN) {
+            "persona text too long (max $MAX_PERSONA_TEXT_LEN chars)"
+        }
+    }
+
+    suspend fun insertChatPersona(persona: ChatPersonaEntity) {
+        require(persona.version > 0 && persona.archivedAt == null) { "invalid persona insert" }
+        requireValidChatPersona(persona)
+        db.chatPersonaDao().insert(persona)
+    }
+
+    suspend fun updateChatPersona(persona: ChatPersonaEntity) {
+        requireValidChatPersona(persona)
+        db.withTransaction {
+            val current = db.chatPersonaDao().getById(persona.id)
+            require(current != null) { "chat persona not found" }
+            require(current.archivedAt == null) { "chat persona is archived" }
+            require(persona.version > current.version) { "version must increase" }
+            db.chatPersonaDao().update(persona)
+        }
+    }
+
+    suspend fun archiveChatPersona(id: String) {
+        db.withTransaction {
+            val current = db.chatPersonaDao().getById(id)
+            require(current != null && current.archivedAt == null) { "chat persona not found or already archived" }
+            db.chatPersonaDao().archive(id, System.currentTimeMillis())
+        }
+    }
+
 
     // ─── Account ───
 
@@ -571,6 +714,13 @@ class Repository(private val db: AozoraDatabase) {
         require(budget.id.isNotBlank()) { "entity ID is required" }
         require(budget.amountCents in 1..9007199254740991L) { "amountCents must be a positive safe integer" }
         require(budget.version > 0) { "invalid version" }
+        // T11-1：handler 现允许改 budgetType/period，补齐与 insertBudget 同级的形态校验
+        require(budget.budgetType in setOf("monthly", "annual")) { "invalid budgetType" }
+        require(when (budget.budgetType) {
+            "monthly" -> Regex("\\d{4}-\\d{2}").matches(budget.period)
+            "annual" -> Regex("\\d{4}").matches(budget.period)
+            else -> false
+        }) { "invalid period format" }
         db.withTransaction {
             val current = db.budgetDao().getById(budget.id)
             require(current != null) { "budget not found" }
@@ -624,6 +774,52 @@ class Repository(private val db: AozoraDatabase) {
     suspend fun getBudget(id: String): BudgetEntity? = db.budgetDao().getById(id)
     suspend fun listBudgets(bookId: String): List<BudgetEntity> =
         db.budgetDao().listByBook(bookId)
+
+    /**
+     * T11-1（REQ-23 / 第十一轮决策 #2）：预算沿用 —— 双触发幂等复制。
+     * 开关（budget_carryover='1'）ON 时，对每个非 master 账本：
+     * mark[book] ≠ 当前月 且 本月 monthly 预算为空 且 上月 monthly 预算非空
+     * → 逐条复制（新 UUID id、period=当前月、同分类/金额，OP_INSERT mutation 正常上行）
+     * 并更新 mark=当前月。年度预算不参与；用户手动删光本月预算后（mark 已=当月）不再生成。
+     * 触发点：AozoraApp.onCreate（冷启动）。
+     */
+    suspend fun ensureBudgetCarryover() {
+        if (getMeta(SyncMetaEntity.KEY_BUDGET_CARRYOVER) != "1") return
+        val now = java.time.YearMonth.now()
+        val curPeriod = now.toString()          // "YYYY-MM"
+        val prevPeriod = now.minusMonths(1).toString()
+        val masterId = getMasterBookId()
+        val mark = try {
+            JSONObject(getMeta(SyncMetaEntity.KEY_BUDGET_CARRYOVER_MARK) ?: "{}")
+        } catch (e: JSONException) {
+            JSONObject()
+        }
+        for (book in listBooks()) {
+            if (book.id == masterId) continue
+            if (mark.optString(book.id, null) == curPeriod) continue
+            val cur = db.budgetDao().listByBookAndPeriod(book.id, curPeriod)
+                .filter { it.budgetType == "monthly" }
+            if (cur.isNotEmpty()) continue
+            val prev = db.budgetDao().listByBookAndPeriod(book.id, prevPeriod)
+                .filter { it.budgetType == "monthly" }
+            if (prev.isEmpty()) continue
+            // 同一事务：复制 + 写 mark 原子落，避免半程崩溃后 mark 未更新但已复制
+            db.withTransaction {
+                prev.forEach { src ->
+                    insertBudget(
+                        src.copy(
+                            id = java.util.UUID.randomUUID().toString(),
+                            period = curPeriod,
+                            version = 1
+                        ),
+                        java.util.UUID.randomUUID().toString()
+                    )
+                }
+                mark.put(book.id, curPeriod)
+                setMeta(SyncMetaEntity.KEY_BUDGET_CARRYOVER_MARK, mark.toString())
+            }
+        }
+    }
 
     // ─── Pending Mutations ───
 
@@ -1106,5 +1302,53 @@ class Repository(private val db: AozoraDatabase) {
         /** 服务端 book/account icon 列上限（String(64)，_validate_name 强校验）——
          *  照片 data URI 超长 push 必 422 成毒丸，见第九轮决策 #7。 */
         private const val ICON_WIRE_MAX_LEN = 64
+
+        /** T11-7（REQ-28 / 决策 #8）：角色昵称 ≤16 字、人设文本 ≤2000 字（应用层校验）。 */
+        const val MAX_PERSONA_NAME_LEN = 16
+        const val MAX_PERSONA_TEXT_LEN = 2000
+
+        /**
+         * T11-7：首版内置 5 角色（决策 #8，全部可编辑）。人设文本 100–200 字，
+         * 注入在线 AI system 消息尾部（persona 段，≤2000 服务端二次截断）。
+         * avatar 统一用 emoji（照片头像由用户自建/编辑后经 IconPicker 覆写）。
+         */
+        val SEED_PERSONAS: List<Triple<String, String, String>> = listOf(
+            Triple(
+                "小贝", "😊",
+                "你是小贝，一个温柔简洁的记账搭子。你说话轻声细语，从不评判或说教用户的花销，" +
+                    "而是先共情再给一句贴心建议。你擅长把复杂的账目说得轻松好懂，遇到用户焦虑时" +
+                    "会安抚情绪、鼓励小额坚持。每次回复都很短，通常一两句话点到位，不啰嗦、不堆砌数据。" +
+                    "你记得用户说过的生活细节，会在合适的时候温柔提起，让记账像和朋友聊天一样自然放松。"
+            ),
+            Triple(
+                "老陈", "🧐",
+                "你是老陈，一名严谨的财务顾问，尤其爱抠细节。你会追问每一笔支出的合理性：这笔钱" +
+                    "有没有凭证、能不能报销、是不是重复消费、有没有更省的方式。你习惯用具体数字和" +
+                    "百分比说话，喜欢把账目拆到分类和周期，指出预算超支的苗头。你的语气专业、直接、" +
+                    "略带较真，但出发点始终帮用户守住钱袋子。发现漏洞你会明确点出，不含糊、不敷衍。"
+            ),
+            Triple(
+                "饭团", "😋",
+                "你是饭团，一个幽默的吃货伙伴。你把所有消费都往吃喝玩乐上联想，说话俏皮爱开玩笑，" +
+                    "气氛担当。一笔奶茶你能夸成人生赢家，一顿火锅你能认真计算有几碗米饭的钱。" +
+                    "可玩笑归玩笑，你也会在用户疯狂剁手时用段子轻轻拽一把，提醒留着下顿饭钱。" +
+                    "你让用户记账时不那么紧绷，把枯燥的收支变成一桩好笑的生活小事，陪ta边笑边把钱花明白。"
+            ),
+            Triple(
+                "阿娘", "🧵",
+                "你是阿娘，一位爱操心、节俭的长辈。你把用户的每一笔开销都当成自家的日子来盘算，" +
+                    "嘴上念叨着别乱花钱、要攒钱过日子，心里全是关心。你会回忆从前物资紧缺的日子" +
+                    "提醒用户珍惜，会惦记用户吃没吃好、冷暖、有没有乱熬夜花冤枉钱。你的语气絮叨" +
+                    "又温暖，带着家长式的唠叨和实打实的省钱建议，让人一边嫌啰嗦一边心里发暖。"
+            ),
+            Triple(
+                "冷面管家", "🧊",
+                "你是冷面管家，一个极简的数据流。你惜字如金，只报告事实：金额、分类、余额、" +
+                    "预算剩余、趋势变化，一律用最短的陈述句给出，不带情绪、不说废话、不寒暄。" +
+                    "你偶尔用一句冷幽默点缀，但绝不铺陈。你把复杂账目压缩成几行干净的数据，" +
+                    "让用户一眼看清钱去哪了。多余修饰会被你删掉，专业、克制、准确是你的信条。" +
+                    "若用户追问，你才多给一句解释，点到为止。"
+            ),
+        )
     }
 }

@@ -120,6 +120,22 @@ export const BridgeCommands = {
   // T9-5a（REQ-11，决策 #1）：本地展示元数据（默认选择 + 列表顺序，存 sync_meta，不上行）
   META_GET: 'meta.get',
   META_SET: 'meta.set',
+
+  // 第十一轮 T11-2（REQ-24，决策 #5）：桌面小组件手动刷新（配置保存后即时重绘）
+  WIDGET_REFRESH: 'widget.refresh',
+
+  // 第十一轮 T11-4/T11-5（REQ-26，决策 #4）：定时记账规则（仅本地，不同步）
+  SCHEDULED_LIST: 'scheduled.list',
+  SCHEDULED_INSERT: 'scheduled.insert',
+  SCHEDULED_UPDATE: 'scheduled.update',
+  SCHEDULED_ARCHIVE: 'scheduled.archive',
+
+  // 第十一轮 T11-7（REQ-28，决策 #8）：聊天角色（仅本地，不同步；
+  // 当前角色指针 = meta.active_persona_id，走 meta.* 命令）
+  PERSONA_LIST: 'persona.list',
+  PERSONA_INSERT: 'persona.insert',
+  PERSONA_UPDATE: 'persona.update',
+  PERSONA_ARCHIVE: 'persona.archive',
 } as const
 
 export type BridgeCommandName = typeof BridgeCommands[keyof typeof BridgeCommands]
@@ -159,7 +175,7 @@ export interface TransactionData {
   note: string
   bizDate: string
   occurredAt: number
-  source: 'manual' | 'nlu_local' | 'nlu_ai' | 'import'
+  source: 'manual' | 'nlu_local' | 'nlu_ai' | 'import' | 'scheduled'
   /** 第十轮 REQ-17（决策 #1）：是否计入预算；缺省 = 计入（!== false 口径）。 */
   includeInBudget?: boolean
   version: number
@@ -176,7 +192,7 @@ export interface TransactionInput {
   note?: string
   bizDate: string
   occurredAt: number
-  source: 'manual' | 'nlu_local' | 'nlu_ai' | 'import'
+  source: 'manual' | 'nlu_local' | 'nlu_ai' | 'import' | 'scheduled'
   /** 手动记账显式传值（QuickEntrySheet 按钮初始 false）；聊天/批量不传 → 计入。 */
   includeInBudget?: boolean
   version?: number
@@ -275,6 +291,86 @@ export interface SavingsGoalInput {
   version: number
 }
 
+/**
+ * 第十一轮 T11-4（REQ-26 / 决策 #4）：定时记账规则（仅本地，不同步）。
+ * lastRunDate 由引擎专管（用户编辑不回传该键）；日期均为 'YYYY-MM-DD'。
+ */
+export interface ScheduledRuleData {
+  id: string
+  ownerId: string
+  type: 'expense' | 'income'
+  name: string
+  amountCents: number
+  bookId: string
+  categoryId: string
+  accountId: string | null
+  includeInBudget: boolean
+  note: string
+  repeat: 'daily' | 'weekly' | 'monthly' | 'yearly'
+  startDate: string
+  /** null = 无限制 */
+  endDate: string | null
+  enabled: boolean
+  /** 最近一次生成交易的 bizDate；null = 从未执行 */
+  lastRunDate: string | null
+  createdAt: number
+  updatedAt: number
+  version: number
+}
+
+/**
+ * scheduled.insert / scheduled.update 入参（包裹在 {rule} 内，无 mutationId）。
+ * update 为局部合并语义：键缺省保留原值；accountId/endDate 显式 null = 清除
+ * （enabled 快捷开关只传 {id, enabled, version}）。
+ */
+export interface ScheduledRuleInput {
+  id: string
+  ownerId?: string
+  type?: 'expense' | 'income'
+  name?: string
+  amountCents?: number
+  bookId?: string
+  categoryId?: string
+  accountId?: string | null
+  includeInBudget?: boolean
+  note?: string
+  repeat?: 'daily' | 'weekly' | 'monthly' | 'yearly'
+  startDate?: string
+  endDate?: string | null
+  enabled?: boolean
+  createdAt?: number
+  version: number
+}
+
+/**
+ * 聊天角色行（第十一轮 T11-7 / REQ-28 / 决策 #8）。仅本地、不上行（镜像
+ * SavingsGoalData/ScheduledRuleData 的毒丸理由）。persona.list 输出全字段。
+ */
+export interface PersonaData {
+  id: string
+  /** 昵称，≤16 字 */
+  name: string
+  /** emoji 或 data:image base64（IconPicker 产物），可空 */
+  avatar: string | null
+  /** 人设文本，≤2000 字；注入在线 AI system 尾部 */
+  persona: string
+  createdAt: number
+  updatedAt: number
+  version: number
+}
+
+/**
+ * persona.insert / persona.update 入参（包裹在 {persona} 内，无 mutationId）。
+ * update 为局部合并语义：键缺省保留原值；avatar 显式 null = 清除回退 emoji/占位。
+ */
+export interface PersonaInput {
+  id: string
+  name?: string
+  avatar?: string | null
+  persona?: string
+  version: number
+}
+
 export interface AccountData {
   id: string
   name: string
@@ -361,6 +457,14 @@ export interface ReminderStatusData {
 }
 
 // ─── T-M4-02c: AI 助手对话类型 ───
+
+/** 第十一轮 T11-6（REQ-27 / 决策 #7）：ai.interpret 注入上下文。
+ *  随 payload.context 透传至服务端拼入 system 消息；两字段均可缺省/null（服务端零再改）。
+ *  persona 段由 T11-7 消费，本键位仅预留形状。 */
+export interface AiInterpretContext {
+  persona: { name: string; text: string } | null
+  profile: Record<string, string> | null
+}
 
 export interface AiInterpretResponse {
   request_id: string

@@ -34,6 +34,8 @@ const mockBridge = vi.hoisted(() => ({
   listAccounts: vi.fn().mockResolvedValue([]),
   // T9-5b（REQ-11）：meta.get mock（默认无默认选择）
   getMeta: vi.fn().mockResolvedValue({}),
+  // T11-7（REQ-28）：角色列表 mock（默认无角色 → header 无角色名）
+  listPersonas: vi.fn().mockResolvedValue([]),
   insertTransaction: vi.fn().mockResolvedValue({ id: 'tx-1' }),
   triggerSync: vi.fn().mockResolvedValue(undefined),
   interpretAI: vi.fn().mockResolvedValue(null),
@@ -189,5 +191,28 @@ describe('AssistantPage — 语音集成 (T-M4-04b)', () => {
     mockAssistant.phase = 'processing'
     renderPage()
     expect(screen.getByTestId('voice-mic-button')).toBeDisabled()
+  })
+
+  // ─── 第十一轮 T11-7（REQ-28）：header 角色名 + 角色管理入口 ───
+
+  it('当前角色渲染在 header，右上有角色管理入口', async () => {
+    mockBridge.getMeta.mockResolvedValueOnce({ active_persona_id: 'p-2' })
+    mockBridge.listPersonas.mockResolvedValueOnce([
+      { id: 'p-1', name: '小贝', avatar: '😊', persona: '温柔搭子', createdAt: 1, updatedAt: 1, version: 1 },
+      { id: 'p-2', name: '饭团', avatar: '😋', persona: '吃货伙伴', createdAt: 2, updatedAt: 2, version: 1 },
+    ])
+    renderPage()
+    await waitFor(() => expect(screen.getByText('饭团')).toBeInTheDocument())
+    const manage = screen.getByTestId('persona-manage-button')
+    expect(manage).toHaveAttribute('aria-label', '角色管理')
+  })
+
+  it('active 指向已删角色 → 回退"小贝"名字', async () => {
+    mockBridge.getMeta.mockResolvedValueOnce({ active_persona_id: 'gone' })
+    mockBridge.listPersonas.mockResolvedValueOnce([
+      { id: 'p-1', name: '小贝', avatar: null, persona: '温柔搭子', createdAt: 1, updatedAt: 1, version: 1 },
+    ])
+    renderPage()
+    await waitFor(() => expect(screen.getByText('小贝')).toBeInTheDocument())
   })
 })

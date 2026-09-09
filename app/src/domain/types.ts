@@ -12,7 +12,7 @@ import { type MoneyCents, cents } from './money'
 
 export type TransactionType = 'expense' | 'income'
 export type BudgetType = 'monthly' | 'annual'
-export type Source = 'manual' | 'nlu_local' | 'nlu_ai' | 'import'
+export type Source = 'manual' | 'nlu_local' | 'nlu_ai' | 'import' | 'scheduled'
 
 // ─── 核心实体 ───
 

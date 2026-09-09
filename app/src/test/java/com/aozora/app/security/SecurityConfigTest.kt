@@ -37,10 +37,13 @@ class SecurityConfigTest {
         // 第八轮: +CATEGORY_INSERT/UPDATE +ICON_PICK +SAVINGS_LIST/INSERT/UPDATE/ARCHIVE（+7）→ 59。
         // T9-5a（REQ-11）: +META_GET/META_SET（meta.get/set，鉴权档与 book.insert 同为写类）→ 61。
         // T10-3（REQ-19，决策 #4）: +AUTH_LOGIN/LOGOUT/ME/UPDATE_PROFILE（auth.*，4 条）→ 65。
+        // T11-2（REQ-24，决策 #5）: +WIDGET_REFRESH（widget.refresh）→ 66。
+        // T11-4（REQ-26，决策 #4）: +SCHEDULED_LIST/INSERT/UPDATE/ARCHIVE（scheduled.*，4 条）→ 70。
+        // T11-7（REQ-28，决策 #8）: +PERSONA_LIST/INSERT/UPDATE/ARCHIVE（persona.*，4 条）→ 74。
         val kotlinCommands = BridgeCommands.ALL
         assertEquals(
-            "Bridge command count must be 65 (sync with bridge-types.ts)",
-            65,
+            "Bridge command count must be 74 (sync with bridge-types.ts)",
+            74,
             kotlinCommands.size
         )
         assertEquals(

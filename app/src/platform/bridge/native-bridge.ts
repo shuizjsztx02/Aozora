@@ -25,6 +25,10 @@ import {
   type IconPickResult,
   type SavingsGoalData,
   type SavingsGoalInput,
+  type ScheduledRuleData,
+  type ScheduledRuleInput,
+  type PersonaData,
+  type PersonaInput,
   type AccountData,
   type AccountInput,
   type BudgetData,
@@ -33,6 +37,7 @@ import {
   type SyncEvent,
   type ReminderStatusData,
   type AiReportResponse,
+  type AiInterpretContext,
   type AiInterpretResponse,
   type AiValidateResponse,
   type AiExecuteResponse,
@@ -264,6 +269,44 @@ export class NativeBridge {
     return this.call('savings.archive', { id })
   }
 
+  // ─── Scheduled Rules（第十一轮 REQ-26，仅本地，镜像 savings 无 mutationId） ───
+
+  async listScheduledRules(): Promise<ScheduledRuleData[]> {
+    return this.call<ScheduledRuleData[]>('scheduled.list')
+  }
+
+  async insertScheduledRule(rule: ScheduledRuleInput): Promise<{ id: string }> {
+    return this.call('scheduled.insert', { rule })
+  }
+
+  /** 局部合并：键缺省保留原值；accountId/endDate 显式 null = 清除；version 必须大于当前值。 */
+  async updateScheduledRule(rule: ScheduledRuleInput): Promise<{ id: string }> {
+    return this.call('scheduled.update', { rule })
+  }
+
+  async archiveScheduledRule(id: string): Promise<{ success: boolean }> {
+    return this.call('scheduled.archive', { id })
+  }
+
+  // ─── Chat Personas（第十一轮 REQ-28，仅本地，镜像 scheduled 无 mutationId） ───
+
+  async listPersonas(): Promise<PersonaData[]> {
+    return this.call<PersonaData[]>('persona.list')
+  }
+
+  async insertPersona(persona: PersonaInput): Promise<{ id: string }> {
+    return this.call('persona.insert', { persona })
+  }
+
+  /** 局部合并：键缺省保留原值；avatar 显式 null = 清除；version 必须大于当前值。 */
+  async updatePersona(persona: PersonaInput): Promise<{ id: string }> {
+    return this.call('persona.update', { persona })
+  }
+
+  async archivePersona(id: string): Promise<{ success: boolean }> {
+    return this.call('persona.archive', { id })
+  }
+
   // ─── Account ───
 
   async listAccounts(): Promise<AccountData[]> {
@@ -295,7 +338,8 @@ export class NativeBridge {
     return this.call('budget.insert', { budget, mutationId })
   }
 
-  async updateBudget(budget: { id: string; amountCents: number; version: number }, mutationId: string): Promise<{ id: string }> {
+  /** T11-1（REQ-23 编辑）：budgetType/period 可选传入（成对改；native 局部合并，缺省沿用原值）。 */
+  async updateBudget(budget: { id: string; amountCents: number; version: number; budgetType?: 'monthly' | 'annual'; period?: string; categoryId?: string | null }, mutationId: string): Promise<{ id: string }> {
     return this.call('budget.update', { budget, mutationId })
   }
 
@@ -384,9 +428,15 @@ export class NativeBridge {
 
   // ─── T-M4-02c: AI 助手对话 ───
 
-  /** AI 解读自然语言输入（ADR-003 通道，25s 超时）。 */
-  async interpretAI(input: string): Promise<AiInterpretResponse> {
-    return this.call<AiInterpretResponse>('ai.interpret', { input }, { timeoutMs: AI_TIMEOUT })
+  /** AI 解读自然语言输入（ADR-003 通道，25s 超时）。
+   *  T11-6（决策 #7）：context = 画像/人设注入（{persona, profile}）；null/缺省不带键，
+   *  服务端行为与旧版一致。本地 NLU 路径不消费 context。 */
+  async interpretAI(input: string, context?: AiInterpretContext | null): Promise<AiInterpretResponse> {
+    return this.call<AiInterpretResponse>(
+      'ai.interpret',
+      context ? { input, context } : { input },
+      { timeoutMs: AI_TIMEOUT },
+    )
   }
 
   /** AI 验证 ActionProposal（ADR-003 通道，25s 超时）。 */
@@ -794,16 +844,24 @@ export class NativeBridge {
 
   /**
    * 批量读 meta。key 限 native 白名单（default_book_id / default_account_id /
-   * book_order / account_order / avatar_uri / display_name），未设置的键返回 null。
+   * book_order / account_order / avatar_uri / display_name / budget_carryover /
+   * budget_carryover_mark / widget_config / user_profile），未设置的键返回 null。
    */
   async getMeta(keys: string[]): Promise<Record<string, string | null>> {
     const r = await this.call<{ values?: Record<string, string | null> }>('meta.get', { keys })
     return r.values ?? {}
   }
 
-  /** 写单个 meta 键（native 校验白名单 + 分键上限：order/default 8KB、avatar_uri 64KB、display_name 64 字符）。 */
+  /** 写单个 meta 键（native 校验白名单 + 分键上限：order/default 8KB、avatar_uri 64KB、display_name 64 字符、widget_config 4KB）。 */
   async setMeta(key: string, value: string): Promise<{ success: boolean }> {
     return this.call('meta.set', { key, value })
+  }
+
+  // ─── 第十一轮 T11-2（REQ-24 / 决策 #5）：桌面小组件 ───
+
+  /** 手动触发桌面小组件刷新（配置保存后 / "立即刷新"按钮）。 */
+  async refreshWidget(): Promise<{ success: boolean }> {
+    return this.call('widget.refresh', {})
   }
 
   // ─── 测试辅助 ───

@@ -142,6 +142,10 @@ export function MePage() {
             <MenuItem icon="📂" label="分类管理" onClick={() => navigate('/settings/categories')} />
             <MenuItem icon="📊" label="预算管理" onClick={() => navigate('/settings/budget')} />
             <MenuItem icon="🐷" label="存钱管理" onClick={() => navigate('/settings/savings')} />
+            {/* 第十一轮 T11-5（REQ-26 / 决策 #9）：定时记账入口（规则管理） */}
+            <MenuItem icon="📅" label="定时记账" onClick={() => navigate('/settings/scheduled')} />
+            {/* 第十一轮 T11-6（REQ-27 / 决策 #9）：用户设定入口（画像 → AI context） */}
+            <MenuItem icon="👤" label="用户设定" onClick={() => navigate('/settings/user-prefs')} />
           </MenuSection>
         </div>
 
@@ -193,6 +197,8 @@ export function MePage() {
         <div className="glass-card overflow-hidden">
           <MenuSection title="更多设置">
             <MenuItem icon="⏰" label="提醒设置" onClick={() => navigate('/settings/reminder')} />
+            {/* 第十一轮 T11-2（REQ-24 / 决策 #9）：桌面小组件配置入口 */}
+            <MenuItem icon="🧩" label="桌面组件" onClick={() => navigate('/settings/widget')} />
             <MenuItem icon="📤" label="数据导出" onClick={() => navigate('/settings/export')} />
             <MenuItem icon="📝" label="意见反馈" onClick={() => navigate('/settings/feedback')} />
             <MenuItem icon="🔐" label="登录与安全" onClick={() => navigate('/settings/security')} />

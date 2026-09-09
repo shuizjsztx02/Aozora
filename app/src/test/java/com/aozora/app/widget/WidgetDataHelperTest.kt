@@ -182,6 +182,75 @@ class WidgetDataHelperTest {
         assertEquals(WidgetDataHelper.WidgetState.READY, data.state)
     }
 
+    // ─── T11-2（REQ-24 / 决策 #5）：config 选择性取数 ───
+
+    @Test
+    fun loadData_monthExpense_sumsWholeMonth(): Unit = runBlocking {
+        seedBookAndCategory()
+        insertTx("t1", today, 100, "expense")            // 今日（同时计入本月）
+        insertTx("t2", "${month}-15", 250, "expense")    // 本月内
+        insertTx("t3", "2020-01-15", 999, "expense")     // 其他月份不计
+
+        val data = WidgetDataHelper.loadData(repository, WidgetConfig(showMonthExpense = true))
+        assertEquals(350L, data.monthExpenseCents)
+        assertEquals(100L, data.todayExpenseCents)
+    }
+
+    @Test
+    fun loadData_budgetProgressUsesMonthSum_regardlessOfMonthRow(): Unit = runBlocking {
+        seedBookAndCategory()
+        insertBudget("bud1", month, 200_000)
+        insertTx("t1", today, 50_000, "expense")
+        insertTx("t2", "${month}-15", 50_000, "expense")
+
+        // showMonthExpense=false 但 showBudget=true → 本月聚合仍为进度计算取数
+        val data = WidgetDataHelper.loadData(repository, WidgetConfig())
+        assertEquals(50, data.budgetProgress)
+        assertEquals(100_000L, data.monthExpenseCents)
+    }
+
+    @Test
+    fun loadData_budgetOff_skipsBudgetAndProgress(): Unit = runBlocking {
+        seedBookAndCategory()
+        insertBudget("bud1", month, 200_000)
+        insertTx("t1", today, 150_000, "expense")
+
+        val data = WidgetDataHelper.loadData(repository, WidgetConfig(showBudget = false))
+        assertNull(data.budgetCents)
+        assertEquals(0, data.budgetProgress)
+    }
+
+    @Test
+    fun loadData_monthAndBudgetBothOff_skipsMonthQueries(): Unit = runBlocking {
+        seedBookAndCategory()
+        insertBudget("bud1", month, 200_000)
+        insertTx("t1", today, 100, "expense")
+
+        val data = WidgetDataHelper.loadData(
+            repository, WidgetConfig(showMonthExpense = false, showBudget = false)
+        )
+        assertEquals(0L, data.monthExpenseCents)
+        assertNull(data.budgetCents)
+        // 今日支出恒开：今日聚合不受影响
+        assertEquals(100L, data.todayExpenseCents)
+        assertEquals(1, data.todayCount)
+    }
+
+    @Test
+    fun loadData_configSnapshotCarried(): Unit = runBlocking {
+        seedBookAndCategory()
+        val cfg = WidgetConfig(showMonthExpense = true, tapAction = "entry")
+        assertEquals(cfg, WidgetDataHelper.loadData(repository, cfg).config)
+    }
+
+    @Test
+    fun loadData_noBooks_carriesConfig(): Unit = runBlocking {
+        val cfg = WidgetConfig(showBudget = false, tapAction = "entry")
+        val data = WidgetDataHelper.loadData(repository, cfg)
+        assertEquals(WidgetDataHelper.WidgetState.NO_DATA, data.state)
+        assertEquals(cfg, data.config)
+    }
+
     // ─── 测试数据 helper ───
 
     private suspend fun seedBookAndCategory() {

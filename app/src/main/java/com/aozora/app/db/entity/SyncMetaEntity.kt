@@ -26,5 +26,16 @@ data class SyncMetaEntity(
         // 第十轮 T10-3（REQ-19 / 决策 #4）：账号展示信息，同样仅本地（换机不保留）。
         const val KEY_AVATAR_URI = "avatar_uri"        // data: URI（icon.pick 压缩链产物，≤64KB）
         const val KEY_DISPLAY_NAME = "display_name"    // 昵称离线镜像（PATCH /me 成功后写入，≤64 字符）
+        // 第十一轮 T11-2（REQ-24 / 决策 #5）：桌面小组件全局配置（所有实例共享一份）。
+        const val KEY_WIDGET_CONFIG = "widget_config"  // JSON {showTodayCount,showMonthExpense,showBudget,tapAction}（≤4KB）
+        // 第十一轮 T11-1（REQ-23 / 决策 #1）：预算沿用开关 + 幂等 mark（{bookId:"YYYY-MM"}）。
+        const val KEY_BUDGET_CARRYOVER = "budget_carryover"            // '1' | '0'
+        const val KEY_BUDGET_CARRYOVER_MARK = "budget_carryover_mark"  // JSON map ≤8KB，仅 Repository 自管写入
+        // 第十一轮 T11-6（REQ-27 / 决策 #7）：用户画像（AI context 注入源，仅本地不上行）。
+        const val KEY_USER_PROFILE = "user_profile"    // JSON 对象 ≤8KB（称呼/职业/节奏/风格等，字段见 UserSettingsPage）
+        // 第十一轮 T11-7（REQ-28 / 决策 #8）：当前聊天角色。active 仅本地；
+        // seeded 标记由 ensureSeedPersonas 自管（镜像 master_book_id 不开放前端写）。
+        const val KEY_ACTIVE_PERSONA_ID = "active_persona_id"  // UUID；空/失效 → 回退"小贝"→第一条
+        const val KEY_PERSONAS_SEEDED = "personas_seeded"      // '1' = 已播过内置 5 角色（删光不重播）
     }
 }

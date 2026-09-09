@@ -188,3 +188,33 @@ describe('ReportsPage 趋势卡（T10-6）', () => {
     expect(await screen.findByText('本期暂无记账')).toBeInTheDocument()
   })
 })
+
+describe('ReportsPage 日历视图（T11-3）', () => {
+  beforeEach(() => {
+    vi.clearAllMocks()
+  })
+
+  it('默认图表态；切日历 → 图卡区隐藏、账本/期间行保留、同一数据源；再切回', async () => {
+    mockCalls(() => TXS_B1)
+    renderPage()
+    await screen.findByText('默认账本')
+    expect(screen.queryByTestId('calendar-view')).not.toBeInTheDocument()
+    expect(screen.getByTestId('trend-legend-expense')).toBeInTheDocument()
+
+    fireEvent.click(screen.getByTestId('toggle-calendar-view'))
+    expect(await screen.findByTestId('calendar-view')).toBeInTheDocument()
+    expect(screen.queryByTestId('trend-legend-expense')).not.toBeInTheDocument()
+    expect(screen.queryByTestId('ai-insight')).not.toBeInTheDocument()
+    // 账本 / 期间两行保留（共享 state，零新增桥调用）
+    expect(screen.getByLabelText('切换账本')).toBeInTheDocument()
+    expect(screen.getByLabelText('上个月')).toBeInTheDocument()
+    // 与图表同一派生 txs：当月 3 日 123.45 支出 → 日历格红色调净额
+    const d3 = screen.getByTestId('cal-day-3')
+    expect(d3).toHaveAttribute('data-tone', 'expense')
+    expect(d3).toHaveTextContent('-¥123.45')
+
+    fireEvent.click(screen.getByTestId('toggle-calendar-view'))
+    await waitFor(() => expect(screen.queryByTestId('calendar-view')).not.toBeInTheDocument())
+    expect(screen.getByTestId('trend-legend-expense')).toBeInTheDocument()
+  })
+})

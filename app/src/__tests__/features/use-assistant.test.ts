@@ -22,6 +22,7 @@ const mockBridge = vi.hoisted(() => ({
   triggerSync: vi.fn().mockResolvedValue(undefined),
   executeProposal: vi.fn(),
   validateProposal: vi.fn().mockResolvedValue({ valid: true }),
+  interpretAI: vi.fn(),
   isAvailable: vi.fn().mockReturnValue(false),
 }))
 
@@ -273,5 +274,114 @@ describe('use-assistant — 免确认本地记账（T8-6）', () => {
 
     const [tx] = mockBridge.insertTransaction.mock.calls[0]
     expect(tx.accountId).toBeNull()
+  })
+
+  // ─── 第十一轮 T11-6（REQ-27 / 决策 #7）：用户画像注入在线 AI 路径 ───
+
+  function setupWithProfile(profile: Record<string, string> | null) {
+    return renderHook(() => useAssistant({
+      categories: [], bookId: 'book-1', defaultAccountId: null, timezone: TZ, profile,
+    }))
+  }
+
+  it('有画像 → interpretAI 收到 context={profile, persona:null}', async () => {
+    vi.mocked(parseInput).mockReturnValue(txProposal({ confidence: 0.3 })) // 低置信 → 走 AI
+    mockBridge.isAvailable.mockReturnValue(true)
+    mockBridge.interpretAI.mockResolvedValue({
+      output: { type: 'expense', amountCents: 1250, category: '餐饮', note: '午饭', bizDate: '', confidence: 0.9 },
+    })
+    const { result } = setupWithProfile({ nickname: '老板', communicationStyle: '简洁直接' })
+
+    await act(async () => { await result.current.submitInput('午饭吃了十二块五') })
+
+    expect(mockBridge.interpretAI).toHaveBeenCalledWith(
+      '午饭吃了十二块五',
+      { profile: { nickname: '老板', communicationStyle: '简洁直接' }, persona: null },
+    )
+  })
+
+  it('画像为 null → context 传 null（桥 payload 不带 context 键）', async () => {
+    vi.mocked(parseInput).mockReturnValue(txProposal({ confidence: 0.3 }))
+    mockBridge.isAvailable.mockReturnValue(true)
+    mockBridge.interpretAI.mockResolvedValue(undefined)
+    const { result } = setupWithProfile(null)
+
+    await act(async () => { await result.current.submitInput('随便说点什么') })
+
+    expect(mockBridge.interpretAI).toHaveBeenCalledWith('随便说点什么', null)
+  })
+
+  it('画像为空对象 → 同样传 null，不发空 context', async () => {
+    vi.mocked(parseInput).mockReturnValue(txProposal({ confidence: 0.3 }))
+    mockBridge.isAvailable.mockReturnValue(true)
+    mockBridge.interpretAI.mockResolvedValue(undefined)
+    const { result } = setupWithProfile({})
+
+    await act(async () => { await result.current.submitInput('随便说点什么') })
+
+    expect(mockBridge.interpretAI).toHaveBeenCalledWith('随便说点什么', null)
+  })
+
+  it('本地 NLU 高置信路径不触 AI（context 管线与本地解析无关）', async () => {
+    vi.mocked(parseInput).mockReturnValue(txProposal()) // confidence 0.9 → needsAI=false
+    mockBridge.isAvailable.mockReturnValue(true)
+    const { result } = setupWithProfile({ nickname: '老板' })
+
+    await act(async () => { await result.current.submitInput('吃饭678') })
+
+    expect(mockBridge.interpretAI).not.toHaveBeenCalled()
+  })
+
+  // ─── 第十一轮 T11-7（REQ-28 / 决策 #7/#8）：角色 persona 注入在线 AI 路径 ───
+
+  function setupContext(
+    profile: Record<string, string> | null,
+    persona: { name: string; text: string } | null,
+  ) {
+    return renderHook(() => useAssistant({
+      categories: [], bookId: 'book-1', defaultAccountId: null, timezone: TZ, profile, persona,
+    }))
+  }
+
+  it('仅角色（无画像）→ context={profile:null, persona:{name,text}}', async () => {
+    vi.mocked(parseInput).mockReturnValue(txProposal({ confidence: 0.3 }))
+    mockBridge.isAvailable.mockReturnValue(true)
+    mockBridge.interpretAI.mockResolvedValue(undefined)
+    const persona = { name: '饭团', text: '幽默的吃货伙伴' }
+    const { result } = setupContext(null, persona)
+
+    await act(async () => { await result.current.submitInput('随便说点什么') })
+
+    expect(mockBridge.interpretAI).toHaveBeenCalledWith(
+      '随便说点什么',
+      { profile: null, persona },
+    )
+  })
+
+  it('画像+角色并存 → context 两段同时携带', async () => {
+    vi.mocked(parseInput).mockReturnValue(txProposal({ confidence: 0.3 }))
+    mockBridge.isAvailable.mockReturnValue(true)
+    mockBridge.interpretAI.mockResolvedValue(undefined)
+    const profile = { nickname: '老板' }
+    const persona = { name: '老陈', text: '严谨财务顾问' }
+    const { result } = setupContext(profile, persona)
+
+    await act(async () => { await result.current.submitInput('随便说点什么') })
+
+    expect(mockBridge.interpretAI).toHaveBeenCalledWith(
+      '随便说点什么',
+      { profile, persona },
+    )
+  })
+
+  it('画像空对象+无角色 → 仍传 null（不发空 context）', async () => {
+    vi.mocked(parseInput).mockReturnValue(txProposal({ confidence: 0.3 }))
+    mockBridge.isAvailable.mockReturnValue(true)
+    mockBridge.interpretAI.mockResolvedValue(undefined)
+    const { result } = setupContext({}, null)
+
+    await act(async () => { await result.current.submitInput('随便说点什么') })
+
+    expect(mockBridge.interpretAI).toHaveBeenCalledWith('随便说点什么', null)
   })
 })

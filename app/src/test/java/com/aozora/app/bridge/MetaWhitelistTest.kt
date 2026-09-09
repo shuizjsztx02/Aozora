@@ -16,18 +16,28 @@ class MetaWhitelistTest {
     private val uuidB = "22222222-2222-4222-8222-222222222222"
 
     @Test
-    fun keys_whitelistIsExactlySix() {
+    fun keys_whitelistIsExactlyEleven() {
         assertEquals(
             setOf(
                 "default_book_id", "default_account_id",
                 "book_order", "account_order",
                 // T10-3（决策 #4）：账号展示信息（仅本地）
                 "avatar_uri", "display_name",
+                // T11-1（REQ-23 / 决策 #1）：预算沿用开关 + 幂等 mark
+                "budget_carryover", "budget_carryover_mark",
+                // T11-2（REQ-24 / 决策 #5）：桌面小组件配置
+                "widget_config",
+                // T11-6（REQ-27 / 决策 #7）：用户画像
+                "user_profile",
+                // T11-7（REQ-28 / 决策 #8）：当前聊天角色（personas_seeded 为
+                // Repository 自管键，同 master_book_id 不开放）
+                "active_persona_id",
             ),
             MetaWhitelist.KEYS
         )
         assertFalse(MetaWhitelist.isAllowed("master_book_id"))
         assertFalse(MetaWhitelist.isAllowed("sync_cursor"))
+        assertFalse(MetaWhitelist.isAllowed("personas_seeded"))
         assertTrue(MetaWhitelist.isAllowed(SyncMetaEntity.KEY_BOOK_ORDER))
     }
 
@@ -134,5 +144,129 @@ class MetaWhitelistTest {
             MetaWhitelist.validateValue(SyncMetaEntity.KEY_DISPLAY_NAME, "a".repeat(65))
         } catch (e: IllegalArgumentException) { threw = true }
         assertTrue(threw)
+    }
+
+    // ─── T11-1（REQ-23 / 决策 #1）：budget_carryover / budget_carryover_mark ───
+
+    @Test
+    fun carryoverFlag_acceptsOnlyOneOrZero() {
+        MetaWhitelist.validateValue(SyncMetaEntity.KEY_BUDGET_CARRYOVER, "1")
+        MetaWhitelist.validateValue(SyncMetaEntity.KEY_BUDGET_CARRYOVER, "0")
+        for (bad in listOf("", "true", "2", "1 ")) {
+            var threw = false
+            try {
+                MetaWhitelist.validateValue(SyncMetaEntity.KEY_BUDGET_CARRYOVER, bad)
+            } catch (e: IllegalArgumentException) { threw = true }
+            assertTrue("budget_carryover 只接受 '1'/'0'，got '$bad'", threw)
+        }
+    }
+
+    @Test
+    fun carryoverMark_acceptsBookIdToMonthMap() {
+        MetaWhitelist.validateValue(SyncMetaEntity.KEY_BUDGET_CARRYOVER_MARK, "{}")
+        MetaWhitelist.validateValue(
+            SyncMetaEntity.KEY_BUDGET_CARRYOVER_MARK, """{"$uuidA":"2026-09"}"""
+        )
+    }
+
+    @Test
+    fun carryoverMark_rejectsBadShape() {
+        // 非对象（数组/坏 JSON）
+        for (bad in listOf("""["$uuidA"]""", "not-json")) {
+            var threw = false
+            try {
+                MetaWhitelist.validateValue(SyncMetaEntity.KEY_BUDGET_CARRYOVER_MARK, bad)
+            } catch (e: IllegalArgumentException) { threw = true }
+            assertTrue("mark 必须是 JSON 对象，got '$bad'", threw)
+        }
+        // value 非 YYYY-MM
+        var threw = false
+        try {
+            MetaWhitelist.validateValue(
+                SyncMetaEntity.KEY_BUDGET_CARRYOVER_MARK, """{"$uuidA":"2026-9"}"""
+            )
+        } catch (e: IllegalArgumentException) { threw = true }
+        assertTrue(threw)
+    }
+
+    // ─── T11-2（REQ-24 / 决策 #5）：widget_config ───
+
+    @Test
+    fun widgetKey_acceptsJsonObjectOrEmpty() {
+        MetaWhitelist.validateValue(
+            SyncMetaEntity.KEY_WIDGET_CONFIG,
+            """{"showTodayCount":true,"showMonthExpense":false,"showBudget":true,"tapAction":"entry"}"""
+        )
+        MetaWhitelist.validateValue(SyncMetaEntity.KEY_WIDGET_CONFIG, "{}")
+        MetaWhitelist.validateValue(SyncMetaEntity.KEY_WIDGET_CONFIG, "") // 空串 = 清除（读取端回退全默认）
+    }
+
+    @Test
+    fun widgetKey_rejectsNonJsonAndOversize() {
+        for (bad in listOf("not-json", """["$uuidA"]""")) {
+            var threw = false
+            try {
+                MetaWhitelist.validateValue(SyncMetaEntity.KEY_WIDGET_CONFIG, bad)
+            } catch (e: IllegalArgumentException) { threw = true }
+            assertTrue("widget_config 必须是 JSON 对象，got '$bad'", threw)
+        }
+        // 超 4KB
+        var threw = false
+        try {
+            MetaWhitelist.validateValue(
+                SyncMetaEntity.KEY_WIDGET_CONFIG, "{\"pad\":\"" + "a".repeat(4096) + "\"}"
+            )
+        } catch (e: IllegalArgumentException) { threw = true }
+        assertTrue("超过 4KB 必须拒绝", threw)
+    }
+
+    // ─── T11-6（REQ-27 / 决策 #7）：user_profile ───
+
+    @Test
+    fun userProfile_acceptsJsonObjectOrEmpty() {
+        MetaWhitelist.validateValue(
+            SyncMetaEntity.KEY_USER_PROFILE,
+            """{"nickname":"老板","communicationStyle":"简洁直接"}"""
+        )
+        MetaWhitelist.validateValue(SyncMetaEntity.KEY_USER_PROFILE, "{}")
+        MetaWhitelist.validateValue(SyncMetaEntity.KEY_USER_PROFILE, "") // 空串 = 清除画像
+    }
+
+    @Test
+    fun userProfile_rejectsNonJsonAndOversize() {
+        for (bad in listOf("not-json", """["$uuidA"]""")) {
+            var threw = false
+            try {
+                MetaWhitelist.validateValue(SyncMetaEntity.KEY_USER_PROFILE, bad)
+            } catch (e: IllegalArgumentException) { threw = true }
+            assertTrue("user_profile 必须是 JSON 对象，got '$bad'", threw)
+        }
+        // 超 8KB（决策 #1：user_profile ≤8KB）
+        var threw = false
+        try {
+            MetaWhitelist.validateValue(
+                SyncMetaEntity.KEY_USER_PROFILE, "{\"pad\":\"" + "a".repeat(8192) + "\"}"
+            )
+        } catch (e: IllegalArgumentException) { threw = true }
+        assertTrue("超过 8KB 必须拒绝", threw)
+    }
+
+    // ─── T11-7（REQ-28 / 决策 #8）：active_persona_id（else 分支 UUID 校验） ───
+
+    @Test
+    fun activePersonaKey_acceptsUuidOrEmpty() {
+        MetaWhitelist.validateValue(SyncMetaEntity.KEY_ACTIVE_PERSONA_ID, uuidA)
+        MetaWhitelist.validateValue(SyncMetaEntity.KEY_ACTIVE_PERSONA_ID, "") // 空串 = 清除，回退默认角色
+    }
+
+    @Test
+    fun activePersonaKey_rejectsNonUuid() {
+        for (bad in listOf("persona_1", "小贝", "[]")) {
+            var threw = false
+            try {
+                MetaWhitelist.validateValue(SyncMetaEntity.KEY_ACTIVE_PERSONA_ID, bad)
+            } catch (e: IllegalArgumentException) { threw = true }
+            assertTrue("active_persona_id 只接受 UUID/空串，got '$bad'", threw)
+        }
     }
 }

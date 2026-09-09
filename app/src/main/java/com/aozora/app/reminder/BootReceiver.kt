@@ -3,6 +3,7 @@ package com.aozora.app.reminder
 import android.content.BroadcastReceiver
 import android.content.Context
 import android.content.Intent
+import com.aozora.app.scheduled.ScheduledTxReceiver
 
 /**
  * BOOT_COMPLETED 接收器 — 重启后恢复所有提醒调度。
@@ -15,5 +16,7 @@ class BootReceiver : BroadcastReceiver() {
     override fun onReceive(context: Context, intent: Intent) {
         if (intent.action != Intent.ACTION_BOOT_COMPLETED) return
         ReminderScheduler(context.applicationContext).scheduleAll()
+        // 第十一轮 T11-4（REQ-26/决策 #4）：重启恢复定时记账每日闹钟（链式续命起点）
+        ScheduledTxReceiver.scheduleNext(context.applicationContext)
     }
 }
