@@ -69,11 +69,10 @@ describe('CategoriesPage · CategoryEditor（REQ-12）', () => {
     const { container } = render(
       <CategoryIcon icon="data:image/png;base64,AAAA" name="多美" className="text-lg" />,
     )
+    // REQ-32（T12-2）后 img 外层容器接管行中对齐（见 CategoryIcon.test.tsx），此处只锁内层视觉尺寸
     const img = container.querySelector('img')!
     expect(img.style.width).toBe('1.25em')
     expect(img.style.height).toBe('1.25em')
     expect(img.style.borderRadius).toBe('50%')
-    expect(img.style.display).toBe('inline-block')
-    expect(img.style.verticalAlign).toBe('middle')
   })
 })

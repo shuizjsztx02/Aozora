@@ -18,6 +18,8 @@ export const BridgeCommands = {
   TX_LIST_BY_BOOK: 'transaction.listByBook',
   TX_LIST_BY_DATE: 'transaction.listByDate',
   TX_SOFT_DELETE: 'transaction.softDelete',
+  // 第十二轮 T12-7（REQ-36 / 决策 #1：桥计数本轮唯一变更点 74→75）：交易编辑真 update
+  TX_UPDATE: 'transaction.update',
 
   // Book
   BOOK_LIST: 'book.list',
@@ -460,10 +462,17 @@ export interface ReminderStatusData {
 
 /** 第十一轮 T11-6（REQ-27 / 决策 #7）：ai.interpret 注入上下文。
  *  随 payload.context 透传至服务端拼入 system 消息；两字段均可缺省/null（服务端零再改）。
- *  persona 段由 T11-7 消费，本键位仅预留形状。 */
+ *  persona 段由 T11-7 消费，本键位仅预留形状。
+ *  第十二轮 T12-11（REQ-37 / 决策 #3）：+categories（分类名白名单，prompt v2 约束
+ *  category/filter.category/set.category 从中选）与 today（相对日期换算基准）；
+ *  均可缺省 → 服务端渲染段跳过，行为与旧版一致。桥侧 optJSONObject 原样透传，Kotlin 零改动。 */
 export interface AiInterpretContext {
   persona: { name: string; text: string } | null
   profile: Record<string, string> | null
+  /** 用户现有分类名（≤120 个、每个 ≤16 字，服务端另有独立截断兜底） */
+  categories?: string[] | null
+  /** 用户时区今天（YYYY-MM-DD），prompt v2 相对日期换算用 */
+  today?: string | null
 }
 
 export interface AiInterpretResponse {

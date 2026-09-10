@@ -11,6 +11,7 @@ import type { ReactNode } from 'react'
 import { AppLayout } from '../components/Layout'
 import { HomePage } from '../features/ledger/HomePage'
 import { DetailPage } from '../features/ledger/DetailPage'
+import { SearchPage } from '../features/ledger/SearchPage'
 import { ReportsPage } from '../features/reports/ReportsPage'
 import { MePage } from '../features/settings/MePage'
 import { ReminderSettingsPage } from '../features/settings/ReminderSettingsPage'
@@ -100,6 +101,8 @@ export function Router() {
         <Route path="/reports" element={<ProtectedRoute><AppLayout><ReportsPage /></AppLayout></ProtectedRoute>} />
         <Route path="/me" element={<ProtectedRoute><AppLayout><MePage /></AppLayout></ProtectedRoute>} />
         <Route path="/assistant" element={<ProtectedRoute><AssistantPage /></ProtectedRoute>} />
+        {/* T12-5（REQ-33 / 决策 #10）：搜索子页——AppLayout 外全屏，与 /assistant 同级 */}
+        <Route path="/search" element={<ProtectedRoute><SearchPage /></ProtectedRoute>} />
         <Route path="/settings/reminder" element={<ProtectedRoute><AppLayout><ReminderSettingsPage /></AppLayout></ProtectedRoute>} />
         <Route path="/settings/export" element={<ProtectedRoute><AppLayout><ExportPage /></AppLayout></ProtectedRoute>} />
         <Route path="/settings/feedback" element={<ProtectedRoute><AppLayout><FeedbackPage /></AppLayout></ProtectedRoute>} />

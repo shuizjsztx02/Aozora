@@ -3,7 +3,7 @@
  *
  * 覆盖：
  * - 默认只展示当月流水 + 期间行右侧支出合计
- * - 搜索框跨月份匹配（分类名/金额），展示命中数量
+ * - 搜索圆钮（T12-5/REQ-33）→ navigate('/search') 带当前账本；原内联搜索用例迁至 SearchPage.test
  * - 点击期间标签打开年/月面板，切到上一个月
  * - 年份 ‹ 切换后选中往年同月 → 空态
  * - 删除走 softDeleteTransaction 且 mutationId 为 UUID（Bug-5.2 契约）
@@ -12,6 +12,13 @@ import { describe, it, expect, vi, beforeEach } from 'vitest'
 import { render, screen, waitFor, within } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { MemoryRouter } from 'react-router'
+
+const mockNavigate = vi.hoisted(() => vi.fn())
+vi.mock('react-router', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('react-router')>()
+  return { ...actual, useNavigate: () => mockNavigate }
+})
+
 import { DetailPage } from '../../features/ledger/DetailPage'
 import type { TransactionData, CategoryData } from '../../platform/bridge/bridge-types'
 
@@ -21,6 +28,9 @@ const mockBridge = vi.hoisted(() => ({
   setMeta: vi.fn().mockResolvedValue({ success: true }),
   call: vi.fn(),
   softDeleteTransaction: vi.fn(),
+  // T12-10：TxEditSheet 挂载时拉取（开层用例用）
+  listBooks: vi.fn().mockResolvedValue([]),
+  listAccounts: vi.fn().mockResolvedValue([]),
 }))
 
 vi.mock('../../platform/hooks/use-bridge', () => ({
@@ -88,19 +98,14 @@ describe('DetailPage', () => {
     expect(screen.getByText('55')).toBeInTheDocument()
   })
 
-  it('searches across all months and reports hit count', async () => {
+  it('内联搜索条已迁出；圆钮跳转 /search 并携带当前账本 id（T12-5 / REQ-33）', async () => {
     const user = userEvent.setup()
     renderPage()
     await screen.findByText('午饭')
-    await user.type(screen.getByLabelText('搜索账单'), '工资')
-    await waitFor(() => expect(screen.getByText('八月工资')).toBeInTheDocument())
-    expect(screen.getByText('找到 1 笔相关记录')).toBeInTheDocument()
-    // 当月行被搜索范围过滤掉
-    expect(screen.queryByText('午饭')).not.toBeInTheDocument()
-    // 清空后恢复当月视图
-    await user.click(screen.getByLabelText('清空搜索'))
-    await waitFor(() => expect(screen.getByText('午饭')).toBeInTheDocument())
-    expect(screen.queryByText('八月工资')).not.toBeInTheDocument()
+    // 原全宽搜索框不再渲染
+    expect(screen.queryByLabelText('搜索账单')).not.toBeInTheDocument()
+    await user.click(screen.getByTestId('open-search'))
+    expect(mockNavigate).toHaveBeenCalledWith('/search', { state: { bookId: 'b1' } })
   })
 
   it('opens year/month picker and switches to previous month', async () => {
@@ -139,7 +144,19 @@ describe('DetailPage', () => {
     const [id, mutationId] = mockBridge.softDeleteTransaction.mock.calls[0]
     expect(id).toBe('tx-cur')
     expect(mutationId).toMatch(/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/)
+    // T12-10：行内删除钮与行点击开层共存——点 ✕ 不开编辑层
+    expect(screen.queryByTestId('tx-edit-sheet')).toBeNull()
     vi.restoreAllMocks()
+  })
+
+  it('点击流水行打开 TxEditSheet，金额预填自行数据（T12-10 / REQ-36）', async () => {
+    const user = userEvent.setup()
+    renderPage()
+    await screen.findByText('午饭')
+    await user.click(screen.getByText('午饭'))
+    const sheet = await screen.findByTestId('tx-edit-sheet')
+    expect(within(sheet).getByTestId('tx-edit-amount')).toHaveValue(55)
+    expect(within(sheet).getByTestId('tx-edit-note')).toHaveValue('午饭')
   })
 })
 
@@ -221,5 +238,8 @@ describe('DetailPage 账本切换（REQ-4）', () => {
     await waitFor(() => expect(screen.getByText('B的打车')).toBeInTheDocument())
     expect(screen.queryByText('A的午饭')).not.toBeInTheDocument()
     expect(screen.getByLabelText('切换账本')).toHaveTextContent('账本B')
+    // T12-5：圆钮携带切换后的账本 id
+    await user.click(screen.getByTestId('open-search'))
+    expect(mockNavigate).toHaveBeenCalledWith('/search', { state: { bookId: 'b' } })
   })
 })

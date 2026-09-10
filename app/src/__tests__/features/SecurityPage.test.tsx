@@ -181,6 +181,28 @@ describe('SecurityPage', () => {
     expect(screen.getByTestId('security-nickname-save').hasAttribute('disabled')).toBe(true)
   })
 
+  it('修改昵称：保存失败 → 弹层内错误行可见、弹层不关、按钮复位（REQ-31）', async () => {
+    mockBridge.updateProfile.mockRejectedValue(new BridgeError('network_error', 'offline', 'r'))
+    const user = userEvent.setup()
+    renderPage()
+    await user.click(screen.getByTestId('security-nickname-button'))
+    await user.type(screen.getByTestId('security-nickname-input'), '新名字')
+    await user.click(screen.getByTestId('security-nickname-save'))
+    // 错误必须出现在弹层内（pageError 会被遮罩盖住，不可作为唯一出口）
+    await waitFor(() => {
+      expect(screen.getByTestId('security-nickname-error').textContent)
+        .toContain('网络错误，请检查网络连接后重试')
+    })
+    // 弹层保持打开可重试
+    expect(screen.getByTestId('security-nickname-input')).toBeTruthy()
+    // finally 复位：文案回「保存」且可再点
+    const saveBtn = screen.getByTestId('security-nickname-save')
+    expect(saveBtn.textContent).toBe('保存')
+    expect(saveBtn.hasAttribute('disabled')).toBe(false)
+    // 不再写页面级错误（保留给页面级链路）
+    expect(screen.queryByTestId('security-error')).toBeNull()
+  })
+
   // ─── 修改头像 ───
 
   it('修改头像：pickIcon 成功 → setMeta(avatar_uri, dataUri)', async () => {

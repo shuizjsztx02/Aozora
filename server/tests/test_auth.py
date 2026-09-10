@@ -412,6 +412,8 @@ class TestProductionGuards:
         from pydantic import ValidationError
         with pytest.raises(ValidationError, match="AI_PROVIDER_API_KEY"):
             Settings(
+                _env_file=None,  # 密封：真实 key 配入 .env 后（第十二轮云端前置），
+                                 # 不能让 ambient .env 的 key 泄漏进"无 key 应拒绝"断言
                 database_url="sqlite+aiosqlite:///test.db",
                 env="production",
                 secret_key="super-secret-key-that-is-not-default",

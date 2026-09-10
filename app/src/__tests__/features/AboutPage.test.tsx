@@ -4,7 +4,7 @@
  * 覆盖（卡验收）：
  * - 图标 / 应用名 / 版本行渲染
  * - 隐私政策 → /privacy、用户协议 → /terms 跳转
- * - 检查更新 → toast「已是最新版本 v{APP_VERSION}」（假实现，无网络请求）
+ * - 检查更新 → toast「当前 v{APP_VERSION}，已是最新版本」（假实现，无网络请求）
  */
 import { describe, it, expect, vi } from 'vitest'
 import { render, screen } from '@testing-library/react'
@@ -43,6 +43,6 @@ describe('AboutPage', () => {
     renderPage()
     expect(screen.queryByTestId('about-toast')).toBeNull()
     await user.click(screen.getByText('检查更新'))
-    expect(screen.getByTestId('about-toast').textContent).toBe(`已是最新版本 v${APP_VERSION}`)
+    expect(screen.getByTestId('about-toast').textContent).toBe(`当前 v${APP_VERSION}，已是最新版本`)
   })
 })

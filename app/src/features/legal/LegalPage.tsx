@@ -5,7 +5,7 @@
  * 内容内联以保证 WebView 离线可读；与 docs/legal/privacy-policy-v1.md 保持一致。
  */
 
-import { useNavigate, useLocation } from 'react-router'
+import { PageHeader } from '../../components/Layout'
 
 const PRIVACY_SECTIONS: Array<{ title: string; body: string[] }> = [
   {
@@ -108,54 +108,41 @@ function LegalPage({
   version: string
   sections: Array<{ title: string; body: string[] }>
 }) {
-  const navigate = useNavigate()
-  const location = useLocation()
-  const fromOnboarding = location.state?.fromOnboarding === true
-
   return (
-    <div className="min-h-screen p-6" style={{ background: 'var(--bg)' }}>
-      <div className="max-w-2xl mx-auto">
-        <div className="flex items-center gap-3 mb-6">
-          {fromOnboarding && (
-            <button
-              onClick={() => navigate(-1)}
-              className="text-sm"
-              style={{ color: 'var(--accent)' }}
-              data-testid="legal-back-btn"
-            >
-              ← 返回
-            </button>
-          )}
-          <div>
-            <h1 className="text-2xl font-bold" style={{ color: 'var(--ink)' }}>
+    <div className="min-h-screen" style={{ background: 'var(--bg)' }}>
+      <PageHeader back />
+      <div className="p-6">
+        <div className="max-w-2xl mx-auto">
+          <div className="mb-6">
+            <h1 className="text-base font-semibold" style={{ color: 'var(--ink)' }}>
               {title}
             </h1>
             <div className="text-xs text-ink2 mt-1">{version}</div>
           </div>
-        </div>
 
-        <div className="space-y-5">
-          {sections.map((s) => (
-            <section key={s.title}>
-              <h2
-                className="text-base font-semibold mb-2"
-                style={{ color: 'var(--ink)' }}
-              >
-                {s.title}
-              </h2>
-              <div className="space-y-2">
-                {s.body.map((p, i) => (
-                  <p
-                    key={i}
-                    className="text-sm leading-relaxed"
-                    style={{ color: 'var(--ink2)' }}
-                  >
-                    {p}
-                  </p>
-                ))}
-              </div>
-            </section>
-          ))}
+          <div className="space-y-5">
+            {sections.map((s) => (
+              <section key={s.title}>
+                <h2
+                  className="text-base font-semibold mb-2"
+                  style={{ color: 'var(--ink)' }}
+                >
+                  {s.title}
+                </h2>
+                <div className="space-y-2">
+                  {s.body.map((p, i) => (
+                    <p
+                      key={i}
+                      className="text-sm leading-relaxed"
+                      style={{ color: 'var(--ink2)' }}
+                    >
+                      {p}
+                    </p>
+                  ))}
+                </div>
+              </section>
+            ))}
+          </div>
         </div>
       </div>
     </div>

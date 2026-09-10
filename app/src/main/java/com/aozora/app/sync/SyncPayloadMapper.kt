@@ -142,7 +142,10 @@ object SyncPayloadMapper {
                 put("entity_type", m.entityType)
                 put("entity_id", m.entityId)
                 put("operation", m.operation)
-                if (m.expectedVersion != null) put("expected_version", m.expectedVersion)
+                // T12-7 前置修复：server MutationItem 字段名为 version（无 alias，
+                // extra 键被 pydantic 忽略）——此前发 expected_version 恒 version=None，
+                // 任何 update/delete push 整体 422。transaction.update 联调暴露，改齐契约。
+                if (m.expectedVersion != null) put("version", m.expectedVersion)
                 put("payload", toWirePayload(m.payload))
             }
             mutationsArr.put(obj)

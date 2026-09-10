@@ -16,6 +16,34 @@ interface TransactionDao {
     @Update
     suspend fun update(transaction: TransactionEntity)
 
+    /**
+     * 第十二轮 T12-7（REQ-36）：乐观锁全字段更新 —— 仅当 id + 变更**前**版本
+     * （:expectedVersion）双条件命中才写入并置新 version；返回受影响行数
+     * （0 = 版本冲突，调用方中止事务）。
+     */
+    @Query(
+        "UPDATE transactions SET bookId = :bookId, type = :type, amountCents = :amountCents, " +
+            "categoryId = :categoryId, accountId = :accountId, note = :note, bizDate = :bizDate, " +
+            "occurredAt = :occurredAt, source = :source, includeInBudget = :includeInBudget, " +
+            "version = :newVersion " +
+            "WHERE id = :id AND version = :expectedVersion"
+    )
+    suspend fun updateWithVersion(
+        id: String,
+        bookId: String,
+        type: String,
+        amountCents: Long,
+        categoryId: String,
+        accountId: String?,
+        note: String,
+        bizDate: String,
+        occurredAt: Long,
+        source: String,
+        includeInBudget: Boolean,
+        newVersion: Int,
+        expectedVersion: Int,
+    ): Int
+
     @Query("SELECT * FROM transactions WHERE id = :id")
     suspend fun getById(id: String): TransactionEntity?
 

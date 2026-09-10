@@ -40,10 +40,11 @@ class SecurityConfigTest {
         // T11-2（REQ-24，决策 #5）: +WIDGET_REFRESH（widget.refresh）→ 66。
         // T11-4（REQ-26，决策 #4）: +SCHEDULED_LIST/INSERT/UPDATE/ARCHIVE（scheduled.*，4 条）→ 70。
         // T11-7（REQ-28，决策 #8）: +PERSONA_LIST/INSERT/UPDATE/ARCHIVE（persona.*，4 条）→ 74。
+        // T12-7（REQ-36，决策 #1）: +TX_UPDATE（transaction.update）→ 75。
         val kotlinCommands = BridgeCommands.ALL
         assertEquals(
-            "Bridge command count must be 74 (sync with bridge-types.ts)",
-            74,
+            "Bridge command count must be 75 (sync with bridge-types.ts)",
+            75,
             kotlinCommands.size
         )
         assertEquals(

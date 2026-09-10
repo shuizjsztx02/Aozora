@@ -2,23 +2,54 @@
  * T-M4-02c: 助手页面 — 对话式记账。
  *
  * 输入 → AI/本地 NLU → 记账卡（T9-7 v2 两态）→ 本地写入 → 撤销
- * T9-8（REQ-16）：键盘 IME inset 顶起输入区；输入行 [🎤][输入][🖼️][发送]；
- * 🖼️ 走既有图片链路（image.pick → image.parse → 批量卡 → ai.execute，服务端权威）
+ * T9-8（REQ-16）：键盘 IME inset 顶起输入区；🖼️ 走既有图片链路（image.pick → image.parse → 批量卡 → ai.execute，服务端权威）
+ * T12-1（REQ-29 / 决策 #8 #9）：语音按需授权（点 mic 才请求 RECORD_AUDIO，结果经 usePermissions 状态推送续链）；
+ * 语音/图片桥错误中文本地化；输入行重排 [🎤][🖼️][输入][发送]
+ * T12-11（REQ-37）：分类名白名单组装（≤120 截断，喂 interpret context.categories）；
+ * edit/delete 意图 → OpPreviewCard 预览确认；chat/query → 文本气泡（hook 层分发）
  */
 
-import { useState, useRef, useEffect, useCallback } from 'react'
+import { useState, useRef, useEffect, useCallback, useMemo } from 'react'
 import { useNavigate } from 'react-router'
 import { PageHeader } from '../../components/Layout'
 import { useBridge } from '../../platform/hooks/use-bridge'
+import { usePermissions } from '../../platform/hooks/use-permissions'
 import { useVoice } from '../../platform/hooks/use-voice'
 import { useAssistant } from './use-assistant'
 import { ConfirmationCard } from './ConfirmationCard'
+import { OpPreviewCard } from './OpPreviewCard'
+import { buildAiCategoryNames } from '../../domain/ai-proposal-builder'
 import { BatchConfirmationCard } from '../ledger/BatchConfirmationCard'
 import { UndoToast } from './UndoToast'
 import type { ActionProposal } from '../../domain/action-proposal'
-import type { AccountData, CategoryData, PersonaData } from '../../platform/bridge/bridge-types'
+import type { AccountData, BookData, CategoryData, PersonaData } from '../../platform/bridge/bridge-types'
 import { pickDefaultAccount, pickEntryBook } from '../../domain/books'
 import { resolveActivePersona } from '../../domain/personas'
+
+// T12-1（REQ-29 / 决策 #8）：语音桥错误码 → 中文文案（原生 message 为英文，不透出）；
+// 未知码回退原生 message。码源：AozoraBridge.handleVoiceStartRecording / VoiceRecognitionService.onError
+const VOICE_ERROR_ZH: Record<string, string> = {
+  permission_denied: '麦克风权限未授予，请授权后重试',
+  model_not_loaded: '语音模型尚未就绪，请稍后重试',
+  start_failed: '录音启动失败，请重试',
+  audio_init_failed: '录音启动失败，请重试',
+  start_error: '录音启动失败，请重试',
+  already_recording: '已在录音中',
+  not_recording: '当前没有进行中的录音',
+  unavailable: '语音服务不可用',
+  timeout: '语音操作超时，请重试',
+}
+
+// T12-1（REQ-29 / 决策 #9）：图片链路错误码 → 中文文案。503 被 Kotlin 统一映射为
+// no_ai_provider（AozoraBridge:1406-1412），按决策给配置指引专属文案；未知码回退原生 message
+const IMAGE_ERROR_ZH: Record<string, string> = {
+  no_ai_provider: 'AI 服务未配置：需在服务器 .env 填 AI_PROVIDER_API_KEY 并重启',
+  timeout: '图片解析超时，请检查网络后重试',
+  network_error: '网络错误，请检查网络连接后重试',
+  rate_limited: 'AI 请求过于频繁，请稍后重试',
+  server_error: 'AI 服务暂时不可用，请稍后重试',
+  auth_lost: '登录已失效，请重新登录',
+}
 
 /** T11-6（REQ-27 / 决策 #7）：meta.user_profile → 注入管线画像。
  *  只保留非空字符串字段；坏 JSON/非对象/全空 → null（interpretAI 不带 context）。 */
@@ -49,12 +80,23 @@ export function AssistantPage() {
     stopRecording: voiceStopRecording,
     reset: voiceReset,
   } = useVoice()
+  // T12-1（REQ-29 / 决策 #8）：语音按需授权——不在启动时轰炸权限，点 mic 才请求
+  const {
+    canRecord,
+    status: permStatus,
+    requestPermission: requestPerm,
+    openSettings,
+  } = usePermissions()
+  const [micPermissionHint, setMicPermissionHint] = useState<'denied' | 'permanently_denied' | null>(null)
+  const [pendingPermission, setPendingPermission] = useState(false)
   const [categories, setCategories] = useState<CategoryData[]>([])
   const [bookId, setBookId] = useState<string | null>(null)
   // T9-7（REQ-15）：卡片账户 chip 数据源 + 提案未带账户时的默认兜底 + 行4 账本名
   const [accounts, setAccounts] = useState<AccountData[]>([])
   const [defaultAccountId, setDefaultAccountId] = useState<string | null>(null)
   const [bookName, setBookName] = useState('')
+  // T12-9（REQ-35）：卡内 EntryChipRow 账本 chip 数据源
+  const [books, setBooks] = useState<BookData[]>([])
   // T11-6（REQ-27）：用户画像（meta.user_profile 解析后），喂给在线 AI context 注入。
   const [profile, setProfile] = useState<Record<string, string> | null>(null)
   // T11-7（REQ-28 / 决策 #8）：聊天角色——header 显示当前角色名 + context.persona 注入；
@@ -63,6 +105,10 @@ export function AssistantPage() {
   const [inputText, setInputText] = useState('')
   const scrollRef = useRef<HTMLDivElement>(null)
   const prevFinalTextRef = useRef('')
+
+  // T12-11（REQ-37 / 决策 #3）：分类名白名单——prompt v2 约束 category/filter/set 从
+  // 列表选择（根治「喝酒→未分类」类云端瞎猜）；≤120 个、各 ≤16 字（buildAiCategoryNames）
+  const aiCategories = useMemo(() => buildAiCategoryNames(categories), [categories])
 
   // 加载分类和账本
   useEffect(() => {
@@ -84,6 +130,7 @@ export function AssistantPage() {
         setBookId(entry.id)
         setBookName(entry.name || '')
       }
+      setBooks(books)
       setAccounts(accountList)
       setDefaultAccountId(pickDefaultAccount(accountList, meta['default_account_id'] ?? null)?.id ?? null)
       setProfile(parseProfile(meta['user_profile']))
@@ -98,9 +145,12 @@ export function AssistantPage() {
     cardStatus,
     undoRemaining,
     isSlow,
+    pendingOp,
     submitInput,
     editProposal,
     undoExecution,
+    confirmOp,
+    cancelOp,
     appendAssistantMessage,
   } = useAssistant({
     categories,
@@ -109,6 +159,8 @@ export function AssistantPage() {
     profile,
     // T11-7（REQ-28）：当前角色 → context.persona（离线本地 NLU 不消费，仅在线生效）
     persona: activePersona ? { name: activePersona.name, text: activePersona.persona } : null,
+    // T12-11（REQ-37）：分类名白名单 → context.categories（仅在线 AI 路径消费）
+    aiCategories,
     // C-B4 fix: 使用设备时区替代硬编码
     timezone: Intl.DateTimeFormat().resolvedOptions().timeZone || 'Asia/Shanghai',
   })
@@ -148,13 +200,15 @@ export function AssistantPage() {
       setImageProposal(proposal)
       setImageState('review')
     } catch (e) {
-      // 用户取消选择器 → 静默回 idle；其余错误可见可重试（决策 #11）
+      // 用户取消选择器 → 静默回 idle；其余错误可见可重试（决策 #11）；
+      // T12-1（决策 #9）：已知错误码映射中文，no_ai_provider 给配置指引专属文案
       const code = e instanceof Error && 'code' in e ? (e as { code: string }).code : null
       if (code === 'cancelled') {
         setImageState('idle')
         return
       }
-      setImageError(e instanceof Error && e.message ? e.message : '图片处理失败')
+      const rawMessage = e instanceof Error && e.message ? e.message : '图片处理失败'
+      setImageError((code ? IMAGE_ERROR_ZH[code] : null) ?? rawMessage)
       setImageState('idle')
     }
   }, [bridge, bookId])
@@ -203,7 +257,7 @@ export function AssistantPage() {
   // 自动滚动到底部
   useEffect(() => {
     scrollRef.current?.scrollTo({ top: scrollRef.current.scrollHeight, behavior: 'smooth' })
-  }, [messages, phase, imageState])
+  }, [messages, phase, imageState, pendingOp])
 
   // T9-8（REQ-16）：MainActivity 注入 --ime-bottom-px 后派发合成 resize →
   // 消息区随键盘收缩滚动到底（决策 #10）
@@ -238,14 +292,57 @@ export function AssistantPage() {
     }
   }, [handleSubmit])
 
-  // T-M4-04b: 语音输入控制
+  // T12-1（REQ-29 / 决策 #8）：语音按需授权——
+  // 已授予 → 直接录音；permanently_denied → 引导系统设置；其余 → 弹系统框，
+  // 结果经 onPermissionResult 推送 → usePermissions 刷新 status → 下方 effect 续链
+  const requestMicPermission = useCallback(() => {
+    setMicPermissionHint(null)
+    setPendingPermission(true)
+    void requestPerm('RECORD_AUDIO')
+  }, [requestPerm])
+
   const handleMicClick = useCallback(async () => {
     if (voiceIsRecording) {
       await voiceStopRecording()
-    } else {
-      await voiceStartRecording()
+      return
     }
-  }, [voiceIsRecording, voiceStartRecording, voiceStopRecording])
+    if (canRecord) {
+      setMicPermissionHint(null)
+      await voiceStartRecording()
+      return
+    }
+    if (pendingPermission) return // 系统弹框在途，防重入
+    if (permStatus.permissions.RECORD_AUDIO === 'permanently_denied') {
+      setMicPermissionHint('permanently_denied')
+      return
+    }
+    requestMicPermission()
+  }, [
+    voiceIsRecording,
+    voiceStopRecording,
+    canRecord,
+    pendingPermission,
+    permStatus,
+    voiceStartRecording,
+    requestMicPermission,
+  ])
+
+  // 权限异步结果续链（primitive dep：usePermissions 推送刷新后本 effect 感知变化）
+  const recordAudioStatus = permStatus.permissions.RECORD_AUDIO
+  useEffect(() => {
+    if (!pendingPermission) return
+    if (recordAudioStatus === 'granted') {
+      setPendingPermission(false)
+      setMicPermissionHint(null)
+      void voiceStartRecording()
+    } else if (recordAudioStatus === 'permanently_denied') {
+      setPendingPermission(false)
+      setMicPermissionHint('permanently_denied')
+    } else if (recordAudioStatus === 'denied') {
+      setPendingPermission(false)
+      setMicPermissionHint('denied')
+    }
+  }, [pendingPermission, recordAudioStatus, voiceStartRecording])
 
   return (
     <div
@@ -364,6 +461,8 @@ export function AssistantPage() {
             status={cardStatus}
             onEditCommit={editProposal}
             accounts={accounts}
+            books={books}
+            bookId={bookId}
             bookName={bookName}
             selectedAccountId={
               activeProposal.transactions?.[0]?.accountId ?? defaultAccountId ?? null
@@ -380,6 +479,16 @@ export function AssistantPage() {
             submitting={imageSubmitting}
             onConfirm={handleImageConfirm}
             onCancel={handleImageCancel}
+          />
+        )}
+
+        {/* T12-11（REQ-37 / 决策 #5）：edit/delete 意图预览确认卡——破坏性操作必过确认 */}
+        {pendingOp && (
+          <OpPreviewCard
+            op={pendingOp}
+            categories={categories}
+            onConfirm={confirmOp}
+            onCancel={cancelOp}
           />
         )}
       </div>
@@ -406,7 +515,7 @@ export function AssistantPage() {
             🎤 {voicePartialText}
           </div>
         )}
-        {/* T-M4-04b: 语音错误提示 */}
+        {/* T-M4-04b: 语音错误提示（T12-1：错误码映射中文，未知码回退原生 message） */}
         {voiceError && !voiceIsRecording && (
           <div
             className="mb-2 px-3 py-1.5 rounded-lg text-xs"
@@ -417,7 +526,45 @@ export function AssistantPage() {
             }}
             data-testid="voice-error"
           >
-            {voiceError.message}
+            {VOICE_ERROR_ZH[voiceError.code] ?? voiceError.message}
+          </div>
+        )}
+        {/* T12-1（REQ-29 / 决策 #8）：未授权红条——denied 内联「授权」重发请求，
+            permanently_denied 内联「去设置」跳系统设置页 */}
+        {micPermissionHint && !voiceIsRecording && (
+          <div
+            className="mb-2 px-3 py-1.5 rounded-lg text-xs flex items-center justify-between gap-2"
+            style={{
+              background: '#fef2f2',
+              color: '#b91c1c',
+              border: '1px solid #fecaca',
+            }}
+            data-testid="voice-permission-bar"
+          >
+            <span>
+              {micPermissionHint === 'permanently_denied'
+                ? '麦克风权限已被拒绝，需到系统设置中开启后重试'
+                : '未获得麦克风权限，无法语音输入'}
+            </span>
+            {micPermissionHint === 'permanently_denied' ? (
+              <button
+                type="button"
+                onClick={() => void openSettings()}
+                className="shrink-0 underline font-medium"
+                data-testid="voice-permission-settings"
+              >
+                去设置
+              </button>
+            ) : (
+              <button
+                type="button"
+                onClick={requestMicPermission}
+                className="shrink-0 underline font-medium"
+                data-testid="voice-permission-grant"
+              >
+                授权
+              </button>
+            )}
           </div>
         )}
         {/* T9-8: 图片链路进度提示（picking/parsing 期间 🖼️ 禁用） */}
@@ -456,9 +603,9 @@ export function AssistantPage() {
             </button>
           </div>
         )}
-        {/* T9-8（REQ-16）：输入行重排为 [🎤语音] [输入框] [🖼️图片] [发送] */}
+        {/* T12-1（REQ-29 ②）：输入行重排 [🎤语音][🖼️图片][输入框][发送]——图片钮从输入框右移到左、紧挨语音；样式不动 */}
         <div className="flex gap-2 items-end">
-          {/* T-M4-04b: 语音输入按钮（左移） */}
+          {/* T-M4-04b: 语音输入按钮 */}
           <button
             onClick={handleMicClick}
             disabled={phase === 'processing' || phase === 'executing'}
@@ -477,20 +624,6 @@ export function AssistantPage() {
           >
             {voiceIsRecording ? '⏹' : '🎤'}
           </button>
-          <input
-            type="text"
-            value={inputText}
-            onChange={e => setInputText(e.target.value)}
-            onKeyDown={handleKeyDown}
-            placeholder={voiceIsRecording ? '正在聆听…' : '输入记账短句…'}
-            disabled={phase === 'processing' || phase === 'executing'}
-            className="flex-1 min-w-0 px-3 py-2 rounded-xl text-sm outline-none"
-            style={{
-              background: 'var(--glass)',
-              color: 'var(--ink)',
-              border: '1px solid var(--glass-border)',
-            }}
-          />
           {/* T9-8: 图片上传按钮（相册选图 → 批量记账卡） */}
           <button
             onClick={handleImageUpload}
@@ -511,6 +644,20 @@ export function AssistantPage() {
           >
             🖼️
           </button>
+          <input
+            type="text"
+            value={inputText}
+            onChange={e => setInputText(e.target.value)}
+            onKeyDown={handleKeyDown}
+            placeholder={voiceIsRecording ? '正在聆听…' : '输入记账短句…'}
+            disabled={phase === 'processing' || phase === 'executing'}
+            className="flex-1 min-w-0 px-3 py-2 rounded-xl text-sm outline-none"
+            style={{
+              background: 'var(--glass)',
+              color: 'var(--ink)',
+              border: '1px solid var(--glass-border)',
+            }}
+          />
           <button
             onClick={handleSubmit}
             disabled={!inputText.trim() || phase === 'processing' || phase === 'executing'}

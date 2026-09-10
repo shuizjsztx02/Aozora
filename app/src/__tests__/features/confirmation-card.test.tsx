@@ -1,20 +1,25 @@
 /**
- * 第九轮 REQ-15/T9-7: 记账卡 v2（两态）测试。
+ * 第九轮 REQ-15/T9-7 v2 两态 + 第十二轮 T12-9（REQ-35）编辑态 v3 重排测试。
  *
  * 验证：
  * - 展示态（默认）：REQ-15 四行要素齐（分类名/收支柱子/账户 chip/金额/日期/
  *   备注/账本名/编辑|撤销），无金额输入框与宫格
- * - 点「编辑」进入编辑态：第八轮控件全集行为不回归（宫格/金额失焦/备注/日期/
- *   同值守卫/executing 守卫/非法金额/error 徽标）+ 账户下拉 + 「完成」收起
+ * - 编辑态 v3（T12-9）：行1 分类图标钮（card-cat-toggle 卡内展开/收起 CategoryPager）
+ *   + 收支 + 金额；行2 日期+备注；行3 EntryChipRow（账本/账户/预算）；无旧
+ *   primary-cats/secondary-cats 胶囊行与 card-account select
+ * - 宫格点选/同值守卫/executing 守卫/金额失焦/备注/日期 行为不回归
+ * - 卡内切账本 → onEditCommit 携带 {bookId} override；预算「不计入」→
+ *   {includeInBudget:false}；改回默认 → 无 override
  * - 展示态换账户/换收支柱子 → 即时替换写（含「不使用账户」= accountId null）
  * - 「撤销」按钮直连 onUndo（任意时刻可用）
+ * - 待选分类态（T12-8）：编辑 UI 预选打开且宫格直接展开
  */
 import { describe, it, expect, vi, type Mock } from 'vitest'
 import { render, screen, fireEvent, within } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { ConfirmationCard } from '../../features/assistant/ConfirmationCard'
 import type { ActionProposal } from '../../domain/action-proposal'
-import type { AccountData, CategoryData } from '../../platform/bridge/bridge-types'
+import type { AccountData, BookData, CategoryData } from '../../platform/bridge/bridge-types'
 
 const CATS: CategoryData[] = [
   { id: 'cat-food', kind: 'expense', name: '餐饮', parentId: null, icon: '🥟', version: 1 },
@@ -27,6 +32,11 @@ const CATS: CategoryData[] = [
 const ACCOUNTS: AccountData[] = [
   { id: 'acc-bank', name: '招商银行卡', icon: '💳', version: 1 },
   { id: 'acc-cash', name: '现金', icon: '', version: 1 },
+]
+
+const BOOKS: BookData[] = [
+  { id: 'book-1', ownerId: 'o', name: '默认账本', icon: '', version: 1 },
+  { id: 'book-2', ownerId: 'o', name: '旅行账本', icon: '', version: 1 },
 ]
 
 function proposal(categoryId = 'cat-lunch', note = '午饭'): ActionProposal {
@@ -48,12 +58,14 @@ function proposal(categoryId = 'cat-lunch', note = '午饭'): ActionProposal {
 }
 
 const renderCard = (over: {
-  status?: 'executing' | 'committed' | 'error',
+  status?: 'executing' | 'committed' | 'error' | 'pending-category',
   onEditCommit?: Mock,
   onUndo?: Mock,
   categoryId?: string,
   note?: string,
   accounts?: AccountData[],
+  books?: BookData[],
+  bookId?: string | null,
   bookName?: string,
   selectedAccountId?: string | null,
 } = {}) => {
@@ -66,6 +78,8 @@ const renderCard = (over: {
       status={over.status ?? 'committed'}
       onEditCommit={onEditCommit}
       accounts={over.accounts ?? ACCOUNTS}
+      books={over.books ?? BOOKS}
+      bookId={over.bookId ?? 'book-1'}
       bookName={over.bookName ?? '默认账本'}
       selectedAccountId={over.selectedAccountId ?? 'acc-bank'}
       onUndo={onUndo}
@@ -77,6 +91,11 @@ const renderCard = (over: {
 /** 点「编辑」进入编辑态。 */
 const toEdit = async () => {
   fireEvent.click(screen.getByTestId('card-edit'))
+}
+
+/** 编辑态点分类图标钮展开宫格（返回后 category-pager 已挂载）。 */
+const openPager = async () => {
+  fireEvent.click(screen.getByTestId('card-cat-toggle'))
 }
 
 describe('ConfirmationCard — 展示态（REQ-15 行1-4）', () => {
@@ -103,11 +122,12 @@ describe('ConfirmationCard — 展示态（REQ-15 行1-4）', () => {
     expect(card.textContent).toContain('🥟')
   })
 
-  it('展示态为紧凑只读：无金额输入框 / 分类宫格 / 日期输入', () => {
+  it('展示态为紧凑只读：无金额输入框 / 宫格 / chip 行 / 日期输入', () => {
     renderCard()
     expect(screen.queryByTestId('card-amount')).toBeNull()
-    expect(screen.queryByTestId('primary-cats')).toBeNull()
-    expect(screen.queryByTestId('secondary-cats')).toBeNull()
+    expect(screen.queryByTestId('card-cat-toggle')).toBeNull()
+    expect(screen.queryByTestId('category-pager')).toBeNull()
+    expect(screen.queryByTestId('entry-book-picker')).toBeNull()
     expect(screen.queryByTestId('card-date')).toBeNull()
     expect(screen.queryByTestId('card-note')).toBeNull()
   })
@@ -122,17 +142,6 @@ describe('ConfirmationCard — 展示态（REQ-15 行1-4）', () => {
     const { onUndo } = renderCard()
     fireEvent.click(screen.getByTestId('card-undo'))
     expect(onUndo).toHaveBeenCalledTimes(1)
-  })
-
-  it('点「编辑」进入编辑态（出现金额输入框与控件全集）', async () => {
-    renderCard()
-    await toEdit()
-    expect(screen.getByTestId('card-amount')).toBeInTheDocument()
-    expect(screen.getByTestId('primary-cats')).toBeInTheDocument()
-    expect(screen.getByTestId('card-date')).toBeInTheDocument()
-    expect(screen.getByTestId('card-note')).toBeInTheDocument()
-    expect(screen.getByTestId('card-account')).toBeInTheDocument()
-    expect(screen.getByTestId('card-done')).toBeInTheDocument()
   })
 
   it('展示态点收支柱子「收入」→ 即时替换写（type 更新 + 分类清空）', () => {
@@ -192,72 +201,79 @@ describe('ConfirmationCard — 展示态（REQ-15 行1-4）', () => {
   })
 })
 
-describe('ConfirmationCard — 编辑态（第八轮控件全集不回归）', () => {
-  it('无确认/取消按钮；状态徽标保留', async () => {
+describe('ConfirmationCard — 编辑态 v3（T12-9 / REQ-35 重排）', () => {
+  it('结构：图标钮+支柱+金额 行1、日期+备注 行2、EntryChipRow 行3、完成；旧胶囊/select 全移除', async () => {
     renderCard()
     await toEdit()
+    expect(screen.getByTestId('card-amount')).toBeInTheDocument()
+    expect(screen.getByTestId('card-cat-toggle')).toBeInTheDocument()
+    expect(screen.getByTestId('card-date')).toBeInTheDocument()
+    expect(screen.getByTestId('card-note')).toBeInTheDocument()
+    expect(screen.getByTestId('entry-book-picker')).toBeInTheDocument()
+    expect(screen.getByTestId('entry-account-picker')).toBeInTheDocument()
+    expect(screen.getByTestId('entry-budget-picker')).toBeInTheDocument()
+    expect(screen.getByTestId('card-done')).toBeInTheDocument()
+    // v3 删除项：两行胶囊 + 账户 select
+    expect(screen.queryByTestId('primary-cats')).toBeNull()
+    expect(screen.queryByTestId('secondary-cats')).toBeNull()
+    expect(screen.queryByTestId('card-account')).toBeNull()
+    // 宫格默认收起（点图标钮才展开）
+    expect(screen.queryByTestId('category-pager')).toBeNull()
+    // 无确认/取消按钮；状态徽标保留
     expect(screen.queryByText('确认记账')).toBeNull()
-    expect(screen.queryByText('取消')).toBeNull()
     expect(screen.getByTestId('card-status').textContent).toContain('已记录')
   })
 
-  it('7 要素齐：一级宫格只含顶级分类，选中子分类时二级行显示且高亮', async () => {
+  it('card-cat-toggle 展开/收起宫格；展开后平铺含二级分类（QuickEntry 同款）', async () => {
     renderCard()
     await toEdit()
-    const primary = screen.getByTestId('primary-cats')
-    expect(primary.textContent).toContain('餐饮')
-    expect(primary.textContent).toContain('交通')
-    expect(primary.textContent).not.toContain('午饭') // 二级不进一级行
-    const secondary = screen.getByTestId('secondary-cats')
-    expect(secondary.textContent).toContain('午饭')
-    expect(secondary.textContent).toContain('晚饭')
-    expect(screen.getByTestId('card-date')).toHaveAttribute('data-date', '2026-09-08')
-    expect(screen.getByTestId('card-note')).toHaveValue('午饭')
+    await openPager()
+    const pager = screen.getByTestId('category-pager')
+    expect(pager.textContent).toContain('餐饮')
+    expect(pager.textContent).toContain('午饭') // 平铺：二级进宫格
+    expect(pager.textContent).toContain('晚饭')
+    expect(pager.textContent).toContain('交通')
+    expect(pager.textContent).not.toContain('工资') // 只含当前 kind
+    fireEvent.click(screen.getByTestId('card-cat-toggle'))
+    expect(screen.queryByTestId('category-pager')).toBeNull()
   })
 
-  it('选中顶级分类且其有子分类时也渲染二级行；无子分类不渲染', async () => {
-    renderCard({ categoryId: 'cat-food' })
-    await toEdit()
-    expect(screen.getByTestId('secondary-cats').textContent).toContain('午饭')
-  })
-
-  it('无子分类时不渲染二级行（交通）', async () => {
-    renderCard({ categoryId: 'cat-traffic' })
-    await toEdit()
-    expect(screen.queryByTestId('secondary-cats')).toBeNull()
-  })
-
-  it('切换收支柱子 → 一级宫格换成收入分类（编辑态不即时写，待重选分类）', async () => {
+  it('宫格点分类 → onEditCommit 收到该 categoryId（无 chip 改动则无 overrides）', async () => {
     const { onEditCommit } = renderCard()
     await toEdit()
-    // 编辑态下「收入」仅存在支柱按钮一处（展示态支柱随编辑态挂载不存在）
-    fireEvent.click(screen.getByText('收入'))
-    expect(screen.getByTestId('primary-cats').textContent).toContain('工资')
-    expect(screen.getByTestId('primary-cats').textContent).not.toContain('餐饮')
-    expect(onEditCommit).not.toHaveBeenCalled()
-  })
-
-  it('点一级分类 → onEditCommit 收到该 categoryId', async () => {
-    const { onEditCommit } = renderCard()
-    await toEdit()
-    fireEvent.click(screen.getByText('交通'))
+    await openPager()
+    fireEvent.click(within(screen.getByTestId('category-pager')).getByText('交通'))
     expect(onEditCommit).toHaveBeenCalledTimes(1)
-    const [edited] = onEditCommit.mock.calls[0]
+    const [edited, overrides] = onEditCommit.mock.calls[0]
     expect(edited.transactions[0].categoryId).toBe('cat-traffic')
     expect(edited.transactions[0].amountCents).toBe(4500)
+    expect(overrides).toBeUndefined()
   })
 
-  it('点二级分类 → onEditCommit 收到子分类 id', async () => {
+  it('宫格点二级分类 → 直接落子分类 id', async () => {
     const { onEditCommit } = renderCard({ categoryId: 'cat-food' })
     await toEdit()
-    fireEvent.click(screen.getByText('晚饭'))
+    await openPager()
+    fireEvent.click(within(screen.getByTestId('category-pager')).getByText('晚饭'))
     expect(onEditCommit.mock.calls[0][0].transactions[0].categoryId).toBe('cat-dinner')
   })
 
-  it('同值不重复提交：再点当前高亮一级分类不触发', async () => {
+  it('同值守卫：再点当前选中分类不触发', async () => {
     const { onEditCommit } = renderCard({ categoryId: 'cat-traffic' })
     await toEdit()
-    fireEvent.click(screen.getByText('交通'))
+    await openPager()
+    fireEvent.click(within(screen.getByTestId('category-pager')).getByText('交通'))
+    expect(onEditCommit).not.toHaveBeenCalled()
+  })
+
+  it('编辑态切收支柱子 → 宫格换收入分类且页码归零；不即时写', async () => {
+    const { onEditCommit } = renderCard()
+    await toEdit()
+    await openPager()
+    fireEvent.click(screen.getByText('收入'))
+    const pager = screen.getByTestId('category-pager')
+    expect(pager.textContent).toContain('工资')
+    expect(pager.textContent).not.toContain('餐饮')
     expect(onEditCommit).not.toHaveBeenCalled()
   })
 
@@ -295,7 +311,8 @@ describe('ConfirmationCard — 编辑态（第八轮控件全集不回归）', (
   it('保存中（executing）编辑态不接受新提交', async () => {
     const { onEditCommit } = renderCard({ status: 'executing' })
     await toEdit()
-    fireEvent.click(screen.getByText('交通'))
+    await openPager()
+    fireEvent.click(within(screen.getByTestId('category-pager')).getByText('交通'))
     expect(onEditCommit).not.toHaveBeenCalled()
   })
 
@@ -315,18 +332,51 @@ describe('ConfirmationCard — 编辑态（第八轮控件全集不回归）', (
     expect(onEditCommit.mock.calls[0][0].transactions[0].bizDate).toBe('2026-09-05')
   })
 
-  it('账户下拉换账户 → 即时替换写；选「不使用账户」→ 显式 null', async () => {
+  it('chip 换账户 → 即时替换写；「不使用账户」→ 显式 null', async () => {
     const { onEditCommit } = renderCard()
     await toEdit()
-    const select = screen.getByTestId('card-account')
-    expect(select).toHaveValue('acc-bank')
-    fireEvent.change(select, { target: { value: 'acc-cash' } })
+    fireEvent.click(screen.getByTestId('entry-account-picker'))
+    fireEvent.click(within(screen.getByTestId('entry-account-list')).getByText('现金'))
     expect(onEditCommit).toHaveBeenCalledTimes(1)
     expect(onEditCommit.mock.calls[0][0].transactions[0].accountId).toBe('acc-cash')
+    // 下拉随选择收起
+    expect(screen.queryByTestId('entry-account-list')).toBeNull()
 
-    fireEvent.change(select, { target: { value: '' } })
+    fireEvent.click(screen.getByTestId('entry-account-picker'))
+    fireEvent.click(within(screen.getByTestId('entry-account-list')).getByText('不使用账户'))
     expect(onEditCommit).toHaveBeenCalledTimes(2)
     expect(onEditCommit.mock.calls[1][0].transactions[0].accountId).toBeNull()
+  })
+
+  it('chip 切账本 → overrides 携带新 bookId；重复选当前账本不触发', async () => {
+    const { onEditCommit } = renderCard()
+    await toEdit()
+    fireEvent.click(screen.getByTestId('entry-book-picker'))
+    const list = screen.getByTestId('entry-book-list')
+    fireEvent.click(within(list).getByText('旅行账本'))
+    expect(onEditCommit).toHaveBeenCalledTimes(1)
+    const [edited, overrides] = onEditCommit.mock.calls[0]
+    expect(overrides).toEqual({ bookId: 'book-2' })
+    expect(edited.transactions[0].amountCents).toBe(4500) // 其余字段沿用
+
+    // 再开下拉重复点当前所选 → 同值守卫
+    fireEvent.click(screen.getByTestId('entry-book-picker'))
+    fireEvent.click(within(screen.getByTestId('entry-book-list')).getByText('旅行账本'))
+    expect(onEditCommit).toHaveBeenCalledTimes(1)
+  })
+
+  it('chip 预算：不计入 → {includeInBudget:false}；改回计入 → 无 override（走 native 缺省）', async () => {
+    const { onEditCommit } = renderCard()
+    await toEdit()
+    fireEvent.click(screen.getByTestId('entry-budget-picker'))
+    fireEvent.click(screen.getByTestId('entry-budget-exclude'))
+    expect(onEditCommit).toHaveBeenCalledTimes(1)
+    expect(onEditCommit.mock.calls[0][1]).toEqual({ includeInBudget: false })
+
+    fireEvent.click(screen.getByTestId('entry-budget-picker'))
+    fireEvent.click(screen.getByTestId('entry-budget-include'))
+    expect(onEditCommit).toHaveBeenCalledTimes(2)
+    expect(onEditCommit.mock.calls[1][1]).toBeUndefined()
   })
 
   it('「完成」收起回展示态，编辑中的金额已随失焦落定', async () => {
@@ -339,13 +389,42 @@ describe('ConfirmationCard — 编辑态（第八轮控件全集不回归）', (
     expect(onEditCommit).not.toHaveBeenCalled()
   })
 
-  it('编辑态换账户后展示态 chip 同步显示新账户', async () => {
+  it('编辑态 chip 换账户后展示态 chip 同步显示新账户', async () => {
     const { onEditCommit } = renderCard()
     await toEdit()
-    fireEvent.change(screen.getByTestId('card-account'), { target: { value: 'acc-cash' } })
+    fireEvent.click(screen.getByTestId('entry-account-picker'))
+    fireEvent.click(within(screen.getByTestId('entry-account-list')).getByText('现金'))
     expect(onEditCommit).toHaveBeenCalledTimes(1)
     fireEvent.click(screen.getByTestId('card-done'))
     expect(screen.getByTestId('card-account-chip').textContent).toContain('现金')
+  })
+})
+
+describe('ConfirmationCard — 待选分类态（T12-8 + T12-9 v3 融合）', () => {
+  const pending = () => renderCard({ status: 'pending-category', categoryId: '' })
+
+  it('编辑 UI 预选打开且宫格直接展开 + 引导文案 + 徽标「待选分类」', () => {
+    pending()
+    expect(screen.getByTestId('card-cat-toggle')).toBeInTheDocument()
+    expect(screen.getByTestId('category-pager')).toBeInTheDocument()
+    expect(screen.getByTestId('card-pending-hint').textContent).toContain('未识别到分类，请选一个后保存')
+    expect(screen.getByTestId('card-status').textContent).toBe('⚠️ 待选分类')
+  })
+
+  it('宫格点分类 → onEditCommit 携带新 categoryId（上层接管首次写入）', () => {
+    const { onEditCommit } = pending()
+    fireEvent.click(within(screen.getByTestId('category-pager')).getByText('交通'))
+    expect(onEditCommit).toHaveBeenCalledTimes(1)
+    expect(onEditCommit.mock.calls[0][0].transactions[0].categoryId).toBe('cat-traffic')
+  })
+
+  it('未选分类点「完成」→ 展示态保留徽标与「尚未记账」提示', () => {
+    pending()
+    fireEvent.click(screen.getByTestId('card-done'))
+    expect(screen.getByTestId('card-edit')).toBeInTheDocument()
+    expect(screen.getByTestId('card-cat-label').textContent).toBe('未分类')
+    expect(screen.getByTestId('card-pending-hint').textContent).toContain('尚未记账')
+    expect(screen.getByTestId('card-status').textContent).toBe('⚠️ 待选分类')
   })
 })
 

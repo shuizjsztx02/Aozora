@@ -9,8 +9,11 @@
  *   文字；行2 收支柱子（支出橙块/收入绿块）+ 账户 chip（可换）。右侧金额大号
  *   纵跨两行居中。行3 日期 | 备注；行4 账本名 + 状态徽标 | [编辑] [撤销]。
  *   支柱/账户 chip 展示态点击即触发既有替换写。
- * - **编辑态**（点「编辑」进入）：控件全集（金额输入、一级/二级分类宫格、
- *   日期、备注、账户下拉）+ 底部「完成」收起（复用第八轮常驻编辑器逻辑）。
+ * - **编辑态**（T12-9 / REQ-35 v3 重排，交互对齐手动记账弹框）：行1 分类图标钮
+ *   （点按卡内展开/收起 CategoryPager 宫格，QuickEntry 同款）+ 收支柱子 + ¥金额
+ *   + 状态徽标；行2 日期 + 备注；行3 EntryChipRow（账本/账户/预算三 chip）；
+ *   警告；底部「完成」收起。卡内切账本/预算经 overrides 传入编辑保存链路
+ *   （writeTransactions 用卡内 selectedBookId 覆盖 hook 层账本）。
  *
  * 「撤销」= 直连上层 undoExecution 软删该笔（卡片存续期常驻可用，不限 5s 窗）；
  * 撤销后上层卸载本卡，消息流转既有「已撤销」灰态。
@@ -18,20 +21,26 @@
 
 import { useState, useCallback, useRef } from 'react'
 import type { ActionProposal, TransactionItem } from '../../domain/action-proposal'
-import type { AccountData, CategoryData } from '../../platform/bridge/bridge-types'
+import type { AccountData, BookData, CategoryData } from '../../platform/bridge/bridge-types'
 import { CategoryIcon } from '../../components/CategoryIcon'
 import DateField from '../../components/DateField'
-import type { CardStatus } from './use-assistant'
+import { CategoryPager, EntryChipRow } from '../ledger/entry-controls'
+import type { CardStatus, ProposalWriteOverrides } from './use-assistant'
 
 interface ConfirmationCardProps {
   proposal: ActionProposal
   categories: CategoryData[]
   /** 上层本地写入状态：executing=保存中 committed=已记录 error=保存失败（可改可重试） */
   status: CardStatus
-  /** 提交编辑后的完整提案（上层执行替换写） */
-  onEditCommit: (edited: ActionProposal) => void
-  /** T9-7（REQ-15）：可选账户列表（展示态 chip 下拉 + 编辑态下拉） */
+  /** 提交编辑后的完整提案（上层执行替换写）。
+   *  T12-9（REQ-35）：overrides = 卡内账本/预算 chip 的带外覆盖（仅显式改过时非空）。 */
+  onEditCommit: (edited: ActionProposal, overrides?: ProposalWriteOverrides) => void
+  /** T9-7（REQ-15）：可选账户列表（展示态 chip 下拉 + 编辑态 EntryChipRow） */
   accounts: AccountData[]
+  /** T12-9（REQ-35）：编辑态 EntryChipRow 账本列表 */
+  books: BookData[]
+  /** T12-9：hook 层落账本 id（chip 展示回退 + 「未切换则不覆盖」基准） */
+  bookId: string | null
   /** T9-7：本笔所记账本名（行4 展示） */
   bookName: string
   /** T9-7：当前笔落库账户（= tx.accountId ?? defaultAccountId，卡片初始值） */
@@ -40,7 +49,8 @@ interface ConfirmationCardProps {
   onUndo: () => void
 }
 
-/** 已保存值快照，避免同值重复触发替换写；展示态渲染以此为准。 */
+/** 已保存值快照，避免同值重复触发替换写；展示态渲染以此为准。
+ *  T12-9：bookId/includeInBudget = 卡内生效值（chip 切换进快照比较，同值守卫同款）。 */
 interface CommittedSnapshot {
   type: TransactionItem['type']
   amountCents: number
@@ -48,6 +58,8 @@ interface CommittedSnapshot {
   bizDate: string
   note: string
   accountId: string | null
+  bookId: string
+  includeInBudget: boolean
 }
 
 export function ConfirmationCard(props: ConfirmationCardProps) {
@@ -58,7 +70,8 @@ export function ConfirmationCard(props: ConfirmationCardProps) {
 }
 
 function ConfirmationCardBody({
-  proposal, categories, status, onEditCommit, accounts, bookName, selectedAccountId, onUndo, tx,
+  proposal, categories, status, onEditCommit, accounts, books, bookId,
+  bookName, selectedAccountId, onUndo, tx,
 }: ConfirmationCardProps & { tx: TransactionItem }) {
   const initial: CommittedSnapshot = {
     type: tx.type,
@@ -67,8 +80,10 @@ function ConfirmationCardBody({
     bizDate: tx.bizDate,
     note: tx.note,
     accountId: selectedAccountId ?? null,
+    bookId: bookId ?? '',
+    includeInBudget: true, // 聊天路径不传 → native 默认计入（REQ-17 口径）
   }
-  const [editing, setEditing] = useState(false)
+  const [editing, setEditing] = useState(status === 'pending-category') // T12-8：待选分类态编辑 UI 预选打开
   const [amountYuan, setAmountYuan] = useState((tx.amountCents / 100).toFixed(2))
   const [categoryId, setCategoryId] = useState(tx.categoryId || '')
   const [bizDate, setBizDate] = useState(tx.bizDate)
@@ -77,6 +92,11 @@ function ConfirmationCardBody({
   const [amountError, setAmountError] = useState<string | null>(null)
   const [accountId, setAccountId] = useState<string | null>(selectedAccountId ?? null)
   const [accountMenuOpen, setAccountMenuOpen] = useState(false)
+  // T12-9（REQ-35）：v3 编辑态——宫格展开态（待选分类直接展开）+ 受控页码 + chip 覆盖值
+  const [catOpen, setCatOpen] = useState(status === 'pending-category')
+  const [catPage, setCatPage] = useState(0)
+  const [selectedBookId, setSelectedBookId] = useState<string | null>(null)
+  const [budgetChoice, setBudgetChoice] = useState<boolean | null>(null)
   // committed 的 state 镜像（ref 做同值比较，state 驱动展示态响应式刷新）
   const [committed, setCommitted] = useState<CommittedSnapshot>(initial)
   const lastCommittedRef = useRef<CommittedSnapshot>(initial)
@@ -105,11 +125,14 @@ function ConfirmationCardBody({
       bizDate: patch.bizDate ?? bizDate,
       note: patch.note ?? note,
       accountId: patch.accountId !== undefined ? patch.accountId : accountId,
+      bookId: patch.bookId ?? selectedBookId ?? bookId ?? '',
+      includeInBudget: patch.includeInBudget ?? budgetChoice ?? true,
     }
     if (
       next.type === prev.type && next.amountCents === prev.amountCents &&
       next.categoryId === prev.categoryId && next.bizDate === prev.bizDate &&
-      next.note === prev.note && next.accountId === prev.accountId
+      next.note === prev.note && next.accountId === prev.accountId &&
+      next.bookId === prev.bookId && next.includeInBudget === prev.includeInBudget
     ) return
     const editedTx: TransactionItem = {
       ...tx,
@@ -121,16 +144,28 @@ function ConfirmationCardBody({
       // 键显式存在：null = 不使用账户（use-assistant 原样透传），string = 换账户
       accountId: next.accountId,
     }
+    // T12-9（决策 #3 注 / REQ-35）：带外字段只在实际偏离默认时下发——
+    // 账本未切换走 hook 层缺省；预算未改「不计入」走 native 缺省计入。
+    const overrides: ProposalWriteOverrides = {}
+    if (next.bookId && next.bookId !== (bookId ?? '')) overrides.bookId = next.bookId
+    if (next.includeInBudget === false) overrides.includeInBudget = false
     lastCommittedRef.current = next
     setCommitted(next)
-    onEditCommit({ ...proposal, transactions: [editedTx] })
-  }, [status, txType, amountYuan, categoryId, bizDate, note, accountId, tx, proposal, onEditCommit])
+    onEditCommit(
+      { ...proposal, transactions: [editedTx] },
+      Object.keys(overrides).length > 0 ? overrides : undefined,
+    )
+  }, [
+    status, txType, amountYuan, categoryId, bizDate, note, accountId,
+    selectedBookId, budgetChoice, bookId, tx, proposal, onEditCommit,
+  ])
 
   /** 收支柱子切换；展示态点击即替换写，编辑态沿用旧语义（清空分类待重选后再写）。 */
   const handleTypeChange = (t: TransactionItem['type'], immediate: boolean) => {
     if (t === txType) return
     setTxType(t)
     setCategoryId('') // 类型切换后需重选分类再落库
+    setCatPage(0)     // T12-6 同款：切收支宫格页码归零
     if (immediate) commit({ type: t, categoryId: '' })
   }
 
@@ -138,6 +173,17 @@ function ConfirmationCardBody({
     setAccountId(id)
     setAccountMenuOpen(false)
     commit({ accountId: id })
+  }
+
+  /** T12-9：卡内切账本 = 该笔改挂新账本（替换写由上层执行）。 */
+  const handleBookSelect = (id: string) => {
+    setSelectedBookId(id)
+    commit({ bookId: id })
+  }
+
+  const handleBudgetSelect = (v: boolean) => {
+    setBudgetChoice(v)
+    commit({ includeInBudget: v })
   }
 
   const handleAmountBlur = useCallback(() => {
@@ -156,11 +202,9 @@ function ConfirmationCardBody({
     if (note !== lastCommittedRef.current.note) commit({ note })
   }, [note, commit])
 
-  // ─── 分类两级结构（编辑态宫格跟随本地选择） ───
-  const primaries = categories.filter(c => c.kind === txType && !c.parentId)
+  // ─── 分类宫格（T12-9 v3：QuickEntry 同款平铺，含二级，过滤口径 categories.kind） ───
+  const pagerCats = categories.filter(c => c.kind === txType)
   const editInfo = catInfo(categoryId)
-  const activeParentId = editInfo.cat ? (editInfo.cat.parentId ?? editInfo.cat.id) : ''
-  const children = categories.filter(c => c.parentId === activeParentId)
 
   /** 分类 id →（图标分类, `一级 · 二级` 文字, 图标——二级无图标时沿用一级）。
    *  function 声明提升：编辑态派生值在其定义前使用。 */
@@ -342,6 +386,11 @@ function ConfirmationCardBody({
             保存失败，点「编辑」修改任意字段将自动重试
           </div>
         )}
+        {status === 'pending-category' && (
+          <div className="text-xs mt-1" style={{ color: 'var(--warning-text, #856404)' }} data-testid="card-pending-hint">
+            未识别到分类，点「编辑」选一个后保存（尚未记账）
+          </div>
+        )}
         {proposal.warnings.length > 0 && (
           <div className="mt-1 text-[10px] truncate" style={{ color: 'var(--warning-text, #856404)' }}>
             ⚠️ {proposal.warnings.join('；')}
@@ -351,16 +400,29 @@ function ConfirmationCardBody({
     )
   }
 
-  // ─────────────── 编辑态（第八轮控件全集 + 账户下拉 + 完成） ───────────────
+  // ─────────────── 编辑态（T12-9 / REQ-35 v3：QuickEntry 同款交互） ───────────────
   return (
     <div className={cardShell} style={cardStyle} data-testid="confirmation-card">
-      {/* 行1：图标 + 收支 + 金额 + 状态徽标 */}
+      {/* 行1：分类图标钮（点击卡内展开/收起宫格）+ 收支 + 金额 + 状态徽标 */}
       <div className="flex items-center gap-2">
-        <CategoryIcon
-          icon={editInfo.icon}
-          name={editInfo.cat?.name || '💰'}
-          className="text-[26px] leading-none shrink-0"
-        />
+        <button
+          type="button"
+          onClick={() => setCatOpen(o => !o)}
+          className="flex items-center gap-1 shrink-0 px-1.5 py-1 rounded-lg"
+          style={{ background: catOpen ? 'var(--glass)' : 'transparent' }}
+          data-testid="card-cat-toggle"
+          aria-expanded={catOpen}
+        >
+          <CategoryIcon
+            icon={editInfo.icon}
+            name={editInfo.cat?.name || '💰'}
+            className="text-[26px] leading-none shrink-0"
+          />
+          <span className="text-xs max-w-[5.5rem] truncate" style={{ color: 'var(--ink2)' }}>
+            {editInfo.label}
+          </span>
+          <span aria-hidden style={{ opacity: 0.6 }}>▾</span>
+        </button>
         <div className="flex gap-1 shrink-0">
           {(['expense', 'income'] as const).map(t => (
             <button
@@ -401,64 +463,30 @@ function ConfirmationCardBody({
           {amountError || '保存失败，修改任意字段将自动重试'}
         </div>
       )}
-
-      {/* 行2：一级分类（横向滚动胶囊） */}
-      <div
-        className="flex gap-1.5 overflow-x-auto mt-2 pb-1"
-        style={{ scrollbarWidth: 'none' }}
-        data-testid="primary-cats"
-      >
-        {primaries.map(cat => (
-          <button
-            key={cat.id}
-            type="button"
-            onClick={() => {
-              setCategoryId(cat.id)
-              commit({ categoryId: cat.id })
+      {/* T12-8（REQ-30）：待选分类引导——选定后 use-assistant 接管首次写入 */}
+      {status === 'pending-category' && !amountError && (
+        <div className="text-xs mt-1" style={{ color: 'var(--warning-text, #856404)' }} data-testid="card-pending-hint">
+          未识别到分类，请选一个后保存
+        </div>
+      )}
+      {/* 卡内展开的分类宫格（T12-6 共享组件；每页 10 格 2×5，>10 类横滑翻页） */}
+      {catOpen && (
+        <div className="mt-2">
+          <CategoryPager
+            categories={pagerCats}
+            selectedId={categoryId}
+            onSelect={id => {
+              setCategoryId(id)
+              commit({ categoryId: id })
             }}
-            className="shrink-0 flex items-center gap-1 px-2 py-1 rounded-lg text-xs transition-colors"
-            style={{
-              background: activeParentId === cat.id ? 'var(--accent)' : 'var(--glass)',
-              color: activeParentId === cat.id ? 'white' : 'var(--ink2)',
-              border: '1px solid var(--glass-border)',
-            }}
-          >
-            <CategoryIcon icon={cat.icon} name={cat.name} className="text-sm leading-none" />
-            {cat.name}
-          </button>
-        ))}
-      </div>
-
-      {/* 行3：二级分类（有所选一级且其有子分类时出现） */}
-      {children.length > 0 && (
-        <div
-          className="flex gap-1.5 overflow-x-auto pb-1"
-          style={{ scrollbarWidth: 'none' }}
-          data-testid="secondary-cats"
-        >
-          {children.map(child => (
-            <button
-              key={child.id}
-              type="button"
-              onClick={() => {
-                setCategoryId(child.id)
-                commit({ categoryId: child.id })
-              }}
-              className="shrink-0 px-2 py-1 rounded-lg text-xs transition-colors"
-              style={{
-                background: categoryId === child.id ? 'var(--accent)' : 'transparent',
-                color: categoryId === child.id ? 'white' : 'var(--ink3)',
-                border: '1px solid var(--glass-border)',
-              }}
-            >
-              {child.name}
-            </button>
-          ))}
+            page={catPage}
+            onPageChange={setCatPage}
+          />
         </div>
       )}
 
-      {/* 行4：日期 + 备注 同行 */}
-      <div className="flex gap-2 mt-1">
+      {/* 行2：日期 + 备注 同行 */}
+      <div className="flex gap-2 mt-2">
         <DateField
           value={bizDate}
           onChange={v => {
@@ -484,25 +512,18 @@ function ConfirmationCardBody({
         />
       </div>
 
-      {/* 行5：账户下拉（含「不使用账户」） */}
-      <div className="flex items-center gap-2 mt-1">
-        <span className="text-xs shrink-0" style={{ color: 'var(--ink2)' }}>账户</span>
-        <select
-          value={accountId ?? ''}
-          onChange={e => handleAccountSelect(e.target.value === '' ? null : e.target.value)}
-          className="flex-1 min-w-0 px-2 py-1 rounded-lg text-xs outline-none"
-          style={{
-            background: 'var(--glass)',
-            color: 'var(--ink)',
-            border: '1px solid var(--glass-border)',
-          }}
-          data-testid="card-account"
-        >
-          <option value="">不使用账户</option>
-          {accounts.map(a => (
-            <option key={a.id} value={a.id}>{a.name}</option>
-          ))}
-        </select>
+      {/* 行3：账本 / 账户 / 预算 chip 行（T12-6 共享组件，QuickEntry 同款交互） */}
+      <div className="mt-2">
+        <EntryChipRow
+          books={books}
+          accounts={accounts}
+          selectedBookId={selectedBookId ?? bookId}
+          selectedAccountId={accountId}
+          includeInBudget={budgetChoice ?? true}
+          onBookSelect={handleBookSelect}
+          onAccountSelect={handleAccountSelect}
+          onBudgetSelect={handleBudgetSelect}
+        />
       </div>
 
       {/* 警告（如低置信度）压缩为一行 */}
@@ -558,7 +579,10 @@ function StatusBadge({ status }: { status: CardStatus }) {
       }}
       data-testid="card-status"
     >
-      {status === 'executing' ? '保存中…' : status === 'committed' ? '✓ 已记录' : '⚠️ 保存失败'}
+      {status === 'executing' ? '保存中…'
+        : status === 'committed' ? '✓ 已记录'
+        : status === 'pending-category' ? '⚠️ 待选分类'
+        : '⚠️ 保存失败'}
     </span>
   )
 }

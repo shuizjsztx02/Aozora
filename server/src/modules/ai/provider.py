@@ -106,7 +106,18 @@ class DashScopeProvider:
         max_tokens: int,
         timeout: float,
     ) -> ProviderResult:
-        payload = {"model": model, "messages": messages, "max_tokens": max_tokens}
+        # T12-11 measurement: qwen3.7-flash thinks by default — edit/delete/
+        # query multi-field outputs took 20-24 s, blowing the ai_timeout_seconds
+        # budget (10 s, le=12) and silently degrading to canned. These are
+        # structured-output tasks; disable thinking for them. DashScope
+        # OpenAI-compatible mode accepts ``enable_thinking`` as a top-level
+        # body param for hybrid-thinking models.
+        payload = {
+            "model": model,
+            "messages": messages,
+            "max_tokens": max_tokens,
+            "enable_thinking": False,
+        }
         try:
             resp = await self._client.post(
                 self._url,

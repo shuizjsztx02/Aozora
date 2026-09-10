@@ -5,7 +5,7 @@
  * T-M4-04e: 图片上传成功后自动触发 AI 解析 → 批量确认卡 → 执行 add_tx_batch。
  */
 
-import { useState, useCallback, useRef, useEffect, useMemo } from 'react'
+import { useState, useCallback, useRef, useEffect } from 'react'
 import { motion, AnimatePresence } from 'framer-motion'
 import { useBridge } from '../../platform/hooks/use-bridge'
 import { useImage } from '../../platform/hooks/use-image'
@@ -20,7 +20,7 @@ import * as Money from '../../domain/money'
 import { todayBizDate } from '../../domain/date'
 import DateField from '../../components/DateField'
 import { pickEntryBook, pickDefaultAccount } from '../../domain/books'
-import { CategoryIcon } from '../../components/CategoryIcon'
+import { CategoryPager, EntryChipRow } from './entry-controls'
 
 interface QuickEntrySheetProps {
   categories: CategoryData[]
@@ -74,7 +74,7 @@ export function QuickEntrySheet({ categories, onClose, onSuccess }: QuickEntrySh
   const [accounts, setAccounts] = useState<AccountData[]>([])
   const [selectedBookId, setSelectedBookId] = useState<string | null>(null)
   const [selectedAccountId, setSelectedAccountId] = useState<string | null>(null)
-  const [openPicker, setOpenPicker] = useState<'book' | 'account' | 'budget' | null>(null)
+  // T12-6：openPicker 单开态随 EntryChipRow 迁入组件内。
   // 第十轮 REQ-17（决策 #1）：手动记账初始"不计入预算"（用户明确要求），可切换；
   // 聊天/图片批量路径不传该字段 → native 缺省计入。
   const [includeInBudget, setIncludeInBudget] = useState(false)
@@ -103,46 +103,12 @@ export function QuickEntrySheet({ categories, onClose, onSuccess }: QuickEntrySh
     return () => { cancelled = true }
   }, [bridge])
 
-  const selectableBooks = books.filter(b => !b.isMaster)
-  const bookLabel = selectedBookId
-    ? (books.find(b => b.id === selectedBookId)?.name || '账本')
-    : (pickEntryBook(books)?.name || '选择账本')
-  const accountLabel = selectedAccountId
-    ? (accounts.find(a => a.id === selectedAccountId)?.name || '账户')
-    : (accounts.length > 0 ? '不使用账户' : '无账户')
-  // T9-6（决策 #6）：按钮/下拉显示所选实体 icon（照片版经 CategoryIcon 渲染）
-  const currentBook = selectedBookId
-    ? books.find(b => b.id === selectedBookId)
-    : pickEntryBook(books)
-  const currentAccount = selectedAccountId
-    ? accounts.find(a => a.id === selectedAccountId)
-    : undefined
-
+  // T12-6：chip 文案/所选实体推导随 EntryChipRow 迁入组件。
+  // selectedBookId/selectedAccountId/includeInBudget 仍留在宿主：handleSubmit 写库要用。
   const filteredCats = categories.filter(c => c.kind === type)
 
-  // T7-3（REQ-3 / 决策 #6）：分类每页 10 格（2×5），末页补空占位保证两态等高
-  const catPages = useMemo(() => {
-    const pages: CategoryData[][] = []
-    for (let i = 0; i < filteredCats.length; i += 10) {
-      pages.push(filteredCats.slice(i, i + 10))
-    }
-    return pages
-  }, [filteredCats])
+  // T12-6：分页/横滑迁入 CategoryPager；页码受控保留（切收支归零策略在本层）。
   const [catPage, setCatPage] = useState(0)
-  const safeCatPage = Math.min(catPage, Math.max(0, catPages.length - 1))
-
-  // touch 横滑翻页：起点/终点 dx 阈值 ±40px
-  const swipeStartXRef = useRef<number | null>(null)
-  const handleCatTouchStart = useCallback((e: React.TouchEvent) => {
-    swipeStartXRef.current = e.touches[0]?.clientX ?? null
-  }, [])
-  const handleCatTouchEnd = useCallback((e: React.TouchEvent) => {
-    if (swipeStartXRef.current === null) return
-    const dx = (e.changedTouches[0]?.clientX ?? 0) - swipeStartXRef.current
-    swipeStartXRef.current = null
-    if (dx <= -40 && safeCatPage < catPages.length - 1) setCatPage(safeCatPage + 1)
-    else if (dx >= 40 && safeCatPage > 0) setCatPage(safeCatPage - 1)
-  }, [safeCatPage, catPages.length])
 
   // ─── T-M4-04e: 图片上传成功后自动触发解析 ───────────────────────────
 
@@ -579,191 +545,29 @@ export function QuickEntrySheet({ categories, onClose, onSuccess }: QuickEntrySh
                 </div>
               </div>
 
-              {/* 第八轮 REQ-9：账本 / 账户选择行 */}
+              {/* 第八轮 REQ-9：账本 / 账户 / 预算 chip 行（T12-6：抽入 EntryChipRow，openPicker 态组件内持有） */}
               <div className="px-4 mb-3">
-                <div className="flex gap-2">
-                  <button
-                    type="button"
-                    onClick={() => setOpenPicker(openPicker === 'book' ? null : 'book')}
-                    className="flex items-center gap-1.5 px-3 py-1.5 rounded-full text-xs transition-colors"
-                    style={{ background: 'var(--glass)', color: 'var(--ink2)', border: '1px solid var(--glass-border)' }}
-                    data-testid="entry-book-picker"
-                  >
-                    <CategoryIcon icon={currentBook?.icon} name={bookLabel} fallback="📒" />
-                    <span className="max-w-[7rem] truncate">{bookLabel}</span>
-                    <span aria-hidden style={{ opacity: 0.6 }}>▾</span>
-                  </button>
-                  <button
-                    type="button"
-                    onClick={() => setOpenPicker(openPicker === 'account' ? null : 'account')}
-                    className="flex items-center gap-1.5 px-3 py-1.5 rounded-full text-xs transition-colors"
-                    style={{ background: 'var(--glass)', color: 'var(--ink2)', border: '1px solid var(--glass-border)' }}
-                    data-testid="entry-account-picker"
-                  >
-                    <CategoryIcon icon={currentAccount?.icon} name={accountLabel} fallback="💳" />
-                    <span className="max-w-[7rem] truncate">{accountLabel}</span>
-                    <span aria-hidden style={{ opacity: 0.6 }}>▾</span>
-                  </button>
-                  {/* 第十轮 REQ-17：是否计入预算（初始不计入） */}
-                  <button
-                    type="button"
-                    onClick={() => setOpenPicker(openPicker === 'budget' ? null : 'budget')}
-                    className="flex items-center gap-1.5 px-3 py-1.5 rounded-full text-xs transition-colors"
-                    style={{ background: 'var(--glass)', color: 'var(--ink2)', border: '1px solid var(--glass-border)' }}
-                    data-testid="entry-budget-picker"
-                  >
-                    <span aria-hidden>📊</span>
-                    <span>{includeInBudget ? '计入预算' : '不计入预算'}</span>
-                    <span aria-hidden style={{ opacity: 0.6 }}>▾</span>
-                  </button>
-                </div>
-
-                {openPicker === 'book' && (
-                  <div
-                    className="mt-2 rounded-xl p-1 max-h-48 overflow-y-auto"
-                    style={{ background: 'var(--glass)', border: '1px solid var(--glass-border)' }}
-                    data-testid="entry-book-list"
-                  >
-                    {selectableBooks.length === 0 ? (
-                      <div className="px-3 py-2 text-xs text-ink3">暂无可用账本</div>
-                    ) : (
-                      selectableBooks.map(b => (
-                        <button
-                          key={b.id}
-                          type="button"
-                          onClick={() => { setSelectedBookId(b.id); setOpenPicker(null) }}
-                          className="w-full text-left px-3 py-2 rounded-lg text-sm flex items-center justify-between"
-                          style={{ color: selectedBookId === b.id ? 'var(--accent)' : 'var(--ink2)' }}
-                        >
-                          <span className="flex items-center gap-1.5 min-w-0">
-                            <CategoryIcon icon={b.icon} name={b.name || '账本'} fallback="📒" />
-                            <span className="truncate">{b.name || '账本'}</span>
-                          </span>
-                          {selectedBookId === b.id && <span>✓</span>}
-                        </button>
-                      ))
-                    )}
-                  </div>
-                )}
-
-                {openPicker === 'account' && (
-                  <div
-                    className="mt-2 rounded-xl p-1 max-h-48 overflow-y-auto"
-                    style={{ background: 'var(--glass)', border: '1px solid var(--glass-border)' }}
-                    data-testid="entry-account-list"
-                  >
-                    <button
-                      type="button"
-                      onClick={() => { setSelectedAccountId(null); setOpenPicker(null) }}
-                      className="w-full text-left px-3 py-2 rounded-lg text-sm flex items-center justify-between"
-                      style={{ color: selectedAccountId === null ? 'var(--accent)' : 'var(--ink2)' }}
-                    >
-                      <span>不使用账户</span>
-                      {selectedAccountId === null && <span>✓</span>}
-                    </button>
-                    {accounts.map(a => (
-                      <button
-                        key={a.id}
-                        type="button"
-                        onClick={() => { setSelectedAccountId(a.id); setOpenPicker(null) }}
-                        className="w-full text-left px-3 py-2 rounded-lg text-sm flex items-center justify-between"
-                        style={{ color: selectedAccountId === a.id ? 'var(--accent)' : 'var(--ink2)' }}
-                      >
-                        <span className="flex items-center gap-1.5 min-w-0">
-                          <CategoryIcon icon={a.icon} name={a.name} fallback="💰" />
-                          <span className="truncate">{a.name}</span>
-                        </span>
-                        {selectedAccountId === a.id && <span>✓</span>}
-                      </button>
-                    ))}
-                  </div>
-                )}
-
-                {openPicker === 'budget' && (
-                  <div
-                    className="mt-2 rounded-xl p-1"
-                    style={{ background: 'var(--glass)', border: '1px solid var(--glass-border)' }}
-                    data-testid="entry-budget-list"
-                  >
-                    {[true, false].map(v => (
-                      <button
-                        key={String(v)}
-                        type="button"
-                        onClick={() => { setIncludeInBudget(v); setOpenPicker(null) }}
-                        className="w-full text-left px-3 py-2 rounded-lg text-sm flex items-center justify-between"
-                        style={{ color: includeInBudget === v ? 'var(--accent)' : 'var(--ink2)' }}
-                        data-testid={v ? 'entry-budget-include' : 'entry-budget-exclude'}
-                      >
-                        <span>{v ? '计入预算' : '不计入预算'}</span>
-                        {includeInBudget === v && <span>✓</span>}
-                      </button>
-                    ))}
-                  </div>
-                )}
+                <EntryChipRow
+                  books={books}
+                  accounts={accounts}
+                  selectedBookId={selectedBookId}
+                  selectedAccountId={selectedAccountId}
+                  includeInBudget={includeInBudget}
+                  onBookSelect={setSelectedBookId}
+                  onAccountSelect={setSelectedAccountId}
+                  onBudgetSelect={setIncludeInBudget}
+                />
               </div>
 
-              {/* 分类选择（REQ-3：每页 10 格 2×5 等高，>10 类横滑翻页 + 指示点） */}
+              {/* 分类选择（T12-6：抽入 CategoryPager；REQ-3 每页 10 格 2×5 等高，>10 类横滑翻页 + 指示点） */}
               <div className="px-4 mb-3">
-                <div
-                  className="overflow-hidden"
-                  data-testid="category-pager"
-                  onTouchStart={handleCatTouchStart}
-                  onTouchEnd={handleCatTouchEnd}
-                >
-                  <div
-                    className="flex transition-transform duration-200"
-                    style={{ transform: `translateX(-${safeCatPage * 100}%)` }}
-                  >
-                    {catPages.map((page, pi) => (
-                      <div key={pi} className="w-full shrink-0 grid grid-cols-5 gap-2">
-                        {page.map(cat => (
-                          <button
-                            key={cat.id}
-                            onClick={() => setCategoryId(cat.id)}
-                            className={`cat-cell text-xs ${categoryId === cat.id ? 'active' : ''}`}
-                            style={{
-                              background: categoryId === cat.id ? 'var(--glass)' : 'transparent',
-                            }}
-                          >
-                            <CategoryIcon icon={cat.icon} name={cat.name} className="text-lg" />
-                            <span className="truncate max-w-full text-ink2">{cat.name}</span>
-                          </button>
-                        ))}
-                        {/* 末页补隐形占位格（与真实格同构，T9-1/UI-18：空 div 行高为 0 等于没补） */}
-                        {Array.from({ length: 10 - page.length }).map((_, i) => (
-                          <div
-                            key={`ph-${i}`}
-                            data-testid="cat-cell-placeholder"
-                            className="cat-cell text-xs"
-                            style={{ visibility: 'hidden' }}
-                            aria-hidden
-                          >
-                            <CategoryIcon name="占" className="text-lg" />
-                            <span className="text-xs">占</span>
-                          </div>
-                        ))}
-                      </div>
-                    ))}
-                  </div>
-                </div>
-                {catPages.length > 1 && (
-                  <div className="flex justify-center gap-1.5 mt-2" data-testid="category-page-dots">
-                    {catPages.map((_, i) => (
-                      <button
-                        key={i}
-                        aria-label={`分类第 ${i + 1} 页`}
-                        onClick={() => setCatPage(i)}
-                        className="rounded-full"
-                        style={{
-                          width: i === safeCatPage ? 16 : 6,
-                          height: 6,
-                          background: i === safeCatPage ? 'var(--accent)' : 'var(--glass-border)',
-                          transition: 'width 0.15s',
-                        }}
-                      />
-                    ))}
-                  </div>
-                )}
+                <CategoryPager
+                  categories={filteredCats}
+                  selectedId={categoryId}
+                  onSelect={setCategoryId}
+                  page={catPage}
+                  onPageChange={setCatPage}
+                />
               </div>
 
               {/* T7-3（REQ-2 / 决策 #5）：日期左、添加凭证右同行分布；有凭证/草稿时凭证块整块占行 */}

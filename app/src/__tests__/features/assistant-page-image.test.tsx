@@ -2,7 +2,7 @@
  * T9-8（REQ-16）: 聊天页图片上传链路测试。
  *
  * 验证：
- * - 🖼️ 按钮渲染（输入行重排后：[🎤][输入][🖼️][发送] DOM 顺序）
+ * - 🖼️ 按钮渲染（T12-1 REQ-29 ② 输入行重排后：[🎤][🖼️][输入][发送] DOM 顺序）
  * - 完整链路：pickImage → parseImage → 批量卡渲染 → batch-confirm →
  *   executeProposal（token=chat_img_*）→ 卡片收起 + 落「已记录 N 笔交易」+ triggerSync
  * - parse 失败 → 红条 + 重试（重试续 parse 不重新选图）
@@ -55,6 +55,25 @@ const mockAssistant = vi.hoisted(() => ({
 vi.mock('../../platform/hooks/use-voice', () => ({ useVoice: () => mockVoice }))
 vi.mock('../../platform/hooks/use-bridge', () => ({ useBridge: () => mockBridge }))
 vi.mock('../../features/assistant/use-assistant', () => ({ useAssistant: () => mockAssistant }))
+// T12-1：页面新增 usePermissions（mic 按需授权）——本文件不点 mic，默认已授予即可
+vi.mock('../../platform/hooks/use-permissions', () => ({
+  usePermissions: () => ({
+    canRecord: true,
+    loading: false,
+    status: {
+      permissions: { RECORD_AUDIO: 'granted', CAMERA: 'not_requested', READ_MEDIA_IMAGES: 'not_requested', POST_NOTIFICATIONS: 'not_requested' },
+      canRecordAudio: true,
+      canUseCamera: false,
+      canAccessImages: false,
+    },
+    canCamera: false,
+    canGallery: false,
+    shouldGuideSettings: false,
+    requestPermission: vi.fn().mockResolvedValue(undefined),
+    openSettings: vi.fn().mockResolvedValue(undefined),
+    refresh: vi.fn().mockResolvedValue(undefined),
+  }),
+}))
 
 const batchProposal = {
   proposalId: 'prop-batch',
@@ -91,14 +110,14 @@ describe('AssistantPage — 图片上传链路 (T9-8)', () => {
     mockBridge.executeProposal.mockResolvedValue({ transaction_ids: ['t1', 't2'], undo_window_seconds: 0 })
   })
 
-  it('输入行为 [🎤][输入框][🖼️][发送] 顺序（REQ-16 B）', () => {
+  it('输入行为 [语音][图片][输入框][发送] 顺序（T12-1 REQ-29 ②：图片钮移到语音旁）', () => {
     renderPage()
     const mic = screen.getByTestId('voice-mic-button')
     const img = screen.getByTestId('image-upload-button')
     const input = screen.getByPlaceholderText('输入记账短句…')
-    // mic 在 input 前（左语音），img 在 input 后（右图片）
+    // T12-1 重排：mic 在最左，img 紧挨其右，input 在 img 之后
     expect(mic.compareDocumentPosition(img) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy()
-    expect(input.compareDocumentPosition(img) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy()
+    expect(img.compareDocumentPosition(input) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy()
     expect(mic.compareDocumentPosition(input) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy()
   })
 
@@ -145,6 +164,20 @@ describe('AssistantPage — 图片上传链路 (T9-8)', () => {
     expect(mockBridge.pickImage).toHaveBeenCalledTimes(1)
     expect(mockBridge.parseImage.mock.calls[1]).toEqual(['att-1', 'book-1'])
     await waitFor(() => expect(screen.getByTestId('batch-confirmation-card')).toBeInTheDocument())
+  })
+
+  it('parse 503 no_ai_provider → AI 未配置专属文案（T12-1 决策 #9）', async () => {
+    mockBridge.parseImage.mockRejectedValueOnce(
+      bridgeError('AI service is temporarily unavailable', 'no_ai_provider'),
+    )
+    const user = userEvent.setup()
+    renderPage()
+    await waitFor(() => expect(mockBridge.listBooks).toHaveBeenCalled())
+
+    await user.click(screen.getByTestId('image-upload-button'))
+    const bar = await screen.findByTestId('image-error')
+    expect(bar.textContent).toContain('AI_PROVIDER_API_KEY')
+    expect(bar.textContent).not.toContain('AI service is temporarily unavailable')
   })
 
   it('用户取消选图 → 静默回 idle，无红条', async () => {

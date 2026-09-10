@@ -218,6 +218,18 @@ export class NativeBridge {
     return this.call('transaction.softDelete', { id, mutationId })
   }
 
+  /**
+   * 第十二轮 T12-7（REQ-36）：交易编辑真 update（保 id 保附件关联，决策 #4）。
+   * tx 为全字段且 version 必填（= 当前版本 +1，Kotlin 侧乐观锁）；payload 形状
+   * { tx, mutationId } 与 transaction.insert 一致。
+   */
+  async updateTransaction(
+    tx: TransactionInput & { version: number },
+    mutationId: string,
+  ): Promise<{ id: string; version: number }> {
+    return this.call('transaction.update', { tx, mutationId })
+  }
+
   // ─── Book ───
 
   async listBooks(): Promise<BookData[]> {

@@ -85,6 +85,67 @@ class Repository(private val db: AozoraDatabase) {
         }
     }
 
+    /**
+     * 第十二轮 T12-7（REQ-36）：原子事务：全字段编辑流水 + 写入 pending mutation
+     * （OP_UPDATE）。真 update 保 id / 保附件关联（决策 #4，区别于聊天卡的替换写）。
+     *
+     * 版本契约镜像 updateAccount：调用方传 version = 当前 +1，入队 expectedVersion =
+     * 变更前版本；SQL 级 where id AND version 乐观锁兜底（0 行 = 冲突 → 抛错回滚，
+     * mutation 不入队）。payload = transactionToJson 全字段（含 bookId/includeInBudget：
+     * 服务端 _apply_update 白名单外的键静默忽略不毒丸，跨账本移动语义 server 暂不支持）。
+     */
+    suspend fun updateTransaction(tx: TransactionEntity, mutationId: String) {
+        require(mutationId.isNotBlank()) { "mutationId is required" }
+        require(tx.id.isNotBlank() && tx.bookId.isNotBlank() && tx.categoryId.isNotBlank()) { "entity IDs are required" }
+        require(tx.amountCents in 1..9007199254740991L) { "amountCents must be a positive safe integer" }
+        require(tx.type in setOf("income", "expense")) { "invalid transaction type" }
+        // 源枚举与 insertTransaction 同步（T11-4 加 scheduled）
+        require(tx.source in setOf("manual", "nlu_local", "nlu_ai", "import", "scheduled")) { "invalid source" }
+        require(tx.version > 0) { "invalid version" }
+        require(Regex("\\d{4}-\\d{2}-\\d{2}").matches(tx.bizDate)) { "invalid bizDate" }
+        require(runCatching { LocalDate.parse(tx.bizDate) }.isSuccess) { "invalid bizDate" }
+        db.withTransaction {
+            val current = db.transactionDao().getById(tx.id)
+            require(current != null && current.deletedAt == null) { "transaction not found or already deleted" }
+            require(tx.version > current.version) { "version must increase" }
+            require(db.bookDao().getById(tx.bookId) != null) { "book not found: ${tx.bookId}" }
+            require(db.categoryDao().getById(tx.categoryId) != null) { "category not found: ${tx.categoryId}" }
+            if (tx.accountId != null) {
+                require(db.accountDao().getById(tx.accountId) != null) { "account not found: ${tx.accountId}" }
+            }
+            val rows = db.transactionDao().updateWithVersion(
+                id = tx.id,
+                bookId = tx.bookId,
+                type = tx.type,
+                amountCents = tx.amountCents,
+                categoryId = tx.categoryId,
+                accountId = tx.accountId,
+                note = tx.note,
+                bizDate = tx.bizDate,
+                occurredAt = tx.occurredAt,
+                source = tx.source,
+                includeInBudget = tx.includeInBudget,
+                newVersion = tx.version,
+                expectedVersion = current.version,
+            )
+            require(rows == 1) { "transaction version conflict" }
+            db.pendingMutationDao().insert(
+                PendingMutationEntity(
+                    mutationId = mutationId,
+                    entityType = "transaction",
+                    entityId = tx.id,
+                    operation = PendingMutationEntity.OP_UPDATE,
+                    payload = transactionToJson(tx),
+                    status = PendingMutationEntity.STATUS_PENDING,
+                    retryCount = 0,
+                    createdAt = System.currentTimeMillis(),
+                    expectedVersion = current.version,
+                    lastError = null
+                )
+            )
+        }
+    }
+
     suspend fun getTransaction(id: String): TransactionEntity? =
         db.transactionDao().getById(id)
 

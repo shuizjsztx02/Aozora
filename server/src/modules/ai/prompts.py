@@ -12,6 +12,7 @@ tasks. Full ActionProposal contract validation lands in T-M4-02.
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass
 from typing import Literal
 
@@ -28,23 +29,61 @@ class PromptTemplate:
 # Online path for short ledger sentences the local rule NLU cannot handle
 # (e.g. Chinese numerals like 「十二块五」 — T-M1-04 handoff note).
 # Output is a minimal parse result, NOT yet an ActionProposal (T-M4-02).
+# 第十二轮 T12-11（REQ-37）：v2 扩 intent/reply/filter/set——老 6 字段原样保留
+# （旧客户端按 bookkeeping 语义消费 v2 输出：非记账 intent 的 type/amountCents
+# 为空/0，经 ai-proposal-builder 落 chat 兜底，向后兼容）；操作目标由 filter 条件
+# 在客户端本地圈定，LLM 永不出 transaction id（决策 #3）。
 LEDGER_PARSE = PromptTemplate(
     task_id="ledger_parse",
     system_prompt=(
-        "你是记账应用的解析引擎。把用户的记账短句解析为一个 JSON 对象。"
+        "你是记账应用的解析引擎。把用户的输入解析为一个 JSON 对象。"
         "只输出 JSON 对象本身，不要输出解释、前后缀或 markdown 代码块。\n"
-        "字段定义：\n"
-        '- "type": "expense"（支出）或 "income"（收入）\n'
+        "字段定义（intent 与基础字段每次都必须输出）：\n"
+        '- "intent": 用户意图，取值之一：\n'
+        '  "bookkeeping"=新增一笔收支记录（默认，拿不准时用它）；\n'
+        '  "edit"=修改已有的一笔或多笔记录的金额/分类/备注/日期/是否计入预算；\n'
+        '  "delete"=删除已有的一笔或多笔记录；\n'
+        '  "query"=询问自己的账单数据（如「这个月花了多少」）；\n'
+        '  "chat"=与记账无关的提问或闲聊。\n'
+        '- "type": "expense"（支出）或 "income"（收入）；非记账场景可为 ""\n'
         '- "amountCents": 整数，金额单位为分（1 元 = 100 分）。'
         "必须支持中文数字和口语金额，例如「十二块五」= 1250、「三十」= 3000、"
-        "「两块」= 200。\n"
+        "「两块」= 200。无法确定时为 0。\n"
         '- "category": 字符串，从短句推断的分类名（如 餐饮/交通/购物）；无法判断时为 ""\n'
         '- "note": 字符串，备注原文；没有时为 ""\n'
         '- "bizDate": "YYYY-MM-DD" 格式的日期；短句未提及具体日期时为 ""\n'
         '- "confidence": 0 到 1 之间的小数，表示解析置信度\n'
-        "如果短句与记账无关或无法解析，输出 "
-        '{"type": "", "amountCents": 0, "category": "", "note": "", '
-        '"bizDate": "", "confidence": 0}'
+        '- "reply": 字符串。chat/query 时给用户的回答正文；'
+        "edit/delete 时给用户看的简短确认拟语；bookkeeping 时为 \"\"\n"
+        '- "filter": 对象，edit/delete/query 用于圈定「哪些已有记录」，'
+        "用户没有明确提到的键一律省略；不涉及则整个键省略。可用键：\n"
+        '  "dateFrom"/"dateTo": "YYYY-MM-DD"（含端点）；"category": 分类名；'
+        '"keyword": 备注关键词；"amountMinCents"/"amountMaxCents": 整数（分）；'
+        '"recentN": 整数，最近 N 笔\n'
+        '- "set": 对象，仅 edit：要把记录改成什么，'
+        "用户没有明确提到的键一律省略；不涉及则整个键省略。可用键：\n"
+        '  "category": 新分类名；"note": 新备注；"amountCents": 新金额（分）；'
+        '"bizDate": "YYYY-MM-DD"；"includeInBudget": 布尔（是否计入预算）\n'
+        "规则：\n"
+        "1. intent=bookkeeping 时 type/amountCents 必须解析完整；"
+        "其他 intent 尽量填充基础字段，但不强求。\n"
+        "2. 相对日期（今天/昨天/上周五/这个月等）按 system 中「今天日期」换算为 "
+        "YYYY-MM-DD；未提供日期参考时不要臆造日期。\n"
+        "3. 若 system 尾部给出「用户现有分类名列表」：bookkeeping 的 category、"
+        "filter.category、set.category 必须从列表中选择——优先精确匹配；"
+        "没有精确项但有语义相近项时选最接近的；完全对不上时输出 \"\"。"
+        "列表之外名词一律不得输出。\n"
+        "4. edit/delete/query 只把用户明确说出的限定条件放进 filter；"
+        "一个限定条件都没有时省略 filter。\n"
+        "5. 你看不到用户的账单数据：edit/delete 的 reply 不要写命中笔数或总额；"
+        "query 的 reply 不要编造任何数字，只做简短澄清或引导"
+        "（具体数字由客户端本地计算）。"
+        "query 提问带有任何时间/类别等限定（如「这个月」「交通费」）时必须输出 filter。\n"
+        "6. 与记账无关的提问用 intent=chat，reply 礼貌简洁地作答，"
+        "不要编造用户的数据。\n"
+        "7. 完全无法解析时输出 "
+        '{"intent": "chat", "type": "", "amountCents": 0, "category": "", '
+        '"note": "", "bizDate": "", "confidence": 0, "reply": ""}'
     ),
     output_format="json",
     max_tokens=512,
@@ -177,6 +216,60 @@ def _clip(text: str) -> str:
     return text[:_MAX_CONTEXT_TEXT_CHARS]
 
 
+# T12-11（REQ-37 / 决策 #3）：categories 注入的独立上限——分类名短，
+# 但数量可能很大；客户端也应截，服务端不信任客户端（决策 #7 同款口径）。
+_MAX_CONTEXT_CATEGORIES = 120
+_MAX_CATEGORY_NAME_CHARS = 16
+
+_ISO_DATE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
+
+
+def _render_date_section(context: dict | None) -> str:
+    """T12-11：today（用户时区今天，客户端注入）→ 「今天日期」段。
+
+    prompt v2 的相对日期换算（filter.dateFrom/dateTo、bizDate）依赖它；
+    缺失/坏型 → ""（prompt 规则 2 自会拒绝臆造日期）。
+    """
+    if not isinstance(context, dict):
+        return ""
+    today = context.get("today")
+    if isinstance(today, str) and _ISO_DATE_RE.match(today.strip()):
+        return f"今天日期：{today.strip()}。用户提到的相对日期按此换算。"
+    return ""
+
+
+def _render_categories_section(context: dict | None) -> str:
+    """T12-11（REQ-37）：categories: string[] → 分类名白名单段。
+
+    专门渲染而非走 profile 的"未知键回退原键名"（那会把列表渲染成 JSON 噪音）。
+    非字符串/空白项跳过；每项 ≤16 字；去重保序；≤120 项；全坏 → ""。
+    """
+    if not isinstance(context, dict):
+        return ""
+    raw = context.get("categories")
+    if not isinstance(raw, list):
+        return ""
+    names: list[str] = []
+    seen: set[str] = set()
+    for item in raw:
+        if not isinstance(item, str):
+            continue
+        name = item.strip()[:_MAX_CATEGORY_NAME_CHARS]
+        if not name or name in seen:
+            continue
+        seen.add(name)
+        names.append(name)
+        if len(names) >= _MAX_CONTEXT_CATEGORIES:
+            break
+    if not names:
+        return ""
+    return (
+        "【用户现有分类名列表】category / filter.category / set.category "
+        '必须从下列名称中选择（无精确项时选语义最接近的，完全对不上输出 ""）：\n'
+        + "、".join(names)
+    )
+
+
 def _render_context_section(context: dict | None) -> str:
     """context = {persona: {name, text} | null, profile: {...} | null} → 注入段落。
 
@@ -220,11 +313,19 @@ def render_messages_with_context(
 
     用户输入仍只出现在 user turn——注入面收敛在带反注入声明的 system 段落里。
     context 为空/无有效字段时与 ``render_messages`` 完全等价。
+    T12-11（REQ-37）：追加 today/categories 两段专用渲染（各自独立判坏，
+    段间空行分隔；persona/profile 的反注入前缀只覆盖其自身段落）。
     """
     messages = render_messages(tpl, user_input)
-    section = _render_context_section(context)
-    if section:
-        messages[0]["content"] += "\n\n" + section
+    sections = [
+        s for s in (
+            _render_context_section(context),
+            _render_date_section(context),
+            _render_categories_section(context),
+        ) if s
+    ]
+    if sections:
+        messages[0]["content"] += "\n\n" + "\n\n".join(sections)
     return messages
 
 

@@ -37,3 +37,4 @@ src/main/assets/vosk-model-small-cn/
 /screenshots/
 /tmp-shots/
 server/.uvicorn-*.log
+server/uvicorn*.log

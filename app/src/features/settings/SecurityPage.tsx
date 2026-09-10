@@ -28,6 +28,8 @@ export function SecurityPage() {
   const [editingNick, setEditingNick] = useState(false)
   const [nickDraft, setNickDraft] = useState('')
   const [nickSaving, setNickSaving] = useState(false)
+  // REQ-31：昵称错误必须渲染在弹层内——pageError 在弹层遮罩之外，用户看不见
+  const [nickError, setNickError] = useState<string | null>(null)
   const [avatarBusy, setAvatarBusy] = useState(false)
   const [confirmMode, setConfirmMode] = useState<'logout' | 'switch' | null>(null)
   const [busy, setBusy] = useState(false)
@@ -65,23 +67,24 @@ export function SecurityPage() {
   const openNickEditor = () => {
     setNickDraft(displayName ?? '')
     setPageError(null)
+    setNickError(null)
     setEditingNick(true)
   }
 
   const saveNickname = async () => {
     const v = nickDraft.trim()
     if (v.length < 1 || v.length > 64) {
-      setPageError('昵称需为 1–64 个字符')
+      setNickError('昵称需为 1–64 个字符')
       return
     }
     setNickSaving(true)
-    setPageError(null)
+    setNickError(null)
     try {
       const me = await bridge.updateProfile(v)
       setDisplayName(me.nickname ?? v)
       setEditingNick(false)
     } catch (e) {
-      setPageError(authErrorMessage(e, '昵称保存失败，请稍后重试'))
+      setNickError(authErrorMessage(e, '昵称保存失败，请稍后重试'))
     } finally {
       setNickSaving(false)
     }
@@ -255,6 +258,16 @@ export function SecurityPage() {
               data-testid="security-nickname-input"
               autoFocus
             />
+            {nickError && (
+              <div
+                className="text-xs px-3 py-2 rounded-lg"
+                style={{ background: 'rgba(220, 38, 38, 0.1)', color: '#dc2626' }}
+                data-testid="security-nickname-error"
+                role="alert"
+              >
+                {nickError}
+              </div>
+            )}
             <div className="flex gap-2">
               <button
                 onClick={() => setEditingNick(false)}

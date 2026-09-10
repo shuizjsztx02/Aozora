@@ -8,6 +8,8 @@
  *
  * 第七轮 REQ-4：去掉"明细"大标题，原位置改为账本切换按钮（含总账本聚合视图——
  * master 不存流水，选中时对其余普通账本并行 listByBook 合并）。
+ *
+ * 第十二轮 REQ-33（T12-5）：搜索框缩为账本行右端圆钮，搜索能力迁至 /search 子页。
  */
 
 import { useState, useEffect, useCallback } from 'react'
@@ -18,6 +20,7 @@ import { newUuid } from '../../platform/uuid'
 import { pickEntryBook } from '../../domain/books'
 import { CategoryIcon } from '../../components/CategoryIcon'
 import { PeriodPanel } from '../../components/PeriodPanel'
+import { TxEditSheet } from './TxEditSheet'
 import type { BookData, TransactionData, CategoryData } from '../../platform/bridge/bridge-types'
 import * as Money from '../../domain/money'
 
@@ -65,15 +68,16 @@ export function DetailPage() {
   const [allTxs, setAllTxs] = useState<TransactionData[]>([])
   const [categories, setCategories] = useState<CategoryData[]>([])
   const [loading, setLoading] = useState(true)
-  const [query, setQuery] = useState('')
   const [pickerOpen, setPickerOpen] = useState(false)
   const [pickerYear, setPickerYear] = useState(() => new Date().getFullYear())
   const [books, setBooks] = useState<BookData[]>([])
   const [selectedBookId, setSelectedBookId] = useState<string | null>(null)
   const [bookPickerOpen, setBookPickerOpen] = useState(false)
+  // T12-10（REQ-36）：点击流水行开编辑弹层
+  const [editTx, setEditTx] = useState<TransactionData | null>(null)
 
   /**
-   * 按所选账本加载全量流水（含所有月份，搜索需要跨月份匹配）。
+   * 按所选账本加载流水（listByBook 不带期间；当前月过滤在渲染侧）。
    * 总账本自身不存流水（决策 #1）→ 对其余普通账本并行 listByBook 合并；
    * 过滤掉 selectedBookId 自身是重复保险。
    */
@@ -135,25 +139,10 @@ export function DetailPage() {
 
   const catOf = (tx: TransactionData) => categories.find(c => c.id === tx.categoryId)
 
-  // ─── 搜索（跨全部月份）或按月筛选 ───
-  const q = query.trim().toLowerCase()
-  const searching = q.length > 0
-  const visibleTxs = searching
-    ? allTxs.filter(tx => {
-        const cat = catOf(tx)
-        const haystack = [
-          cat?.name ?? '',
-          tx.note ?? '',
-          fmtAmount(tx.amountCents),
-          String(tx.amountCents),
-          tx.bizDate,               // 2026-09-03
-          dayLabel(tx.bizDate),     // 9月3日
-        ].join(' ').toLowerCase()
-        return haystack.includes(q)
-      })
-    : allTxs.filter(tx => tx.bizDate.startsWith(period))
+  // ─── 按月筛选（搜索能力 T12-5/REQ-33 已迁出至 /search 子页） ───
+  const visibleTxs = allTxs.filter(tx => tx.bizDate.startsWith(period))
 
-  // 当月合计（右侧展示，随所选月份变化；搜索时保持展示当月数字）
+  // 当月合计（右侧展示，随所选月份变化）
   const monthTxs = allTxs.filter(tx => tx.bizDate.startsWith(period))
   const monthExpense = monthTxs.filter(t => t.type === 'expense').reduce((s, t) => s + t.amountCents, 0)
   const monthIncome = monthTxs.filter(t => t.type === 'income').reduce((s, t) => s + t.amountCents, 0)
@@ -180,19 +169,35 @@ export function DetailPage() {
 
   return (
     <div className="min-h-screen pb-20">
-      {/* ─── 账本切换入口（REQ-4：替换原"明细"大标题位置） ─── */}
+      {/* ─── 账本切换入口（REQ-4：替换原"明细"大标题位置；REQ-33：右端加搜索圆钮） ─── */}
       <div className="relative px-4 pt-2 pb-1">
-        <button
-          onClick={() => setBookPickerOpen(v => !v)}
-          className="flex items-center gap-1 text-base font-semibold active:opacity-60"
-          style={{ color: 'var(--ink)' }}
-          aria-label="切换账本"
-          aria-expanded={bookPickerOpen}
-        >
-          {selectedBook && <CategoryIcon icon={selectedBook.icon} name={selectedBook.name} fallback="📒" className="text-lg" />}
-          <span>{selectedBook?.name ?? '选择账本'}</span>
-          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.4" strokeLinecap="round" strokeLinejoin="round" style={{ opacity: 0.5 }}><polyline points="6 9 12 15 18 9" /></svg>
-        </button>
+        <div className="flex items-center justify-between">
+          <button
+            onClick={() => setBookPickerOpen(v => !v)}
+            className="flex items-center gap-1 text-base font-semibold active:opacity-60"
+            style={{ color: 'var(--ink)' }}
+            aria-label="切换账本"
+            aria-expanded={bookPickerOpen}
+          >
+            {selectedBook && <CategoryIcon icon={selectedBook.icon} name={selectedBook.name} fallback="📒" className="text-lg" />}
+            <span>{selectedBook?.name ?? '选择账本'}</span>
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.4" strokeLinecap="round" strokeLinejoin="round" style={{ opacity: 0.5 }}><polyline points="6 9 12 15 18 9" /></svg>
+          </button>
+
+          {/* T12-5（REQ-33）：搜索缩为圆钮（样式同期间行 ‹› 钮），点击进 /search 子页 */}
+          <button
+            data-testid="open-search"
+            onClick={() => navigate('/search', { state: { bookId: selectedBookId } })}
+            className="flex items-center justify-center w-8 h-8 rounded-full active:opacity-60"
+            style={{ color: 'var(--ink)' }}
+            aria-label="搜索"
+          >
+            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round">
+              <circle cx="11" cy="11" r="7" />
+              <line x1="21" y1="21" x2="16.5" y2="16.5" />
+            </svg>
+          </button>
+        </div>
 
         {/* 账本列表面板（复用年/月面板的 fixed 遮罩 + glass-card 样式） */}
         {bookPickerOpen && (
@@ -298,53 +303,14 @@ export function DetailPage() {
         />
       </div>
 
-      {/* ─── 搜索框（匹配全部月份的账单卡片） ─── */}
-      <div className="px-4 pt-3 pb-1">
-        <div
-          className="flex items-center gap-2 px-3 py-2 rounded-full"
-          style={{ background: 'var(--glass)', border: '1px solid var(--glass-border)' }}
-        >
-          <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="var(--ink3)" strokeWidth="2" strokeLinecap="round">
-            <circle cx="11" cy="11" r="7" />
-            <line x1="21" y1="21" x2="16.5" y2="16.5" />
-          </svg>
-          <input
-            type="text"
-            value={query}
-            onChange={e => setQuery(e.target.value)}
-            placeholder="搜索分类、备注、金额、日期…"
-            className="flex-1 bg-transparent text-sm outline-none"
-            style={{ color: 'var(--ink)' }}
-            aria-label="搜索账单"
-          />
-          {query && (
-            <button
-              onClick={() => setQuery('')}
-              className="w-5 h-5 rounded-full flex items-center justify-center text-xs"
-              style={{ background: 'var(--glass-border)', color: 'var(--ink2)' }}
-              aria-label="清空搜索"
-            >
-              ✕
-            </button>
-          )}
-        </div>
-        {searching && (
-          <div className="px-1 pt-2 text-xs" style={{ color: 'var(--ink3)' }}>
-            找到 {visibleTxs.length} 笔相关记录
-          </div>
-        )}
-      </div>
-
-      {/* ─── 流水列表 ─── */}
+      {/* ─── 流水列表（搜索入口 T12-5 起为账本行右端圆钮 → /search 子页） ─── */}
       <div className="px-4">
         {loading ? (
           <div className="flex justify-center py-12">
             <div className="w-8 h-8 rounded-full border-2 border-t-transparent animate-spin" style={{ borderColor: 'var(--accent)', borderTopColor: 'transparent' }} />
           </div>
         ) : sortedDays.length === 0 ? (
-          searching
-            ? <EmptyState icon="🔍" title="未找到相关记录" />
-            : <EmptyState icon="📋" title="本月暂无记录" />
+          <EmptyState icon="📋" title="本月暂无记录" />
         ) : (
           sortedDays.map(day => {
             const dayTxs = grouped.get(day)!
@@ -374,8 +340,9 @@ export function DetailPage() {
                     return (
                       <div
                         key={tx.id}
-                        className="flex items-center gap-3 py-2.5"
+                        className="flex items-center gap-3 py-2.5 cursor-pointer active:opacity-70"
                         style={i < dayTxs.length - 1 ? { borderBottom: '1px solid var(--glass-border)' } : undefined}
+                        onClick={() => setEditTx(tx)}
                       >
                         <div
                           className="flex items-center justify-center shrink-0 rounded-xl"
@@ -401,7 +368,7 @@ export function DetailPage() {
                           {tx.type === 'expense' ? '-' : '+'}{fmtAmount(tx.amountCents)}
                         </span>
                         <button
-                          onClick={() => handleDelete(tx.id)}
+                          onClick={e => { e.stopPropagation(); handleDelete(tx.id) }}
                           className="shrink-0 text-xs p-1.5 active:opacity-60"
                           style={{ color: 'var(--ink3)' }}
                           aria-label="删除"
@@ -417,6 +384,19 @@ export function DetailPage() {
           })
         )}
       </div>
+
+      {/* T12-10（REQ-36）：点行编辑弹层；保存/删除后按所选账本刷新列表 */}
+      {editTx && (
+        <TxEditSheet
+          tx={editTx}
+          categories={categories}
+          onClose={() => setEditTx(null)}
+          onSaved={() => {
+            if (selectedBookId) loadTxs(selectedBookId, books).catch(err =>
+              console.error('Failed to refresh after edit:', err))
+          }}
+        />
+      )}
     </div>
   )
 }

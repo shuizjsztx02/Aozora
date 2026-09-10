@@ -12,6 +12,7 @@ import { CategoryIcon } from '../../components/CategoryIcon'
 import { useBridge } from '../../platform/hooks/use-bridge'
 import { useTheme } from '../../design/theme'
 import { QuickEntrySheet } from './QuickEntrySheet'
+import { TxEditSheet } from './TxEditSheet'
 import type { TransactionData, CategoryData } from '../../platform/bridge/bridge-types'
 import * as Money from '../../domain/money'
 import { todayBizDate } from '../../domain/date'
@@ -90,6 +91,8 @@ export function HomePage() {
   const [categories, setCategories] = useState<CategoryData[]>([])
   const [budget, setBudget] = useState<{ amountCents: number } | null>(null)
   const [loadError, setLoadError] = useState<string | null>(null)
+  // T12-10（REQ-36）：今日流水行点击开编辑弹层
+  const [editTx, setEditTx] = useState<TransactionData | null>(null)
   const bridge = useBridge()
   const navigate = useNavigate()
   const [searchParams, setSearchParams] = useSearchParams()
@@ -254,8 +257,9 @@ export function HomePage() {
             {todayTxs.slice(0, 10).map(tx => {
               const cat = categories.find(c => c.id === tx.categoryId)
               return (
-                <div key={tx.id} className="flex items-center justify-between py-3"
-                  style={{ borderBottom: '1px solid var(--glass-border)' }}>
+                <div key={tx.id} className="flex items-center justify-between py-3 cursor-pointer active:opacity-70"
+                  style={{ borderBottom: '1px solid var(--glass-border)' }}
+                  onClick={() => setEditTx(tx)}>
                   <div className="flex items-center gap-3">
                     <CategoryIcon icon={cat?.icon} name={cat?.name ?? ''} className="text-xl" />
                     <div>
@@ -301,6 +305,16 @@ export function HomePage() {
             setShowSheet(false)
             loadData()
           }}
+        />
+      )}
+
+      {/* T12-10（REQ-36）：今日流水行点击编辑，保存/删除后刷新 */}
+      {editTx && (
+        <TxEditSheet
+          tx={editTx}
+          categories={categories}
+          onClose={() => setEditTx(null)}
+          onSaved={loadData}
         />
       )}
 

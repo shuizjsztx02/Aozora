@@ -5,8 +5,10 @@
  * - 麦克风按钮渲染 + 状态切换（录音中/非录音）
  * - 实时部分转写显示
  * - 最终转写文本填入输入框
- * - 语音错误显示
+ * - 语音错误显示（T12-1：错误码映射中文）
  * - 完整链路：录音 → 转写 → 填入输入 → 发送
+ * - T12-1（REQ-29 / 决策 #8）：按需授权流——未授权点 mic 请求权限、
+ *   granted 续链录音、denied 红条+「授权」、permanently_denied「去设置」
  */
 import { describe, it, expect, vi, beforeEach } from 'vitest'
 import { render, screen, waitFor } from '@testing-library/react'
@@ -26,6 +28,36 @@ const mockVoice = vi.hoisted(() => ({
   stopRecording: vi.fn(),
   reset: vi.fn(),
 }))
+
+// T12-1：usePermissions mock（默认已授予，单用例内改写 status/canRecord 后 rerender 驱动续链）
+const mockPermissions = vi.hoisted(() => ({
+  canRecord: true,
+  loading: false,
+  status: {
+    permissions: {
+      RECORD_AUDIO: 'granted',
+      CAMERA: 'not_requested',
+      READ_MEDIA_IMAGES: 'not_requested',
+      POST_NOTIFICATIONS: 'not_requested',
+    } as Record<string, string>,
+    canRecordAudio: true,
+    canUseCamera: false,
+    canAccessImages: false,
+  },
+  canCamera: false,
+  canGallery: false,
+  shouldGuideSettings: false,
+  requestPermission: vi.fn().mockResolvedValue(undefined),
+  openSettings: vi.fn().mockResolvedValue(undefined),
+  refresh: vi.fn().mockResolvedValue(undefined),
+}))
+
+/** 改写 RECORD_AUDIO 状态（模拟 onPermissionResult 推送后 usePermissions 刷新） */
+const setRecordStatus = (s: string) => {
+  mockPermissions.status.permissions.RECORD_AUDIO = s
+  mockPermissions.canRecord = s === 'granted'
+  mockPermissions.status.canRecordAudio = s === 'granted'
+}
 
 const mockBridge = vi.hoisted(() => ({
   listCategories: vi.fn().mockResolvedValue([]),
@@ -63,6 +95,10 @@ vi.mock('../../platform/hooks/use-voice', () => ({
   useVoice: () => mockVoice,
 }))
 
+vi.mock('../../platform/hooks/use-permissions', () => ({
+  usePermissions: () => mockPermissions,
+}))
+
 vi.mock('../../platform/hooks/use-bridge', () => ({
   useBridge: () => mockBridge,
 }))
@@ -96,6 +132,8 @@ describe('AssistantPage — 语音集成 (T-M4-04b)', () => {
     })
     mockAssistant.phase = 'idle'
     mockAssistant.messages = []
+    // T12-1：每例默认已授予（个别用例内改写）
+    setRecordStatus('granted')
   })
 
   it('渲染麦克风按钮', () => {
@@ -145,12 +183,19 @@ describe('AssistantPage — 语音集成 (T-M4-04b)', () => {
     expect(screen.queryByTestId('voice-partial')).not.toBeInTheDocument()
   })
 
-  it('语音错误时显示错误提示', () => {
-    mockVoice.error = { code: 'permission_denied', message: '需要麦克风权限' }
+  it('语音错误时显示中文提示（T12-1：错误码映射，不透出英文原生 message）', () => {
+    mockVoice.error = { code: 'permission_denied', message: 'RECORD_AUDIO permission not granted' }
     renderPage()
     const err = screen.getByTestId('voice-error')
     expect(err).toBeInTheDocument()
-    expect(err.textContent).toContain('需要麦克风权限')
+    expect(err.textContent).toContain('麦克风权限未授予')
+    expect(err.textContent).not.toContain('RECORD_AUDIO')
+  })
+
+  it('未知错误码回退原生 message', () => {
+    mockVoice.error = { code: 'some_new_code', message: '出错了' }
+    renderPage()
+    expect(screen.getByTestId('voice-error').textContent).toBe('出错了')
   })
 
   it('转写完成后将文本填入输入框', async () => {
@@ -214,5 +259,67 @@ describe('AssistantPage — 语音集成 (T-M4-04b)', () => {
     ])
     renderPage()
     await waitFor(() => expect(screen.getByText('小贝')).toBeInTheDocument())
+  })
+
+  // ─── 第十二轮 T12-1（REQ-29 / 决策 #8）：麦克风按需授权流 ───
+
+  it('未授权时点麦克风 → 调 requestPermission，不调 startRecording', async () => {
+    setRecordStatus('not_requested')
+    const user = userEvent.setup()
+    renderPage()
+    await user.click(screen.getByTestId('voice-mic-button'))
+    expect(mockPermissions.requestPermission).toHaveBeenCalledWith('RECORD_AUDIO')
+    expect(mockVoice.startRecording).not.toHaveBeenCalled()
+  })
+
+  it('授权 granted 后自动续链开始录音，红条不出现', async () => {
+    setRecordStatus('not_requested')
+    const user = userEvent.setup()
+    const { rerender } = renderPage()
+    await user.click(screen.getByTestId('voice-mic-button'))
+    expect(mockVoice.startRecording).not.toHaveBeenCalled()
+
+    // 模拟系统弹框「允许」→ onPermissionResult 推送 → usePermissions 刷新 status
+    setRecordStatus('granted')
+    rerender(
+      <MemoryRouter>
+        <AssistantPage />
+      </MemoryRouter>,
+    )
+    await waitFor(() => expect(mockVoice.startRecording).toHaveBeenCalledTimes(1))
+    expect(screen.queryByTestId('voice-permission-bar')).not.toBeInTheDocument()
+  })
+
+  it('denied → 中文红条 + 内联「授权」钮重发请求', async () => {
+    setRecordStatus('not_requested')
+    const user = userEvent.setup()
+    const { rerender } = renderPage()
+    await user.click(screen.getByTestId('voice-mic-button'))
+
+    setRecordStatus('denied')
+    rerender(
+      <MemoryRouter>
+        <AssistantPage />
+      </MemoryRouter>,
+    )
+    const bar = await screen.findByTestId('voice-permission-bar')
+    expect(bar.textContent).toContain('未获得麦克风权限')
+    expect(mockVoice.startRecording).not.toHaveBeenCalled()
+
+    await user.click(screen.getByTestId('voice-permission-grant'))
+    expect(mockPermissions.requestPermission).toHaveBeenCalledTimes(2)
+  })
+
+  it('permanently_denied → 点麦克风直接显「去设置」引导，不重发系统请求', async () => {
+    setRecordStatus('permanently_denied')
+    const user = userEvent.setup()
+    renderPage()
+    await user.click(screen.getByTestId('voice-mic-button'))
+    expect(mockPermissions.requestPermission).not.toHaveBeenCalled()
+
+    const bar = await screen.findByTestId('voice-permission-bar')
+    expect(bar.textContent).toContain('系统设置')
+    await user.click(screen.getByTestId('voice-permission-settings'))
+    expect(mockPermissions.openSettings).toHaveBeenCalledTimes(1)
   })
 })

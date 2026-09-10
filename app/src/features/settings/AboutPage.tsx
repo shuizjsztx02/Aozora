@@ -16,7 +16,7 @@ export function AboutPage() {
   const [toast, setToast] = useState<string | null>(null)
 
   const handleCheckUpdate = () => {
-    setToast(`已是最新版本 v${APP_VERSION}`)
+    setToast(`当前 v${APP_VERSION}，已是最新版本`)
     window.setTimeout(() => setToast(null), 2000)
   }
 
@@ -71,7 +71,7 @@ export function AboutPage() {
 
       {toast && (
         <div
-          className="fixed left-1/2 -translate-x-1/2 bottom-24 z-50 px-4 py-2 rounded-full text-xs"
+          className="fixed left-1/2 top-1/2 -translate-x-1/2 -translate-y-1/2 z-[80] px-4 py-2 rounded-full text-xs"
           style={{ background: 'var(--ink)', color: 'var(--bg)' }}
           data-testid="about-toast"
         >

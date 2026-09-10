@@ -42,6 +42,9 @@ def _test_config():
         secret_key="test-secret",
         env="test",
         api_prefix=os.environ.get("API_PREFIX", ""),
+        # 密封：init kwarg 优先级高于 ``.env``。真实 DashScope key 配入 .env 后
+        # （第十二轮云端验收前置），不能让"无 key → 降级"类断言被 ambient .env 污染。
+        ai_provider_api_key=None,
     )
     set_config(settings)
     yield

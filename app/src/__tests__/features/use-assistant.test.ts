@@ -11,13 +11,16 @@
  */
 import { describe, it, expect, vi, beforeEach } from 'vitest'
 import { renderHook, act, waitFor } from '@testing-library/react'
-import { useAssistant } from '../../features/assistant/use-assistant'
+import { useAssistant, AI_OFFLINE_CANNED } from '../../features/assistant/use-assistant'
 import { parseInput } from '../../domain/nlu/parser'
 import type { ActionProposal } from '../../domain/action-proposal'
 import { todayBizDate } from '../../domain/date'
 
 const mockBridge = vi.hoisted(() => ({
   insertTransaction: vi.fn().mockResolvedValue({ id: 'tx-1', version: 1 }),
+  // T12-11（REQ-37）：edit/delete 意图执行与本地圈定用
+  updateTransaction: vi.fn().mockResolvedValue({ id: 'tx-1', version: 2 }),
+  listTransactionsByBook: vi.fn().mockResolvedValue([]),
   softDeleteTransaction: vi.fn().mockResolvedValue({ success: true }),
   triggerSync: vi.fn().mockResolvedValue(undefined),
   executeProposal: vi.fn(),
@@ -188,20 +191,20 @@ describe('use-assistant — 免确认本地记账（T8-6）', () => {
     expect(last.text).toContain('❌ 记账失败：db down')
   })
 
-  it('chat 提案 → 正常落消息，不写库不弹卡', async () => {
+  it('chat 提案且云端不可达 → 统一降级 canned（T12-11 REQ-37 ④）', async () => {
     vi.mocked(parseInput).mockReturnValue(txProposal({
       action: 'chat',
       transactions: undefined,
       message: '你好呀',
     }))
-    const { result } = setup()
+    const { result } = setup() // isAvailable=false → AI 不触达
 
     await act(async () => { await result.current.submitInput('你好') })
 
     expect(mockBridge.insertTransaction).not.toHaveBeenCalled()
     expect(result.current.activeProposal).toBeNull()
     const last = result.current.messages[result.current.messages.length - 1]
-    expect(last.text).toBe('你好呀')
+    expect(last.text).toBe(AI_OFFLINE_CANNED)
     expect(result.current.phase).toBe('idle')
   })
 
@@ -277,6 +280,8 @@ describe('use-assistant — 免确认本地记账（T8-6）', () => {
   })
 
   // ─── 第十一轮 T11-6（REQ-27 / 决策 #7）：用户画像注入在线 AI 路径 ───
+  // ─── 第十二轮 T12-11（REQ-37）：context 恒带 today（相对日期换算基准），
+  //     画像/角色/categories 缺段传 null，服务端渲染段跳过 ───
 
   function setupWithProfile(profile: Record<string, string> | null) {
     return renderHook(() => useAssistant({
@@ -284,7 +289,11 @@ describe('use-assistant — 免确认本地记账（T8-6）', () => {
     }))
   }
 
-  it('有画像 → interpretAI 收到 context={profile, persona:null}', async () => {
+  const baseCtx = {
+    profile: null, persona: null, categories: null, today: todayBizDate(TZ),
+  }
+
+  it('有画像 → interpretAI 收到 context.profile 段', async () => {
     vi.mocked(parseInput).mockReturnValue(txProposal({ confidence: 0.3 })) // 低置信 → 走 AI
     mockBridge.isAvailable.mockReturnValue(true)
     mockBridge.interpretAI.mockResolvedValue({
@@ -296,11 +305,11 @@ describe('use-assistant — 免确认本地记账（T8-6）', () => {
 
     expect(mockBridge.interpretAI).toHaveBeenCalledWith(
       '午饭吃了十二块五',
-      { profile: { nickname: '老板', communicationStyle: '简洁直接' }, persona: null },
+      { ...baseCtx, profile: { nickname: '老板', communicationStyle: '简洁直接' } },
     )
   })
 
-  it('画像为 null → context 传 null（桥 payload 不带 context 键）', async () => {
+  it('画像为 null → profile 段为 null（today 常驻）', async () => {
     vi.mocked(parseInput).mockReturnValue(txProposal({ confidence: 0.3 }))
     mockBridge.isAvailable.mockReturnValue(true)
     mockBridge.interpretAI.mockResolvedValue(undefined)
@@ -308,10 +317,10 @@ describe('use-assistant — 免确认本地记账（T8-6）', () => {
 
     await act(async () => { await result.current.submitInput('随便说点什么') })
 
-    expect(mockBridge.interpretAI).toHaveBeenCalledWith('随便说点什么', null)
+    expect(mockBridge.interpretAI).toHaveBeenCalledWith('随便说点什么', baseCtx)
   })
 
-  it('画像为空对象 → 同样传 null，不发空 context', async () => {
+  it('画像为空对象 → profile 段传 null，不发空段', async () => {
     vi.mocked(parseInput).mockReturnValue(txProposal({ confidence: 0.3 }))
     mockBridge.isAvailable.mockReturnValue(true)
     mockBridge.interpretAI.mockResolvedValue(undefined)
@@ -319,7 +328,7 @@ describe('use-assistant — 免确认本地记账（T8-6）', () => {
 
     await act(async () => { await result.current.submitInput('随便说点什么') })
 
-    expect(mockBridge.interpretAI).toHaveBeenCalledWith('随便说点什么', null)
+    expect(mockBridge.interpretAI).toHaveBeenCalledWith('随便说点什么', baseCtx)
   })
 
   it('本地 NLU 高置信路径不触 AI（context 管线与本地解析无关）', async () => {
@@ -343,7 +352,7 @@ describe('use-assistant — 免确认本地记账（T8-6）', () => {
     }))
   }
 
-  it('仅角色（无画像）→ context={profile:null, persona:{name,text}}', async () => {
+  it('仅角色（无画像）→ context.persona 段携带，其余段 null', async () => {
     vi.mocked(parseInput).mockReturnValue(txProposal({ confidence: 0.3 }))
     mockBridge.isAvailable.mockReturnValue(true)
     mockBridge.interpretAI.mockResolvedValue(undefined)
@@ -354,7 +363,7 @@ describe('use-assistant — 免确认本地记账（T8-6）', () => {
 
     expect(mockBridge.interpretAI).toHaveBeenCalledWith(
       '随便说点什么',
-      { profile: null, persona },
+      { profile: null, persona, categories: null, today: todayBizDate(TZ) },
     )
   })
 
@@ -370,11 +379,11 @@ describe('use-assistant — 免确认本地记账（T8-6）', () => {
 
     expect(mockBridge.interpretAI).toHaveBeenCalledWith(
       '随便说点什么',
-      { profile, persona },
+      { profile, persona, categories: null, today: todayBizDate(TZ) },
     )
   })
 
-  it('画像空对象+无角色 → 仍传 null（不发空 context）', async () => {
+  it('画像空对象+无角色 → 各资料段传 null（不发空段；today 常驻）', async () => {
     vi.mocked(parseInput).mockReturnValue(txProposal({ confidence: 0.3 }))
     mockBridge.isAvailable.mockReturnValue(true)
     mockBridge.interpretAI.mockResolvedValue(undefined)
@@ -382,6 +391,196 @@ describe('use-assistant — 免确认本地记账（T8-6）', () => {
 
     await act(async () => { await result.current.submitInput('随便说点什么') })
 
-    expect(mockBridge.interpretAI).toHaveBeenCalledWith('随便说点什么', null)
+    expect(mockBridge.interpretAI).toHaveBeenCalledWith(
+      '随便说点什么',
+      { profile: null, persona: null, categories: null, today: todayBizDate(TZ) },
+    )
+  })
+
+  // ─── 第十二轮 T12-8（REQ-30 / 决策 #7 #9）：缺分类待选态 + 云端失败轻提示 + 错误中文化 ───
+
+  /** 「喝酒472」形态：add_tx 但 transactions[0] 无 categoryId，带 warning（复刻 REQ-30 场景）。 */
+  function noCatProposal(): ActionProposal {
+    return txProposal({
+      confidence: 0.5,
+      warnings: ['未识别到分类「喝酒」'],
+      transactions: [{
+        type: 'expense',
+        amountCents: 47200,
+        bizDate: todayBizDate(TZ),
+        note: '喝酒',
+      }],
+    })
+  }
+
+  it('add_tx 缺分类 → 不自动写入，卡片进入 pending-category 态（消息 pending 未记账）', async () => {
+    vi.mocked(parseInput).mockReturnValue(noCatProposal())
+    const { result } = setup()
+
+    await act(async () => { await result.current.submitInput('喝酒472') })
+
+    expect(mockBridge.insertTransaction).not.toHaveBeenCalled()
+    expect(result.current.cardStatus).toBe('pending-category')
+    expect(result.current.activeProposal).not.toBeNull()
+    expect(result.current.phase).toBe('idle')
+    const m = result.current.messages.find(x => x.proposal?.proposalId === 'prop-1')
+    expect(m?.proposalStatus).toBe('pending')
+    expect(m?.text).toContain('未识别到分类')
+  })
+
+  it('待选态改金额但未选分类 → 仍不写库，态保持，草稿回写提案', async () => {
+    vi.mocked(parseInput).mockReturnValue(noCatProposal())
+    const { result } = setup()
+    await act(async () => { await result.current.submitInput('喝酒472') })
+
+    const edited = noCatProposal()
+    edited.transactions![0].amountCents = 5000
+    await act(async () => { await result.current.editProposal(edited) })
+
+    expect(mockBridge.insertTransaction).not.toHaveBeenCalled()
+    expect(result.current.cardStatus).toBe('pending-category')
+    expect(result.current.activeProposal?.transactions?.[0].amountCents).toBe(5000)
+  })
+
+  it('待选态选定分类 → 接管首次写入（无 softDelete），committed + 撤销窗 + 文案已记录', async () => {
+    vi.mocked(parseInput).mockReturnValue(noCatProposal())
+    const { result } = setup()
+    await act(async () => { await result.current.submitInput('喝酒472') })
+    expect(mockBridge.insertTransaction).not.toHaveBeenCalled()
+
+    const edited = noCatProposal()
+    edited.transactions![0].categoryId = 'cat-food'
+    await act(async () => { await result.current.editProposal(edited) })
+
+    await waitFor(() => expect(result.current.cardStatus).toBe('committed'))
+    expect(mockBridge.insertTransaction).toHaveBeenCalledTimes(1)
+    expect(mockBridge.insertTransaction.mock.calls[0][0].categoryId).toBe('cat-food')
+    expect(mockBridge.softDeleteTransaction).not.toHaveBeenCalled()
+    const m = result.current.messages.find(x => x.proposal?.proposalId === 'prop-1')
+    expect(m?.proposalStatus).toBe('committed')
+    expect(m?.text).toBe('已记录 1 笔交易')
+    expect(result.current.phase).toBe('undo_window')
+  })
+
+  it('interpretAI 失败 → 会话级一次性轻提示，第二次失败不再弹（决策 #9）', async () => {
+    vi.mocked(parseInput).mockReturnValue(txProposal({ confidence: 0.3 }))
+    mockBridge.isAvailable.mockReturnValue(true)
+    mockBridge.interpretAI.mockRejectedValue(
+      Object.assign(new Error('AI service unavailable'), { code: '503' }),
+    )
+    const { result } = setup()
+
+    await act(async () => { await result.current.submitInput('午饭吃了十二块五') })
+    await act(async () => { await result.current.submitInput('晚饭二十') })
+
+    const notices = result.current.messages.filter(m => m.text.includes('云端 AI 暂时不可用'))
+    expect(notices).toHaveLength(1)
+    expect(notices[0].text).toContain('本次以本地解析继续')
+    // 两次提交都回退本地提案正常写入
+    expect(mockBridge.insertTransaction).toHaveBeenCalledTimes(2)
+  })
+
+  it('code=no_ai_provider → 决策 #9 配置指引专属文案', async () => {
+    vi.mocked(parseInput).mockReturnValue(txProposal({ confidence: 0.3 }))
+    mockBridge.isAvailable.mockReturnValue(true)
+    mockBridge.interpretAI.mockRejectedValue(
+      Object.assign(new Error('AI service is temporarily unavailable'), { code: 'no_ai_provider' }),
+    )
+    const { result } = setup()
+
+    await act(async () => { await result.current.submitInput('午饭') })
+
+    expect(result.current.messages.some(m =>
+      m.text.includes('AI_PROVIDER_API_KEY'))).toBe(true)
+  })
+
+  it('Kotlin "entity IDs are required" → 错误可见为中文（决策 #7 兜底映射）', async () => {
+    vi.mocked(parseInput).mockReturnValue(txProposal())
+    mockBridge.insertTransaction.mockRejectedValueOnce(new Error('entity IDs are required'))
+    const { result } = setup()
+
+    await act(async () => { await result.current.submitInput('吃饭678') })
+
+    const last = result.current.messages[result.current.messages.length - 1]
+    expect(last.text).toContain('缺少分类或账本信息')
+    expect(last.text).not.toContain('entity IDs')
+    expect(result.current.cardStatus).toBe('error')
+  })
+})
+
+// ─── 第十二轮 T12-9（REQ-35）：卡内账本/预算 chip override 进写入链路 ───
+
+describe('use-assistant — 编辑写入 overrides（T12-9）', () => {
+  beforeEach(() => {
+    vi.clearAllMocks()
+    mockBridge.insertTransaction.mockResolvedValue({ id: 'tx-1', version: 1 })
+    mockBridge.softDeleteTransaction.mockResolvedValue({ success: true })
+    mockBridge.isAvailable.mockReturnValue(false)
+  })
+
+  /** 提交并等待 committed，返回后可直接走 editProposal。 */
+  async function commitFirst(result: {
+    current: { submitInput: (t: string) => Promise<unknown>; cardStatus: string | null }
+  }) {
+    await act(async () => { await result.current.submitInput('吃饭678') })
+    await waitFor(() => expect(result.current.cardStatus).toBe('committed'))
+  }
+
+  it('editProposal 带 {bookId} → 替换写 insert 落新账本', async () => {
+    vi.mocked(parseInput).mockReturnValue(txProposal())
+    const { result } = setup()
+    await commitFirst(result)
+
+    const edited = txProposal()
+    edited.transactions![0].amountCents = 5000
+    await act(async () => { await result.current.editProposal(edited, { bookId: 'book-2' }) })
+
+    expect(mockBridge.softDeleteTransaction).toHaveBeenCalledTimes(1)
+    const [tx2] = mockBridge.insertTransaction.mock.calls[1]
+    expect(tx2.bookId).toBe('book-2')
+    expect(tx2.amountCents).toBe(5000)
+  })
+
+  it('editProposal 带 {includeInBudget:false} → payload 显式不计入；不带 → 无该键（native 缺省）', async () => {
+    vi.mocked(parseInput).mockReturnValue(txProposal())
+    const { result } = setup()
+    await commitFirst(result)
+
+    const edited = txProposal()
+    edited.transactions![0].note = '午饭'
+    await act(async () => { await result.current.editProposal(edited, { includeInBudget: false }) })
+    const [tx2] = mockBridge.insertTransaction.mock.calls[1]
+    expect(tx2.includeInBudget).toBe(false)
+    expect(tx2.bookId).toBe('book-1') // bookId 未覆盖 → hook 层账本
+
+    const edited2 = txProposal()
+    edited2.transactions![0].note = '晚饭'
+    await act(async () => { await result.current.editProposal(edited2) })
+    const [tx3] = mockBridge.insertTransaction.mock.calls[2]
+    expect('includeInBudget' in tx3).toBe(false)
+  })
+
+  it('待选分类态选类+切账本一次提交 → 首次写入即用 override 账本（无 softDelete）', async () => {
+    vi.mocked(parseInput).mockReturnValue(txProposal({
+      confidence: 0.5,
+      warnings: ['未识别到分类「喝酒」'],
+      transactions: [{ type: 'expense', amountCents: 47200, bizDate: todayBizDate(TZ), note: '喝酒' }],
+    }))
+    const { result } = setup()
+    await act(async () => { await result.current.submitInput('喝酒472') })
+    expect(result.current.cardStatus).toBe('pending-category')
+
+    const edited = txProposal({
+      confidence: 0.5,
+      warnings: ['未识别到分类「喝酒」'],
+      transactions: [{ type: 'expense', amountCents: 47200, bizDate: todayBizDate(TZ), note: '喝酒', categoryId: 'cat-food' }],
+    })
+    await act(async () => { await result.current.editProposal(edited, { bookId: 'book-2' }) })
+
+    await waitFor(() => expect(result.current.cardStatus).toBe('committed'))
+    expect(mockBridge.softDeleteTransaction).not.toHaveBeenCalled()
+    expect(mockBridge.insertTransaction).toHaveBeenCalledTimes(1)
+    expect(mockBridge.insertTransaction.mock.calls[0][0].bookId).toBe('book-2')
+    expect(mockBridge.insertTransaction.mock.calls[0][0].categoryId).toBe('cat-food')
   })
 })

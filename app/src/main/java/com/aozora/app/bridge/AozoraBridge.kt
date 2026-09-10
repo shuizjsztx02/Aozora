@@ -124,6 +124,7 @@ class AozoraBridge(
             BridgeCommands.TX_LIST_BY_BOOK -> handleTxListByBook(requestId, payload)
             BridgeCommands.TX_LIST_BY_DATE -> handleTxListByDate(requestId, payload)
             BridgeCommands.TX_SOFT_DELETE -> handleTxSoftDelete(requestId, payload)
+            BridgeCommands.TX_UPDATE -> handleTxUpdate(requestId, payload)
 
             // Book
             BridgeCommands.BOOK_LIST -> handleBookList(requestId)
@@ -304,6 +305,38 @@ class AozoraBridge(
         // T11-2（决策 #5）：删改同样即时刷新（今日/本月聚合随之变化）
         notifyWidgetUpdate()
         return BridgeResponse.success(requestId, JSONObject().put("success", true).toString())
+    }
+
+    /**
+     * 第十二轮 T12-7（REQ-36 / 决策 #1 #4）：交易编辑真 update —— payload {tx, mutationId}，
+     * tx 为**全字段**（保 id 保附件关联），version 必填且 = 当前 +1（Repository 乐观锁）。
+     * 字段解析与 handleTxInsert 完全同构；区别仅在 Repository 走 update 分支不入队 insert。
+     */
+    private suspend fun handleTxUpdate(requestId: String, p: JSONObject): BridgeResponse {
+        val txObj = p.getJSONObject("tx")
+        val mutationId = p.getString("mutationId")
+        val tx = TransactionEntity(
+            id = txObj.getString("id"),
+            bookId = txObj.getString("bookId"),
+            type = txObj.getString("type"),
+            amountCents = BridgePayload.safeLong(txObj, "amountCents"),
+            categoryId = txObj.getString("categoryId"),
+            accountId = BridgePayload.optionalString(txObj, "accountId"),
+            note = txObj.optString("note", ""),
+            bizDate = txObj.getString("bizDate"),
+            occurredAt = BridgePayload.safeLong(txObj, "occurredAt"),
+            source = txObj.getString("source"),
+            includeInBudget = txObj.optBoolean("includeInBudget", true),
+            version = BridgePayload.version(txObj),
+            deletedAt = null
+        )
+        repository.updateTransaction(tx, mutationId)
+        // 编辑即时刷新桌面组件（今日/本月聚合变化，同 softDelete 语义）
+        notifyWidgetUpdate()
+        return BridgeResponse.success(
+            requestId,
+            JSONObject().put("id", tx.id).put("version", tx.version).toString()
+        )
     }
 
     // ─── Book handlers ───

@@ -26,6 +26,8 @@ object BridgeCommands {
     const val TX_LIST_BY_BOOK = "transaction.listByBook"
     const val TX_LIST_BY_DATE = "transaction.listByDate"
     const val TX_SOFT_DELETE = "transaction.softDelete"
+    // 第十二轮 T12-7（REQ-36 / 决策 #1：桥计数本轮唯一变更点 74→75）：交易编辑真 update
+    const val TX_UPDATE = "transaction.update"
 
     // Book
     const val BOOK_LIST = "book.list"
@@ -163,7 +165,7 @@ object BridgeCommands {
      */
     val ALL: List<String> = listOf(
         GET_VERSION,
-        TX_INSERT, TX_GET, TX_LIST_BY_BOOK, TX_LIST_BY_DATE, TX_SOFT_DELETE,
+        TX_INSERT, TX_GET, TX_LIST_BY_BOOK, TX_LIST_BY_DATE, TX_SOFT_DELETE, TX_UPDATE,
         BOOK_LIST, BOOK_INSERT,
         CATEGORY_LIST, CATEGORY_INSERT, CATEGORY_UPDATE,
         ICON_PICK,

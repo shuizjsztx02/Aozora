@@ -5,7 +5,7 @@
  * "本月总额"不过滤（含不计入项）；旧数据缺省字段=计入。
  */
 import { describe, it, expect, vi, beforeEach } from 'vitest'
-import { render, screen, waitFor } from '@testing-library/react'
+import { render, screen, waitFor, fireEvent, within } from '@testing-library/react'
 import { MemoryRouter } from 'react-router'
 import { HomePage } from '../../features/ledger/HomePage'
 import { todayBizDate } from '../../domain/date'
@@ -15,6 +15,9 @@ const mockBridge = vi.hoisted(() => ({
   call: vi.fn(),
   getMeta: vi.fn().mockResolvedValue({}),
   isAvailable: () => true,
+  // T12-10：TxEditSheet 挂载时拉取（开层用例用）
+  listBooks: vi.fn().mockResolvedValue([]),
+  listAccounts: vi.fn().mockResolvedValue([]),
 }))
 vi.mock('../../platform/hooks/use-bridge', () => ({ useBridge: () => mockBridge }))
 vi.mock('../../components/SyncBadge', () => ({
@@ -82,5 +85,19 @@ describe('HomePage 预算进度过滤（REQ-17 决策 #1）', () => {
       </MemoryRouter>,
     )
     await waitFor(() => expect(screen.getByText(/已用 40%/)).toBeInTheDocument())
+  })
+
+  it('今日流水行点击打开 TxEditSheet，金额预填自行数据（T12-10 / REQ-36）', async () => {
+    const today = todayBizDate('Asia/Shanghai')
+    setup([mkTx({ id: 't1', bizDate: today, amountCents: 5500 })], 100000)
+    render(
+      <MemoryRouter>
+        <HomePage />
+      </MemoryRouter>,
+    )
+    await waitFor(() => expect(screen.getByText('餐饮')).toBeInTheDocument())
+    fireEvent.click(screen.getByText('餐饮'))
+    const sheet = await screen.findByTestId('tx-edit-sheet')
+    expect(within(sheet).getByTestId('tx-edit-amount')).toHaveValue(55)
   })
 })

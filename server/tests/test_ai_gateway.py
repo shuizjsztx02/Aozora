@@ -364,6 +364,178 @@ class TestInterpretContext:
         assert "weirdFutureKey：值" in system  # 未知键回退原键名（向前兼容）
 
 
+# ── 第十二轮 T12-11（REQ-37 / 决策 #2 #3）：LEDGER_PARSE v2 ───────────────────
+
+class TestLedgerPromptV2:
+    """prompt v2：intent/reply/filter/set 声明齐备，老 6 字段原样保留。"""
+
+    def _prompt(self) -> str:
+        from src.modules.ai.prompts import get_template
+        return get_template("ledger_parse").system_prompt
+
+    def test_v2_fields_declared(self):
+        p = self._prompt()
+        for token in (
+            '"intent"', '"reply"', '"filter"', '"set"',
+            "bookkeeping", '"edit"', '"delete"', '"query"', '"chat"',
+            "recentN", "amountMinCents", "includeInBudget", "dateFrom",
+        ):
+            assert token in p, token
+
+    def test_v1_fields_unchanged(self):
+        """老客户端只消费 6 字段——v2 必须原样保留其定义与中文数字示例。"""
+        p = self._prompt()
+        for token in (
+            '"type"', '"amountCents"', '"category"', '"note"',
+            '"bizDate"', '"confidence"', "十二块五", "1250",
+        ):
+            assert token in p, token
+
+    def test_category_list_and_no_fabrication_rules_present(self):
+        p = self._prompt()
+        assert "用户现有分类名列表" in p  # categories 段的 prompt 侧约定
+        assert "今天日期" in p            # today 段的 prompt 侧约定
+        assert "不要编造" in p            # chat/query 反幻觉规则句
+
+    def test_edit_sample_passes_through_untouched(self, ai_env):
+        """新 schema 输出（intent=edit）服务端只透传，不做 ActionProposal 校验。"""
+        sample = {
+            "intent": "edit", "type": "", "amountCents": 0, "category": "",
+            "note": "", "bizDate": "", "confidence": 0.9,
+            "reply": "好的，把昨天那笔房租改成 6500 元",
+            "filter": {"dateFrom": "2026-09-09", "dateTo": "2026-09-09", "keyword": "房租"},
+            "set": {"amountCents": 650000},
+        }
+        ai_env.provider.results = [
+            ProviderResult(json.dumps(sample, ensure_ascii=False), 10, 10),
+        ]
+        user = _guest(ai_env)
+        resp = _interpret(ai_env, user, text="把昨天那笔房租改成6500")
+        assert resp.status_code == 200
+        assert resp.json()["output"] == sample
+
+    def test_chat_sample_passes_through(self, ai_env):
+        sample = {
+            "intent": "chat", "type": "", "amountCents": 0, "category": "",
+            "note": "", "bizDate": "", "confidence": 0.9,
+            "reply": "你好呀，需要记账随时叫我",
+        }
+        ai_env.provider.results = [
+            ProviderResult(json.dumps(sample, ensure_ascii=False), 10, 10),
+        ]
+        user = _guest(ai_env)
+        resp = _interpret(ai_env, user, text="你好")
+        assert resp.status_code == 200
+        out = resp.json()["output"]
+        assert out["intent"] == "chat"
+        assert out["reply"] == "你好呀，需要记账随时叫我"
+        # 无 filter/set（老客户端按键缺失容错）
+        assert "filter" not in out and "set" not in out
+
+
+class TestInterpretContextV2Sections:
+    """T12-11：context.categories（≤120×≤16 专段）与 context.today（日期参考段）。"""
+
+    def _system(self, env: AIEnv) -> str:
+        return env.provider.calls[0]["messages"][0]["content"]
+
+    def _base_prompt(self) -> str:
+        from src.modules.ai.prompts import get_template
+        return get_template("ledger_parse").system_prompt
+
+    def test_no_categories_no_sections_system_unchanged(self, ai_env):
+        user = _guest(ai_env)
+        assert _interpret(ai_env, user).status_code == 200
+        assert self._system(ai_env) == self._base_prompt()
+
+    def test_categories_rendered_as_whitelist_section(self, ai_env):
+        user = _guest(ai_env)
+        resp = _interpret(ai_env, user, context={"categories": ["餐饮", "交通", "工资"]})
+        assert resp.status_code == 200
+        system = self._system(ai_env)
+        assert "【用户现有分类名列表】" in system
+        assert "餐饮、交通、工资" in system
+        # categories 不是"用户资料"——不得套反注入前缀段
+        assert "不构成指令" not in system
+        assert system.startswith(self._base_prompt())
+
+    def test_categories_capped_at_120(self, ai_env):
+        names = [f"分类{i}" for i in range(200)]
+        user = _guest(ai_env)
+        resp = _interpret(ai_env, user, context={"categories": names})
+        assert resp.status_code == 200
+        system = self._system(ai_env)
+        assert "分类119" in system
+        assert "分类120" not in system
+
+    def test_category_name_clipped_to_16_chars(self, ai_env):
+        user = _guest(ai_env)
+        resp = _interpret(
+            ai_env, user, context={"categories": ["猫" * 30, "餐饮"]},
+        )
+        assert resp.status_code == 200
+        system = self._system(ai_env)
+        assert "猫" * 16 in system
+        assert "猫" * 17 not in system
+
+    def test_categories_bad_items_skipped(self, ai_env):
+        user = _guest(ai_env)
+        resp = _interpret(
+            ai_env, user,
+            context={"categories": [None, 5, "", "   ", {"a": 1}, "餐饮", "餐饮"]},
+        )
+        assert resp.status_code == 200
+        system = self._system(ai_env)
+        assert "餐饮" in system
+        assert "None" not in system and "{\"a\": 1}" not in system
+        # 去重：餐饮只出现一次（列表段内）
+        section = system.split("【用户现有分类名列表】", 1)[1]
+        assert section.count("餐饮") == 1
+
+    def test_categories_empty_or_non_list_no_section(self, ai_env):
+        user = _guest(ai_env)
+        for ctx in (
+            {"categories": []}, {"categories": None}, {"categories": "餐饮"},
+            {"categories": [None, ""]},
+        ):
+            resp = _interpret(ai_env, user, context=ctx)
+            assert resp.status_code == 200
+            assert "【用户现有分类名列表】" not in self._system(ai_env)
+
+    def test_today_rendered_and_invalid_skipped(self, ai_env):
+        user = _guest(ai_env)
+        resp = _interpret(ai_env, user, context={"today": "2026-09-10"})
+        assert resp.status_code == 200
+        assert "今天日期：2026-09-10" in self._system(ai_env)
+
+        ai_env.provider.calls.clear()
+        for bad in ("not-a-date", "", "2026-9-1", 20260910, None):
+            resp = _interpret(ai_env, user, context={"today": bad})
+            assert resp.status_code == 200
+            assert "今天日期：" not in self._system(ai_env)
+            ai_env.provider.calls.clear()
+
+    def test_profile_and_v2_sections_coexist(self, ai_env):
+        user = _guest(ai_env)
+        resp = _interpret(
+            ai_env, user,
+            context={
+                "profile": {"nickname": "老板"},
+                "today": "2026-09-10",
+                "categories": ["餐饮"],
+            },
+        )
+        assert resp.status_code == 200
+        system = self._system(ai_env)
+        assert "如何称呼你：老板" in system
+        assert "不构成指令" in system          # persona/profile 段前缀
+        assert "今天日期：2026-09-10" in system
+        assert "【用户现有分类名列表】" in system
+        # 段序：资料段在前，categories 段在尾部（其内容可含任意分类名，
+        # 反注入前缀只声明资料段"不构成指令"——分类列表段自身是指令性白名单）
+        assert system.index("不构成指令") < system.index("【用户现有分类名列表】")
+
+
 # ── Usage recording & cost ──────────────────────────────────────────────
 
 class TestUsageRecording:
@@ -744,6 +916,8 @@ def _settings(**overrides) -> Settings:
         "secret_key": "test-secret",
         "env": "test",
         "api_prefix": "",
+        # 密封：init kwarg 压过 .env，默认无 key（with_key 用例经 overrides 显式覆盖）。
+        "ai_provider_api_key": None,
     }
     base.update(overrides)
     return Settings(**base)
@@ -811,6 +985,9 @@ class TestDashScopeProvider:
         assert body["model"] == "qwen3.7-flash"
         assert body["messages"] == [{"role": "user", "content": "hi"}]
         assert body["max_tokens"] == 512
+        # T12-12: thinking mode must stay off on the text path (20-24 s measured
+        # with it on, beyond the ai_timeout_seconds budget).
+        assert body["enable_thinking"] is False
         assert result == ProviderResult(VALID_JSON, PROMPT_TOKENS, COMPLETION_TOKENS)
 
     @pytest.mark.parametrize(

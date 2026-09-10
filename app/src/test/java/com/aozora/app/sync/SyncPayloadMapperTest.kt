@@ -245,9 +245,10 @@ class SyncPayloadMapperTest {
         val arr = root.getJSONArray("mutations")
         assertEquals(2, arr.length())
         val m1 = arr.getJSONObject(0)
-        assertFalse(m1.has("expected_version"))
+        // T12-7 前置修复：wire 键为 version（server MutationItem 契约，旧 expected_version 被忽略→恒 422）
+        assertFalse(m1.has("version"))
         val m2 = arr.getJSONObject(1)
-        assertEquals(3, m2.getInt("expected_version"))
+        assertEquals(3, m2.getInt("version"))
     }
 
     @Test
