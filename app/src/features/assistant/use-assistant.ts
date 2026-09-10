@@ -28,12 +28,16 @@ import { parseInput, type ParseContext } from '../../domain/nlu/parser'
 import {
   buildProposalFromAiOutput, parseAiInterpretOutput, hasOpConditions, applyOpFilter,
   buildEditUpdates, sumByFilter, MAX_BATCH_OPS,
-  type AiOpSet, type AiInterpretV2,
+  resolveConfigTargets, buildAiObjectNames, buildConfigPreview, deadlineToSavingsPeriod,
+  type AiConfig, type AiOpSet, type AiInterpretV2, type ConfigTargets,
 } from '../../domain/ai-proposal-builder'
 import { useBridge } from '../../platform/hooks/use-bridge'
 import { newUuid } from '../../platform/uuid'
 import { todayBizDate } from '../../domain/date'
-import type { CategoryData, TransactionData } from '../../platform/bridge/bridge-types'
+import { META_KEY_DEFAULT_ACCOUNT_ID, META_KEY_DEFAULT_BOOK_ID } from '../../domain/meta'
+import type {
+  AccountData, BookData, BudgetData, CategoryData, SavingsGoalData, TransactionData,
+} from '../../platform/bridge/bridge-types'
 import type { AiInterpretContext, AiValidateVerdict } from '../../platform/bridge/bridge-types'
 import type { Category } from '../../domain/types'
 
@@ -80,6 +84,19 @@ export interface PendingOp {
   candidates: TransactionData[]
 }
 
+/**
+ * 第十三轮 T13-5（REQ-48 / 决策 #6 #8）：config 意图的待确认设置操作。
+ * targets = resolveConfigTargets 已解析的本地 id；preview = OpPreviewCard config
+ * 模式内容（决策 #8 rows 形态）。确认前零写入；「取消」不落任何写。
+ */
+export interface PendingConfig {
+  cfg: AiConfig
+  /** 云端对即将所做设置的简短说明（回执在预览后，拟语仅作气泡补充，暂存备用） */
+  reply: string
+  targets: ConfigTargets
+  preview: { title: string; rows: Array<{ label: string; value: string }> }
+}
+
 interface UseAssistantOptions {
   categories: CategoryData[]
   bookId: string | null
@@ -97,6 +114,20 @@ interface UseAssistantOptions {
   /** T12-11（REQ-37 / 决策 #3）：分类名白名单（buildAiCategoryNames 截断产物），
    *  经 context.categories 注入，prompt v2 约束分类输出从列表选择。空/缺省 → null 段。 */
   aiCategories?: string[] | null
+  /**
+   * T13-5（REQ-48 / 决策 #7）：现有对象全列表（AssistantPage 装载后传入）。
+   * 双职责——① context.books/accounts/budgets/goals 名单段（buildAiObjectNames
+   * 截断，模型点名/避重依据）；② config 执行的名→id 解析数据源。
+   * 缺省/空 → 名单段 null + config resolve 走引导语。
+   */
+  books?: BookData[]
+  accounts?: AccountData[]
+  budgets?: BudgetData[]
+  goals?: SavingsGoalData[]
+  /** T13-5（REQ-48）：config 执行成功后的名单重拉回调——本轮新建的对象要能被
+   *  下一轮点名/避重（活体发现：建账本成功后名单快照不刷新，"把默认账本设成
+   *  旅行" 被拒）。取消/失败不触发（无写入，名单无需变）。 */
+  onConfigApplied?: () => void
 }
 
 interface UseAssistantReturn {
@@ -109,6 +140,8 @@ interface UseAssistantReturn {
   isSlow: boolean
   /** T12-11：edit/delete 意图圈定后的待确认操作（null=无）；确认/取消后清空。 */
   pendingOp: PendingOp | null
+  /** T13-5：config 意图解析成功后的待确认设置操作（null=无）。 */
+  pendingConfig: PendingConfig | null
   submitInput: (text: string) => Promise<void>
   /** 卡片编辑保存：softDelete 旧笔 + insert 新（编辑 = 替换写）。
    *  T12-9（REQ-35）：overrides = 卡内账本/预算 chip 覆盖（首提与替换写均生效）。 */
@@ -118,6 +151,10 @@ interface UseAssistantReturn {
   confirmOp: () => Promise<void>
   /** T12-11：放弃 pendingOp（不执行任何写）。 */
   cancelOp: () => void
+  /** T13-5：执行 pendingConfig（单桥命令，回执一条助手消息；失败可见不落半途）。 */
+  confirmConfig: () => Promise<void>
+  /** T13-5：放弃 pendingConfig（不落任何写）。 */
+  cancelConfig: () => void
   /** T9-8（REQ-16）：页面级链路（图片批量卡）完成后追加一条助手文本消息。 */
   appendAssistantMessage: (text: string) => void
 }
@@ -187,6 +224,11 @@ export function useAssistant({
   profile = null,
   persona = null,
   aiCategories = null,
+  books = [],
+  accounts = [],
+  budgets = [],
+  goals = [],
+  onConfigApplied,
 }: UseAssistantOptions): UseAssistantReturn {
   const bridge = useBridge()
   const [messages, setMessages] = useState<AssistantMessage[]>([])
@@ -197,12 +239,14 @@ export function useAssistant({
   const [isSlow, setIsSlow] = useState(false)
   // T12-11（REQ-37）：edit/delete 意图的待确认操作卡
   const [pendingOp, setPendingOp] = useState<PendingOp | null>(null)
+  // T13-5（REQ-48）：config 意图的待确认设置卡
+  const [pendingConfig, setPendingConfig] = useState<PendingConfig | null>(null)
   const undoTimerRef = useRef<ReturnType<typeof setInterval> | null>(null)
   const undoDeadlineRef = useRef<number>(0)
   const slowTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
   // C-B3 fix: 并发提交互斥
   const isSubmittingRef = useRef(false)
-  // T12-11：confirmOp 重入互斥（按钮禁用之外的最后防线）
+  // T12-11：confirmOp 重入互斥（按钮禁用之外的最后防线）；T13-5 confirmConfig 共用
   const opBusyRef = useRef(false)
   // 当前卡对应的已写入交易 id（编辑=替换写 / 撤销=软删 都以此为准）
   const activeTxIdsRef = useRef<string[]>([])
@@ -437,6 +481,34 @@ export function useAssistant({
     setPendingOp({ kind, reply: v2.reply, set: v2.set, candidates: rows })
   }, [appendAssistantMessage, bridge, bookId, categories])
 
+  /**
+   * T13-5（REQ-48 / 决策 #6 #8）：config 意图 → 名→id 本地解析 + 预览确认。
+   * 坏形状（intent=config 但 config 缺失/op 不在白名单）→ 回落 chat 转述 reply
+   * （决策 #6）；解析失败（匹配不到/重名 create/期限过期）→ 引导语气泡，不开卡；
+   * 解析成功 → pendingConfig（确认前零写入）。
+   */
+  const openConfigPreview = useCallback(async (v2: AiInterpretV2) => {
+    if (!v2.config) {
+      appendAssistantMessage(await answerTextIntent(v2))
+      return
+    }
+    const today = todayBizDate(timezone)
+    const r = resolveConfigTargets(v2.config, {
+      books, accounts, goals, categories, bookId, today,
+    })
+    if (!r.ok) {
+      appendAssistantMessage(r.message)
+      return
+    }
+    setPendingConfig({
+      cfg: v2.config, reply: v2.reply, targets: r.targets,
+      preview: buildConfigPreview(v2.config, today),
+    })
+  }, [
+    appendAssistantMessage, answerTextIntent, timezone,
+    books, accounts, goals, categories, bookId,
+  ])
+
   const submitInput = useCallback(async (text: string) => {
     if (!text.trim()) return
     // C-B3 fix: 并发提交互斥 — 非 idle 阶段拒绝新提交
@@ -445,8 +517,11 @@ export function useAssistant({
 
     // C-C1 fix: 新提交时清理旧 undo timer，防止状态机竞争
     stopUndoTimer()
+
     // T12-11：新输入接管会话，未决操作卡作废（不静默执行）
+    // T13-5：config 预览卡同理
     setPendingOp(null)
+    setPendingConfig(null)
 
     const userMsg: AssistantMessage = {
       id: 'msg_' + Date.now() + '_user',
@@ -498,12 +573,24 @@ export function useAssistant({
       // T11-6/T11-7（决策 #7）：画像/人设任一非空才拼对应段。
       // T12-11（REQ-37）：today 与 categories 常驻注入——相对日期换算与分类白名单
       // 是 prompt v2 全部 intent 的公共前提（桥侧 context 整包透传，服务端缺段零影响）。
+      // T13-5（REQ-48 / 决策 #7）：books/accounts/budgets/goals 现有对象名单段——
+      // config 意图点名与避重名的依据；空列表 → null 段（服务端渲染跳过）。
       const hasProfile = !!profile && Object.keys(profile).length > 0
+      const objNames = (names: string[]): AiInterpretContext['books'] => {
+        const seg = buildAiObjectNames(names)
+        return seg.length ? seg : null
+      }
       const aiContext: AiInterpretContext = {
         profile: hasProfile ? profile : null,
         persona: persona ? { name: persona.name, text: persona.text } : null,
         categories: aiCategories?.length ? aiCategories : null,
         today: todayBizDate(timezone),
+        books: objNames(books.map(b => b.name)),
+        accounts: objNames(accounts.map(a => a.name)),
+        budgets: objNames(budgets.map(b => b.categoryId
+          ? (categories.find(c => c.id === b.categoryId)?.name ?? '')
+          : '总预算')),
+        goals: objNames(goals.map(g => g.name)),
       }
       try {
         const aiResult = await bridge.interpretAI(text.trim(), aiContext)
@@ -516,6 +603,12 @@ export function useAssistant({
           }
           if (v2.intent === 'edit' || v2.intent === 'delete') {
             await openOpPreview(v2)
+            finishProcessing()
+            return
+          }
+          // T13-5（REQ-48）：config → 名→id 解析 + 预览确认（确认前零写入）
+          if (v2.intent === 'config') {
+            await openConfigPreview(v2)
             finishProcessing()
             return
           }
@@ -616,8 +709,9 @@ export function useAssistant({
     isSubmittingRef.current = false
   }, [
     bridge, categories, bookId, timezone, profile, persona, aiCategories,
+    books, accounts, budgets, goals,
     buildParseContext, commitProposalInternal, stopUndoTimer,
-    appendAssistantMessage, answerTextIntent, openOpPreview,
+    appendAssistantMessage, answerTextIntent, openOpPreview, openConfigPreview,
   ])
 
   /** 卡片编辑保存：替换写（softDelete 旧 + insert 新），不新增 transaction.update。
@@ -757,9 +851,121 @@ export function useAssistant({
     appendAssistantMessage('已取消')
   }, [pendingOp, appendAssistantMessage])
 
+  /**
+   * T13-5（REQ-48 / 决策 #6 #8）：执行 pendingConfig——单桥命令 + 回执消息，
+   * Kotlin 零改动（book.insert / account.insert / budget.insert / savings.insert /
+   * meta.set 全部现成命令；入参组装口径照 BooksPage/AccountsPage/BudgetPage/
+   * SavingsPage 现行 UI：id=newUuid()、ownerId='local'、version=1、mutationId UUID）。
+   * 失败只报错不保留卡（重说一次即可重触发，与 pendingOp 收口口径一致）；
+   * 成功统一 triggerSync（savings/meta 仅本地，触发无副作用）。
+   */
+  const confirmConfig = useCallback(async () => {
+    const pc = pendingConfig
+    if (!pc || opBusyRef.current) return
+    opBusyRef.current = true
+    const { cfg, targets } = pc
+    const yuan = (n: number) => `¥${n.toFixed(2)}`
+    try {
+      let text = ''
+      switch (cfg.op) {
+        case 'book.create': {
+          await bridge.insertBook(
+            {
+              id: newUuid(), ownerId: 'local', name: cfg.name,
+              icon: cfg.icon || '📒', version: 1,
+            },
+            newUuid(),
+          )
+          text = `已创建账本「${cfg.name}」`
+          break
+        }
+        case 'account.create': {
+          // config 契约 accountType 是 income|expense 二值（T13-4 prompt）；native
+          // accountType 是自由文案分类（储蓄卡/微信/…），折成中文标签再写。
+          const typeLabel = cfg.accountType === 'income' ? '收入账户' : '支出账户'
+          await bridge.insertAccount(
+            {
+              id: newUuid(), ownerId: 'local', name: cfg.name,
+              icon: '💰', accountType: typeLabel, version: 1,
+            },
+            newUuid(),
+          )
+          text = `已创建账户「${cfg.name}」（${typeLabel}）`
+          if (cfg.initBalance) {
+            text += `；期初余额 ${yuan(cfg.initBalance)} 请再记一笔写入（账户暂无期初字段）`
+          }
+          break
+        }
+        case 'budget.create': {
+          // period 锚定创建当期（BudgetPage 同口径）：月度=YYYY-MM / 年度=YYYY
+          const yearly = cfg.period === 'year'
+          const today = todayBizDate(timezone)
+          await bridge.insertBudget(
+            {
+              id: newUuid(),
+              bookId: bookId!,
+              budgetType: yearly ? 'annual' : 'monthly',
+              categoryId: targets.categoryId ?? null,
+              period: yearly ? today.slice(0, 4) : today.slice(0, 7),
+              amountCents: Math.round((cfg.amount || 0) * 100),
+              version: 1,
+            },
+            newUuid(),
+          )
+          text = `已为「${cfg.category}」创建${yearly ? '年度' : '月度'}预算 ${yuan(cfg.amount || 0)}`
+          break
+        }
+        case 'savings.create': {
+          const p = cfg.deadline
+            ? deadlineToSavingsPeriod(cfg.deadline, todayBizDate(timezone))
+            : null
+          await bridge.insertSavingsGoal({
+            id: newUuid(), ownerId: 'local', name: cfg.name,
+            targetCents: Math.round((cfg.targetAmount || 0) * 100),
+            currentCents: 0, icon: '🐷',
+            periodValue: p?.value ?? null, periodUnit: p?.unit ?? null,
+            version: 1,
+          })
+          text = `已创建存钱目标「${cfg.name}」（目标 ${yuan(cfg.targetAmount || 0)}）`
+          break
+        }
+        case 'default.book_set': {
+          await bridge.setMeta(META_KEY_DEFAULT_BOOK_ID, targets.bookId!)
+          text = `已把「${cfg.name}」设为默认账本`
+          break
+        }
+        case 'default.account_set': {
+          await bridge.setMeta(META_KEY_DEFAULT_ACCOUNT_ID, targets.accountId!)
+          text = `已把「${cfg.name}」设为默认账户`
+          break
+        }
+      }
+      setPendingConfig(null)
+      appendAssistantMessage(text)
+      // T13-5：写入成功 → 通知页面重拉对象名单（下一轮可点名本轮新建对象；
+      // default.* 还会经重拉更新 bookId/bookName 落点）
+      onConfigApplied?.()
+      bridge.triggerSync().catch(() => { /* 同步入队失败不阻断（confirmOp 同口径） */ })
+    } catch (err) {
+      const errMsg = localizeBridgeError(err instanceof Error ? err.message : '未知错误')
+      setPendingConfig(null)
+      appendAssistantMessage(`❌ 设置执行失败：${errMsg}`)
+    } finally {
+      opBusyRef.current = false
+    }
+  }, [pendingConfig, bridge, bookId, timezone, appendAssistantMessage, onConfigApplied])
+
+  /** T13-5：取消 pendingConfig——不落任何写，落一条「已取消」回执。 */
+  const cancelConfig = useCallback(() => {
+    if (!pendingConfig) return
+    setPendingConfig(null)
+    appendAssistantMessage('已取消')
+  }, [pendingConfig, appendAssistantMessage])
+
   return {
-    messages, phase, activeProposal, cardStatus, undoRemaining, isSlow, pendingOp,
+    messages, phase, activeProposal, cardStatus, undoRemaining, isSlow, pendingOp, pendingConfig,
     submitInput, editProposal, undoExecution, confirmOp, cancelOp,
+    confirmConfig, cancelConfig,
     appendAssistantMessage,
   }
 }

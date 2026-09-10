@@ -22,7 +22,9 @@ import { buildAiCategoryNames } from '../../domain/ai-proposal-builder'
 import { BatchConfirmationCard } from '../ledger/BatchConfirmationCard'
 import { UndoToast } from './UndoToast'
 import type { ActionProposal } from '../../domain/action-proposal'
-import type { AccountData, BookData, CategoryData, PersonaData } from '../../platform/bridge/bridge-types'
+import type {
+  AccountData, BookData, BudgetData, CategoryData, PersonaData, SavingsGoalData,
+} from '../../platform/bridge/bridge-types'
 import { pickDefaultAccount, pickEntryBook } from '../../domain/books'
 import { resolveActivePersona } from '../../domain/personas'
 
@@ -97,6 +99,9 @@ export function AssistantPage() {
   const [bookName, setBookName] = useState('')
   // T12-9（REQ-35）：卡内 EntryChipRow 账本 chip 数据源
   const [books, setBooks] = useState<BookData[]>([])
+  // T13-5（REQ-48）：现有对象名单 context 注入 + config 名→id 解析数据源
+  const [budgets, setBudgets] = useState<BudgetData[]>([])
+  const [goals, setGoals] = useState<SavingsGoalData[]>([])
   // T11-6（REQ-27）：用户画像（meta.user_profile 解析后），喂给在线 AI context 注入。
   const [profile, setProfile] = useState<Record<string, string> | null>(null)
   // T11-7（REQ-28 / 决策 #8）：聊天角色——header 显示当前角色名 + context.persona 注入；
@@ -110,9 +115,10 @@ export function AssistantPage() {
   // 列表选择（根治「喝酒→未分类」类云端瞎猜）；≤120 个、各 ≤16 字（buildAiCategoryNames）
   const aiCategories = useMemo(() => buildAiCategoryNames(categories), [categories])
 
-  // 加载分类和账本
-  useEffect(() => {
-    bridge.listCategories().then(setCategories).catch(() => {})
+  // T13-5（REQ-48）：对象名单装载——挂载时拉；config 执行成功后由
+  // useAssistant.onConfigApplied 回调重拉（本轮新建的账本/账户下一轮可被
+  // 点名与避重；default.book_set 也经此刷新记账落点 bookId/bookName）。
+  const loadObjects = useCallback(() => {
     // T9-5b（REQ-11 决策 #3）：聊天记账目标 = default_book_id 优先，否则第一个非 master
     // T9-7（REQ-15）：同批取账户列表 + default_account_id，pickDefaultAccount 整形
     // （默认账户已删除/归档时回退首账户，与 QuickEntrySheet 同源逻辑）
@@ -124,19 +130,44 @@ export function AssistantPage() {
         .catch(() => ({}) as Record<string, string | null>),
       // T11-7（REQ-28）：加载全部角色，按 active_persona_id 解析当前角色
       bridge.listPersonas().catch(() => [] as PersonaData[]),
-    ]).then(([books, accountList, meta, personas]) => {
+      // T13-5（REQ-48）：存钱目标名单（savings.create 避重名/解析数据源）
+      bridge.listSavingsGoals().catch(() => [] as SavingsGoalData[]),
+    ]).then(([books, accountList, meta, personas, goalList]) => {
       const entry = pickEntryBook(books, meta['default_book_id'] ?? null)
       if (entry) {
         setBookId(entry.id)
         setBookName(entry.name || '')
+        // budget.create 成功重拉时 bookId 不变、下方 effect 不会触发，随本批补拉
+        bridge.listBudgets(entry.id).then(setBudgets).catch(() => {})
       }
       setBooks(books)
       setAccounts(accountList)
       setDefaultAccountId(pickDefaultAccount(accountList, meta['default_account_id'] ?? null)?.id ?? null)
       setProfile(parseProfile(meta['user_profile']))
       setActivePersona(resolveActivePersona(personas, meta['active_persona_id'] ?? null))
+      setGoals(goalList)
     }).catch(() => {})
   }, [bridge])
+
+  // 加载分类和账本
+  useEffect(() => {
+    bridge.listCategories().then(setCategories).catch(() => {})
+    loadObjects()
+  }, [bridge, loadObjects])
+
+  // T13-5（REQ-48）：预算名单随记账账本走（budget.list 按 bookId；bookId 在上方
+  // effect 解析后此 effect 自动补拉）。仅作 context 注入段，解析失败 → 空段。
+  useEffect(() => {
+    if (!bookId) {
+      setBudgets([])
+      return
+    }
+    let cancelled = false
+    bridge.listBudgets(bookId)
+      .then(list => { if (!cancelled) setBudgets(list) })
+      .catch(() => { if (!cancelled) setBudgets([]) })
+    return () => { cancelled = true }
+  }, [bridge, bookId])
 
   const {
     messages,
@@ -146,11 +177,14 @@ export function AssistantPage() {
     undoRemaining,
     isSlow,
     pendingOp,
+    pendingConfig,
     submitInput,
     editProposal,
     undoExecution,
     confirmOp,
     cancelOp,
+    confirmConfig,
+    cancelConfig,
     appendAssistantMessage,
   } = useAssistant({
     categories,
@@ -161,6 +195,13 @@ export function AssistantPage() {
     persona: activePersona ? { name: activePersona.name, text: activePersona.persona } : null,
     // T12-11（REQ-37）：分类名白名单 → context.categories（仅在线 AI 路径消费）
     aiCategories,
+    // T13-5（REQ-48 / 决策 #7）：现有对象全列表 → context 名单段 + config 名→id 解析
+    books,
+    accounts,
+    budgets,
+    goals,
+    // T13-5：config 写入成功 → 重拉名单（本轮新建对象下一轮可点名）
+    onConfigApplied: loadObjects,
     // C-B4 fix: 使用设备时区替代硬编码
     timezone: Intl.DateTimeFormat().resolvedOptions().timeZone || 'Asia/Shanghai',
   })
@@ -257,7 +298,7 @@ export function AssistantPage() {
   // 自动滚动到底部
   useEffect(() => {
     scrollRef.current?.scrollTo({ top: scrollRef.current.scrollHeight, behavior: 'smooth' })
-  }, [messages, phase, imageState, pendingOp])
+  }, [messages, phase, imageState, pendingOp, pendingConfig])
 
   // T9-8（REQ-16）：MainActivity 注入 --ime-bottom-px 后派发合成 resize →
   // 消息区随键盘收缩滚动到底（决策 #10）
@@ -489,6 +530,17 @@ export function AssistantPage() {
             categories={categories}
             onConfirm={confirmOp}
             onCancel={cancelOp}
+          />
+        )}
+
+        {/* T13-5（REQ-48 / 决策 #8）：config 设置意图预览确认卡——防呆，确认才写 */}
+        {pendingConfig && (
+          <OpPreviewCard
+            variant="config"
+            title={pendingConfig.preview.title}
+            rows={pendingConfig.preview.rows}
+            onConfirm={confirmConfig}
+            onCancel={cancelConfig}
           />
         )}
       </div>

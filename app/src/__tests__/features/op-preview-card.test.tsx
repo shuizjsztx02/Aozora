@@ -3,6 +3,8 @@
  *
  * 覆盖：delete/edit 标题与执行数、预览 ≤20 行 + 行数截断提示、
  * 命中 >50 的批量上限提示、执行/取消回调与执行中禁用。
+ * 第十三轮 T13-5（REQ-48 / 决策 #8）：泛化双形态——config rows 模式
+ * （标题 + label/value 行、「确认」钮、执行中禁用、取消回调）。
  */
 import { describe, it, expect, vi } from 'vitest'
 import { render, screen, fireEvent, waitFor } from '@testing-library/react'
@@ -92,5 +94,63 @@ describe('OpPreviewCard（T12-11）', () => {
 
     fireEvent.click(screen.getByTestId('op-cancel'))
     expect(onCancel).toHaveBeenCalledTimes(1)
+  })
+})
+
+describe('OpPreviewCard config 模式（T13-5 / 决策 #8）', () => {
+  const rows = [
+    { label: '操作', value: '新建账本' },
+    { label: '名称', value: '旅行' },
+    { label: '图标', value: '✈️' },
+  ]
+
+  it('title + rows 渲染；确认钮文案「确认」（无笔数）', () => {
+    render(
+      <OpPreviewCard variant="config" title="⚙️ 新建账本" rows={rows}
+                     onConfirm={vi.fn()} onCancel={vi.fn()} />,
+    )
+    expect(screen.getByTestId('op-preview-card')).toBeInTheDocument()
+    expect(screen.getByTestId('op-preview-title').textContent).toBe('⚙️ 新建账本')
+    const rowEls = screen.getAllByTestId('op-config-row')
+    expect(rowEls).toHaveLength(3)
+    expect(rowEls[1].textContent).toContain('名称')
+    expect(rowEls[1].textContent).toContain('旅行')
+    expect(screen.getByTestId('op-confirm').textContent).toBe('确认')
+    // 交易模式的截断提示不出现
+    expect(screen.queryByTestId('op-truncate-hint')).toBeNull()
+    expect(screen.queryByTestId('op-row')).toBeNull()
+  })
+
+  it('执行 → onConfirm 触发、执行中禁双触；完成恢复', async () => {
+    let resolveConfirm: () => void = () => {}
+    const onConfirm = vi.fn(() => new Promise<void>(r => { resolveConfirm = r }))
+    render(
+      <OpPreviewCard variant="config" title="⚙️ 新建账本" rows={rows}
+                     onConfirm={onConfirm} onCancel={vi.fn()} />,
+    )
+    const btn = screen.getByTestId('op-confirm')
+    fireEvent.click(btn)
+    expect(onConfirm).toHaveBeenCalledTimes(1)
+    fireEvent.click(btn)
+    expect(onConfirm).toHaveBeenCalledTimes(1)
+    expect(btn).toBeDisabled()
+    resolveConfirm()
+    await waitFor(() => expect(btn).not.toBeDisabled())
+  })
+
+  it('取消 → onCancel 独立回调（config 执行/取消与交易模式互不共用）', () => {
+    const onCancel = vi.fn()
+    render(
+      <OpPreviewCard variant="config" title="⚙️ 设置默认账本" rows={rows.slice(0, 2)}
+                     onConfirm={vi.fn()} onCancel={onCancel} />,
+    )
+    fireEvent.click(screen.getByTestId('op-cancel'))
+    expect(onCancel).toHaveBeenCalledTimes(1)
+  })
+
+  it('缺省 variant（不传）仍走交易列表模式——存量调用点零改动兼容', () => {
+    render(<OpPreviewCard op={op()} categories={cats} onConfirm={vi.fn()} onCancel={vi.fn()} />)
+    expect(screen.getByTestId('op-preview-title').textContent).toBe('🗑 将删除 2 笔记录')
+    expect(screen.getByTestId('op-confirm').textContent).toBe('执行 (2)')
   })
 })

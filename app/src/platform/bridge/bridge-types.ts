@@ -473,6 +473,11 @@ export interface AiInterpretContext {
   categories?: string[] | null
   /** 用户时区今天（YYYY-MM-DD），prompt v2 相对日期换算用 */
   today?: string | null
+  /** T13-5：现有对象名单（只含名字；模型永不经手 id，名→id 由客户端解析） */
+  books?: Array<{ name: string }> | null
+  accounts?: Array<{ name: string }> | null
+  budgets?: Array<{ name: string }> | null
+  goals?: Array<{ name: string }> | null
 }
 
 export interface AiInterpretResponse {

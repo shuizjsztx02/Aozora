@@ -16,9 +16,11 @@
 import type { ActionProposal, TransactionItem } from './action-proposal'
 import { validateProposal } from './action-proposal'
 import type {
-  CategoryData, TransactionData, TransactionInput,
+  AccountData, BookData, CategoryData, SavingsGoalData,
+  TransactionData, TransactionInput,
 } from '../platform/bridge/bridge-types'
-import { localBizDate } from './date'
+import { localBizDate, parseBizDate } from './date'
+import { fromYuan } from './money'
 
 /** AI interpret 输出结构（ledger_parse 任务） */
 export interface AiParseOutput {
@@ -165,7 +167,7 @@ function buildChatFallback(message: string, confidence: number): ActionProposal 
 // 的目标由 filter 条件在本模块纯函数里于本地 listByBook 结果上圈定。
 // 本模块保持纯函数：不触 React / bridge / 存储。
 
-export type AiIntent = 'bookkeeping' | 'edit' | 'delete' | 'query' | 'chat'
+export type AiIntent = 'bookkeeping' | 'edit' | 'delete' | 'query' | 'chat' | 'config'
 
 /** edit/delete/query 的目标圈定条件（仅显式字段，坏字段解析时已剔除）。 */
 export interface AiOpFilter {
@@ -191,6 +193,8 @@ export interface AiOpSet {
   bizDate?: string
 }
 
+/** T12-11：edit/delete/query/chat 的文本意图；T13-5：intent=config 时的设置操作
+ *  （op 不在白名单/坏形状 → null，调用方回落 chat 转述 reply，决策 #6）。 */
 export interface AiInterpretV2 {
   intent: AiIntent
   /** 老 6 字段（intent=bookkeeping 时喂 buildProposalFromAiOutput） */
@@ -198,6 +202,7 @@ export interface AiInterpretV2 {
   reply: string
   filter: AiOpFilter | null
   set: AiOpSet | null
+  config: AiConfig | null
 }
 
 /** 批量操作上限 v1（REQ-37 ⑤）：单操作最多执行 50 笔，预览卡提示截断。 */
@@ -209,7 +214,7 @@ export const AI_CATEGORY_MAX_COUNT = 120
 export const AI_CATEGORY_NAME_MAX_CHARS = 16
 
 const AI_INTENTS: ReadonlySet<string> = new Set<AiIntent>([
-  'bookkeeping', 'edit', 'delete', 'query', 'chat',
+  'bookkeeping', 'edit', 'delete', 'query', 'chat', 'config',
 ])
 const ISO_DATE_RE = /^\d{4}-\d{2}-\d{2}$/
 
@@ -259,7 +264,11 @@ export function parseAiInterpretOutput(raw: Record<string, unknown>): AiInterpre
     confidence: Number(raw.confidence) || 0.5,
   }
   const reply = typeof raw.reply === 'string' ? raw.reply.trim() : ''
-  return { intent, legacy, reply, filter: parseOpFilter(raw.filter), set: parseOpSet(raw.set) }
+  return {
+    intent, legacy, reply,
+    filter: parseOpFilter(raw.filter), set: parseOpSet(raw.set),
+    config: parseAiConfig(raw.config),
+  }
 }
 
 function parseOpFilter(raw: unknown): AiOpFilter | null {
@@ -394,5 +403,334 @@ export function buildEditUpdates(
     source: tx.source,
     includeInBudget: set?.includeInBudget ?? tx.includeInBudget !== false,
     version: tx.version + 1, // Kotlin 乐观锁：必须 > 当前版本（T12-7）
+  }
+}
+
+// ─── 第十三轮 T13-5（REQ-48 / 决策 #6 #7 #8）：config 意图 —— 白名单解析 + 名→id 解析 + 预览组装 ───
+//
+// 服务端 T13-4（LEDGER_PARSE v3）输出顶层 config 对象（6 op 白名单；模型只报名、
+// 永不报 UUID）。本段纯函数负责：① 白名单校验（缺 config/坏 op/必填缺失 → null，
+// 调用方回落 chat 转述 reply，决策 #6）；② 名→id 本地解析（trim + 全等，重名取
+// 第一个——list 桥侧已滤归档——匹配不到返回引导语，绝不猜测）；③ 预览 rows 组装
+// （OpPreviewCard config 模式消费，决策 #8：确认前用户看到即将所写的全部要点）。
+
+export type AiConfigOp =
+  | 'book.create' | 'account.create' | 'budget.create'
+  | 'savings.create' | 'default.book_set' | 'default.account_set'
+
+/** config 载荷（按 op 取用；金额类字段单位为「元」，执行时转分）。 */
+export interface AiConfig {
+  op: AiConfigOp
+  /** 6 op 公用对象名（trim 后非空才成立） */
+  name: string
+  /** book.create：单个表情（可选） */
+  icon?: string
+  /** account.create：契约必填（income|expense） */
+  accountType?: 'income' | 'expense'
+  /** account.create：期初余额（元，可选；AccountEntity 无余额列，执行不落库，回执引导补记一笔） */
+  initBalance?: number
+  /** budget.create：分类名（契约必填，解析 expense 口径分类 id） */
+  category?: string
+  /** budget.create：金额（元，契约必填） */
+  amount?: number
+  /** budget.create：month|year，缺省 month（决策 #6） */
+  period?: 'month' | 'year'
+  /** savings.create：目标金额（元，契约必填） */
+  targetAmount?: number
+  /** savings.create：存款期限（YYYY-MM-DD；native 只有周/月期限，执行时换算） */
+  deadline?: string
+}
+
+const AI_CONFIG_OPS: ReadonlySet<string> = new Set<AiConfigOp>([
+  'book.create', 'account.create', 'budget.create',
+  'savings.create', 'default.book_set', 'default.account_set',
+])
+
+/** context.books/accounts/budgets/goals 名单上限（决策 #7：≤30 条 × ≤16 字）。 */
+export const AI_OBJECT_MAX_COUNT = 30
+export const AI_OBJECT_NAME_MAX_CHARS = 16
+
+/** 金额容错（元）：number 或数字字符串，>0 且有限才收。 */
+function toPositiveNum(v: unknown): number | undefined {
+  const n =
+    typeof v === 'number' ? v
+      : typeof v === 'string' && v.trim() !== '' ? Number(v)
+        : NaN
+  if (!Number.isFinite(n) || n <= 0) return undefined
+  try {
+    if (fromYuan(n) < 1) return undefined
+  } catch {
+    return undefined
+  }
+  return n
+}
+
+/** initBalance 容错：≥0（期初 0 元合法）。 */
+function toNonNegativeNum(v: unknown): number | undefined {
+  const n =
+    typeof v === 'number' ? v
+      : typeof v === 'string' && v.trim() !== '' ? Number(v)
+        : NaN
+  if (!Number.isFinite(n) || n < 0) return undefined
+  return n
+}
+
+function trimmedNonEmpty(v: unknown): string | null {
+  return typeof v === 'string' && v.trim() ? v.trim() : null
+}
+
+/**
+ * config 白名单校验（永不抛异常）。op 坏/必填缺失 → null（回落 chat）；
+ * 可选字段坏 → 仅丢该字段（与 filter/set 解析同口径）。
+ */
+export function parseAiConfig(raw: unknown): AiConfig | null {
+  if (!isPlainObject(raw)) return null
+  const op = trimmedNonEmpty(raw.op)
+  if (!op || !AI_CONFIG_OPS.has(op)) return null
+  const name = trimmedNonEmpty(raw.name)
+  if (!name) return null
+  const cfg: AiConfig = { op: op as AiConfigOp, name }
+  switch (cfg.op) {
+    case 'book.create': {
+      const icon = trimmedNonEmpty(raw.icon)
+      if (icon) cfg.icon = icon
+      return cfg
+    }
+    case 'account.create': {
+      if (raw.accountType !== 'income' && raw.accountType !== 'expense') return null
+      cfg.accountType = raw.accountType
+      const bal = toNonNegativeNum(raw.initBalance)
+      if (bal !== undefined) cfg.initBalance = bal
+      return cfg
+    }
+    case 'budget.create': {
+      const category = trimmedNonEmpty(raw.category)
+      const amount = toPositiveNum(raw.amount)
+      if (!category || amount === undefined) return null
+      cfg.category = category
+      cfg.amount = amount
+      if (raw.period === 'month' || raw.period === 'year') cfg.period = raw.period
+      return cfg
+    }
+    case 'savings.create': {
+      const target = toPositiveNum(raw.targetAmount)
+      if (target === undefined) return null
+      cfg.targetAmount = target
+      if (typeof raw.deadline === 'string') {
+        try {
+          parseBizDate(raw.deadline)
+          cfg.deadline = raw.deadline
+        } catch {
+          // 可选期限形状无效时丢弃，保留其余合法 config（与其他可选字段同口径）。
+        }
+      }
+      return cfg
+    }
+    // default.book_set / default.account_set：仅 name（必填校验已过）
+    default:
+      return cfg
+  }
+}
+
+/** 对象名数组 → context 注入段形状（trim + ≤16 字 + 去重 + ≤30 条；空名丢）。 */
+export function buildAiObjectNames(names: string[]): Array<{ name: string }> {
+  const out: Array<{ name: string }> = []
+  const seen = new Set<string>()
+  for (const raw of names) {
+    const name = (raw || '').trim().slice(0, AI_OBJECT_NAME_MAX_CHARS)
+    if (!name || seen.has(name)) continue
+    seen.add(name)
+    out.push({ name })
+    if (out.length >= AI_OBJECT_MAX_COUNT) break
+  }
+  return out
+}
+
+export interface ConfigResolveContext {
+  books: BookData[]
+  accounts: AccountData[]
+  goals: SavingsGoalData[]
+  categories: CategoryData[]
+  /** budget.create 落点账本（聊天记账 bookId）；null → 引导语 */
+  bookId: string | null
+  /** 用户时区今天（YYYY-MM-DD），savings deadline 过期校验用 */
+  today: string
+}
+
+/** 名→id 解析产物（各 op 只填自己用到的键）。 */
+export interface ConfigTargets {
+  /** default.book_set → 账本 id */
+  bookId?: string
+  /** default.account_set → 账户 id */
+  accountId?: string
+  /** budget.create → 分类 id */
+  categoryId?: string
+}
+
+export type ConfigResolution =
+  | { ok: true; targets: ConfigTargets }
+  | { ok: false; message: string }
+
+function findByName<T extends { name: string }>(list: T[], name: string): T[] {
+  const n = name.trim()
+  return list.filter(o => (o.name || '').trim() === n)
+}
+
+/** 引导语里的现有对象名清单（≤10 个，决策 #6「匹配不到 → 引导语不猜测」）。 */
+function nameHint(names: string[]): string {
+  const shown = names.filter(Boolean).slice(0, 10).join('、')
+  return shown ? `现有的：${shown}。` : '目前还没有可选项，请先在设置中创建。'
+}
+
+/**
+ * config 的名→id 解析 + 本地可执行性校验（纯函数，桥零调用）。
+ * create 类：同类重名 → 引导语（重名会让后续 default.* 无法解析）；
+ * budget.create：分类解析（与 edit set.category 同口径 matchCategoryByName expense）；
+ * default.*：trim+全等、重名取第一个（桥侧 list 已滤归档）；master 账本不可设为默认。
+ */
+export function resolveConfigTargets(
+  cfg: AiConfig, ctx: ConfigResolveContext,
+): ConfigResolution {
+  switch (cfg.op) {
+    case 'book.create':
+      if (findByName(ctx.books, cfg.name).length > 0) {
+        return { ok: false, message: `账本「${cfg.name}」已经存在了，换一个名字或直接用现有的～` }
+      }
+      return { ok: true, targets: {} }
+    case 'account.create':
+      if (findByName(ctx.accounts, cfg.name).length > 0) {
+        return { ok: false, message: `账户「${cfg.name}」已经存在了，换一个名字或直接用现有的～` }
+      }
+      return { ok: true, targets: {} }
+    case 'budget.create': {
+      if (!ctx.bookId) {
+        return { ok: false, message: '账本未就绪，无法创建预算。请返回首页切换账本后重试。' }
+      }
+      const categoryId = matchCategoryByName(cfg.category || '', ctx.categories, 'expense')
+      if (!categoryId) {
+        return {
+          ok: false,
+          message: `没找到分类「${cfg.category}」，请在现有分类里选一个，或先到设置·分类里创建～`,
+        }
+      }
+      return { ok: true, targets: { categoryId } }
+    }
+    case 'savings.create':
+      // ISO 日期字符串可比；deadline 今天之前 = 无法倒着存钱（形状合法但语义坏）
+      if (cfg.deadline && cfg.deadline < ctx.today) {
+        return {
+          ok: false,
+          message: `存款期限（${cfg.deadline}）已经过了，给我一个未来的日期再试～`,
+        }
+      }
+      return { ok: true, targets: {} }
+    case 'default.book_set': {
+      // master（总账本）不可记账（REQ-11 决策 #4），不提供为默认
+      const hit = findByName(ctx.books, cfg.name).filter(b => !b.isMaster)
+      if (!hit.length) {
+        return {
+          ok: false,
+          message: `没找到叫「${cfg.name}」的账本。${nameHint(ctx.books.map(b => b.name))}`,
+        }
+      }
+      return { ok: true, targets: { bookId: hit[0].id } }
+    }
+    case 'default.account_set': {
+      const hit = findByName(ctx.accounts, cfg.name)
+      if (!hit.length) {
+        return {
+          ok: false,
+          message: `没找到叫「${cfg.name}」的账户。${nameHint(ctx.accounts.map(a => a.name))}`,
+        }
+      }
+      return { ok: true, targets: { accountId: hit[0].id } }
+    }
+  }
+}
+
+/**
+ * savings deadline（YYYY-MM-DD）→ native 期限（periodValue/periodUnit）。
+ * 口径：剩余 ≤12 周给「周」（整数感强），更长给「月」；边界钳进 Kotlin 合法域
+ * （周 1-521 / 月 1-120）。deadline 过期由 resolveConfigTargets 拦截，此处仅防御。
+ */
+export function deadlineToSavingsPeriod(
+  deadline: string, today: string,
+): { value: number; unit: 'week' | 'month' } {
+  const days = Math.round(
+    (Date.parse(`${deadline}T00:00:00Z`) - Date.parse(`${today}T00:00:00Z`)) / 86_400_000,
+  )
+  if (days <= 0) return { value: 1, unit: 'week' }
+  const weeks = Math.min(521, Math.ceil(days / 7))
+  if (days <= 84) return { value: weeks, unit: 'week' }
+  return { value: Math.min(120, Math.max(1, Math.round(days / 30.44))), unit: 'month' }
+}
+
+const YUAN = (n: number) => `¥${n.toFixed(2)}`
+
+export interface ConfigPreview {
+  title: string
+  rows: Array<{ label: string; value: string }>
+}
+
+/**
+ * config 预览卡内容（决策 #8：2-4 行，操作类型/目标名/关键参数）。
+ * 只展示会真实写入的效果：budget 的 name 与 account 的 initBalance 无 native 落点，
+ * 前者不进 rows（实体无名列），后者明示「创建后补记一笔」。
+ */
+export function buildConfigPreview(cfg: AiConfig, today: string): ConfigPreview {
+  switch (cfg.op) {
+    case 'book.create': {
+      const rows = [{ label: '操作', value: '新建账本' }, { label: '名称', value: cfg.name }]
+      if (cfg.icon) rows.push({ label: '图标', value: cfg.icon })
+      return { title: '⚙️ 新建账本', rows }
+    }
+    case 'account.create': {
+      const rows = [
+        { label: '操作', value: '新建账户' },
+        { label: '名称', value: cfg.name },
+        { label: '类型', value: cfg.accountType === 'income' ? '收入账户' : '支出账户' },
+      ]
+      if (cfg.initBalance) {
+        rows.push({ label: '期初余额', value: `${YUAN(cfg.initBalance)}（创建后请补记一笔收入）` })
+      }
+      return { title: '⚙️ 新建账户', rows }
+    }
+    case 'budget.create': {
+      const yearly = cfg.period === 'year'
+      return {
+        title: '⚙️ 新建预算',
+        rows: [
+          { label: '操作', value: '新建预算' },
+          { label: '分类', value: cfg.category || '' },
+          { label: '金额', value: YUAN(cfg.amount || 0) },
+          { label: '周期', value: yearly ? `年度（${today.slice(0, 4)} 年）` : `月度（${today.slice(0, 7)}）` },
+        ],
+      }
+    }
+    case 'savings.create': {
+      const rows = [
+        { label: '操作', value: '新建存钱目标' },
+        { label: '名称', value: cfg.name },
+        { label: '目标金额', value: YUAN(cfg.targetAmount || 0) },
+      ]
+      if (cfg.deadline) {
+        const p = deadlineToSavingsPeriod(cfg.deadline, today)
+        rows.push({
+          label: '存款期限',
+          value: `${cfg.deadline} 前（约 ${p.value}${p.unit === 'week' ? '周' : '个月'}）`,
+        })
+      }
+      return { title: '⚙️ 新建存钱目标', rows }
+    }
+    case 'default.book_set':
+      return {
+        title: '⚙️ 设置默认账本',
+        rows: [{ label: '操作', value: '设为默认账本' }, { label: '目标', value: cfg.name }],
+      }
+    case 'default.account_set':
+      return {
+        title: '⚙️ 设置默认账户',
+        rows: [{ label: '操作', value: '设为默认账户' }, { label: '目标', value: cfg.name }],
+      }
   }
 }

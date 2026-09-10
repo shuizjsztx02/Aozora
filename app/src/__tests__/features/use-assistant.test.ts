@@ -291,6 +291,8 @@ describe('use-assistant — 免确认本地记账（T8-6）', () => {
 
   const baseCtx = {
     profile: null, persona: null, categories: null, today: todayBizDate(TZ),
+    // T13-5（REQ-48 / 决策 #7）：对象名单四段——hook 未收到列表时传 null 段
+    books: null, accounts: null, budgets: null, goals: null,
   }
 
   it('有画像 → interpretAI 收到 context.profile 段', async () => {
@@ -363,7 +365,7 @@ describe('use-assistant — 免确认本地记账（T8-6）', () => {
 
     expect(mockBridge.interpretAI).toHaveBeenCalledWith(
       '随便说点什么',
-      { profile: null, persona, categories: null, today: todayBizDate(TZ) },
+      { ...baseCtx, persona },
     )
   })
 
@@ -379,7 +381,7 @@ describe('use-assistant — 免确认本地记账（T8-6）', () => {
 
     expect(mockBridge.interpretAI).toHaveBeenCalledWith(
       '随便说点什么',
-      { profile, persona, categories: null, today: todayBizDate(TZ) },
+      { ...baseCtx, profile, persona },
     )
   })
 
@@ -393,7 +395,7 @@ describe('use-assistant — 免确认本地记账（T8-6）', () => {
 
     expect(mockBridge.interpretAI).toHaveBeenCalledWith(
       '随便说点什么',
-      { profile: null, persona: null, categories: null, today: todayBizDate(TZ) },
+      { ...baseCtx, profile: null, persona: null },
     )
   })
 

@@ -6,27 +6,42 @@
  * 预览 ≤OP_PREVIEW_ROWS 行（日期 · 分类 · 金额 · 备注）；执行数截断
  * MAX_BATCH_OPS 并在卡上提示；「执行(N)」触发 hook confirmOp（逐笔写、
  * 部分失败可见），「取消」cancelOp 不落任何写。
+ *
+ * 第十三轮 T13-5（REQ-48 / 决策 #8）：泛化双形态——config 预览（variant='config'，
+ * title + rows[{label,value}] 2-4 行 + 确认/取消 + executing 态）。config 一律
+ * 预览确认才写（防呆），确认钮「确认」（单操作无笔数）。
  */
 
-import { useState } from 'react'
+import { useState, type ReactNode } from 'react'
 import { CategoryIcon } from '../../components/CategoryIcon'
 import { OP_PREVIEW_ROWS, MAX_BATCH_OPS } from '../../domain/ai-proposal-builder'
 import type { CategoryData, TransactionData } from '../../platform/bridge/bridge-types'
 import type { PendingOp } from './use-assistant'
 
-interface OpPreviewCardProps {
-  op: PendingOp
-  categories: CategoryData[]
+interface PreviewActions {
   onConfirm: () => Promise<void> | void
   onCancel: () => void
 }
 
-export function OpPreviewCard({ op, categories, onConfirm, onCancel }: OpPreviewCardProps) {
+/** T12-11 原形态：edit/delete 交易候选列表预览（variant 缺省）。 */
+interface TxPreviewProps extends PreviewActions {
+  variant?: 'transactions'
+  op: PendingOp
+  categories: CategoryData[]
+}
+
+/** T13-5：config 设置操作预览（操作类型/目标名/关键参数，≤4 行）。 */
+interface ConfigPreviewProps extends PreviewActions {
+  variant: 'config'
+  title: string
+  rows: Array<{ label: string; value: string }>
+}
+
+export type OpPreviewCardProps = TxPreviewProps | ConfigPreviewProps
+
+export function OpPreviewCard(props: OpPreviewCardProps) {
+  const { onConfirm, onCancel } = props
   const [busy, setBusy] = useState(false)
-  const isDelete = op.kind === 'delete'
-  const total = op.candidates.length
-  const execCount = Math.min(total, MAX_BATCH_OPS)
-  const rows = op.candidates.slice(0, OP_PREVIEW_ROWS)
 
   const handleConfirm = async () => {
     if (busy) return
@@ -34,12 +49,12 @@ export function OpPreviewCard({ op, categories, onConfirm, onCancel }: OpPreview
     try {
       await onConfirm()
     } finally {
-      // 成功后 pendingOp 清空、本卡卸载（卸载后 setState 无害）；失败保留可重试
+      // 成功后 pendingOp/pendingConfig 清空、本卡卸载（卸载后 setState 无害）；失败保留可重试
       setBusy(false)
     }
   }
 
-  return (
+  const shell = (titleNode: ReactNode, bodyNode: ReactNode, confirmLabel: string, confirmDanger: boolean) => (
     <div
       className="rounded-xl p-3 mx-4 my-2"
       style={{
@@ -51,30 +66,10 @@ export function OpPreviewCard({ op, categories, onConfirm, onCancel }: OpPreview
       {/* 标题行：操作类型 + 执行数（截断后） */}
       <div className="flex items-center justify-between gap-2">
         <span className="text-sm font-medium" style={{ color: 'var(--ink)' }} data-testid="op-preview-title">
-          {isDelete ? `🗑 将删除 ${execCount} 笔记录` : `✏️ 将修改 ${execCount} 笔记录`}
+          {titleNode}
         </span>
       </div>
-
-      {/* 超批量上限提示（REQ-37 ⑤：v1 单操作 50 笔截断） */}
-      {total > MAX_BATCH_OPS && (
-        <div className="text-xs mt-1" style={{ color: 'var(--warning-text, #856404)' }} data-testid="op-truncate-hint">
-          命中 {total} 笔，超出单次 {MAX_BATCH_OPS} 笔上限，仅执行最近 {MAX_BATCH_OPS} 笔
-        </div>
-      )}
-      {/* 预览行数截断提示 */}
-      {rows.length < execCount && (
-        <div className="text-xs mt-1" style={{ color: 'var(--ink3)' }}>
-          预览仅显示前 {OP_PREVIEW_ROWS} 笔
-        </div>
-      )}
-
-      {/* 候选明细（bizDate DESC，最新在前——与 listByBook 圈定顺序一致） */}
-      <div className="mt-2 max-h-64 overflow-y-auto">
-        {rows.map(tx => (
-          <OpRow key={tx.id} tx={tx} categories={categories} />
-        ))}
-      </div>
-
+      {bodyNode}
       {/* 执行 / 取消（决策 #5：确认步骤不可省；执行中禁双触） */}
       <div className="flex gap-2 mt-2">
         <button
@@ -96,13 +91,73 @@ export function OpPreviewCard({ op, categories, onConfirm, onCancel }: OpPreview
           onClick={() => void handleConfirm()}
           disabled={busy}
           className="flex-1 py-1.5 rounded-lg text-xs font-medium text-white disabled:opacity-60"
-          style={{ background: isDelete ? 'var(--expense)' : 'var(--accent)' }}
+          style={{ background: confirmDanger ? 'var(--expense)' : 'var(--accent)' }}
           data-testid="op-confirm"
         >
-          {busy ? '执行中…' : `执行 (${execCount})`}
+          {busy ? '执行中…' : confirmLabel}
         </button>
       </div>
     </div>
+  )
+
+  if (props.variant === 'config') {
+    return shell(
+      props.title,
+      (
+        <div className="mt-2">
+          {props.rows.map(r => (
+            <div
+              key={r.label}
+              className="flex items-baseline gap-2 py-1 border-b last:border-b-0"
+              style={{ borderColor: 'var(--glass-border)' }}
+              data-testid="op-config-row"
+            >
+              <span className="text-xs shrink-0" style={{ color: 'var(--ink2)' }}>{r.label}</span>
+              <span className="text-xs flex-1 min-w-0 text-right" style={{ color: 'var(--ink)' }}>
+                {r.value}
+              </span>
+            </div>
+          ))}
+        </div>
+      ),
+      '确认',
+      false,
+    )
+  }
+
+  const { op, categories } = props
+  const isDelete = op.kind === 'delete'
+  const total = op.candidates.length
+  const execCount = Math.min(total, MAX_BATCH_OPS)
+  const rows = op.candidates.slice(0, OP_PREVIEW_ROWS)
+
+  return shell(
+    isDelete ? `🗑 将删除 ${execCount} 笔记录` : `✏️ 将修改 ${execCount} 笔记录`,
+    (
+      <>
+        {/* 超批量上限提示（REQ-37 ⑤：v1 单操作 50 笔截断） */}
+        {total > MAX_BATCH_OPS && (
+          <div className="text-xs mt-1" style={{ color: 'var(--warning-text, #856404)' }} data-testid="op-truncate-hint">
+            命中 {total} 笔，超出单次 {MAX_BATCH_OPS} 笔上限，仅执行最近 {MAX_BATCH_OPS} 笔
+          </div>
+        )}
+        {/* 预览行数截断提示 */}
+        {rows.length < execCount && (
+          <div className="text-xs mt-1" style={{ color: 'var(--ink3)' }}>
+            预览仅显示前 {OP_PREVIEW_ROWS} 笔
+          </div>
+        )}
+
+        {/* 候选明细（bizDate DESC，最新在前——与 listByBook 圈定顺序一致） */}
+        <div className="mt-2 max-h-64 overflow-y-auto">
+          {rows.map(tx => (
+            <OpRow key={tx.id} tx={tx} categories={categories} />
+          ))}
+        </div>
+      </>
+    ),
+    `执行 (${execCount})`,
+    isDelete,
   )
 }
 

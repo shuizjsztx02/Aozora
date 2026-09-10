@@ -68,6 +68,9 @@ const mockBridge = vi.hoisted(() => ({
   getMeta: vi.fn().mockResolvedValue({}),
   // T11-7（REQ-28）：角色列表 mock（默认无角色 → header 无角色名）
   listPersonas: vi.fn().mockResolvedValue([]),
+  // T13-5（REQ-48）：现有对象名单装载（context 注入 + config 解析数据源）
+  listSavingsGoals: vi.fn().mockResolvedValue([]),
+  listBudgets: vi.fn().mockResolvedValue([]),
   insertTransaction: vi.fn().mockResolvedValue({ id: 'tx-1' }),
   triggerSync: vi.fn().mockResolvedValue(undefined),
   interpretAI: vi.fn().mockResolvedValue(null),
