@@ -23,7 +23,8 @@ import java.io.IOException
  *
  * 错误处理：
  * - [AuthClient.AuthLostException]：清空本地 auth，状态置 ERROR。
- * - [SyncHttpException] 4xx：同上（服务端拒绝 token）。
+ * - [SyncHttpException] 401：同上（服务端拒绝 token）。其余 4xx（含 403
+ *   consent_required / account_frozen 业务态）→ ERROR + RETRYABLE，不清凭证。
  * - [SyncHttpException] 5xx 或 IOException：状态置 ERROR，由 worker 的 backoff 重试。
  * - T-M3-03: bootstrap checksum 或实体计数不匹配 → [SyncOutcome.RETRYABLE]，日志记录详细差异。
  *
@@ -100,8 +101,10 @@ class SyncEngine(
             emit(SyncState.AUTH_LOST, pendingCountSnapshot(), lastError = e.message)
             SyncOutcome.AUTH_LOST
         } catch (e: SyncHttpException) {
-            // P1-5: 仅 401/403 → AUTH_LOST；429 + 其他 4xx → RETRYABLE；5xx → RETRYABLE
-            val authLost = e.httpCode == 401 || e.httpCode == 403
+            // P1-5（T12 后修正）：仅 401 → AUTH_LOST；403（consent_required /
+            // account_frozen 业务态）与其他 4xx → ERROR + RETRYABLE，不清凭证。
+            // 旧口径把 403 当认证丢失 → clearAuth → guest 重注册身份漂移死循环。
+            val authLost = e.httpCode == 401
             emit(
                 if (authLost) SyncState.AUTH_LOST else SyncState.ERROR,
                 pendingCountSnapshot(),
@@ -140,7 +143,8 @@ class SyncEngine(
             emit(SyncState.AUTH_LOST, pendingCountSnapshot(), lastError = e.message)
             SyncOutcome.AUTH_LOST
         } catch (e: SyncHttpException) {
-            val authLost = e.httpCode == 401 || e.httpCode == 403
+            // 与 runOnce 同一口径：仅 401 → AUTH_LOST；403 等业务态 → ERROR/RETRYABLE
+            val authLost = e.httpCode == 401
             emit(
                 if (authLost) SyncState.AUTH_LOST else SyncState.ERROR,
                 pendingCountSnapshot(),

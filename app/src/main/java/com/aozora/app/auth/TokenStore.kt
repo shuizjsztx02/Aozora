@@ -77,9 +77,20 @@ open class TokenStore(context: Context) {
         }
     }
 
-    /** 清除所有令牌状态（登出 / 认证丢失时调用）。 */
+    /**
+     * 清除所有令牌状态（登出 / 认证丢失时调用）。
+     *
+     * **device_id 跨清除保留**：它不是凭证，而是设备标识（/auth/guest 与
+     * /auth/refresh 共用，且服务端设备级隐私同意按它关联）。若一并清除，
+     * guest 重注册会生成新 device_id → 服务端 consent 判定查无此设备 →
+     * sync/push 恒 403，形成"清凭证即换身份"的漂移循环（T12 后修图片记账 403 案）。
+     */
     fun clear() {
-        prefs.edit { clear() }
+        val deviceIdToKeep = prefs.getString(KEY_DEVICE_ID, null)
+        prefs.edit {
+            clear()
+            if (deviceIdToKeep != null) putString(KEY_DEVICE_ID, deviceIdToKeep)
+        }
     }
 
     /**

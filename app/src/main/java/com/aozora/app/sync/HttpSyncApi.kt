@@ -14,8 +14,12 @@ import java.io.IOException
  *
  * - 每次请求前通过 [AuthClient] 取当前 access_token，作为 `Authorization: Bearer` 携带。
  * - 不自行实现重试；WorkManager 的 backoff policy 负责调度重试。
- * - HTTP 401/403 显式抛 [AuthClient.AuthLostException]（token 失效/被吊销），
+ * - HTTP 401 显式抛 [AuthClient.AuthLostException]（token 失效/被吊销），
  *   由 [SyncEngine] 清空本地 auth 并引导用户重新注册。
+ * - HTTP 403 **不是**认证丢失：sync 端点的 403 语义是业务状态（consent_required /
+ *   account_frozen），清凭证无法修复，反而会在 guest 场景下触发"clearAuth → 重新注册
+ *   新 guest → device_id 变更 → 无同意记录 → push 再 403"的身份漂移死循环。
+ *   与 AiGatewayClient"403 is NOT auth"同一口径，按普通 4xx 上抛。
  * - 其他非 2xx 抛 [SyncHttpException]，冒泡到 [SyncEngine] 按状态码判定 retryable。
  */
 class HttpSyncApi(
@@ -57,11 +61,12 @@ class HttpSyncApi(
             httpClient.newCall(request).execute().use { response ->
                 val bodyStr = response.body?.string().orEmpty()
                 if (!response.isSuccessful) {
-                    // N-M3-6 修复：401/403 显式视为认证丢失，抛 AuthLostException。
-                    // 职责边界清晰：HttpSyncApi 层直接判定语义，SyncEngine 无需知道 HTTP 状态码含义。
+                    // N-M3-6 修复：401 显式视为认证丢失，抛 AuthLostException。
+                    // 403 按 SyncHttpException 上抛（业务状态，见类注释）——旧口径把
+                    // 401..403 一律当认证丢失，导致 consent 403 抹掉合法会话。
                     // NEW-3 修复：仅传递状态码，不传递响应体。服务端错误页面可能包含
                     // HTML、堆栈或其他敏感内容，避免通过 SyncStatusEvent → 前端/日志泄露。
-                    if (response.code in 401..403) {
+                    if (response.code == 401) {
                         throw AuthClient.AuthLostException("HTTP ${response.code}")
                     }
                     throw SyncHttpException(response.code, "HTTP ${response.code}")
