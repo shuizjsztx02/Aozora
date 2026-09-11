@@ -45,3 +45,6 @@ docs/progress.json
 
 # Playwright 运行输出（基线目录 visual-tests/baseline 为入库资产，不受影响）
 test-results/
+
+# 收口复验工作产物（截图/CDP 助手/临时日志，本地留存不入库）
+.scratch/
