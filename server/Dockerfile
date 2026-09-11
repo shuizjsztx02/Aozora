@@ -1,10 +1,10 @@
-# syntax=docker/dockerfile:1
+# syntax=swr.cn-north-4.myhuaweicloud.com/ddn-k8s/docker.io/docker/dockerfile:1
 # T-M2-01: Multi-stage build — secrets and build tools stay out of runtime image.
 # R-M4-39: build context is the repo root (docker-compose ``build.context: .``)
 # so that ``contracts/`` is reachable. All COPY paths are repo-root-relative.
 
 # -- builder ---------------------------------------------------------------
-FROM python:3.12-slim AS builder
+FROM swr.cn-north-4.myhuaweicloud.com/ddn-k8s/docker.io/library/python:3.12-slim AS builder
 
 WORKDIR /build
 
@@ -14,7 +14,7 @@ RUN pip install --no-cache-dir --prefix=/install .
 COPY server/src/ ./src/
 
 # -- runtime ---------------------------------------------------------------
-FROM python:3.12-slim AS runtime
+FROM swr.cn-north-4.myhuaweicloud.com/ddn-k8s/docker.io/library/python:3.12-slim AS runtime
 
 LABEL maintainer="aozora"
 
