@@ -166,3 +166,22 @@ val MIGRATION_7_8: Migration = object : Migration(7, 8) {
         )
     }
 }
+
+/**
+ * 第十四轮（REQ-43 定时记账时刻化 / 决策 #1/#4）Room schema 迁移（T14-5，v9 唯一声明者）。
+ *
+ * v8 → v9：
+ * - scheduled_rules 新增 runHour INTEGER NOT NULL DEFAULT 8 /
+ *   runMinute INTEGER NOT NULL DEFAULT 0（执行时刻，到点才生成当日账单）。
+ *   存量行取默认 = 保持原「每日 08:00 闹钟」语义，零数据搬迁。
+ */
+val MIGRATION_8_9: Migration = object : Migration(8, 9) {
+    override fun migrate(db: SupportSQLiteDatabase) {
+        db.execSQL(
+            "ALTER TABLE `scheduled_rules` ADD COLUMN `runHour` INTEGER NOT NULL DEFAULT 8"
+        )
+        db.execSQL(
+            "ALTER TABLE `scheduled_rules` ADD COLUMN `runMinute` INTEGER NOT NULL DEFAULT 0"
+        )
+    }
+}

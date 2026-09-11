@@ -4,6 +4,9 @@ import android.content.BroadcastReceiver
 import android.content.Context
 import android.content.Intent
 import com.aozora.app.scheduled.ScheduledTxReceiver
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.launch
 
 /**
  * BOOT_COMPLETED 接收器 — 重启后恢复所有提醒调度。
@@ -16,7 +19,18 @@ class BootReceiver : BroadcastReceiver() {
     override fun onReceive(context: Context, intent: Intent) {
         if (intent.action != Intent.ACTION_BOOT_COMPLETED) return
         ReminderScheduler(context.applicationContext).scheduleAll()
-        // 第十一轮 T11-4（REQ-26/决策 #4）：重启恢复定时记账每日闹钟（链式续命起点）
-        ScheduledTxReceiver.scheduleNext(context.applicationContext)
+        // 第十一轮 T11-4（REQ-26/决策 #4）：重启恢复定时记账闹钟（链式续命起点）。
+        // T14-5（REQ-43）：scheduleNext 查 Room 决定触发时刻，改 goAsync 包裹防进程早死。
+        val appContext = context.applicationContext
+        val pendingResult = goAsync()
+        CoroutineScope(Dispatchers.IO).launch {
+            try {
+                ScheduledTxReceiver.scheduleNext(appContext)
+            } catch (_: Exception) {
+                // 与 ScheduledTxReceiver 同款兜底：失败等冷启动重排
+            } finally {
+                pendingResult.finish()
+            }
+        }
     }
 }

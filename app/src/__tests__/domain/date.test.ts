@@ -7,7 +7,17 @@ import {
   isBizDateInRange,
   bizDateToMonthPeriod,
   bizDateToYearPeriod,
+  localHHmm,
 } from '../../domain/date'
+
+describe('localHHmm（T14-1 流水行副行共享格式化）', () => {
+  it('设备本地时间 "HH:mm"，个位补零', () => {
+    // new Date(y,m,d,h,mi) 构造本地时间，断言与时区无关
+    expect(localHHmm(new Date(2026, 8, 3, 7, 5).getTime())).toBe('07:05')
+    expect(localHHmm(new Date(2026, 8, 3, 23, 59).getTime())).toBe('23:59')
+    expect(localHHmm(new Date(2026, 8, 3, 0, 0).getTime())).toBe('00:00')
+  })
+})
 
 describe('localBizDate — 基本功能', () => {
   it('返回 YYYY-MM-DD 格式', () => {

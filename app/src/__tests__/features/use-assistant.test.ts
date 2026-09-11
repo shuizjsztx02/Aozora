@@ -12,6 +12,7 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest'
 import { renderHook, act, waitFor } from '@testing-library/react'
 import { useAssistant, AI_OFFLINE_CANNED } from '../../features/assistant/use-assistant'
+import { useAssistantChatStore } from '../../platform/store/assistant-chat-store'
 import { parseInput } from '../../domain/nlu/parser'
 import type { ActionProposal } from '../../domain/action-proposal'
 import { todayBizDate } from '../../domain/date'
@@ -70,6 +71,8 @@ describe('use-assistant — 免确认本地记账（T8-6）', () => {
     mockBridge.insertTransaction.mockResolvedValue({ id: 'tx-1', version: 1 })
     mockBridge.softDeleteTransaction.mockResolvedValue({ success: true })
     mockBridge.isAvailable.mockReturnValue(false)
+    // T14-4：messages 外置到模块级 store——逐用例复位防串
+    useAssistantChatStore.setState({ messages: [] })
   })
 
   it('解析成功直接本地写入，不调用 executeProposal，卡片进入 committed + 撤销窗', async () => {
@@ -97,9 +100,9 @@ describe('use-assistant — 免确认本地记账（T8-6）', () => {
     expect(last.proposalStatus).toBe('committed')
     expect(last.transactionIds).toHaveLength(1)
     expect(last.text).toBe('已记录 1 笔交易')
-    // 卡片常驻 + 撤销窗开启
+    // 卡片常驻（卡内「撤销」钮常驻可用，T13-3：无底部撤销条）
     expect(result.current.activeProposal).not.toBeNull()
-    expect(result.current.phase).toBe('undo_window')
+    expect(result.current.phase).toBe('idle')
     expect(mockBridge.triggerSync).toHaveBeenCalled()
   })
 
@@ -444,7 +447,7 @@ describe('use-assistant — 免确认本地记账（T8-6）', () => {
     expect(result.current.activeProposal?.transactions?.[0].amountCents).toBe(5000)
   })
 
-  it('待选态选定分类 → 接管首次写入（无 softDelete），committed + 撤销窗 + 文案已记录', async () => {
+  it('待选态选定分类 → 接管首次写入（无 softDelete），committed + 文案已记录', async () => {
     vi.mocked(parseInput).mockReturnValue(noCatProposal())
     const { result } = setup()
     await act(async () => { await result.current.submitInput('喝酒472') })
@@ -461,7 +464,7 @@ describe('use-assistant — 免确认本地记账（T8-6）', () => {
     const m = result.current.messages.find(x => x.proposal?.proposalId === 'prop-1')
     expect(m?.proposalStatus).toBe('committed')
     expect(m?.text).toBe('已记录 1 笔交易')
-    expect(result.current.phase).toBe('undo_window')
+    expect(result.current.phase).toBe('idle')
   })
 
   it('interpretAI 失败 → 会话级一次性轻提示，第二次失败不再弹（决策 #9）', async () => {
@@ -518,6 +521,8 @@ describe('use-assistant — 编辑写入 overrides（T12-9）', () => {
     mockBridge.insertTransaction.mockResolvedValue({ id: 'tx-1', version: 1 })
     mockBridge.softDeleteTransaction.mockResolvedValue({ success: true })
     mockBridge.isAvailable.mockReturnValue(false)
+    // T14-4：messages 外置到模块级 store——逐用例复位防串
+    useAssistantChatStore.setState({ messages: [] })
   })
 
   /** 提交并等待 committed，返回后可直接走 editProposal。 */

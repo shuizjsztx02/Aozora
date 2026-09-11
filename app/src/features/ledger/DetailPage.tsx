@@ -10,6 +10,8 @@
  * master 不存流水，选中时对其余普通账本并行 listByBook 合并）。
  *
  * 第十二轮 REQ-33（T12-5）：搜索框缩为账本行右端圆钮，搜索能力迁至 /search 子页。
+ *
+ * 第十四轮 REQ-38（T14-1）：流水行换共享组件 TxListRow（本页为视觉基准，零变化）。
  */
 
 import { useState, useEffect, useCallback } from 'react'
@@ -20,6 +22,8 @@ import { newUuid } from '../../platform/uuid'
 import { pickEntryBook } from '../../domain/books'
 import { CategoryIcon } from '../../components/CategoryIcon'
 import { PeriodPanel } from '../../components/PeriodPanel'
+import { TxListRow } from '../../components/TxListRow'
+import { localHHmm } from '../../domain/date'
 import { TxEditSheet } from './TxEditSheet'
 import type { BookData, TransactionData, CategoryData } from '../../platform/bridge/bridge-types'
 import * as Money from '../../domain/money'
@@ -49,11 +53,6 @@ function fmtAmount(cents: number): string {
 function fmtTotal(cents: number): string {
   const s = fmtAmount(cents)
   return s.endsWith('.00') ? s.slice(0, -3) : s
-}
-
-function fmtTime(occurredAt: number): string {
-  const d = new Date(occurredAt)
-  return `${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}`
 }
 
 function dayLabel(bizDate: string): string {
@@ -336,46 +335,30 @@ export function DetailPage() {
                     const cat = catOf(tx)
                     const note = tx.note?.trim()
                     const title = note || cat?.name || '未分类'
-                    const sub = `${fmtTime(tx.occurredAt)} · ${cat?.name || '未分类'}`
+                    const sub = `${localHHmm(tx.occurredAt)} · ${cat?.name || '未分类'}`
                     return (
-                      <div
+                      <TxListRow
                         key={tx.id}
-                        className="flex items-center gap-3 py-2.5 cursor-pointer active:opacity-70"
-                        style={i < dayTxs.length - 1 ? { borderBottom: '1px solid var(--glass-border)' } : undefined}
+                        icon={cat?.icon}
+                        iconName={cat?.name ?? ''}
+                        title={title}
+                        sub={sub}
+                        amountCents={tx.amountCents}
+                        isExpense={tx.type === 'expense'}
+                        aiBadge={tx.source === 'nlu_ai'}
+                        borderBottom={i < dayTxs.length - 1}
                         onClick={() => setEditTx(tx)}
-                      >
-                        <div
-                          className="flex items-center justify-center shrink-0 rounded-xl"
-                          style={{ width: 40, height: 40, background: 'var(--glass)', border: '1px solid var(--glass-border)' }}
-                        >
-                          <CategoryIcon icon={cat?.icon} name={cat?.name ?? ''} className="text-[19px] leading-none" />
-                        </div>
-                        <div className="flex-1 min-w-0">
-                          <div className="text-[15px] font-semibold truncate" style={{ color: 'var(--ink)' }}>
-                            {title}
-                            {tx.source === 'nlu_ai' && (
-                              <span
-                                className="ml-1.5 align-middle text-[9px] px-1 py-px rounded"
-                                style={{ background: 'var(--glass)', color: 'var(--accent)', border: '1px solid var(--glass-border)' }}
-                              >
-                                AI
-                              </span>
-                            )}
-                          </div>
-                          <div className="text-xs truncate mt-0.5" style={{ color: 'var(--ink3)' }}>{sub}</div>
-                        </div>
-                        <span className="money-num text-[17px] font-bold shrink-0" style={{ color: 'var(--ink)' }}>
-                          {tx.type === 'expense' ? '-' : '+'}{fmtAmount(tx.amountCents)}
-                        </span>
-                        <button
-                          onClick={e => { e.stopPropagation(); handleDelete(tx.id) }}
-                          className="shrink-0 text-xs p-1.5 active:opacity-60"
-                          style={{ color: 'var(--ink3)' }}
-                          aria-label="删除"
-                        >
-                          ✕
-                        </button>
-                      </div>
+                        right={
+                          <button
+                            onClick={e => { e.stopPropagation(); handleDelete(tx.id) }}
+                            className="shrink-0 text-xs p-1.5 active:opacity-60"
+                            style={{ color: 'var(--ink3)' }}
+                            aria-label="删除"
+                          >
+                            ✕
+                          </button>
+                        }
+                      />
                     )
                   })}
                 </div>

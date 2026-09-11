@@ -1,7 +1,8 @@
 /**
- * ReportsPage 测试（T10-5 / REQ-21 + T10-6 / REQ-22）。
+ * ReportsPage 测试（T10-5 / REQ-21 + T10-6 / REQ-22 + T15-5 / REQ-54）。
  *
- * 数据层（buildDailySeries 纯函数）：非当月满月天数；当月截至今日；逐日零填充；净额。
+ * 数据层（buildDailySeries 纯函数）：非当月满月天数；T15-5 起当月亦满月（未来日零填充）；逐日零填充；净额。
+ * X 轴（trendTickFormatter）：只渲染 1/5/10/15/20/25/月末，其余返回空串。
  * 报表筛选（T10-5）：默认当前账本；切月重新过滤；账本下拉过滤 master；切账本重新拉取。
  * 趋势卡（T10-6）：图例 toggle 显隐；全月零交易空态"本期暂无记账"。
  *
@@ -12,7 +13,7 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest'
 import { render, screen, fireEvent, waitFor } from '@testing-library/react'
 import { MemoryRouter } from 'react-router'
-import { ReportsPage, buildDailySeries } from '../../features/reports/ReportsPage'
+import { ReportsPage, buildDailySeries, trendTickFormatter } from '../../features/reports/ReportsPage'
 import type { TransactionData, BookData, CategoryData } from '../../platform/bridge/bridge-types'
 
 const mockBridge = vi.hoisted(() => ({
@@ -104,10 +105,29 @@ describe('buildDailySeries（T10-6 数据层）', () => {
     expect(rows[0]).toMatchObject({ expense: 0, income: 0, balance: 0 })
   })
 
-  it('当月 → 截至今日（未来日不画）', () => {
+  it('当月（T15-5 / REQ-54）→ 满月横轴（不再截至今日）', () => {
     const rows = buildDailySeries(curPeriod, [])
-    expect(rows).toHaveLength(NOW.getDate())
-    expect(rows[rows.length - 1].day).toBe(NOW.getDate())
+    const [y, m] = curPeriod.split('-').map(Number)
+    const expected = new Date(y, m, 0).getDate()
+    expect(rows).toHaveLength(expected)
+    expect(rows[0].day).toBe(1)
+    expect(rows[rows.length - 1].day).toBe(expected)
+  })
+
+  it('trendTickFormatter：渲染 1/5/10/15/20/25/月末，其余空串', () => {
+    // 平年二月：月末 = 28
+    expect(trendTickFormatter('02-01')).toBe('1')
+    expect(trendTickFormatter('02-05')).toBe('5')
+    expect(trendTickFormatter('02-10')).toBe('10')
+    expect(trendTickFormatter('02-15')).toBe('15')
+    expect(trendTickFormatter('02-20')).toBe('20')
+    expect(trendTickFormatter('02-25')).toBe('25')
+    expect(trendTickFormatter('02-28')).toBe('28') // 月末
+    expect(trendTickFormatter('02-03')).toBe('')
+    expect(trendTickFormatter('02-17')).toBe('')
+    // 31 天月：月末 = 31
+    expect(trendTickFormatter('01-31')).toBe('31')
+    expect(trendTickFormatter('01-17')).toBe('')
   })
 })
 

@@ -154,3 +154,88 @@ describe('OpPreviewCard config 模式（T13-5 / 决策 #8）', () => {
     expect(screen.getByTestId('op-confirm').textContent).toBe('执行 (2)')
   })
 })
+
+// ─── 第十五轮 T15-7（REQ-56 ④ / 决策 #8）：OpRow 补账户/账本/收支/预算呈现 ───
+
+describe('OpPreviewCard edit 全字段呈现（T15-7）', () => {
+  const accounts = [
+    { id: 'a-wx', name: '微信零钱', icon: '💬', version: 1 },
+    { id: 'a-test', name: '测试', icon: '🧪', version: 1 },
+  ]
+  const books = [
+    { id: 'book-1', ownerId: 'local', name: '日常', icon: '📒', version: 1 },
+    { id: 'book-2', ownerId: 'local', name: '旅行', icon: '✈️', version: 1 },
+  ]
+
+  it('副行呈现当前账户/账本名（有值）', () => {
+    render(
+      <OpPreviewCard
+        op={op({
+          kind: 'edit', set: { amountCents: 500 },
+          candidates: [tx({ id: 'a', accountId: 'a-wx' }), tx({ id: 'b', note: '午饭', amountCents: 4700, type: 'income' })],
+        })}
+        categories={cats} accounts={accounts} books={books}
+        onConfirm={vi.fn()} onCancel={vi.fn()}
+      />,
+    )
+    const rows = screen.getAllByTestId('op-row')
+    const a = rows[0]
+    expect(a.querySelector('[data-testid="op-row-subline"]')?.textContent)
+      .toContain('账户·微信零钱')
+    expect(a.querySelector('[data-testid="op-row-subline"]')?.textContent)
+      .toContain('账本·日常')
+    // 第二笔无 accountId → 不出现账户段；未标「不计入预算」
+    expect(rows[1].textContent).not.toContain('账户·')
+    expect(rows[1].textContent).not.toContain('不计入预算')
+  })
+
+  it('includeInBudget === false 的行标「不计入预算」', () => {
+    render(
+      <OpPreviewCard
+        op={op({ kind: 'edit', set: null, candidates: [tx({ id: 'c', includeInBudget: false })] })}
+        categories={cats} accounts={accounts} books={books}
+        onConfirm={vi.fn()} onCancel={vi.fn()}
+      />,
+    )
+    expect(screen.getAllByTestId('op-row')[0].textContent).toContain('不计入预算')
+  })
+
+  it('edit set 被改字段汇入「改为」diff 行（收支/账户/账本/预算/金额/备注清空）', () => {
+    render(
+      <OpPreviewCard
+        op={op({
+          kind: 'edit',
+          set: {
+            type: 'income', accountName: '测试', bookName: '旅行',
+            includeInBudget: false, amountCents: 42000, note: '',
+          },
+        })}
+        categories={cats} accounts={accounts} books={books}
+        onConfirm={vi.fn()} onCancel={vi.fn()}
+      />,
+    )
+    const diff = screen.getAllByTestId('op-row-diff')[0].textContent ?? ''
+    expect(diff).toContain('收支·收入')
+    expect(diff).toContain('账户·测试')
+    expect(diff).toContain('账本·旅行')
+    expect(diff).toContain('不计入预算')
+    expect(diff).toContain('金额·¥420.00')
+    expect(diff).toContain('备注·（清空）')
+  })
+
+  it('delete 不渲染 diff；未传 accounts/books 时旧渲染零变化（无副行）', () => {
+    const { rerender } = render(
+      <OpPreviewCard op={op()} categories={cats} onConfirm={vi.fn()} onCancel={vi.fn()} />,
+    )
+    expect(screen.queryByTestId('op-row-subline')).toBeNull()
+    expect(screen.queryByTestId('op-row-diff')).toBeNull()
+    rerender(
+      <OpPreviewCard
+        op={op({ kind: 'edit', set: { accountName: '测试' } })}
+        categories={cats} accounts={accounts} books={books}
+        onConfirm={vi.fn()} onCancel={vi.fn()}
+      />,
+    )
+    expect(screen.getAllByTestId('op-row-diff').length).toBeGreaterThan(0)
+  })
+})

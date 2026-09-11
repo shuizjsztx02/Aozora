@@ -4,12 +4,16 @@
  * 覆盖：
  * - 点击「添加」走 bridge.insertBook 封装（{book} + mutationId 包裹契约），成功后关闭表单
  * - 创建失败时表单内显示可见错误且不关闭表单（错误不再被静默吞掉）
+ * - T14-2（REQ-39）：点行开编辑表单回填名称、保存走 updateBook（version+1）、
+ *   master 行不给编辑入口、同名检测编辑态排除自身
  */
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
 import { render, screen, waitFor, fireEvent, act, within } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { MemoryRouter } from 'react-router'
 import { BooksPage } from '../../features/settings/BooksPage'
+
+const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/
 
 const mockBridge = vi.hoisted(() => ({
   // T9-5b（REQ-11）：meta.get/set mock（默认无默认选择）
@@ -19,6 +23,8 @@ const mockBridge = vi.hoisted(() => ({
   pickIcon: vi.fn(),
   call: vi.fn(),
   insertBook: vi.fn(),
+  // T14-2（REQ-39）：账本编辑
+  updateBook: vi.fn(),
 }))
 
 vi.mock('../../platform/hooks/use-bridge', () => ({
@@ -84,6 +90,86 @@ describe('BooksPage', () => {
     // 徽标只出现在 master 行
     expect(screen.getAllByText('汇总 · 所有账本')).toHaveLength(1)
     expect(screen.getAllByText('自动汇总，不可记账')).toHaveLength(1)
+  })
+})
+
+// ─── T14-2（REQ-39 / 决策 #3）：点击行编辑（照搬 AccountsPage 模式） ───
+
+describe('BooksPage · 点击编辑（T14-2 / REQ-39）', () => {
+  beforeEach(() => {
+    vi.clearAllMocks()
+    mockBridge.call.mockResolvedValue([
+      { id: 'm1', ownerId: 'local', name: '总账本', icon: '📊', version: 1, isMaster: true },
+      { id: 'b1', ownerId: 'local', name: '旧账本', icon: '📒', version: 3 },
+    ])
+    mockBridge.updateBook.mockResolvedValue({ id: 'b1' })
+    mockBridge.insertBook.mockResolvedValue({ id: 'book-new' })
+  })
+
+  it('row click opens a prefilled edit form and saves via updateBook with version+1', async () => {
+    const user = userEvent.setup()
+    renderPage()
+    await user.click(await screen.findByText('旧账本'))
+    // 表单标题二态 + 名称/图标回填
+    expect(screen.getByTestId('book-form')).toBeInTheDocument()
+    expect(screen.getByText('编辑账本')).toBeInTheDocument()
+    expect(screen.getByDisplayValue('旧账本')).toBeInTheDocument()
+    await user.clear(screen.getByPlaceholderText('账本名称'))
+    await user.type(screen.getByPlaceholderText('账本名称'), '新账本')
+    await user.click(screen.getByRole('button', { name: '保存' }))
+
+    await waitFor(() => expect(mockBridge.updateBook).toHaveBeenCalledTimes(1))
+    const [book, mutationId] = mockBridge.updateBook.mock.calls[0]
+    expect(book).toMatchObject({
+      id: 'b1', ownerId: 'local', name: '新账本', icon: '📒',
+      version: 4, // 原 version 3 + 1（native 侧要求递增）
+    })
+    expect(mutationId).toMatch(UUID_RE)
+    // 成功后表单关闭
+    await waitFor(() => expect(screen.queryByTestId('book-form')).not.toBeInTheDocument())
+  })
+
+  it('master row offers no edit entry — click does not open the form', async () => {
+    const user = userEvent.setup()
+    renderPage()
+    await user.click(await screen.findByText('总账本'))
+    expect(screen.queryByTestId('book-form')).not.toBeInTheDocument()
+    expect(mockBridge.updateBook).not.toHaveBeenCalled()
+  })
+
+  it('duplicate-name check excludes the book itself when editing', async () => {
+    const user = userEvent.setup()
+    renderPage()
+    await user.click(await screen.findByText('旧账本'))
+    // 不改名称直接保存 → 不应报"已存在"（同名检测排除自身）
+    await user.click(screen.getByRole('button', { name: '保存' }))
+    await waitFor(() => expect(mockBridge.updateBook).toHaveBeenCalledTimes(1))
+    expect(screen.queryByText('该账本名已存在')).not.toBeInTheDocument()
+  })
+
+  it('update failure shows a visible error and keeps the form open', async () => {
+    mockBridge.updateBook.mockRejectedValue(new Error('bridge internal_error'))
+    const user = userEvent.setup()
+    renderPage()
+    await user.click(await screen.findByText('旧账本'))
+    await user.clear(screen.getByPlaceholderText('账本名称'))
+    await user.type(screen.getByPlaceholderText('账本名称'), '新账本')
+    await user.click(screen.getByRole('button', { name: '保存' }))
+
+    await waitFor(() => expect(screen.getByText(/更新账本失败/)).toBeInTheDocument())
+    expect(screen.getByDisplayValue('新账本')).toBeInTheDocument()
+  })
+
+  it('new-book path still goes through insertBook (add button opens empty form)', async () => {
+    const user = userEvent.setup()
+    renderPage()
+    await user.click(await screen.findByText('＋ 添加账本'))
+    expect(screen.getByText('新建账本')).toBeInTheDocument()
+    await user.type(screen.getByPlaceholderText('账本名称'), '新建的')
+    await user.click(screen.getByRole('button', { name: '添加' }))
+    await waitFor(() => expect(mockBridge.insertBook).toHaveBeenCalledTimes(1))
+    expect(mockBridge.updateBook).not.toHaveBeenCalled()
+    expect(mockBridge.insertBook.mock.calls[0][0]).toMatchObject({ name: '新建的', version: 1 })
   })
 })
 

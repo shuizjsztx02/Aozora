@@ -169,28 +169,43 @@ function buildChatFallback(message: string, confidence: number): ActionProposal 
 
 export type AiIntent = 'bookkeeping' | 'edit' | 'delete' | 'query' | 'chat' | 'config'
 
-/** edit/delete/query 的目标圈定条件（仅显式字段，坏字段解析时已剔除）。 */
+/** edit/delete/query 的目标圈定条件（仅显式字段，坏字段解析时已剔除）。
+ *  第十五轮 T15-7（REQ-56）：+type/accountName/bookName（模型只报名、服务端
+ *  只透传，名→id 在本模块解析）。 */
 export interface AiOpFilter {
   /** YYYY-MM-DD，含端点 */
   dateFrom?: string
   dateTo?: string
   /** 分类名（可能一级/二级，本地匹配名字或父名） */
   category?: string
-  /** 备注关键词（大小写不敏感子串） */
+  /** 关键词（T15-7 语义扩：备注或分类名命中其一）；大小写不敏感子串 */
   keyword?: string
   amountMinCents?: number
   amountMaxCents?: number
   /** 最近 N 笔（按 bizDate+occurredAt 降序取前 N） */
   recentN?: number
+  /** T15-7：收支类型圈定（parse 层只放 income|expense 两值） */
+  type?: 'income' | 'expense'
+  /** T15-7：账户名（matchAccountByName 本地解析） */
+  accountName?: string
+  /** T15-7：账本名（matchBookByName 本地解析，master 总账本除外） */
+  bookName?: string
 }
 
-/** edit 的新值集（LLM 只回显用户明确要求改的键）。 */
+/** edit 的新值集（LLM 只回显用户明确要求改的键）。
+ *  T15-7：+type/accountName/bookName——账户/账本一律对象名、永不 UUID。 */
 export interface AiOpSet {
   category?: string
   note?: string
   includeInBudget?: boolean
   amountCents?: number
   bizDate?: string
+  /** T15-7：新收支类型（收支切换） */
+  type?: 'income' | 'expense'
+  /** T15-7：新账户名 */
+  accountName?: string
+  /** T15-7：新账本名 */
+  bookName?: string
 }
 
 /** T12-11：edit/delete/query/chat 的文本意图；T13-5：intent=config 时的设置操作
@@ -251,7 +266,7 @@ function toPositiveInt(v: unknown): number | undefined {
  * intent 缺失/坏值 → 'bookkeeping'（老服务端/老形状向前兼容，走现链路）。
  */
 export function parseAiInterpretOutput(raw: Record<string, unknown>): AiInterpretV2 {
-  const intent: AiIntent =
+  let intent: AiIntent =
     typeof raw.intent === 'string' && AI_INTENTS.has(raw.intent)
       ? (raw.intent as AiIntent)
       : 'bookkeeping'
@@ -263,6 +278,11 @@ export function parseAiInterpretOutput(raw: Record<string, unknown>): AiInterpre
     bizDate: String(raw.bizDate || ''),
     confidence: Number(raw.confidence) || 0.5,
   }
+  // T13-6（REQ-49 / 决策 #10）人设守卫：bookkeeping 却无金额（云端把闲聊误判成
+  // 记账、或老形状回落）必走记账 builder 吐「无法识别金额」系统腔 canned——
+  // 改判 chat 转文本气泡链路（answerTextIntent 转述 reply；reply 空 → 调用方
+  // 给人设化兜底句）。不改传输契约，legacy 原样保留。
+  if (intent === 'bookkeeping' && legacy.amountCents <= 0) intent = 'chat'
   const reply = typeof raw.reply === 'string' ? raw.reply.trim() : ''
   return {
     intent, legacy, reply,
@@ -284,6 +304,12 @@ function parseOpFilter(raw: unknown): AiOpFilter | null {
   if (max !== undefined) f.amountMaxCents = max
   const n = toPositiveInt(raw.recentN)
   if (n !== undefined) f.recentN = n
+  // T15-7（REQ-56）：type 只认两值；对象名 trim 后非空才放（坏形状 parse 层丢弃）
+  if (raw.type === 'income' || raw.type === 'expense') f.type = raw.type
+  const accName = trimmedNonEmpty(raw.accountName)
+  if (accName) f.accountName = accName
+  const bkName = trimmedNonEmpty(raw.bookName)
+  if (bkName) f.bookName = bkName
   return Object.keys(f).length > 0 ? f : null
 }
 
@@ -297,6 +323,12 @@ function parseOpSet(raw: unknown): AiOpSet | null {
   if (amt !== undefined) s.amountCents = amt
   if (typeof raw.bizDate === 'string' && ISO_DATE_RE.test(raw.bizDate)) s.bizDate = raw.bizDate
   if (typeof raw.includeInBudget === 'boolean') s.includeInBudget = raw.includeInBudget
+  // T15-7（REQ-56）：set 三新键同口径白名单
+  if (raw.type === 'income' || raw.type === 'expense') s.type = raw.type
+  const setAcc = trimmedNonEmpty(raw.accountName)
+  if (setAcc) s.accountName = setAcc
+  const setBk = trimmedNonEmpty(raw.bookName)
+  if (setBk) s.bookName = setBk
   return Object.keys(s).length > 0 ? s : null
 }
 
@@ -321,14 +353,63 @@ function categoryMatches(needle: string, names: string[]): boolean {
   return names.some(n => needle.includes(n) || n.includes(needle))
 }
 
+/** 单名匹配口径：精确 → 双向子串（与 matchCategoryByName 同族，T15-7）。 */
+function singleNameMatches(needle: string, name: string): boolean {
+  const n = name.trim()
+  return !!n && (n === needle || needle.includes(n) || n.includes(needle))
+}
+
+/**
+ * 精确 + 最长双向子串的对象名匹配（matchCategoryByName 同口径：先全等，
+ * 再按名称长度降序取首个双向子串命中——避免子串顺序依赖）。
+ */
+function matchObjectByName<T extends { name: string }>(
+  name: string, list: T[],
+): T | null {
+  if (!name) return null
+  const exact = list.find(o => (o.name || '').trim() === name)
+  if (exact) return exact
+  const sorted = [...list].sort((a, b) => (b.name || '').length - (a.name || '').length)
+  return sorted.find(o => singleNameMatches(name, o.name || '')) ?? null
+}
+
+/** 账户名→对象（T15-7；桥侧 listAccounts 已滤归档，重名取最长命中）。 */
+export function matchAccountByName(
+  name: string, accounts: AccountData[],
+): AccountData | null {
+  return matchObjectByName(name.trim(), accounts)
+}
+
+/** 账本名→对象（T15-7；master 总账本不可记账、不作 edit 目标，口径同 default.book_set）。 */
+export function matchBookByName(
+  name: string, books: BookData[],
+): BookData | null {
+  return matchObjectByName(name.trim(), books.filter(b => !b.isMaster))
+}
+
+/** keyword 命中判定（T15-7 REQ-56 ①：备注或分类名命中其一即算）。 */
+function keywordMatches(
+  tx: TransactionData, keyword: string, categories: CategoryData[],
+): boolean {
+  const kw = keyword.toLowerCase()
+  if ((tx.note || '').toLowerCase().includes(kw)) return true
+  return categoryMatches(keyword, txCategoryNames(tx, categories))
+}
+
 /**
  * filter 在本地交易集上圈定候选（决策 #3：目标全在客户端算）。
  * 交易集来自 listByBook（已按 bizDate DESC 排序）；recentN 再显式排序兜底。
+ * T15-7（REQ-56）：keyword 语义扩「备注或分类名」；+type/账户/账本三分支——
+ * 账户/账本按键名匹配 tx.accountId/tx.bookId 对应对象的 name；
+ * 名单未提供（undefined）时该分支跳过（旧调用方向前兼容），名单提供但
+ * 匹配不到 → 排除（宁缺勿错，绝不放宽成"全命中"）。
  */
 export function applyOpFilter(
   txs: TransactionData[],
   categories: CategoryData[],
   filter: AiOpFilter,
+  accounts?: AccountData[],
+  books?: BookData[],
 ): TransactionData[] {
   const out = txs.filter(tx => {
     if (filter.dateFrom && tx.bizDate < filter.dateFrom) return false
@@ -336,9 +417,20 @@ export function applyOpFilter(
     if (filter.amountMinCents !== undefined && tx.amountCents < filter.amountMinCents) return false
     if (filter.amountMaxCents !== undefined && tx.amountCents > filter.amountMaxCents) return false
     if (filter.keyword !== undefined &&
-        !(tx.note || '').toLowerCase().includes(filter.keyword.toLowerCase())) return false
+        !keywordMatches(tx, filter.keyword, categories)) return false
     if (filter.category !== undefined &&
         !categoryMatches(filter.category, txCategoryNames(tx, categories))) return false
+    if (filter.type !== undefined && tx.type !== filter.type) return false
+    if (filter.accountName !== undefined && accounts !== undefined) {
+      const acc = tx.accountId
+        ? accounts.find(a => a.id === tx.accountId)
+        : undefined
+      if (!acc || !singleNameMatches(filter.accountName, acc.name)) return false
+    }
+    if (filter.bookName !== undefined && books !== undefined) {
+      const bk = books.find(b => b.id === tx.bookId)
+      if (!bk || !singleNameMatches(filter.bookName, bk.name)) return false
+    }
     return true
   })
   if (filter.recentN !== undefined) {
@@ -363,8 +455,13 @@ export function sumByFilter(rows: TransactionData[]): {
 
 /**
  * 单笔 edit 的完整 update payload（updateTransaction 是全字段 update）。
- * 保 id / 保 bookId / 保账户 / 保 source；只覆盖 set 点名且能本地解析的字段。
- * 分类名匹配不到 / 结果缺分类 / 金额坏 → null（调用方记为失败笔，绝不硬写）。
+ * 保 id / 保 source；T15-7（REQ-56）起支持全八字段：
+ * - type 切换（set.type）；账户 set.accountName→accountId、账本
+ *   set.bookName→bookId——名→id 匹配不到 → 该字段保留原值不回写（宁缺勿错；
+ *   use-assistant 预览入口已先行剔除并出引导语，此处为同口径双保险）；
+ * - 分类按「改后类型」的分类集匹配（set.category 点名；仅换 type 未点名分类时
+ *   尝试旧分类名在新类型下平移，平移不到保留原分类——不因分类丢类型切换）；
+ * - 点名的分类匹配不到 / 结果缺分类 / 金额坏 → null（调用方记为失败笔，绝不硬写）。
  */
 export function buildEditUpdates(
   tx: TransactionData,
@@ -372,14 +469,22 @@ export function buildEditUpdates(
   categories: CategoryData[],
   timezone: string,
   now: number,
+  accounts?: AccountData[],
+  books?: BookData[],
 ): (TransactionInput & { version: number }) | null {
   const amountCents = set?.amountCents ?? tx.amountCents
   if (!Number.isInteger(amountCents) || amountCents < 1) return null
+  const type = set?.type ?? tx.type
   let categoryId = tx.categoryId
   if (set?.category) {
-    const id = matchCategoryByName(set.category, categories, tx.type)
+    const id = matchCategoryByName(set.category, categories, type)
     if (!id) return null
     categoryId = id
+  } else if (set?.type && set.type !== tx.type) {
+    // 只换类型没点名分类：旧分类名在新类型集下同名可平移，否则保留原分类
+    const oldName = categories.find(c => c.id === tx.categoryId)?.name
+    const carry = oldName ? matchCategoryByName(oldName, categories, set.type) : null
+    if (carry) categoryId = carry
   }
   if (!categoryId) return null // Kotlin require 同款守卫：编辑不产生缺分类笔（REQ-36 ④）
   const bizDate = set?.bizDate ?? tx.bizDate
@@ -390,13 +495,23 @@ export function buildEditUpdates(
     occurredAt = bizDate === today ? now : new Date(`${bizDate}T12:00:00`).getTime()
     if (Number.isNaN(occurredAt)) return null
   }
+  let accountId = tx.accountId ?? null
+  if (set?.accountName && accounts) {
+    const hit = matchAccountByName(set.accountName, accounts)
+    if (hit) accountId = hit.id
+  }
+  let bookId = tx.bookId
+  if (set?.bookName && books) {
+    const hit = matchBookByName(set.bookName, books)
+    if (hit) bookId = hit.id
+  }
   return {
     id: tx.id,
-    bookId: tx.bookId,
-    type: tx.type,
+    bookId,
+    type,
     amountCents,
     categoryId,
-    accountId: tx.accountId ?? null,
+    accountId,
     note: set?.note ?? tx.note,
     bizDate,
     occurredAt,

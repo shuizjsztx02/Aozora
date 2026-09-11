@@ -240,6 +240,14 @@ export class NativeBridge {
     return this.call('book.insert', { book, mutationId })
   }
 
+  /**
+   * 第十四轮 T14-2（REQ-39 / 决策 #3）：账本编辑（形状照 updateAccount）。
+   * book.update 局部合并，version 必填且必须大于当前值（Kotlin 侧乐观锁）。
+   */
+  async updateBook(book: BookInput & { version: number }, mutationId: string): Promise<{ id: string }> {
+    return this.call('book.update', { book, mutationId })
+  }
+
   // ─── Category ───
 
   async listCategories(): Promise<CategoryData[]> {

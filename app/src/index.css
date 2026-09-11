@@ -38,6 +38,7 @@
   --sky-to: #FFE4D6;
   --nav-bg: rgba(255, 250, 245, 0.75);
   --card-shadow: 0 4px 24px rgba(180, 100, 60, 0.08);
+  --bg-scrim: rgba(0, 0, 0, 0.10);
 }
 
 /* 昼 day (10:00-16:59) */
@@ -56,6 +57,7 @@
   --sky-to: #E0F4FF;
   --nav-bg: rgba(255, 255, 255, 0.7);
   --card-shadow: 0 4px 24px rgba(0, 0, 0, 0.06);
+  --bg-scrim: rgba(0, 0, 0, 0.08);
 }
 
 /* 暮 dusk (17:00-19:59) */
@@ -74,6 +76,7 @@
   --sky-to: #2D1B4E;
   --nav-bg: rgba(60, 40, 70, 0.65);
   --card-shadow: 0 4px 24px rgba(80, 30, 60, 0.15);
+  --bg-scrim: rgba(0, 0, 0, 0.20);
 }
 
 /* 夜 night (20:00-04:59) - 星空夜空主题 */
@@ -92,6 +95,7 @@
   --sky-to: #1A1F3A;
   --nav-bg: rgba(10, 14, 26, 0.85);
   --card-shadow: 0 4px 24px rgba(0, 0, 0, 0.3);
+  --bg-scrim: rgba(0, 0, 0, 0.28);
 }
 
 /* ─── 星空夜空全局背景 ─── */
@@ -106,10 +110,40 @@ body {
   transition: color 0.3s, background 0.3s;
 }
 
-/* 星空夜空：夜间模式强制使用深色背景 */
-.t-night body,
-body.t-night {
-  background: linear-gradient(180deg, #0A0E1A 0%, #141830 40%, #1A1F3A 100%);
+/* ─── T13-1 (REQ-45) 四主题背景图 ─── */
+/* 图为首层（1123x1999 水彩图，app/public/theme/，Vite public 原样进 dist）；
+   渐变 token 为末层兜底（图加载失败时同色呈现）。attachment:fixed —
+   长页（min-h-screen）随 body 滚动时 cover 以视口而非文档高缩放。
+   night 原深色多段渐变保留为其兜底层。 */
+.t-dawn body, body.t-dawn {
+  background-image: url('/theme/dawn.webp'), linear-gradient(180deg, var(--sky-from), var(--sky-to));
+}
+.t-day body, body.t-day {
+  background-image: url('/theme/day.webp'), linear-gradient(180deg, var(--sky-from), var(--sky-to));
+}
+.t-dusk body, body.t-dusk {
+  background-image: url('/theme/dusk.webp'), linear-gradient(180deg, var(--sky-from), var(--sky-to));
+}
+.t-night body, body.t-night {
+  background-image: url('/theme/night.webp'), linear-gradient(180deg, #0A0E1A 0%, #141830 40%, #1A1F3A 100%);
+}
+.t-dawn body, .t-day body, .t-dusk body, .t-night body,
+body.t-dawn, body.t-day, body.t-dusk, body.t-night {
+  background-size: cover, auto;
+  background-position: center top, center;
+  background-repeat: no-repeat, no-repeat;
+  background-attachment: fixed, fixed;
+}
+
+/* 可读性 scrim：压在背景图之上、装饰层与内容之下
+   （body 背景经 canvas 传播先绘制，z=-1 的 ::after 恰在图与 .sky-fixed(z=0) 之间） */
+body::after {
+  content: '';
+  position: fixed;
+  inset: 0;
+  z-index: -1;
+  pointer-events: none;
+  background: var(--bg-scrim, transparent);
 }
 
 /* ─── 玻璃材质基础类 ─── */

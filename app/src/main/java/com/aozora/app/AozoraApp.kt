@@ -212,12 +212,13 @@ class AozoraApp : Application(), Configuration.Provider {
             repository.ensureSeedPersonas()
             // T11-1（REQ-23 决策 #2）：预算沿用冷启动触发点；开关非 '1' 时立即返回，幂等。
             repository.ensureBudgetCarryover()
-            // T11-4（REQ-26 决策 #4）：冷启动补跑当日到期规则（漏日不补，已知限制）；
-            // 与每日 08:00 闹钟经 lastRunDate 当日去重，重复触发天然幂等。
-            ScheduledTxEngine(repository).runDueToday()
+            // T11-4（REQ-26 决策 #4）/ T14-5（REQ-43）：冷启动补跑「日命中且已过
+            // 执行时刻」的规则（漏日不补，已知限制）；与闹钟经 lastRunDate 当日去重。
+            ScheduledTxEngine(repository).runDueNow()
+            // T14-5：B2 单闹钟链起点——scheduleNext 改 suspend（查规则算最近触发时刻），
+            // 挪进 runBlocking 保持"补跑后重排"顺序（重启恢复由 BootReceiver 承担）。
+            ScheduledTxReceiver.scheduleNext(applicationContext)
         }
-        // T11-4：定时记账闹钟链起点（重启恢复由 BootReceiver 承担；链式续命见 Receiver）
-        ScheduledTxReceiver.scheduleNext(this)
         // T-M5-05b: 立即安装全局 UncaughtExceptionHandler —— 越早越好，
         // 任何依赖（auth、sync）尚未初始化时也可能崩溃。
         crashReporter.install()

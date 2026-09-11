@@ -76,7 +76,10 @@ export function SearchPage() {
   const searching = query.trim().length > 0
 
   return (
-    <div className="min-h-screen pb-20">
+    // safe-top（REQ-51）：/search 在 AppLayout 外，无外层安全区补偿；
+    // PageHeader pinned 占位仅 40px，缺此 padding 会把搜索条埋进状态栏幕布。
+    // 模式对齐 AssistantPage，不动 Layout.tsx 共享占位逻辑（决策 #2）。
+    <div className="min-h-screen pb-20 safe-top">
       <PageHeader back />
 
       {/* ─── 搜索条（样式/placeholder 沿用原明细页内联实现） ─── */}

@@ -34,7 +34,7 @@ class AozoraDatabaseTest {
         try {
             val repo = Repository(disk)
             repo.insertBook(BookEntity("b1", "o", "B", "", 1, null), "seed-book")
-            repo.insertCategory(CategoryEntity("c1", "o", null, null, "expense", "C", null, 1), "seed-cat")
+            repo.insertCategory(CategoryEntity("c1", "o", null, null, "expense", "C", null, null, 1), "seed-cat")
             repo.insertTransaction(sample(), "cache-test")
             instrumentation.runOnMainSync {
                 val webView = WebView(context)
@@ -57,11 +57,12 @@ class AozoraDatabaseTest {
         val disk = Room.databaseBuilder(context, AozoraDatabase::class.java, name).build()
         val repo = Repository(disk)
         repo.insertBook(BookEntity("b1", "o", "B", "", 1, null), "seed-book")
-        repo.insertCategory(CategoryEntity("c1", "o", null, null, "expense", "C", null, 1), "seed-cat")
+        repo.insertCategory(CategoryEntity("c1", "o", null, null, "expense", "C", null, null, 1), "seed-cat")
         repo.insertTransaction(sample(), "keep-me")
         disk.close()
         val path = context.getDatabasePath(name).path
-        SQLiteDatabase.openDatabase(path, null, SQLiteDatabase.OPEN_READWRITE).use { it.version = 2 }
+        // 以未知的更高版本模拟缺失 downgrade；只改 user_version 不会触发已有迁移的重复 DDL。
+        SQLiteDatabase.openDatabase(path, null, SQLiteDatabase.OPEN_READWRITE).use { it.version = 10 }
         val unsupported = AozoraDatabase.open(context, name)
         try {
             try { unsupported.transactionDao().getById("guard"); fail("missing migration accepted") }
@@ -82,7 +83,7 @@ class AozoraDatabaseTest {
     }
 
     private fun sample(id: String = "guard") = TransactionEntity(
-        id, "b1", "expense", 100, "c1", null, "", "2026-09-04", 0L, "manual", 1, null
+        id, "b1", "expense", 100, "c1", null, "", "2026-09-04", 0L, "manual", true, 1, null
     )
 
     @Test
@@ -129,9 +130,9 @@ class AozoraDatabaseTest {
         // 引用完整性：用 DAO 直接创建依赖实体（不产生 pending mutation，R-P1-RefInt）
         db.bookDao().insert(BookEntity("b1", "owner-test", "Book1", "", 1, null))
         db.bookDao().insert(BookEntity("book-1", "owner-test", "Book1", "", 1, null))
-        db.categoryDao().insert(CategoryEntity("c1", "owner-test", null, null, "expense", "Cat1", null, 1))
-        db.categoryDao().insert(CategoryEntity("cat-food", "owner-test", null, null, "expense", "Food", null, 1))
-        db.categoryDao().insert(CategoryEntity("cat-salary", "owner-test", null, null, "income", "Salary", null, 1))
+        db.categoryDao().insert(CategoryEntity("c1", "owner-test", null, null, "expense", "Cat1", null, null, 1))
+        db.categoryDao().insert(CategoryEntity("cat-food", "owner-test", null, null, "expense", "Food", null, null, 1))
+        db.categoryDao().insert(CategoryEntity("cat-salary", "owner-test", null, null, "income", "Salary", null, null, 1))
         Unit
     }
 
@@ -197,7 +198,7 @@ class AozoraDatabaseTest {
             .build()
         val repo = Repository(testDb)
         repo.insertBook(BookEntity("book-1", "o", "B", "", 1, null), "seed-book")
-        repo.insertCategory(CategoryEntity("cat-salary", "o", null, null, "income", "C", null, 1), "seed-cat")
+        repo.insertCategory(CategoryEntity("cat-salary", "o", null, null, "income", "C", null, null, 1), "seed-cat")
 
         val tx = TransactionEntity(
             id = "tx-persist", bookId = "book-1", type = "income",
@@ -230,9 +231,9 @@ class AozoraDatabaseTest {
     @Test
     fun test_listByDateRange() = runBlocking {
         val txs = listOf(
-            TransactionEntity("tx-a", "b1", "expense", 1000, "c1", null, "", "2026-09-01", 0L, "manual", 1, null),
-            TransactionEntity("tx-b", "b1", "expense", 2000, "c1", null, "", "2026-09-15", 0L, "manual", 1, null),
-            TransactionEntity("tx-c", "b1", "expense", 3000, "c1", null, "", "2026-10-01", 0L, "manual", 1, null),
+            TransactionEntity("tx-a", "b1", "expense", 1000, "c1", null, "", "2026-09-01", 0L, "manual", true, 1, null),
+            TransactionEntity("tx-b", "b1", "expense", 2000, "c1", null, "", "2026-09-15", 0L, "manual", true, 1, null),
+            TransactionEntity("tx-c", "b1", "expense", 3000, "c1", null, "", "2026-10-01", 0L, "manual", true, 1, null),
         )
         for (tx in txs) {
             repository.insertTransaction(tx, "m-${tx.id}")
@@ -244,7 +245,7 @@ class AozoraDatabaseTest {
 
     @Test
     fun test_listByBook_excludesSoftDeleted() = runBlocking {
-        val tx = TransactionEntity("tx-del", "b1", "expense", 1000, "c1", null, "", "2026-09-03", 0L, "manual", 1, null)
+        val tx = TransactionEntity("tx-del", "b1", "expense", 1000, "c1", null, "", "2026-09-03", 0L, "manual", true, 1, null)
         repository.insertTransaction(tx, "m-del")
         repository.softDeleteTransaction("tx-del", "m-del2")
 
@@ -256,7 +257,7 @@ class AozoraDatabaseTest {
 
     @Test
     fun test_pendingMutation_lifecycle() = runBlocking {
-        val tx = TransactionEntity("tx-m", "b1", "expense", 500, "c1", null, "", "2026-09-03", 0L, "manual", 1, null)
+        val tx = TransactionEntity("tx-m", "b1", "expense", 500, "c1", null, "", "2026-09-03", 0L, "manual", true, 1, null)
         repository.insertTransaction(tx, "m-lifecycle")
 
         // pending
@@ -286,7 +287,7 @@ class AozoraDatabaseTest {
 
     @Test
     fun test_amountCents_isInteger() = runBlocking {
-        val tx = TransactionEntity("tx-int", "b1", "expense", 1, "c1", null, "", "2026-09-03", 0L, "manual", 1, null)
+        val tx = TransactionEntity("tx-int", "b1", "expense", 1, "c1", null, "", "2026-09-03", 0L, "manual", true, 1, null)
         repository.insertTransaction(tx, "m-int")
 
         val fetched = repository.getTransaction("tx-int")

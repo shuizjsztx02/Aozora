@@ -257,6 +257,87 @@ class TestBatchExecution:
         assert resp.json()["code"] == "ai_proposal_rejected"
 
 
+# ── T14-3（REQ-40）: missing category → 400 before insert ────────────────
+
+
+class TestMissingCategoryGuard:
+    def test_execute_missing_category_400(self, exec_env):
+        """零分类账本 + 缺 categoryId 行（REQ-40 旧 500 IntegrityError 路径）
+        → items 构建后 400 ai_missing_category（中文 message），不落库。
+
+        注：账本有分类时缺 categoryId 在重校验即 403 rejected_hallucination
+        （既有 R-M4-64 行为，不回归）；本卡 400 拦截覆盖 validator 放行的
+        零分类场景——正是线上「确认 → Internal database error」的路径。
+        """
+        user = _guest(exec_env)
+        c, factory = exec_env
+
+        resp = c.post("/books", json={"name": "Test Book"}, headers=_auth(user))
+        book_id = uuid.UUID(resp.json()["id"])
+        # 故意不建任何分类 → ctx.category_ids 为空，validator 放行
+
+        proposal = {
+            "proposalId": "prop-no-cat-001",
+            "action": "add_tx_batch",
+            "confidence": 0.95,
+            "requiresConfirmation": True,
+            "transactions": [
+                {
+                    "type": "expense",
+                    "amountCents": 3500,
+                    "bizDate": "2026-09-06",
+                    "note": "午餐",
+                },
+                {
+                    "type": "expense",
+                    "amountCents": 1500,
+                    "bizDate": "2026-09-06",
+                    "note": "购物",
+                },
+            ],
+            "message": "检测到 2 笔交易",
+            "warnings": [],
+        }
+
+        resp = _execute(exec_env, user, book_id, proposal)
+        assert resp.status_code == 400
+        data = resp.json()
+        assert data["code"] == "ai_missing_category"
+        assert "分类" in data["message"]  # 中文可映射，不透英文 IntegrityError
+        # 拦截发生在落库前：0 笔写入
+        assert _count_transactions(factory, book_id) == 0
+
+    def test_execute_with_categories_still_ok(self, exec_env):
+        """回归：全行有分类 → 正常 200（拦截不误伤主链路）。"""
+        user = _guest(exec_env)
+        c, factory = exec_env
+
+        resp = c.post("/books", json={"name": "Test Book"}, headers=_auth(user))
+        book_id = uuid.UUID(resp.json()["id"])
+        cat_id = uuid.uuid4()
+        _seed_categories(factory, uuid.UUID(user["id"]), book_id, {cat_id: "餐饮"})
+
+        proposal = {
+            "proposalId": "prop-no-cat-002",
+            "action": "add_tx",
+            "confidence": 0.95,
+            "requiresConfirmation": False,
+            "transactions": [{
+                "type": "expense",
+                "amountCents": 3500,
+                "categoryId": str(cat_id),
+                "bizDate": "2026-09-06",
+                "note": "午餐",
+            }],
+            "message": "已记录午餐",
+            "warnings": [],
+        }
+
+        resp = _execute(exec_env, user, book_id, proposal)
+        assert resp.status_code == 200
+        assert len(resp.json()["transaction_ids"]) == 1
+
+
 # ── Confidence gate ──────────────────────────────────────────────────────
 
 
@@ -602,3 +683,90 @@ class TestIdempotency:
         c1, c2 = asyncio.run(_count())
         assert c1 == 1
         assert c2 == 1
+
+
+# ── T14-8 回归：/ai/execute 写入必须进 sync 变更日志（pull 可见）──────────
+
+
+class TestSyncVisibility:
+    """T14-8：图片批量确认走 /ai/execute「服务端权威」，但 TransactionService
+    直写不产生 SyncChange → 任何设备 pull 都拿不到（模拟器实测：已落库两笔、
+    本机永远查不到）。execute 成功后必须逐笔写 insert 变更。"""
+
+    def test_execute_transactions_are_pullable(self, exec_env):
+        user = _guest(exec_env)
+        c, factory = exec_env
+
+        resp = c.post("/books", json={"name": "Sync Book"}, headers=_auth(user))
+        book_id = uuid.UUID(resp.json()["id"])
+        cat_a, cat_b = uuid.uuid4(), uuid.uuid4()
+        _seed_categories(factory, uuid.UUID(user["id"]), book_id, {
+            cat_a: "交通", cat_b: "餐饮",
+        })
+
+        proposal = {
+            "proposalId": "prop-sync-001",
+            "action": "add_tx_batch",
+            "confidence": 0.95,
+            "requiresConfirmation": False,
+            "transactions": [
+                {
+                    "type": "expense", "amountCents": 3000,
+                    "categoryId": str(cat_a), "bizDate": "2026-09-08",
+                    "note": "打车",
+                },
+                {
+                    "type": "expense", "amountCents": 67800,
+                    "categoryId": str(cat_b), "bizDate": "2026-09-08",
+                    "note": "吃饭",
+                },
+            ],
+            "message": "识别到 2 笔交易",
+            "warnings": [],
+        }
+        r = _execute(exec_env, user, book_id, proposal)
+        assert r.status_code == 200
+        tx_ids = {str(x) for x in r.json()["transaction_ids"]}
+
+        pull = c.post("/sync/pull", json={"cursor": 0}, headers=_auth(user))
+        assert pull.status_code == 200
+        tx_changes = [
+            ch for ch in pull.json()["changes"]
+            if ch["entity_type"] == "transaction"
+        ]
+        assert {str(ch["entity_id"]) for ch in tx_changes} == tx_ids
+        assert all(ch["operation"] == "insert" for ch in tx_changes)
+        assert pull.json()["cursor"] > 0
+
+    def test_idempotent_replay_does_not_duplicate_changes(self, exec_env):
+        """重放同 proposalId 命中幂等缓存，不得再写一遍 SyncChange。"""
+        user = _guest(exec_env)
+        c, factory = exec_env
+
+        resp = c.post("/books", json={"name": "Sync Book"}, headers=_auth(user))
+        book_id = uuid.UUID(resp.json()["id"])
+        cat_id = uuid.uuid4()
+        _seed_categories(factory, uuid.UUID(user["id"]), book_id, {cat_id: "餐饮"})
+
+        proposal = {
+            "proposalId": "prop-sync-002",
+            "action": "add_tx",
+            "confidence": 0.95,
+            "requiresConfirmation": False,
+            "transactions": [{
+                "type": "expense", "amountCents": 1500,
+                "categoryId": str(cat_id), "bizDate": "2026-09-08",
+                "note": "午饭",
+            }],
+            "message": "已记录午饭",
+            "warnings": [],
+        }
+        assert _execute(exec_env, user, book_id, proposal).status_code == 200
+        assert _execute(exec_env, user, book_id, proposal).status_code == 200
+
+        pull = c.post("/sync/pull", json={"cursor": 0}, headers=_auth(user))
+        tx_changes = [
+            ch for ch in pull.json()["changes"]
+            if ch["entity_type"] == "transaction"
+        ]
+        assert len(tx_changes) == 1

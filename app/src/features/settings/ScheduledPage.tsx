@@ -1,9 +1,10 @@
 /**
  * ScheduledPage — 定时记账（第十一轮 T11-5 / REQ-26 / 决策 #4）。
  *
- * 管理周期性自动记账规则：列表卡（周期文案 + 上次/下次执行 + 开关 + 删除）
- * + 新建/编辑表单（字段序参考截图 #17）。规则仅存本机不上行同步（同存钱
- * 目标，见 Repository 说明）；引擎按规则生成的交易走正常 mutation 上行。
+ * 管理周期性自动记账规则：列表卡（周期文案含执行时刻 + 上次/下次执行 + 开关 + 删除）
+ * + 新建/编辑表单（字段序参考截图 #17；执行时刻 T14-5 / REQ-43）。规则仅存本机
+ * 不上行同步（同存钱目标，见 Repository 说明）；引擎按规则生成的交易走正常
+ * mutation 上行。
  * 表单写入 = scheduled.insert/update（无 mutationId，update 局部合并、
  * version+1）；enabled 快捷开关只传 {id, enabled, version+1}。
  */
@@ -17,6 +18,7 @@ import { todayBizDate } from '../../domain/date'
 import { pickEntryBook, pickDefaultAccount } from '../../domain/books'
 import { CategoryIcon } from '../../components/CategoryIcon'
 import DateField from '../../components/DateField'
+import TimeField from '../../components/TimeField'
 import type {
   ScheduledRuleData,
   BookData,
@@ -107,14 +109,15 @@ function dateLabel(iso: string, today: string): string {
   return p.y === Number(today.slice(0, 4)) ? label : `${p.y}年${label}`
 }
 
-function repeatLabel(rule: Pick<ScheduledRuleData, 'repeat' | 'startDate'>): string {
+function repeatLabel(rule: Pick<ScheduledRuleData, 'repeat' | 'startDate' | 'runHour' | 'runMinute'>): string {
   const start = parseYmd(rule.startDate)
   if (!start) return '—'
+  const t = `${String(rule.runHour ?? 8).padStart(2, '0')}:${String(rule.runMinute ?? 0).padStart(2, '0')}`
   switch (rule.repeat) {
-    case 'daily': return '每天'
-    case 'weekly': return `每${WEEKDAY_CN[dayOfWeek(rule.startDate)]}`
-    case 'monthly': return `每月 ${start.d} 日`
-    case 'yearly': return `每年 ${start.m}月${start.d}日`
+    case 'daily': return `每天 ${t}`
+    case 'weekly': return `每${WEEKDAY_CN[dayOfWeek(rule.startDate)]} ${t}`
+    case 'monthly': return `每月 ${start.d} 日 ${t}`
+    case 'yearly': return `每年 ${start.m}月${start.d}日 ${t}`
     default: return '—'
   }
 }
@@ -135,6 +138,8 @@ interface RuleForm {
   startDate: string
   endUnlimited: boolean
   endDate: string
+  runHour: number
+  runMinute: number
 }
 
 function emptyForm(bookId: string, accountId: string | null): RuleForm {
@@ -143,6 +148,7 @@ function emptyForm(bookId: string, accountId: string | null): RuleForm {
     enabled: true, type: 'expense', name: '', amount: '',
     bookId, categoryId: '', accountId, includeInBudget: true, note: '',
     repeat: 'daily', startDate: today, endUnlimited: true, endDate: today,
+    runHour: 8, runMinute: 0,
   }
 }
 
@@ -161,6 +167,9 @@ function formFromRule(r: ScheduledRuleData): RuleForm {
     startDate: r.startDate,
     endUnlimited: r.endDate == null,
     endDate: r.endDate ?? r.startDate,
+    // 旧包/异常行缺时刻 → 回落 v9 迁移缺省 8:00（与 native 语义一致）
+    runHour: r.runHour ?? 8,
+    runMinute: r.runMinute ?? 0,
   }
 }
 
@@ -262,6 +271,7 @@ export function ScheduledPage() {
           note: form.note.trim(),
           repeat: form.repeat, startDate: form.startDate, endDate,
           enabled: form.enabled,
+          runHour: form.runHour, runMinute: form.runMinute,
           version: editingVersion + 1,
         })
       } else {
@@ -274,6 +284,7 @@ export function ScheduledPage() {
           note: form.note.trim(),
           repeat: form.repeat, startDate: form.startDate, endDate,
           enabled: form.enabled,
+          runHour: form.runHour, runMinute: form.runMinute,
           version: 1,
         })
       }
@@ -629,6 +640,17 @@ export function ScheduledPage() {
                   </button>
                 ))}
               </div>
+            </div>
+
+            {/* 执行时刻（T14-5 / REQ-43）：到点才生成当日账单 */}
+            <div>
+              <div className="text-xs text-ink2 mb-1">执行时刻</div>
+              <TimeField
+                hour={form.runHour}
+                minute={form.runMinute}
+                onChange={(h, m) => setForm(f => ({ ...f, runHour: h, runMinute: m }))}
+                testId="scheduled-form-run-time"
+              />
             </div>
 
             {/* 开始日期 */}

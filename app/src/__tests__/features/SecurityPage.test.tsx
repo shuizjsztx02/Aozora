@@ -34,6 +34,7 @@ vi.mock('react-router', async (importOriginal) => {
 })
 
 import { SecurityPage } from '../../features/settings/SecurityPage'
+import { useAssistantChatStore } from '../../platform/store/assistant-chat-store'
 
 const guestStatus = { registered: false, userId: null, deviceId: 'dev-1' }
 const memberStatus = { registered: true, userId: 'user-abc-123456', deviceId: 'dev-1' }
@@ -46,6 +47,8 @@ describe('SecurityPage', () => {
     mockBridge.getAuthStatus.mockResolvedValue(guestStatus)
     mockBridge.getMeta.mockResolvedValue({})
     mockBridge.logoutAuth.mockResolvedValue({ success: true })
+    // T14-4：聊天历史 store 为模块级共享态——逐用例复位
+    useAssistantChatStore.setState({ messages: [] })
   })
 
   it('游客：身份卡显示游客态 + 登录入口，无退出/切换按钮', async () => {
@@ -100,6 +103,8 @@ describe('SecurityPage', () => {
   it('退出登录：确认弹框含数据清除提示 → logoutAuth → navigate(/onboarding)', async () => {
     mockBridge.getAuthStatus.mockResolvedValue(memberStatus)
     mockBridge.getMe.mockResolvedValue({ id: 'u1', nickname: null, phone: null, status: 'active', timezone: 'UTC' })
+    // T14-4（决策 #7）：登出需清空聊天历史 store（防跨账号串会话）
+    useAssistantChatStore.setState({ messages: [{ id: 'm1', role: 'user', text: 'hi' }] })
     const user = userEvent.setup()
     renderPage()
     await waitFor(() => expect(screen.getByTestId('security-logout')).toBeTruthy())
@@ -110,6 +115,7 @@ describe('SecurityPage', () => {
     await waitFor(() => {
       expect(mockBridge.logoutAuth).toHaveBeenCalled()
       expect(mockNavigate).toHaveBeenCalledWith('/onboarding', { replace: true })
+      expect(useAssistantChatStore.getState().messages).toEqual([])
     })
   })
 

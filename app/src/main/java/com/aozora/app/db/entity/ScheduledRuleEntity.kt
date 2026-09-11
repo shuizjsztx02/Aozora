@@ -19,6 +19,8 @@ import androidx.room.PrimaryKey
  * - [startDate]/[endDate]：'YYYY-MM-DD'；endDate null = 无限制。
  * - [enabled]：规则开关，false 时引擎跳过。
  * - [lastRunDate]：最近一次生成交易的 bizDate（'YYYY-MM-DD'），当日去重锚点。
+ * - [runHour]/[runMinute]：每日执行时刻（第十四轮 REQ-43 / 决策 #4）——引擎到
+ *   该墙钟时刻才生成当日账单；缺省 8:00（v9 迁移后存量规则保持原 08:00 语义）。
  */
 @Entity(tableName = "scheduled_rules")
 data class ScheduledRuleEntity(
@@ -37,6 +39,8 @@ data class ScheduledRuleEntity(
     val endDate: String?,         // 'YYYY-MM-DD' or null=无限制
     val enabled: Boolean = true,
     val lastRunDate: String?,     // 'YYYY-MM-DD' or null=从未执行
+    val runHour: Int = 8,         // 执行时刻-时 0..23（REQ-43）
+    val runMinute: Int = 0,       // 执行时刻-分 0..59（REQ-43）
     val createdAt: Long,          // UTC ms
     val updatedAt: Long,          // UTC ms
     val archivedAt: Long?,        // 删除=归档；UTC ms or null

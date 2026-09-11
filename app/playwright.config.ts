@@ -16,7 +16,8 @@ export default defineConfig({
   workers: 1,
   reporter: [['html', { open: 'never' }]],
   use: {
-    baseURL: 'http://localhost:5173',
+    // 本机 vite 默认只监听 IPv6 ::1，端口探测走 127.0.0.1 会超时，显式绑 IPv4
+    baseURL: 'http://127.0.0.1:5173',
     viewport: { width: 390, height: 844 }, // iPhone 14 尺寸
     // deviceScaleFactor 由 projects[].use.devices['iPhone 14'] 提供（值为 3），此处不重复设置
     // T-M4-06b: 禁用动画确保截图稳定
@@ -29,7 +30,7 @@ export default defineConfig({
     },
   ],
   webServer: {
-    command: 'npm run dev -- --port 5173',
+    command: 'npm run dev -- --port 5173 --host 127.0.0.1',
     port: 5173,
     reuseExistingServer: !process.env.CI,
     timeout: 30_000,

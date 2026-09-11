@@ -183,6 +183,41 @@ class Repository(private val db: AozoraDatabase) {
         }
     }
 
+    /**
+     * 第十四轮 T14-2（REQ-39 / 决策 #3）：原子事务：更新账本 + 写入 pending mutation
+     * （镜像 updateAccount：局部合并由 handler 构造完整实体；version 必须递增，
+     * expectedVersion = 变更前版本）。master 总账本只读（isMaster 系 meta 键
+     * master_book_id 派生，对齐 handleBookList 现有语义），拒绝编辑。
+     */
+    suspend fun updateBook(book: BookEntity, mutationId: String) {
+        require(mutationId.isNotBlank()) { "mutationId is required" }
+        require(book.id.isNotBlank()) { "entity ID is required" }
+        require(book.name.isNotBlank()) { "name is required" }
+        require(book.version > 0) { "invalid version" }
+        db.withTransaction {
+            val current = db.bookDao().getById(book.id)
+            require(current != null) { "book not found" }
+            require(current.archivedAt == null) { "book is archived" }
+            require(book.version > current.version) { "version must increase" }
+            require(book.id != getMasterBookId()) { "master book is read-only" }
+            db.bookDao().update(book)
+            db.pendingMutationDao().insert(
+                PendingMutationEntity(
+                    mutationId = mutationId,
+                    entityType = "book",
+                    entityId = book.id,
+                    operation = PendingMutationEntity.OP_UPDATE,
+                    payload = bookToJson(book),
+                    status = PendingMutationEntity.STATUS_PENDING,
+                    retryCount = 0,
+                    createdAt = System.currentTimeMillis(),
+                    expectedVersion = current.version,
+                    lastError = null
+                )
+            )
+        }
+    }
+
     suspend fun getBook(id: String): BookEntity? = db.bookDao().getById(id)
     suspend fun listBooks(): List<BookEntity> = db.bookDao().listActive()
 
@@ -520,7 +555,8 @@ class Repository(private val db: AozoraDatabase) {
     suspend fun getScheduledRule(id: String): ScheduledRuleEntity? = db.scheduledRuleDao().getById(id)
 
     /**
-     * 规则底线校验——repeat/type 枚举、日期格式与 endDate≥startDate 成序。
+     * 规则底线校验——repeat/type 枚举、日期格式与 endDate≥startDate 成序、
+     * 执行时刻值域（T14-5 / REQ-43）。
      * 桥层（handleScheduledInsert/Update）只做形状与必填解析，枚举与成序
      * 在此唯一把关（镜像 requireValidSavingsPeriod 的"防绕过"定位）。
      */
@@ -529,6 +565,8 @@ class Repository(private val db: AozoraDatabase) {
         require(rule.amountCents in 1..9007199254740991L) { "amountCents must be a positive safe integer" }
         require(rule.type in setOf("income", "expense")) { "invalid rule type: ${rule.type}" }
         require(rule.repeat in setOf("daily", "weekly", "monthly", "yearly")) { "invalid repeat: ${rule.repeat}" }
+        require(rule.runHour in 0..23) { "invalid runHour: ${rule.runHour}" }
+        require(rule.runMinute in 0..59) { "invalid runMinute: ${rule.runMinute}" }
         require(isoDateOrNullOr(rule.startDate)) { "invalid startDate: ${rule.startDate}" }
         if (rule.endDate != null) {
             require(isoDateOrNullOr(rule.endDate)) { "invalid endDate: ${rule.endDate}" }
@@ -1268,7 +1306,7 @@ class Repository(private val db: AozoraDatabase) {
             amountCents = amountCents, type = type, bizDate = bizDate,
             occurredAt = occurredAt, note = note, source = source, version = version,
             includeInBudget = includeInBudget,
-            deletedAt = null
+            deletedAt = map["deletedAt"]?.toLongOrNull()
         )
     }
 
@@ -1281,7 +1319,7 @@ class Repository(private val db: AozoraDatabase) {
         val version = map["version"]?.toIntOrNull() ?: 1
         return BookEntity(
             id = id, ownerId = ownerId, name = name, icon = icon,
-            version = version, archivedAt = null
+            version = version, archivedAt = map["archivedAt"]?.toLongOrNull()
         )
     }
 
@@ -1297,7 +1335,7 @@ class Repository(private val db: AozoraDatabase) {
         return CategoryEntity(
             id = id, ownerId = ownerId, bookId = bookId, parentId = parentId,
             kind = kind, name = name, icon = map["icon"],
-            archivedAt = null, version = version
+            archivedAt = map["archivedAt"]?.toLongOrNull(), version = version
         )
     }
 
@@ -1311,7 +1349,7 @@ class Repository(private val db: AozoraDatabase) {
         return AccountEntity(
             id = id, ownerId = ownerId, name = name, icon = icon,
             accountType = map["accountType"],
-            archivedAt = null, version = version
+            archivedAt = map["archivedAt"]?.toLongOrNull(), version = version
         )
     }
 

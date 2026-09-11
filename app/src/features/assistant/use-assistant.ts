@@ -20,6 +20,21 @@
  *   不得编数字）；edit/delete → pendingOp 圈定候选交 OpPreviewCard 预览确认，
  *   confirmOp 逐笔 update/softDelete（上限 50）。needsAI 判据不翻向（决策 #2）；
  *   离线/无 key/失败 → edit/delete/query/chat 一律 canned 降级，bookkeeping 保本地 NLU。
+ *
+ * 第十四轮 T14-4（REQ-42 / 决策 #7）：messages 持久化到 platform/store/assistant-chat-store
+ *   （zustand persist → localStorage），切页 remount 历史不丢；瞬时态不落盘。
+ *
+ * 第十三轮 T13-5（REQ-48 / 决策 #6 #7 #8）：分发矩阵 +intent=config——config 坏形状
+ *   回落 chat 转述 reply；好形状 → resolveConfigTargets 名→id 解析（失败引导语不开卡），
+ *   成功 → pendingConfig 预览确认卡（决策 #8 rows 模式），confirmConfig 逐 op 走现有
+ *   桥命令（Kotlin 零改动），cancelConfig 不落写；context 注入 +books/accounts/
+ *   budgets/goals 现有对象名单段（buildAiObjectNames ≤30 条 × ≤16 字，决策 #7）。
+ *
+ * 第十五轮 T15-7（REQ-56 / 决策 #8）：edit 契约 v4 客户端侧——openOpPreview 对
+ *   filter/set 点名的账户/账本先过名→id 解析（matchAccountByName/matchBookByName）：
+ *   filter 侧指代不明 → 引导语不开卡（绝不回落当前账本盲猜）；命中他账本 → 跨账本
+ *   取数圈定；set 侧匹配不到 → 该字段剔除不回写 + 引导语（宁缺勿错）。confirmOp
+ *   把 accounts/books 名单下传 buildEditUpdates（type/账户/账本全字段消费）。
  */
 
 import { useState, useCallback, useRef, useEffect } from 'react'
@@ -29,9 +44,11 @@ import {
   buildProposalFromAiOutput, parseAiInterpretOutput, hasOpConditions, applyOpFilter,
   buildEditUpdates, sumByFilter, MAX_BATCH_OPS,
   resolveConfigTargets, buildAiObjectNames, buildConfigPreview, deadlineToSavingsPeriod,
+  matchAccountByName, matchBookByName,
   type AiConfig, type AiOpSet, type AiInterpretV2, type ConfigTargets,
 } from '../../domain/ai-proposal-builder'
 import { useBridge } from '../../platform/hooks/use-bridge'
+import { useAssistantChatStore } from '../../platform/store/assistant-chat-store'
 import { newUuid } from '../../platform/uuid'
 import { todayBizDate } from '../../domain/date'
 import { META_KEY_DEFAULT_ACCOUNT_ID, META_KEY_DEFAULT_BOOK_ID } from '../../domain/meta'
@@ -53,7 +70,7 @@ export interface AssistantMessage {
 }
 
 /** 第八轮：'confirming' 态随免确认改造移除——解析成功后直接本地提交。 */
-export type AssistantPhase = 'idle' | 'processing' | 'executing' | 'undo_window'
+export type AssistantPhase = 'idle' | 'processing' | 'executing'
 
 /** 常驻编辑卡的展示状态（error 态下卡片仍可编辑，改动即重试保存）。
  *  T12-8（REQ-30 / 决策 #7）：pending-category = 提案缺分类，未写库，卡内选定后接管首次写入。 */
@@ -136,7 +153,6 @@ interface UseAssistantReturn {
   /** 常驻卡数据；解析成功后设置，撤销后清除。 */
   activeProposal: ActionProposal | null
   cardStatus: CardStatus | null
-  undoRemaining: number
   isSlow: boolean
   /** T12-11：edit/delete 意图圈定后的待确认操作（null=无）；确认/取消后清空。 */
   pendingOp: PendingOp | null
@@ -165,7 +181,6 @@ const CONFIDENCE_THRESHOLD = 0.8
 // 覆盖 edit（改成/改为…）、delete（删/去掉/移除…）、query（查一下/多少…）。
 const OP_SENTENCE_RE = /(改成|改为|记成|调成|删掉|删了|删除|删去|去掉|移除|查一下|查查|查询|多少)/
 const SLOW_THRESHOLD_MS = 12_000
-const UNDO_WINDOW_SECONDS = 5
 
 /**
  * T12-8（REQ-30 / 决策 #7）：Kotlin Repository 校验/查询失败的英文异常消息 → 中文。
@@ -231,18 +246,20 @@ export function useAssistant({
   onConfigApplied,
 }: UseAssistantOptions): UseAssistantReturn {
   const bridge = useBridge()
-  const [messages, setMessages] = useState<AssistantMessage[]>([])
+  // T14-4（REQ-42 / 决策 #7）：messages 外置到 zustand persist store——切页 remount
+  // 后历史仍在（写入时 ≤200 条截断，localStorage 读写静默容错）。setMessages 兼容
+  // React updater 形态，下方几十处调用点零改动；processing/pendingOp 等瞬时态
+  // 仍为内存 useState，不落盘（恢复后无过期撤销钮：卡由内存态门控）。
+  const messages = useAssistantChatStore(s => s.messages)
+  const setMessages = useAssistantChatStore(s => s.setMessages)
   const [phase, setPhase] = useState<AssistantPhase>('idle')
   const [activeProposal, setActiveProposal] = useState<ActionProposal | null>(null)
   const [cardStatus, setCardStatus] = useState<CardStatus | null>(null)
-  const [undoRemaining, setUndoRemaining] = useState(0)
   const [isSlow, setIsSlow] = useState(false)
   // T12-11（REQ-37）：edit/delete 意图的待确认操作卡
   const [pendingOp, setPendingOp] = useState<PendingOp | null>(null)
   // T13-5（REQ-48）：config 意图的待确认设置卡
   const [pendingConfig, setPendingConfig] = useState<PendingConfig | null>(null)
-  const undoTimerRef = useRef<ReturnType<typeof setInterval> | null>(null)
-  const undoDeadlineRef = useRef<number>(0)
   const slowTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
   // C-B3 fix: 并发提交互斥
   const isSubmittingRef = useRef(false)
@@ -258,7 +275,6 @@ export function useAssistant({
   // C-C2 fix: 组件卸载时清理所有 timer
   useEffect(() => {
     return () => {
-      if (undoTimerRef.current) clearInterval(undoTimerRef.current)
       if (slowTimerRef.current) clearTimeout(slowTimerRef.current)
     }
   }, [])
@@ -281,14 +297,6 @@ export function useAssistant({
       accounts: [],
     }
   }, [categories, timezone])
-
-  const stopUndoTimer = useCallback(() => {
-    if (undoTimerRef.current) {
-      clearInterval(undoTimerRef.current)
-      undoTimerRef.current = null
-    }
-    setUndoRemaining(0)
-  }, [])
 
   /**
    * 第八轮：本地写入提案全部交易，返回生成的交易 id。
@@ -373,22 +381,7 @@ export function useAssistant({
           : m
       ))
       setCardStatus('committed')
-
-      // 5s 撤销窗（沿用现有 timer / UndoToast）
-      undoDeadlineRef.current = Date.now() + UNDO_WINDOW_SECONDS * 1000
-      setPhase('undo_window')
-      setUndoRemaining(UNDO_WINDOW_SECONDS)
-      undoTimerRef.current = setInterval(() => {
-        const remaining = Math.ceil((undoDeadlineRef.current - Date.now()) / 1000)
-        if (remaining <= 0) {
-          if (undoTimerRef.current) clearInterval(undoTimerRef.current)
-          undoTimerRef.current = null
-          setPhase('idle')
-          setUndoRemaining(0)
-        } else {
-          setUndoRemaining(remaining)
-        }
-      }, 200)
+      setPhase('idle')
 
       try { await bridge.triggerSync() } catch { /* ignore */ }
     } catch (err) {
@@ -425,7 +418,8 @@ export function useAssistant({
     const filter = v2.filter
     if (v2.intent === 'query' && filter && bookId) {
       const rows = await bridge.listTransactionsByBook(bookId)
-        .then(all => applyOpFilter(all, categories, filter))
+        // T15-7：名单下传——query 直算也须尊重 type/账户/账本圈定条件
+        .then(all => applyOpFilter(all, categories, filter, accounts, books))
         .catch(() => null)
       if (rows) {
         if (rows.length === 0) return '没找到符合条件的记录'
@@ -443,12 +437,33 @@ export function useAssistant({
       // 一律不转述，引导用户给出范围走本地直算。
       return '把金额交给我从账本里直接算吧——告诉我时间或类别范围（如「这个月」「交通」）～'
     }
-    return reply || '这个问题我暂时答不上来，换个说法试试？'
-  }, [bridge, bookId, categories])
+    // T13-6（REQ-49 / 决策 #10）：reply 空（含 bookkeeping 无金额被守卫改判 chat 的
+    // 场景）→ 带当前角色名的兜底句，不再吐无角色系统腔。
+    if (reply) return reply
+    return persona
+      ? `${persona.name}没听明白，换个说法试试？`
+      : '这个问题我暂时答不上来，换个说法试试？'
+  }, [bridge, bookId, categories, accounts, books, persona])
+
+  /**
+   * T15-7（REQ-56 / 决策 #8）：命名对象匹配不到时的引导语（宁缺勿错不猜测，
+   * config nameHint 同款文案口径；master 总账本不可作 edit 目标，不列）。
+   */
+  const namedObjectHint = useCallback((kind: '账户' | '账本', name: string): string => {
+    const existing = (kind === '账本'
+      ? books.filter(b => !b.isMaster).map(b => b.name)
+      : accounts.map(a => a.name)
+    ).filter(Boolean).slice(0, 10).join('、')
+    return `没找到叫「${name}」的${kind}。` +
+      (existing ? `现有的：${existing}。` : `目前还没有可用的${kind}，请先在设置中创建。`)
+  }, [books, accounts])
 
   /**
    * T12-11（REQ-37 ③ / 决策 #5）：edit/delete 意图 → 当前账本本地圈定候选，
    * 交 OpPreviewCard 预览确认（破坏性操作必过确认）；守卫态与零命中以气泡收口。
+   * T15-7（REQ-56 / 决策 #8）：filter/set 点名对象（accountName/bookName）先过
+   * 名→id 解析——filter 侧指代不明直接引导（绝不回落当前账本盲猜目标笔）；
+   * set 侧匹配不到 → 该字段不回写（从 set 剔除 + 引导语，其余字段照常预览）。
    */
   const openOpPreview = useCallback(async (v2: AiInterpretV2) => {
     const filter = v2.filter
@@ -466,20 +481,55 @@ export function useAssistant({
       appendAssistantMessage('❌ 账本未就绪，无法查找要处理的记录。请返回首页切换账本后重试。')
       return
     }
-    const all = await bridge.listTransactionsByBook(bookId).catch(() => null)
+    // filter 侧点名：命中他账 → 跨账本取数（改「别的账本里的记录」场景）
+    let listBookId = bookId
+    if (filter.bookName) {
+      const hit = matchBookByName(filter.bookName, books)
+      if (!hit) {
+        appendAssistantMessage(namedObjectHint('账本', filter.bookName))
+        return
+      }
+      listBookId = hit.id
+    }
+    if (filter.accountName && !matchAccountByName(filter.accountName, accounts)) {
+      appendAssistantMessage(namedObjectHint('账户', filter.accountName))
+      return
+    }
+    // set 侧点名（仅 edit）：解析不到的字段剔除 + 引导语；剔空 → 不开卡
+    let set = v2.set
+    if (v2.intent === 'edit' && set) {
+      const notes: string[] = []
+      if (set.accountName && !matchAccountByName(set.accountName, accounts)) {
+        notes.push(`${namedObjectHint('账户', set.accountName)}该项未改。`)
+        set = { ...set, accountName: undefined }
+      }
+      if (set.bookName && !matchBookByName(set.bookName, books)) {
+        notes.push(`${namedObjectHint('账本', set.bookName)}该项未改。`)
+        set = { ...set, bookName: undefined }
+      }
+      if (notes.length > 0) {
+        appendAssistantMessage(notes.join(''))
+        const hasRealChange = Object.values(set).some(v => v !== undefined)
+        if (!hasRealChange) return
+      }
+    }
+    const all = await bridge.listTransactionsByBook(listBookId).catch(() => null)
     if (!all) {
       appendAssistantMessage('查找本地账单失败，请稍后重试')
       return
     }
-    const rows = applyOpFilter(all, categories, filter)
+    const rows = applyOpFilter(all, categories, filter, accounts, books)
     if (rows.length === 0) {
       appendAssistantMessage('没找到符合条件的记录')
       return
     }
     // 调用点已限定 intent ∈ {edit, delete}，kind 显式收窄
     const kind: 'edit' | 'delete' = v2.intent === 'delete' ? 'delete' : 'edit'
-    setPendingOp({ kind, reply: v2.reply, set: v2.set, candidates: rows })
-  }, [appendAssistantMessage, bridge, bookId, categories])
+    setPendingOp({ kind, reply: v2.reply, set, candidates: rows })
+  }, [
+    appendAssistantMessage, bridge, bookId, categories,
+    books, accounts, namedObjectHint,
+  ])
 
   /**
    * T13-5（REQ-48 / 决策 #6 #8）：config 意图 → 名→id 本地解析 + 预览确认。
@@ -514,9 +564,6 @@ export function useAssistant({
     // C-B3 fix: 并发提交互斥 — 非 idle 阶段拒绝新提交
     if (isSubmittingRef.current) return
     isSubmittingRef.current = true
-
-    // C-C1 fix: 新提交时清理旧 undo timer，防止状态机竞争
-    stopUndoTimer()
 
     // T12-11：新输入接管会话，未决操作卡作废（不静默执行）
     // T13-5：config 预览卡同理
@@ -710,7 +757,7 @@ export function useAssistant({
   }, [
     bridge, categories, bookId, timezone, profile, persona, aiCategories,
     books, accounts, budgets, goals,
-    buildParseContext, commitProposalInternal, stopUndoTimer,
+    buildParseContext, commitProposalInternal,
     appendAssistantMessage, answerTextIntent, openOpPreview, openConfigPreview,
   ])
 
@@ -721,7 +768,7 @@ export function useAssistant({
   ) => {
     if (!bookId && !overrides?.bookId) { pushBookMissingError(edited.proposalId); return }
     // T12-8（REQ-30 ①）：待选分类态——分类补齐前编辑只回写消息（不写库、态保持），
-    // 选定分类后接管首次写入（commitProposalInternal：文案「已记录 N 笔」+ 撤销窗 + triggerSync）
+    // 选定分类后接管首次写入（commitProposalInternal：文案「已记录 N 笔」+ triggerSync）
     if (isPendingCategoryRef.current) {
       setActiveProposal(edited)
       setMessages(prev => prev.map(m =>
@@ -732,8 +779,6 @@ export function useAssistant({
       await commitProposalInternal(edited, overrides)
       return
     }
-    // 编辑即接管：终止未结束的 5s 撤销窗
-    stopUndoTimer()
     const oldIds = activeTxIdsRef.current
     setPhase('executing')
     setCardStatus('executing')
@@ -765,10 +810,9 @@ export function useAssistant({
       setCardStatus('error')
       setPhase('idle')
     }
-  }, [bridge, bookId, pushBookMissingError, stopUndoTimer, writeTransactions, commitProposalInternal])
+  }, [bridge, bookId, pushBookMissingError, writeTransactions, commitProposalInternal])
 
   const undoExecution = useCallback(async () => {
-    stopUndoTimer()
     const ids = activeTxIdsRef.current
     if (ids.length === 0) { setPhase('idle'); return }
     try {
@@ -791,7 +835,7 @@ export function useAssistant({
       ))
     }
     setPhase('idle')
-  }, [bridge, stopUndoTimer])
+  }, [bridge])
 
   /**
    * T12-11（REQ-37 ③ / 决策 #3 #5）：执行 pendingOp——逐笔 updateTransaction/
@@ -812,7 +856,8 @@ export function useAssistant({
         if (op.kind === 'delete') {
           await bridge.softDeleteTransaction(tx.id, newUuid())
         } else {
-          const input = buildEditUpdates(tx, op.set, categories, timezone, now)
+          // T15-7（REQ-56）：accounts/books 名单下传——set 的账户/账本名→id 解析
+          const input = buildEditUpdates(tx, op.set, categories, timezone, now, accounts, books)
           if (!input) throw new Error('该笔缺少分类或数据异常，无法修改')
           await bridge.updateTransaction(input, newUuid())
         }
@@ -842,7 +887,7 @@ export function useAssistant({
     if (done > 0) {
       bridge.triggerSync().catch(() => { /* 同步入队失败不阻断（hook 层同口径） */ })
     }
-  }, [pendingOp, bridge, categories, timezone, appendAssistantMessage])
+  }, [pendingOp, bridge, categories, timezone, accounts, books, appendAssistantMessage])
 
   /** T12-11：取消 pendingOp——不执行任何写，落一条「已取消」回执。 */
   const cancelOp = useCallback(() => {
@@ -963,7 +1008,7 @@ export function useAssistant({
   }, [pendingConfig, appendAssistantMessage])
 
   return {
-    messages, phase, activeProposal, cardStatus, undoRemaining, isSlow, pendingOp, pendingConfig,
+    messages, phase, activeProposal, cardStatus, isSlow, pendingOp, pendingConfig,
     submitInput, editProposal, undoExecution, confirmOp, cancelOp,
     confirmConfig, cancelConfig,
     appendAssistantMessage,

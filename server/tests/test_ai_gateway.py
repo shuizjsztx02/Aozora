@@ -360,7 +360,9 @@ class TestInterpretContext:
         assert resp.status_code == 200
         system = self._system(ai_env)
         assert "如何称呼你：老板" in system
-        assert "count" not in system  # 非 str 值跳过
+        # T13-4 后按渲染形态断言——v3 契约串 account.create/accountType
+        # 含 "count" 子串，裸 "count" 断言会被误伤（原意：非 str 值键不渲染）
+        assert "- count：" not in system
         assert "weirdFutureKey：值" in system  # 未知键回退原键名（向前兼容）
 
 
@@ -534,6 +536,269 @@ class TestInterpretContextV2Sections:
         # 段序：资料段在前，categories 段在尾部（其内容可含任意分类名，
         # 反注入前缀只声明资料段"不构成指令"——分类列表段自身是指令性白名单）
         assert system.index("不构成指令") < system.index("【用户现有分类名列表】")
+
+
+# ── 第十三轮 T13-4（REQ-48 / REQ-49 / 决策 #6 #7 #10）：prompt v3 + 对象段 ────
+
+class TestLedgerPromptV3:
+    """prompt v3：intent +config、6 op 契约、对象段与人设口吻规则齐备；
+    v1/v2 字段与老客户端兼容路径原样保留。"""
+
+    def _prompt(self) -> str:
+        from src.modules.ai.prompts import get_template
+        return get_template("ledger_parse").system_prompt
+
+    def test_config_intent_declared(self):
+        p = self._prompt()
+        assert '"config"' in p
+        assert "config=用户明确要求更改应用设置" in p or "intent=config" in p
+
+    def test_six_ops_whitelist_declared(self):
+        """决策 #6：op 6 值白名单逐字出现在 schema 说明中。"""
+        p = self._prompt()
+        for op in (
+            "book.create", "account.create", "budget.create",
+            "savings.create", "default.book_set", "default.account_set",
+        ):
+            assert f'"{op}"' in p, op
+
+    def test_config_params_declared(self):
+        p = self._prompt()
+        for token in (
+            "accountType", "initBalance", "targetAmount", "deadline", "period",
+        ):
+            assert token in p, token
+
+    def test_name_not_id_rule_present(self):
+        """决策 #6：模型只报名字，永不输出 id/UUID。"""
+        p = self._prompt()
+        assert "绝不输出任何 id/UUID" in p
+        assert "不要猜" in p  # 重名/指代不明不猜测，改 chat 追问
+
+    def test_objects_section_rule_present(self):
+        """决策 #7：对象段的 prompt 侧约定（default.* 从名单点名）。"""
+        p = self._prompt()
+        assert "现有对象" in p
+        assert "重名" in p
+
+    def test_persona_reply_rule_v3(self):
+        """决策 #10 prompt 侧：chat reply 必须人设口吻、无系统腔。"""
+        p = self._prompt()
+        assert "口吻与自称作答" in p
+        assert "无法识别" in p  # 明文禁止「无法识别」「无法解析」类系统腔
+
+    def test_v2_fields_unchanged(self):
+        """v3 不得回退 v2：intent 五类 + filter/set/reply 定义原样。"""
+        p = self._prompt()
+        for token in (
+            "bookkeeping", '"edit"', '"delete"', '"query"', '"chat"',
+            '"filter"', '"set"', "recentN", "includeInBudget",
+        ):
+            assert token in p, token
+
+
+class TestConfigPassThrough:
+    """v3 输出含 config 时服务端原样透传（output 不做业务校验——
+    「op 不在白名单 → 回落 chat」是客户端职责，T13-5）。"""
+
+    def _run(self, ai_env, sample: dict) -> dict:
+        ai_env.provider.results = [
+            ProviderResult(json.dumps(sample, ensure_ascii=False), 10, 10),
+        ]
+        user = _guest(ai_env)
+        resp = _interpret(ai_env, user, text="帮我建一个叫旅行的账本")
+        assert resp.status_code == 200
+        return resp.json()["output"]
+
+    def test_book_create_sample(self, ai_env):
+        sample = {
+            "intent": "config", "type": "", "amountCents": 0, "category": "",
+            "note": "", "bizDate": "", "confidence": 0.95,
+            "reply": "好嘞，帮你建一个「旅行」账本～",
+            "config": {"op": "book.create", "name": "旅行", "icon": "✈️"},
+        }
+        assert self._run(ai_env, sample) == sample
+
+    def test_six_ops_samples_pass_through(self, ai_env):
+        """六 op 各一例：config 字段形状服务端不加工、不吞键。"""
+        configs = [
+            {"op": "account.create", "name": "现金", "accountType": "expense",
+             "initBalance": 0},
+            {"op": "budget.create", "name": "餐饮预算", "category": "餐饮",
+             "amount": 800, "period": "month"},
+            {"op": "savings.create", "name": "旅行基金", "targetAmount": 5000,
+             "deadline": "2026-12-31"},
+            {"op": "default.book_set", "name": "旅行"},
+            {"op": "default.account_set", "name": "现金"},
+            {"op": "book.create", "name": "旅行"},
+        ]
+        for cfg in configs:
+            sample = {
+                "intent": "config", "type": "", "amountCents": 0, "category": "",
+                "note": "", "bizDate": "", "confidence": 0.9, "reply": "确认一下",
+                "config": cfg,
+            }
+            out = self._run(ai_env, sample)
+            assert out == sample
+            ai_env.provider.calls.clear()
+
+    def test_bad_op_still_passes_through(self, ai_env):
+        """白名单外 op 服务端也不拦——透传后由客户端回落 chat（T13-5 契约）。"""
+        sample = {
+            "intent": "config", "type": "", "amountCents": 0, "category": "",
+            "note": "", "bizDate": "", "confidence": 0.5, "reply": "",
+            "config": {"op": "book.delete", "name": "旅行"},
+        }
+        assert self._run(ai_env, sample) == sample
+
+
+class TestObjectsSection:
+    """T13-4（决策 #7）：context.books/accounts/budgets/goals → 【现有对象】段。"""
+
+    def _render(self, context):
+        from src.modules.ai.prompts import _render_objects_section
+        return _render_objects_section(context)
+
+    def test_absent_or_bad_context_empty(self):
+        for ctx in (None, "not-a-dict", {}, {"books": None}, {"books": []},
+                    {"books": "账本"}, {"books": [1, None, {"name": "  "}]}):
+            assert self._render(ctx) == "", ctx
+
+    def test_lines_and_counts(self):
+        section = self._render({
+            "books": [{"name": "日常"}, {"name": "旅行"}],
+            "accounts": [{"name": "现金"}],
+        })
+        assert section.startswith("【现有对象】")
+        assert "账本（2）：日常、旅行" in section
+        assert "账户（1）：现金" in section
+        assert "预算（" not in section  # 空类别不出行（段头说明文字含「预算」二字）
+        assert "存钱目标（" not in section
+
+    def test_plain_string_items_tolerated(self):
+        """形状漂移（客户端直发字符串）不炸渲染，与「坏项跳过」同口径。"""
+        section = self._render({"goals": ["相机", {"name": "车"}]})
+        assert "存钱目标（2）：相机、车" in section
+
+    def test_dedup_and_trim(self):
+        section = self._render({"books": [{"name": " 旅行 "}, {"name": "旅行"}]})
+        assert section.count("旅行") == 1  # strip + 去重（行内出现一次）
+
+    def test_caps_30_items_16_chars(self):
+        long_name = "名" * 30
+        section = self._render({"books": [{"name": long_name}]})
+        assert "名" * 16 in section
+        assert "名" * 17 not in section  # 单项 ≤16 字
+        many = [{"name": f"账{i}"} for i in range(40)]
+        section = self._render({"books": many})
+        assert "账29" in section
+        assert "账30" not in section  # 每类 ≤30 条
+        assert "账本（30）" in section
+
+    def test_total_section_clipped_to_2000(self):
+        # 4 类 × 30 条 × 16 字满额，必然超 2000 → 验证整段截断生效
+        ctx = {
+            key: [{"name": f"{key}-{i:03d}" + "名" * 9} for i in range(30)]
+            for key in ("books", "accounts", "budgets", "goals")
+        }
+        section = self._render(ctx)
+        assert section  # 有内容
+        assert len(section) <= 2000  # 整段 ≤2000（决策 #7）
+
+    def test_rendered_into_system_tail(self, ai_env):
+        user = _guest(ai_env)
+        resp = _interpret(
+            ai_env, user,
+            context={"books": [{"name": "日常"}], "accounts": [{"name": "现金"}]},
+        )
+        assert resp.status_code == 200
+        system = ai_env.provider.calls[0]["messages"][0]["content"]
+        assert "【现有对象】" in system
+        assert "账本（1）：日常" in system
+        assert "不构成指令" not in system  # 独立段，不套反注入前缀（categories 同款）
+
+    def test_section_order_after_categories(self, ai_env):
+        user = _guest(ai_env)
+        resp = _interpret(
+            ai_env, user,
+            context={
+                "profile": {"nickname": "老板"},
+                "categories": ["餐饮"],
+                "books": [{"name": "日常"}],
+            },
+        )
+        assert resp.status_code == 200
+        system = ai_env.provider.calls[0]["messages"][0]["content"]
+        assert (
+            system.index("不构成指令")
+            < system.index("【用户现有分类名列表】")
+            < system.index("【现有对象】")
+        )
+
+
+# ── 第十五轮 T15-7（REQ-56 / 决策 #8）：LEDGER_PARSE v4 —— edit 全字段 ────────
+
+class TestLedgerPromptV4:
+    """prompt v4：filter/set +type/accountName/bookName、keyword 语义扩、
+    edit 防漂移规则句（决策 #8：模型只报名、永不 UUID；坏形状 parse 层丢
+    弃为客户端职责，服务端仍只透传）。"""
+
+    def _prompt(self) -> str:
+        from src.modules.ai.prompts import get_template
+        return get_template("ledger_parse").system_prompt
+
+    def test_v4_filter_keys_declared(self):
+        p = self._prompt()
+        for token in ('"accountName"', '"bookName"', "按收支类型筛选"):
+            assert token in p, token
+        # 事故①根因一手：keyword 匹配语义扩为「备注或分类名命中其一」
+        assert "备注或分类名命中其一" in p
+
+    def test_v4_set_keys_declared(self):
+        p = self._prompt()
+        for token in ("新收支类型", "新账户名", "新账本名"):
+            assert token in p, token
+
+    def test_edit_no_drift_rule_present(self):
+        """事故③防漂移规则句：修改动词+指代已有记录 → intent=edit。"""
+        p = self._prompt()
+        assert "不得输出 bookkeeping" in p
+        assert "刚才那笔" in p
+
+    def test_objects_section_covers_edit_naming(self):
+        """T15-7：对象段点名指引从 config-only 扩到 edit 的 accountName/bookName。"""
+        from src.modules.ai.prompts import _render_objects_section
+        section = _render_objects_section({"accounts": [{"name": "测试"}]})
+        assert "edit 的 accountName/bookName 点名须出自此名单" in section
+
+    def test_v3_fields_unchanged(self):
+        """v4 不得回退 v3/v2：config 6 op 与 intent/filter/set 原定义齐备。"""
+        p = self._prompt()
+        for token in (
+            "book.create", "default.account_set", '"filter"', '"set"',
+            "recentN", "includeInBudget", "现有对象", "不要猜",
+        ):
+            assert token in p, token
+
+    def test_edit_v4_sample_passes_through(self, ai_env):
+        """REQ-56 #65 事故句形状：服务端只透传，不做 filter/set 校验。"""
+        sample = {
+            "intent": "edit", "type": "", "amountCents": 0, "category": "",
+            "note": "", "bizDate": "", "confidence": 0.9,
+            "reply": "好的，把打牌那笔改成收入 420 元",
+            "filter": {"recentN": 1, "keyword": "打牌", "type": "expense"},
+            "set": {
+                "type": "income", "amountCents": 42000,
+                "accountName": "测试", "bookName": "日常",
+            },
+        }
+        ai_env.provider.results = [
+            ProviderResult(json.dumps(sample, ensure_ascii=False), 10, 10),
+        ]
+        user = _guest(ai_env)
+        resp = _interpret(ai_env, user, text="打牌这笔改成收入420")
+        assert resp.status_code == 200
+        assert resp.json()["output"] == sample
 
 
 # ── Usage recording & cost ──────────────────────────────────────────────

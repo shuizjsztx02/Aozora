@@ -15,7 +15,10 @@
 import { useState, type ReactNode } from 'react'
 import { CategoryIcon } from '../../components/CategoryIcon'
 import { OP_PREVIEW_ROWS, MAX_BATCH_OPS } from '../../domain/ai-proposal-builder'
-import type { CategoryData, TransactionData } from '../../platform/bridge/bridge-types'
+import type {
+  AccountData, BookData, CategoryData, TransactionData,
+} from '../../platform/bridge/bridge-types'
+import type { AiOpSet } from '../../domain/ai-proposal-builder'
 import type { PendingOp } from './use-assistant'
 
 interface PreviewActions {
@@ -23,11 +26,15 @@ interface PreviewActions {
   onCancel: () => void
 }
 
-/** T12-11 原形态：edit/delete 交易候选列表预览（variant 缺省）。 */
+/** T12-11 原形态：edit/delete 交易候选列表预览（variant 缺省）。
+ *  T15-7（REQ-56 ④）：accounts/books 名单下传 OpRow——补账户/账本/收支类型/
+ *  计入预算呈现（仅被改或有值时）；缺省空名单 = 旧渲染行为。 */
 interface TxPreviewProps extends PreviewActions {
   variant?: 'transactions'
   op: PendingOp
   categories: CategoryData[]
+  accounts?: AccountData[]
+  books?: BookData[]
 }
 
 /** T13-5：config 设置操作预览（操作类型/目标名/关键参数，≤4 行）。 */
@@ -151,7 +158,11 @@ export function OpPreviewCard(props: OpPreviewCardProps) {
         {/* 候选明细（bizDate DESC，最新在前——与 listByBook 圈定顺序一致） */}
         <div className="mt-2 max-h-64 overflow-y-auto">
           {rows.map(tx => (
-            <OpRow key={tx.id} tx={tx} categories={categories} />
+            <OpRow
+              key={tx.id} tx={tx} categories={categories}
+              accounts={props.accounts ?? []} books={props.books ?? []}
+              set={op.kind === 'edit' ? op.set : null}
+            />
           ))}
         </div>
       </>
@@ -161,33 +172,83 @@ export function OpPreviewCard(props: OpPreviewCardProps) {
   )
 }
 
-/** 简版明细行：分类图标 + 名称（一级 · 二级）+ 日期 + 备注 | 金额（收支柱子色）。 */
-function OpRow({ tx, categories }: { tx: TransactionData; categories: CategoryData[] }) {
+/**
+ * 简版明细行：分类图标 + 名称（一级 · 二级）+ 日期 + 备注 | 金额（收支柱子色）。
+ * T15-7（REQ-56 ④）副行——仅被改或有值时呈现：账户/账本当前名、不计入预算标记，
+ * edit 时追加「改为」diff（模型报名、预览按名呈现；账户/账本名在 openOpPreview
+ * 已过名→id 校验，匹配不到的字段已剔除不会出现在这里）。
+ */
+function setDiffParts(set: AiOpSet): string[] {
+  const parts: string[] = []
+  if (set.type) parts.push(`收支·${set.type === 'income' ? '收入' : '支出'}`)
+  if (set.amountCents !== undefined) parts.push(`金额·¥${(set.amountCents / 100).toFixed(2)}`)
+  if (set.category) parts.push(`分类·${set.category}`)
+  if (set.note !== undefined) parts.push(`备注·${set.note || '（清空）'}`)
+  if (set.bizDate) parts.push(`日期·${set.bizDate}`)
+  if (set.accountName) parts.push(`账户·${set.accountName}`)
+  if (set.bookName) parts.push(`账本·${set.bookName}`)
+  if (set.includeInBudget !== undefined) parts.push(set.includeInBudget ? '计入预算' : '不计入预算')
+  return parts
+}
+
+function OpRow({ tx, categories, accounts, books, set }: {
+  tx: TransactionData
+  categories: CategoryData[]
+  accounts: AccountData[]
+  books: BookData[]
+  set: AiOpSet | null
+}) {
   const cat = categories.find(c => c.id === tx.categoryId)
   const parent = cat?.parentId ? categories.find(c => c.id === cat.parentId) : undefined
   const label = cat ? (parent ? `${parent.name} · ${cat.name}` : cat.name) : '未分类'
   const sign = tx.type === 'expense' ? '-' : '+'
+  const accName = tx.accountId
+    ? accounts.find(a => a.id === tx.accountId)?.name
+    : undefined
+  const bkName = books.find(b => b.id === tx.bookId)?.name
+  const diff = set ? setDiffParts(set) : []
+  const subParts = [
+    accName ? `账户·${accName}` : '',
+    bkName ? `账本·${bkName}` : '',
+    tx.includeInBudget === false ? '不计入预算' : '',
+  ].filter(Boolean)
   return (
     <div
-      className="flex items-center gap-2 py-1 border-b last:border-b-0"
+      className="py-1 border-b last:border-b-0"
       style={{ borderColor: 'var(--glass-border)' }}
       data-testid="op-row"
     >
-      <CategoryIcon
-        icon={cat?.icon ?? parent?.icon}
-        name={cat?.name || '💰'}
-        className="text-base leading-none shrink-0"
-      />
-      <span className="text-xs shrink-0" style={{ color: 'var(--ink2)' }}>{tx.bizDate}</span>
-      <span className="text-xs truncate flex-1 min-w-0" style={{ color: 'var(--ink)' }}>
-        {label}{tx.note ? `｜${tx.note}` : ''}
-      </span>
-      <span
-        className="text-xs font-medium shrink-0"
-        style={{ color: tx.type === 'expense' ? 'var(--expense)' : 'var(--income)' }}
-      >
-        {sign}¥{(tx.amountCents / 100).toFixed(2)}
-      </span>
+      <div className="flex items-center gap-2">
+        <CategoryIcon
+          icon={cat?.icon ?? parent?.icon}
+          name={cat?.name || '💰'}
+          className="text-base leading-none shrink-0"
+        />
+        <span className="text-xs shrink-0" style={{ color: 'var(--ink2)' }}>{tx.bizDate}</span>
+        <span className="text-xs truncate flex-1 min-w-0" style={{ color: 'var(--ink)' }}>
+          {label}{tx.note ? `｜${tx.note}` : ''}
+        </span>
+        <span
+          className="text-xs font-medium shrink-0"
+          style={{ color: tx.type === 'expense' ? 'var(--expense)' : 'var(--income)' }}
+        >
+          {sign}¥{(tx.amountCents / 100).toFixed(2)}
+        </span>
+      </div>
+      {(subParts.length > 0 || diff.length > 0) && (
+        <div
+          className="text-[10px] mt-0.5 pl-6"
+          style={{ color: 'var(--ink3)' }}
+          data-testid="op-row-subline"
+        >
+          {subParts.join(' · ')}
+          {diff.length > 0 && (
+            <span data-testid="op-row-diff">
+              {subParts.length > 0 ? '　' : ''}改为：{diff.join(' · ')}
+            </span>
+          )}
+        </div>
+      )}
     </div>
   )
 }

@@ -238,9 +238,12 @@ describe('buildProposalFromAiOutput', () => {
 import {
   parseAiInterpretOutput, hasOpConditions, applyOpFilter, buildEditUpdates,
   sumByFilter, buildAiCategoryNames, MAX_BATCH_OPS,
+  matchAccountByName, matchBookByName,
   type AiOpFilter,
 } from '../../domain/ai-proposal-builder'
-import type { TransactionData } from '../../platform/bridge/bridge-types'
+import type {
+  AccountData, BookData, TransactionData,
+} from '../../platform/bridge/bridge-types'
 
 const cats: CategoryData[] = [
   { id: 'c-food', kind: 'expense', name: '餐饮', parentId: null, version: 1 },
@@ -277,7 +280,32 @@ const txs: TransactionData[] = [
 describe('parseAiInterpretOutput（v2 容错解析）', () => {
   it('intent 缺失/坏值 → bookkeeping（老服务端向前兼容）', () => {
     expect(parseAiInterpretOutput({ type: 'expense', amountCents: 100 }).intent).toBe('bookkeeping')
-    expect(parseAiInterpretOutput({ intent: 'nonsense' }).intent).toBe('bookkeeping')
+    expect(parseAiInterpretOutput({ intent: 'nonsense', amountCents: 500 }).intent).toBe('bookkeeping')
+  })
+
+  // T13-6（REQ-49 / 决策 #10）：人设守卫 —— bookkeeping ∧ amountCents≤0 → chat
+  it('守卫：bookkeeping 无金额（闲聊误判形状）→ 改判 chat，reply/legacy 原样保留', () => {
+    const v2 = parseAiInterpretOutput({
+      intent: 'bookkeeping', type: '', amountCents: 0, category: '', note: '',
+      bizDate: '', confidence: 0.9, reply: '哈哈，这个梗有意思',
+    })
+    expect(v2.intent).toBe('chat')
+    expect(v2.reply).toBe('哈哈，这个梗有意思')
+    expect(v2.legacy).toEqual({
+      type: '', amountCents: 0, category: '', note: '', bizDate: '', confidence: 0.9,
+    })
+  })
+
+  it('守卫：金额为负 / intent 缺失且无金额 也改判 chat', () => {
+    expect(parseAiInterpretOutput({ intent: 'bookkeeping', amountCents: -100 }).intent).toBe('chat')
+    expect(parseAiInterpretOutput({ type: 'expense' }).intent).toBe('chat')
+  })
+
+  it('守卫不越界：bookkeeping 有金额 / 其余 intent 零金额均不改判', () => {
+    expect(parseAiInterpretOutput({ intent: 'bookkeeping', amountCents: 1 }).intent).toBe('bookkeeping')
+    for (const intent of ['query', 'chat', 'edit', 'delete', 'config']) {
+      expect(parseAiInterpretOutput({ intent, amountCents: 0 }).intent).toBe(intent)
+    }
   })
 
   it('legacy 六字段照常提取', () => {
@@ -433,5 +461,162 @@ describe('buildAiCategoryNames（context.categories 组装）', () => {
 describe('批量上限常量', () => {
   it('MAX_BATCH_OPS=50（REQ-37 ⑤ v1）', () => {
     expect(MAX_BATCH_OPS).toBe(50)
+  })
+})
+
+// ─── 第十五轮 T15-7（REQ-56 / 决策 #8）：edit 契约 v4 —— 全字段 ────────────────
+
+const accounts: AccountData[] = [
+  { id: 'a-wx', name: '微信零钱', icon: '💬', version: 1 },
+  { id: 'a-test', name: '测试', icon: '🧪', version: 1 },
+  { id: 'a-bank', name: '招商银行储蓄卡', icon: '🏦', version: 1 },
+]
+const books: BookData[] = [
+  { id: 'book-1', ownerId: 'local', name: '日常', icon: '📒', version: 1 },
+  { id: 'book-2', ownerId: 'local', name: '旅行', icon: '✈️', version: 1 },
+  { id: 'book-m', ownerId: 'local', name: '总账本', icon: '📚', version: 1, isMaster: true },
+]
+
+describe('parseOpFilter/parseOpSet 新键白名单（T15-7）', () => {
+  it('filter/set：type 只认两值；对象名 trim 后收', () => {
+    const v2 = parseAiInterpretOutput({
+      intent: 'edit',
+      filter: { type: 'income', accountName: ' 微信 ', bookName: '旅行', recentN: 1 },
+      set: { type: 'expense', accountName: '测试', bookName: ' 日常 ' },
+    })
+    expect(v2.filter).toEqual({ type: 'income', accountName: '微信', bookName: '旅行', recentN: 1 })
+    expect(v2.set).toEqual({ type: 'expense', accountName: '测试', bookName: '日常' })
+  })
+
+  it('坏形状逐键丢弃：type 非两值 / 名单空串或非字符串（决策 #8 parse 层口径）', () => {
+    const v2 = parseAiInterpretOutput({
+      intent: 'edit',
+      filter: { type: '转账', accountName: '   ', bookName: 42, recentN: 1 },
+      set: { type: true, accountName: {}, bookName: [], bizDate: '2026-09-09' },
+    })
+    expect(v2.filter).toEqual({ recentN: 1 })
+    expect(v2.set).toEqual({ bizDate: '2026-09-09' })
+  })
+})
+
+describe('matchAccountByName / matchBookByName（T15-7）', () => {
+  it('账户：精确优先；双向子串取最长命中；匹配不到 null', () => {
+    expect(matchAccountByName('测试', accounts)?.id).toBe('a-test')
+    expect(matchAccountByName('微信', accounts)?.id).toBe('a-wx')       // needle ⊂ 微信零钱
+    expect(matchAccountByName('储蓄卡', accounts)?.id).toBe('a-bank')   // 最长命中优先
+    expect(matchAccountByName('支付宝', accounts)).toBeNull()
+    expect(matchAccountByName('', accounts)).toBeNull()
+  })
+
+  it('账本：master 总账本不可作 edit 目标（口径同 default.book_set）', () => {
+    expect(matchBookByName('旅行', books)?.id).toBe('book-2')
+    expect(matchBookByName('总账本', books)).toBeNull()
+    expect(matchBookByName('账本', books)).toBeNull()
+  })
+})
+
+describe('applyOpFilter type/账户/账本分支 + keyword 语义扩（T15-7）', () => {
+  it('keyword 命中分类名（事故①「打牌」类：备注没有、分类命中）', () => {
+    const rows = [
+      tx({ id: 'k1', categoryId: 'c-food-early', note: '' }),        // 早餐←父级餐饮
+      tx({ id: 'k2', categoryId: 'c-car', note: '打牌' }),
+    ]
+    expect(applyOpFilter(rows, cats, { keyword: '餐饮' }).map(t => t.id)).toEqual(['k1'])
+    expect(applyOpFilter(rows, cats, { keyword: '早餐' }).map(t => t.id)).toEqual(['k1'])
+    expect(applyOpFilter(rows, cats, { keyword: '打牌' }).map(t => t.id)).toEqual(['k2'])
+  })
+
+  it('type 圈定收支', () => {
+    expect(applyOpFilter(txs, cats, { type: 'income' }).map(t => t.id)).toEqual(['t3'])
+    expect(applyOpFilter(txs, cats, { type: 'expense' }).map(t => t.id))
+      .toEqual(['t1', 't2', 't4'])
+  })
+
+  it('accountName：名单提供 → 命中保留/不中排除；名单未提供 → 分支跳过（向前兼容）', () => {
+    const rows = [
+      tx({ id: 'a1', accountId: 'a-wx' }),
+      tx({ id: 'a2', accountId: 'a-test' }),
+      tx({ id: 'a3', accountId: null }),
+    ]
+    expect(applyOpFilter(rows, cats, { accountName: '微信' }, accounts).map(t => t.id))
+      .toEqual(['a1'])
+    expect(applyOpFilter(rows, cats, { accountName: '不存在的账户' }, accounts)).toEqual([])
+    expect(applyOpFilter(rows, cats, { accountName: '微信' })).toEqual(rows)
+  })
+
+  it('bookName：按 tx.bookId 对应账本名圈定', () => {
+    const rows = [tx({ id: 'b1' }), tx({ id: 'b2', bookId: 'book-2' })]
+    expect(applyOpFilter(rows, cats, { bookName: '旅行' }, undefined, books).map(t => t.id))
+      .toEqual(['b2'])
+    expect(applyOpFilter(rows, cats, { bookName: '旅行' })).toEqual(rows)
+  })
+})
+
+describe('buildEditUpdates 全字段消费（T15-7）', () => {
+  it('type 切换 + 旧分类名在新类型下同名平移', () => {
+    const cats2: CategoryData[] = [
+      ...cats,
+      { id: 'c-food-in', kind: 'income', name: '餐饮', parentId: null, version: 1 },
+    ]
+    const flipped = buildEditUpdates(
+      tx({ id: 'f1', categoryId: 'c-food', type: 'expense' }),
+      { type: 'income' }, cats2, TZ, Date.now(),
+    )!
+    expect(flipped.type).toBe('income')
+    expect(flipped.categoryId).toBe('c-food-in')
+  })
+
+  it('type 切换无新类型同名分类 → 保留原分类，不因此丢类型切换', () => {
+    const flipped = buildEditUpdates(
+      tx({ id: 'f2', categoryId: 'c-food', type: 'expense' }),
+      { type: 'income' }, cats, TZ, Date.now(),
+    )!
+    expect(flipped.type).toBe('income')
+    expect(flipped.categoryId).toBe('c-food')
+  })
+
+  it('set.category 按「改后类型」的分类集匹配（事故句：改成收入 → 工资）', () => {
+    const input = buildEditUpdates(
+      tx({ id: 'f3', categoryId: 'c-car', type: 'expense' }),
+      { type: 'income', category: '工资' }, cats, TZ, Date.now(),
+    )!
+    expect(input.type).toBe('income')
+    expect(input.categoryId).toBe('c-salary')
+    // 点名分类不在新类型集 → null（绝不硬写跨类分类）
+    expect(buildEditUpdates(
+      tx({ id: 'f4', type: 'expense' }),
+      { type: 'income', category: '交通' }, cats, TZ, Date.now(),
+    )).toBeNull()
+  })
+
+  it('accountName→accountId、bookName→bookId（跨账本改单）', () => {
+    const input = buildEditUpdates(
+      tx({ id: 'g1', accountId: 'a-wx' }),
+      { accountName: '测试', bookName: '旅行' }, cats, TZ, Date.now(), accounts, books,
+    )!
+    expect(input.accountId).toBe('a-test')
+    expect(input.bookId).toBe('book-2')
+    expect(input.version).toBe(4)
+  })
+
+  it('名→id 匹配不到 → 该字段保留原值不回写（宁缺勿错双保险）；其余字段照常', () => {
+    const base = tx({ id: 'g2', accountId: 'a-wx' })
+    const input = buildEditUpdates(
+      base,
+      { accountName: '不存在的账户', bookName: '总账本', amountCents: 900 },
+      cats, TZ, Date.now(), accounts, books,
+    )!
+    expect(input.accountId).toBe('a-wx')
+    expect(input.bookId).toBe('book-1')
+    expect(input.amountCents).toBe(900)
+  })
+
+  it('名单未提供（老调用方）→ 点名的账户/账本不回写，type/金额照常', () => {
+    const input = buildEditUpdates(
+      tx({ id: 'g3', accountId: 'a-wx' }),
+      { type: 'income', accountName: '测试' }, cats, TZ, Date.now(),
+    )!
+    expect(input.accountId).toBe('a-wx')
+    expect(input.type).toBe('income')
   })
 })

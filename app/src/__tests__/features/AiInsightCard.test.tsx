@@ -270,4 +270,73 @@ describe('AiInsightCard', () => {
     })
     expect(bridge.call).toHaveBeenCalledTimes(1)
   })
+
+  // ─── T13-2 / 决策 #5：404 'Book not found' → 同步引导出口 ───
+
+  it("404 'Book not found' → 专用引导行 + 去同步按钮，不显示原始英文错误", async () => {
+    const bridge = makeBridge(
+      undefined,
+      new Error('Server error: HTTP 404: Book not found'),
+    )
+    render(<AiInsightCard bridge={bridge} bookId="book-1" period="2026-09" />)
+
+    await waitFor(() => {
+      expect(screen.getByText('该账本尚未同步到云端')).toBeInTheDocument()
+    })
+    expect(screen.getByText('去同步')).toBeInTheDocument()
+    expect(screen.queryByText(/Book not found/)).not.toBeInTheDocument()
+  })
+
+  it('非 Book-not-found 错误仍显示原始红字文案', async () => {
+    const bridge = makeBridge(undefined, new Error('Server error: HTTP 500: boom'))
+    render(<AiInsightCard bridge={bridge} bookId="book-1" period="2026-09" />)
+
+    await waitFor(() => {
+      expect(screen.getByText('Server error: HTTP 500: boom')).toBeInTheDocument()
+    })
+    expect(screen.queryByText('该账本尚未同步到云端')).not.toBeInTheDocument()
+    expect(screen.queryByText('去同步')).not.toBeInTheDocument()
+  })
+
+  it('404 分支去同步：triggerAuthSync OK → 绕过缓存重查成功 → 渲染报告', async () => {
+    const report = makeReport({ transaction_count: 7 })
+    const call = vi.fn()
+      .mockRejectedValueOnce(new Error('Server error: HTTP 404: Book not found'))
+      .mockResolvedValue(report)
+    const bridge = {
+      call,
+      isAvailable: () => true,
+      triggerAuthSync: vi.fn().mockResolvedValue({ outcome: 'OK' }),
+    } as unknown as NativeBridge
+
+    render(<AiInsightCard bridge={bridge} bookId="book-1" period="2026-09" />)
+    await waitFor(() => expect(screen.getByText('去同步')).toBeInTheDocument())
+    expect(call).toHaveBeenCalledTimes(1)
+
+    fireEvent.click(screen.getByText('去同步'))
+
+    await waitFor(() => {
+      expect(screen.getByText('7')).toBeInTheDocument()
+    })
+    expect(bridge.triggerAuthSync).toHaveBeenCalledTimes(1)
+    expect(call).toHaveBeenCalledTimes(2)
+    expect(screen.queryByText('该账本尚未同步到云端')).not.toBeInTheDocument()
+  })
+
+  it('404 分支同步未完成（非 OK）→ 提示稍后重试，不重查', async () => {
+    const bridge = makeBridge(
+      undefined,
+      new Error('Server error: HTTP 404: Book not found'),
+    )
+    bridge.triggerAuthSync = vi.fn().mockResolvedValue({ outcome: 'RETRYABLE' })
+    render(<AiInsightCard bridge={bridge} bookId="book-1" period="2026-09" />)
+    await waitFor(() => expect(screen.getByText('去同步')).toBeInTheDocument())
+
+    fireEvent.click(screen.getByText('去同步'))
+
+    await waitFor(() => {
+      expect(screen.getByText('同步未完成，请稍后重试')).toBeInTheDocument()
+    })
+    expect(bridge.call).toHaveBeenCalledTimes(1)
+  })
 })

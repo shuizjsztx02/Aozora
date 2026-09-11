@@ -616,6 +616,112 @@ class TestUsageOnVerificationFailure:
             _narrative_cache_clear()
 
 
+# ── Test T13-2: 0 笔交易跳过 narrative 调用（决策 #5）──────────────────────
+
+
+class TestZeroTransactionsSkipNarrative:
+    """T13-2 (REQ-46 / 决策 #5): transaction_count==0 → 不调 provider，
+    直接返回事实包（空数据前端已有 showSyncHint 分支承接）。"""
+
+    @pytest.mark.asyncio
+    async def test_zero_transactions_skips_provider(
+        self, sample_fact_pack, mock_provider, db_session,
+    ):
+        import dataclasses
+
+        from src.models.user import User, UserStatus
+        from src.modules.ai.fact_pack import FactPackService
+        from src.modules.ai.schemas import AIReportRequest
+        from src.modules.ai.service import AIService, _narrative_cache_clear
+
+        _narrative_cache_clear()
+
+        empty_fp = dataclasses.replace(sample_fact_pack, transaction_count=0)
+
+        user = User(
+            id=uuid.uuid4(),
+            phone="13800138020",
+            nickname="t132-user",
+            status=UserStatus.ACTIVE,
+            timezone="UTC",
+        )
+        db_session.add(user)
+        await db_session.flush()
+
+        original_build = FactPackService.build
+
+        async def mock_build(self_service, book_id, user_id, period):
+            return empty_fp
+
+        FactPackService.build = mock_build
+
+        try:
+            service = AIService(db_session, mock_provider)
+            request = AIReportRequest(
+                book_id=sample_fact_pack.book_id,
+                period=sample_fact_pack.period,
+            )
+
+            response = await service.generate_report(user, "req-t132", request)
+
+            # Provider 完全未被调用（省 token）
+            assert mock_provider.call_count == 0
+            # 无叙述、无计费
+            assert response.narrative is None
+            assert response.usage is None
+            # 事实包照常返回
+            assert response.transaction_count == 0
+            assert response.total_income == sample_fact_pack.total_income
+            assert response.data_hash == sample_fact_pack.data_hash
+        finally:
+            FactPackService.build = original_build
+            _narrative_cache_clear()
+
+    @pytest.mark.asyncio
+    async def test_nonzero_transactions_still_calls_provider(
+        self, sample_fact_pack, mock_provider, db_session,
+    ):
+        """对照组：有交易数据时 provider 正常被调用（42 笔样本包）。"""
+        from src.models.user import User, UserStatus
+        from src.modules.ai.fact_pack import FactPackService
+        from src.modules.ai.schemas import AIReportRequest
+        from src.modules.ai.service import AIService, _narrative_cache_clear
+
+        _narrative_cache_clear()
+
+        user = User(
+            id=uuid.uuid4(),
+            phone="13800138021",
+            nickname="t132-ctl-user",
+            status=UserStatus.ACTIVE,
+            timezone="UTC",
+        )
+        db_session.add(user)
+        await db_session.flush()
+
+        original_build = FactPackService.build
+
+        async def mock_build(self_service, book_id, user_id, period):
+            return sample_fact_pack
+
+        FactPackService.build = mock_build
+
+        try:
+            service = AIService(db_session, mock_provider)
+            request = AIReportRequest(
+                book_id=sample_fact_pack.book_id,
+                period=sample_fact_pack.period,
+            )
+
+            response = await service.generate_report(user, "req-t132-ctl", request)
+
+            assert mock_provider.call_count == 1
+            assert response.narrative is not None
+        finally:
+            FactPackService.build = original_build
+            _narrative_cache_clear()
+
+
 # ── Test R-M4-15: rate limit → 200 with null narrative ────────────────────
 
 

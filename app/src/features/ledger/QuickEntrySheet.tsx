@@ -448,6 +448,11 @@ export function QuickEntrySheet({ categories, onClose, onSuccess }: QuickEntrySh
     <AnimatePresence>
       <motion.div
         className="fixed inset-0 z-50 flex flex-col justify-end"
+        // T15-3（REQ-52 / 决策#3）：键盘弹起整卡顶到键盘上方——复用 T9-8 通道，
+        // --ime-bottom-px 由 MainActivity 注入 :root，未注入环境回落 0px 布局不变；
+        // 公式与 AssistantPage 根容器同款
+        style={{ paddingBottom: 'calc(env(safe-area-inset-bottom, 0px) + var(--ime-bottom-px, 0px))' }}
+        data-testid="quick-entry-root"
         initial={{ opacity: 0 }}
         animate={{ opacity: 1 }}
         exit={{ opacity: 0 }}

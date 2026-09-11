@@ -146,11 +146,11 @@ class SyncEngineTest {
     }
 
     /**
-     * P1-8: 连续快速点击同一实体不应产生重复实体（Room REPLACE 去重）。
+     * P1-8: 连续快速点击同一实体不应产生重复实体（Room ABORT 拒绝重复写入）。
      *
      * 步骤：
      * 1. 快速连续两次 insertTransaction 同一 id（模拟用户连点）。
-     * 2. 验证实体唯一（第二次覆盖第一次），mutation 会正常入队两条。
+     * 2. 验证第二次写入被拒绝，原实体和 mutation 均不被覆盖。
      */
     @Test
     fun rapidClickDoesNotDuplicateEntity() = runBlocking {
@@ -170,17 +170,20 @@ class SyncEngineTest {
             occurredAt = 5000L, note = "second click", source = "manual",
             version = 2, deletedAt = null
         )
-        // Room REPLACE 会覆盖，但 mutation 仍会入队
-        repo.insertTransaction(tx2, "m-rapid-2")
+        try {
+            repo.insertTransaction(tx2, "m-rapid-2")
+            fail("duplicate transaction id should be rejected")
+        } catch (_: android.database.sqlite.SQLiteConstraintException) {
+            // ABORT preserves the first write and does not enqueue the duplicate mutation.
+        }
 
-        // 验证：应该有两条 mutation（因为 insertTransaction 总是入队新 mutation）
-        // 但实体本身只有一条（tx2 覆盖 tx1）
+        // 验证：实体与 mutation 均保留第一次写入。
         val mutations = repo.listPendingMutations()
-        assertEquals("both mutations should be queued", 2, mutations.size)
+        assertEquals("only the accepted mutation should be queued", 1, mutations.size)
 
         val tx = repo.getTransaction("t-rapid")
         assertNotNull(tx)
-        assertEquals("entity should be tx2 (latest)", 200L, tx!!.amountCents)
+        assertEquals("entity should preserve the first accepted write", 100L, tx!!.amountCents)
     }
 
     /**
@@ -213,7 +216,7 @@ class SyncEngineTest {
 
         // 插入额外的 book/category/account 用于测试归档分支
         db.bookDao().insert(BookEntity("b-del", "u1", "ToDelete", "", 1, null))
-        db.categoryDao().insert(CategoryEntity("c-del", "u1", null, null, "expense", "ToDelete", null, 1))
+        db.categoryDao().insert(CategoryEntity("c-del", "u1", null, null, "expense", "ToDelete", null, null, 1))
         db.accountDao().insert(com.aozora.app.db.entity.AccountEntity("a-del", "u1", "ToDelete", "", null, null, 1))
 
         // 模拟服务端 DELETE 变更
@@ -842,7 +845,7 @@ class SyncEngineTest {
     private suspend fun seedBookAndCategory() {
         // 直接通过 DAO 插入 seed 数据（避免入队 mutation）
         db.bookDao().insert(BookEntity("b1", "u1", "Main", "", 1, null))
-        db.categoryDao().insert(CategoryEntity("c1", "u1", null, null, "expense", "Food", null, 1))
+        db.categoryDao().insert(CategoryEntity("c1", "u1", null, null, "expense", "Food", null, null, 1))
     }
 }
 

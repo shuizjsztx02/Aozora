@@ -1,10 +1,7 @@
 /**
- * AboutPage 组件测试 — 第十轮 T10-4（REQ-20 关于页 / 决策 #9）。
- *
- * 覆盖（卡验收）：
- * - 图标 / 应用名 / 版本行渲染
- * - 隐私政策 → /privacy、用户协议 → /terms 跳转
- * - 检查更新 → toast「当前 v{APP_VERSION}，已是最新版本」（假实现，无网络请求）
+ * AboutPage 组件测试 — 第十轮 T10-4（REQ-20 关于页 / 决策 #9）；
+ * T14-7（REQ-44）改版：图标/应用名/标语烘焙进设计稿横幅；
+ * T15-6（REQ-55）去 tagline，横幅改为天空裁切图，alt 清空。
  */
 import { describe, it, expect, vi } from 'vitest'
 import { render, screen } from '@testing-library/react'
@@ -22,10 +19,11 @@ import { APP_VERSION } from '../../platform/app-version'
 const renderPage = () => render(<AboutPage />)
 
 describe('AboutPage', () => {
-  it('渲染图标、应用名与版本行', () => {
+  it('渲染天空横幅与版本行', () => {
     renderPage()
-    expect(screen.getByTestId('about-icon')).toBeTruthy()
-    expect(screen.getByText('Aozora')).toBeTruthy()
+    const img = screen.getByTestId('about-banner') as HTMLImageElement
+    expect(img.tagName).toBe('IMG')
+    expect(img.alt).toBe('')
     expect(screen.getByText(`版本 v${APP_VERSION}`)).toBeTruthy()
   })
 

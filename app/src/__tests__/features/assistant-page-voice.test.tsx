@@ -49,7 +49,8 @@ const mockPermissions = vi.hoisted(() => ({
   shouldGuideSettings: false,
   requestPermission: vi.fn().mockResolvedValue(undefined),
   openSettings: vi.fn().mockResolvedValue(undefined),
-  refresh: vi.fn().mockResolvedValue(undefined),
+  // T14-6：refresh 现返回查询结果（PermissionStatusData）供恢复流判定
+  refresh: vi.fn(async () => mockPermissions.status),
 }))
 
 /** 改写 RECORD_AUDIO 状态（模拟 onPermissionResult 推送后 usePermissions 刷新） */
@@ -85,7 +86,6 @@ const mockAssistant = vi.hoisted(() => ({
   phase: 'idle' as AssistantPhase,
   activeProposal: null,
   cardStatus: null,
-  undoRemaining: 0,
   isSlow: false,
   submitInput: vi.fn(),
   editProposal: vi.fn(),
@@ -186,19 +186,30 @@ describe('AssistantPage — 语音集成 (T-M4-04b)', () => {
     expect(screen.queryByTestId('voice-partial')).not.toBeInTheDocument()
   })
 
-  it('语音错误时显示中文提示（T12-1：错误码映射，不透出英文原生 message）', () => {
+  it('permission_denied 错误走恢复条而非英文红条（T14-6：refresh 后内联「授权」）', async () => {
+    setRecordStatus('denied')
     mockVoice.error = { code: 'permission_denied', message: 'RECORD_AUDIO permission not granted' }
     renderPage()
-    const err = screen.getByTestId('voice-error')
-    expect(err).toBeInTheDocument()
-    expect(err.textContent).toContain('麦克风权限未授予')
-    expect(err.textContent).not.toContain('RECORD_AUDIO')
+    // 普通红条被抑制，恢复条（授权钮）出现
+    await waitFor(() => expect(screen.getByTestId('voice-permission-bar')).toBeInTheDocument())
+    expect(screen.queryByTestId('voice-error')).toBeNull()
+    expect(mockPermissions.refresh).toHaveBeenCalled()
+    expect(screen.getByTestId('voice-permission-bar').textContent).not.toContain('RECORD_AUDIO')
   })
 
-  it('未知错误码回退原生 message', () => {
-    mockVoice.error = { code: 'some_new_code', message: '出错了' }
+  it('code 丢失时按英文 message 反推 permission_denied 并出恢复条（T14-6）', async () => {
+    mockVoice.error = { message: 'RECORD_AUDIO permission not granted' } as never
     renderPage()
-    expect(screen.getByTestId('voice-error').textContent).toBe('出错了')
+    await waitFor(() => expect(screen.getByTestId('voice-permission-bar')).toBeInTheDocument())
+    expect(screen.queryByTestId('voice-error')).toBeNull()
+    expect(document.body.textContent).not.toContain('permission not granted')
+  })
+
+  it('未知错误码不再透出原生 message（T14-6：中文兜底）', () => {
+    mockVoice.error = { code: 'some_new_code', message: 'unexpected internal state' }
+    renderPage()
+    const err = screen.getByTestId('voice-error')
+    expect(err.textContent).toBe('录音操作未成功，请重试')
   })
 
   it('转写完成后将文本填入输入框', async () => {
@@ -262,6 +273,45 @@ describe('AssistantPage — 语音集成 (T-M4-04b)', () => {
     ])
     renderPage()
     await waitFor(() => expect(screen.getByText('小贝')).toBeInTheDocument())
+  })
+
+  // ─── 第十三轮 T13-6（REQ-49）：右上文字钮 → 24px 当前角色头像圆钮 ───
+  // 注：activePersona 异步装载会整块替换 header 的 right 子树（节点失连），
+  // 必须 waitFor 内重查 getByTestId，不能先捕获节点再轮询。
+
+  it('头像钮渲染当前角色 emoji 头像（无 img），点跳转不炸且 testid/aria 保留', async () => {
+    mockBridge.getMeta.mockResolvedValueOnce({ active_persona_id: 'p-2' })
+    mockBridge.listPersonas.mockResolvedValueOnce([
+      { id: 'p-1', name: '小贝', avatar: '😊', persona: '温柔搭子', createdAt: 1, updatedAt: 1, version: 1 },
+      { id: 'p-2', name: '饭团', avatar: '😋', persona: '吃货伙伴', createdAt: 2, updatedAt: 2, version: 1 },
+    ])
+    const user = userEvent.setup()
+    renderPage()
+    await waitFor(() =>
+      expect(screen.getByTestId('persona-manage-button')).toHaveTextContent('😋'))
+    const manage = screen.getByTestId('persona-manage-button')
+    expect(manage.querySelector('img')).toBeNull()
+    expect(manage).toHaveAttribute('aria-label', '角色管理')
+    await user.click(manage)
+    expect(screen.getByTestId('persona-manage-button')).toBeInTheDocument()
+  })
+
+  it('base64 头像 → CategoryIcon img 圆图分支', async () => {
+    const dataUrl = 'data:image/webp;base64,UklGRgA='
+    mockBridge.getMeta.mockResolvedValueOnce({ active_persona_id: 'p-1' })
+    mockBridge.listPersonas.mockResolvedValueOnce([
+      { id: 'p-1', name: '自定义', avatar: dataUrl, persona: 'x', createdAt: 1, updatedAt: 1, version: 1 },
+    ])
+    renderPage()
+    await waitFor(() =>
+      expect(screen.getByTestId('persona-manage-button')
+        .querySelector('img')).toHaveAttribute('src', dataUrl))
+  })
+
+  it('未选角色/无头像 → 👤 兜底', async () => {
+    renderPage()
+    await waitFor(() =>
+      expect(screen.getByTestId('persona-manage-button')).toHaveTextContent('👤'))
   })
 
   // ─── 第十二轮 T12-1（REQ-29 / 决策 #8）：麦克风按需授权流 ───

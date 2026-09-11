@@ -643,6 +643,8 @@ class AIService:
         from sqlalchemy.exc import IntegrityError
 
         from src.models.proposal import ProposalIdempotency
+        from src.models.sync import SyncOperation
+        from src.modules.sync.repository import SyncRepository
         from src.modules.transactions.service import TransactionService
 
         proposal_id = proposal.get("proposalId")
@@ -719,6 +721,15 @@ class AIService:
                 "biz_date": biz_date,
             })
 
+        # T14-3（REQ-40 / 决策 #5）：任一行缺分类 → 落库前 400 拦截。
+        # Transaction.category_id 是 NOT NULL，缺分类直达 create_transaction_batch
+        # 会 IntegrityError → 500 英文（旧链路）。400 + code 可被前端映射中文。
+        if any(item["category_id"] is None for item in items):
+            raise AppException(
+                400, "ai_missing_category",
+                "有记录未识别到分类，请在卡片中选择分类后重试",
+            )
+
         # Execute atomically
         tx_service = TransactionService(self._db)
         created = await tx_service.create_transaction_batch(
@@ -728,6 +739,20 @@ class AIService:
             source="ai",
         )
         transaction_ids = [str(tx.id) for tx in created]
+
+        # T14-8 修复：execute 是服务端权威直写，只有 sync push 路径写
+        # sync_changes——不在此登记则任何设备 pull 永远看不到这笔交易
+        # （模拟器实测：确认卡显示「已记录」但本机查无）。与 push 的
+        # _apply_mutation 同口径：insert / version=1，同事务提交。
+        sync_repo = SyncRepository(self._db)
+        for tx in created:
+            await sync_repo.write_change(
+                user_id=user.id,
+                entity_type="transaction",
+                entity_id=tx.id,
+                operation=SyncOperation.INSERT,
+                version=tx.version,
+            )
 
         # ── Record idempotency ───────────────────────────────────────────
         if proposal_id:
@@ -913,7 +938,9 @@ class AIService:
         )
 
         # Try to generate narrative if provider is available
-        if self._provider is not None:
+        # T13-2 (REQ-46 / 决策 #5): 0 笔期间数据没有可叙述的事实，跳过
+        # provider 调用省 token——空数据由前端 showSyncHint 分支承接。
+        if self._provider is not None and fact_pack.transaction_count > 0:
             # Check narrative cache first (R-M4-09 fix)
             # R-M4-41: use the canonical (lowercase) book_id for the cache
             # key so that differently-cased inputs hit the same entry.
@@ -1180,7 +1207,14 @@ class AIService:
 
         # -- Call vision model --
         model = self._cfg.ai_vision_model
-        messages = render_image_messages(tpl, data_url)
+        # T14-3（REQ-40 / 决策 #5）：分类白名单在 server 侧注入——数据源与下方
+        # _resolve_categories 的 ctx.category_names 同一（该账本分类表），
+        # 客户端不上行分类；vision 只能在列表内选，对不上输出 ""。
+        from .context import load_validation_context
+        ctx = await load_validation_context(self._db, user.id, book_id)
+        messages = render_image_messages(
+            tpl, data_url, categories=list(ctx.category_names.keys()),
+        )
         started = time.perf_counter()
 
         result: ProviderResult | None = None
@@ -1262,8 +1296,7 @@ class AIService:
             confidence = float(max(0, min(1, confidence)))
 
             # -- Resolve category names to IDs --
-            from .context import load_validation_context
-            ctx = await load_validation_context(self._db, user.id, book_id)
+            # T14-3: ctx 已在构造 messages 前加载（白名单同源复用）
             resolved_txs = self._resolve_categories(
                 raw_transactions, ctx, user.timezone,
             )
@@ -1324,10 +1357,11 @@ class AIService:
     ) -> list[dict]:
         """Resolve category names from LLM output to category IDs.
 
-        Uses exact matching first, then prefix fallback.
-        Unresolved categories fall back to the first available category
-        in the context (if any), so that the resulting proposal always
-        passes schema validation (``categoryId`` requires ``minLength: 1``).
+        Uses exact matching first, then prefix fallback. T14-3（REQ-40 /
+        决策 #5「宁缺勿错」）: unresolved categories omit the
+        ``categoryId`` key entirely (no first-category fallback) — the
+        client surfaces an in-card category picker and /ai/execute rejects
+        missing categories with 400 ``ai_missing_category`` before insert.
         Empty ``bizDate`` falls back to today in the user's timezone
         (``format: date`` required).
         """
@@ -1340,13 +1374,6 @@ class AIService:
             name_to_id[cat_name] = cat_id
             # Also add common aliases (strip whitespace)
             name_to_id[cat_name.strip()] = cat_id
-
-        # Determine fallback category ID: first available category.
-        # We cannot know the type from context alone, so we just pick the
-        # first category ID available. The user can edit in the batch card.
-        # R-M4-64 fix: 零分类用户时 fallback 为空，后续 resolve 循环中若无法匹配
-        # 则省略 categoryId（schema 中 categoryId 非 required，不触发 minLength:1）
-        fallback_category_id = next(iter(ctx.category_names.values()), "")
 
         # R-M4-52 fix: today in the user's timezone — same day boundary as
         # the quota system (local_day_start_utc). A UTC fallback would date
@@ -1370,10 +1397,6 @@ class AIService:
                     if name.startswith(cat_name) or cat_name.startswith(name):
                         cat_id = cid
                         break
-
-            # R-M4-53 fix: unresolved category → fallback (schema minLength: 1)
-            if not cat_id:
-                cat_id = fallback_category_id
 
             # R-M4-52 fix: empty bizDate → today (schema format: date)
             biz_date = str(tx.get("bizDate", "")).strip()
@@ -1410,8 +1433,8 @@ class AIService:
                 "note": str(tx.get("note", "")),
                 "bizDate": biz_date,
             }
-            # R-M4-64 fix: 零分类用户时 cat_id 可能为空，此时省略 categoryId
-            # 键（schema 中非 required；带空字符串会触发 minLength:1 校验失败）
+            # T14-3（决策 #5）：未匹配到分类 → 省略 categoryId 键（宁缺勿错，
+            # schema 非 required；卡片引导手选，/ai/execute 落库前 400 拦截）
             if cat_id:
                 tx_dict["categoryId"] = cat_id
             resolved.append(tx_dict)

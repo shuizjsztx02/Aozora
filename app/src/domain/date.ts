@@ -48,6 +48,12 @@ export function todayBizDate(timezone: string): string {
   return localBizDate(Date.now(), timezone)
 }
 
+/** 从 UTC 时间戳按设备本地时区显示 "HH:mm"（T14-1/REQ-38：首页/明细流水行副行共用） */
+export function localHHmm(utcTimestamp: number): string {
+  const d = new Date(utcTimestamp)
+  return `${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}`
+}
+
 /** 构造指定日期的 bizDate 字符串，校验格式与日历合法性（与 parseBizDate 往返一致） */
 export function bizDateOfMonth(year: number, month: number, day: number): string {
   if (

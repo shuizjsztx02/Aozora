@@ -13,6 +13,7 @@ import com.aozora.app.db.migrations.MIGRATION_4_5
 import com.aozora.app.db.migrations.MIGRATION_5_6
 import com.aozora.app.db.migrations.MIGRATION_6_7
 import com.aozora.app.db.migrations.MIGRATION_7_8
+import com.aozora.app.db.migrations.MIGRATION_8_9
 
 /**
  * Aozora Room 数据库。
@@ -27,6 +28,8 @@ import com.aozora.app.db.migrations.MIGRATION_7_8
  * - v7：transactions 新增 includeInBudget（第十轮 REQ-17，默认计入）
  * - v8：新增 scheduled_rules / chat_personas 表（第十一轮 REQ-26/REQ-28，
  *        均仅本地不同步；一张迁移建两表）
+ * - v9：scheduled_rules 新增 runHour/runMinute 执行时刻列（第十四轮 REQ-43，
+ *        T14-5 决策 #1 唯一声明者；存量行默认 8/0=保持 08:00 语义）
  * 后续 migration 使用 MIGRATION_* 追加，不做破坏性 reset；缺失迁移时
  * Room 会拒绝打开并保留数据（fallbackToDestructiveMigration 未开启）。
  */
@@ -44,7 +47,7 @@ import com.aozora.app.db.migrations.MIGRATION_7_8
         ScheduledRuleEntity::class,
         ChatPersonaEntity::class,
     ],
-    version = 8,
+    version = 9,
     exportSchema = true
 )
 abstract class AozoraDatabase : RoomDatabase() {
@@ -76,7 +79,7 @@ abstract class AozoraDatabase : RoomDatabase() {
 
         internal fun open(context: Context, name: String = DATABASE_NAME): AozoraDatabase =
             Room.databaseBuilder(context.applicationContext, AozoraDatabase::class.java, name)
-                .addMigrations(MIGRATION_1_2, MIGRATION_2_3, MIGRATION_3_4, MIGRATION_4_5, MIGRATION_5_6, MIGRATION_6_7, MIGRATION_7_8)
+                .addMigrations(MIGRATION_1_2, MIGRATION_2_3, MIGRATION_3_4, MIGRATION_4_5, MIGRATION_5_6, MIGRATION_6_7, MIGRATION_7_8, MIGRATION_8_9)
                 .build()
 
         /** 仅用于测试：创建内存数据库，迁移同样应用 */
@@ -84,7 +87,7 @@ abstract class AozoraDatabase : RoomDatabase() {
             return Room.inMemoryDatabaseBuilder(
                 context.applicationContext,
                 AozoraDatabase::class.java
-            ).addMigrations(MIGRATION_1_2, MIGRATION_2_3, MIGRATION_3_4, MIGRATION_4_5, MIGRATION_5_6, MIGRATION_6_7, MIGRATION_7_8).build()
+            ).addMigrations(MIGRATION_1_2, MIGRATION_2_3, MIGRATION_3_4, MIGRATION_4_5, MIGRATION_5_6, MIGRATION_6_7, MIGRATION_7_8, MIGRATION_8_9).build()
         }
     }
 }

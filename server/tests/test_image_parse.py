@@ -317,12 +317,13 @@ class TestImageParseSuccess:
         data = resp.json()
         assert len(data["proposal"]["transactions"]) == 3
         assert data["confidence"] == 0.88
-        # "餐饮" resolved, "交通" resolved, "购物" unresolved → fallback to first category
+        # "餐饮" resolved, "交通" resolved, "购物" unresolved → omit categoryId
         txs = data["proposal"]["transactions"]
         assert txs[0]["categoryId"] != ""  # 餐饮
         assert txs[1]["categoryId"] != ""  # 交通
-        # R-M4-53 fix: unresolved category falls back to first available (not empty)
-        assert txs[2]["categoryId"] != ""  # 购物 → fallback
+        # T14-3（REQ-40 / 决策 #5「宁缺勿错」）: unresolved category → 省略 categoryId，
+        # 不再兜底第一个分类（旧 R-M4-53 行为会把「购物」错记成随机分类）
+        assert "categoryId" not in txs[2]
         # R-M4-52 fix: empty bizDate falls back to today (not empty string)
         assert txs[2]["bizDate"] != ""
         assert len(txs[2]["bizDate"]) == 10  # YYYY-MM-DD format
@@ -624,6 +625,55 @@ class TestImageParseEdgeCases:
         assert image_part["image_url"]["url"].startswith("data:image/jpeg;base64,")
 
 
+class TestImageCategoryWhitelist:
+    """T14-3（REQ-40 / 决策 #5）：图片 prompt 分类白名单注入。"""
+
+    def test_system_prompt_contains_category_whitelist(self, img_env):
+        """该账本分类名 → system 尾部追加「用户现有分类名列表」段。"""
+        user = _guest(img_env)
+        book_id = _seed_book_and_categories(img_env, user["id"])
+        att_id = _seed_attachment(img_env, user["id"])
+
+        resp = _parse_image(img_env, user, att_id, book_id)
+        assert resp.status_code == 200
+
+        assert len(img_env.provider.calls) == 1
+        system_prompt = img_env.provider.calls[0]["messages"][0]["content"]
+        assert "【用户现有分类名列表】" in system_prompt
+        # 白名单段追加在 system 尾部 → 最后一行是「、」分隔的分类名列表
+        # （不用 in 全 prompt 判断：模板正文本身含「餐饮/交通」示例字样）
+        last_line = system_prompt.rstrip().splitlines()[-1]
+        assert "餐饮" in last_line and "交通" in last_line and "餐饮食谱" in last_line
+        # 语义要求保留：必须从列表选择 + 完全对不上输出空
+        assert "必须从下列名称中选择" in system_prompt
+        assert '完全对不上输出 ""' in system_prompt
+
+    def test_zero_categories_no_whitelist_and_omits_id(self, img_env):
+        """账本无任何分类 → 不注入白名单段；解析行省略 categoryId。"""
+        user = _guest(img_env)
+
+        async def _seed_book_only():
+            async with img_env.factory() as session:
+                uid = uuid.UUID(user["id"])
+                book = Book(id=uuid.uuid4(), owner_id=uid, name="无分类账本")
+                session.add(book)
+                await session.commit()
+                return str(book.id)
+
+        book_id = asyncio.run(_seed_book_only())
+        att_id = _seed_attachment(img_env, user["id"])
+
+        resp = _parse_image(img_env, user, att_id, book_id)
+        assert resp.status_code == 200
+        data = resp.json()
+        txs = data["proposal"]["transactions"]
+        assert len(txs) == 1
+        assert "categoryId" not in txs[0]
+
+        system_prompt = img_env.provider.calls[0]["messages"][0]["content"]
+        assert "【用户现有分类名列表】" not in system_prompt
+
+
 class TestResolveCategoriesValidation:
     """NEW-E1 / NEW-E2: LLM output data validation in _resolve_categories."""
 
@@ -732,6 +782,33 @@ class TestResolveCategoriesValidation:
         assert "categoryId" not in resolved[0]
         assert resolved[0]["amountCents"] == 1000
         assert resolved[0]["bizDate"] == "2026-09-06"
+
+    def test_unmatched_category_omits_id_no_fallback(self):
+        """T14-3（决策 #5）：有分类但匹配不到 → 省略 categoryId，不兜底第一个分类。"""
+        from src.modules.ai.context import ProposalValidationContext
+        from src.modules.ai.service import AIService
+
+        ctx = ProposalValidationContext(
+            category_ids=frozenset({"cat-food", "cat-transit"}),
+            category_names={"餐饮": "cat-food", "交通": "cat-transit"},
+        )
+        raw = [{"type": "expense", "amountCents": 1000, "category": "购物", "bizDate": "2026-09-06"}]
+        resolved = AIService._resolve_categories(raw, ctx)
+        assert len(resolved) == 1
+        assert "categoryId" not in resolved[0]
+
+    def test_prefix_match_still_resolves(self):
+        """T14-3：前缀匹配保留（"餐" → "餐饮"/"餐饮食谱" 前缀命中，插入序优先）。"""
+        from src.modules.ai.context import ProposalValidationContext
+        from src.modules.ai.service import AIService
+
+        ctx = ProposalValidationContext(
+            category_ids=frozenset({"cat-food"}),
+            category_names={"餐饮": "cat-food"},
+        )
+        raw = [{"type": "expense", "amountCents": 1000, "category": "餐", "bizDate": "2026-09-06"}]
+        resolved = AIService._resolve_categories(raw, ctx)
+        assert resolved[0]["categoryId"] == "cat-food"
 
 
 class TestConcurrentParseDedup:

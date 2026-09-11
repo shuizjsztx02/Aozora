@@ -7,6 +7,7 @@
  *   master 不直查（LEAK 防呆），合并其余普通账本
  * - 全量语义：非当前月记录也直接列出（与明细页"仅当月"相反）+ 按 occurredAt 倒序
  * - 输入框自动聚焦；返回栏（PageHeader back）存在
+ * - 根容器带 safe-top（T15-2 / REQ-51：AppLayout 外无外层安全区补偿）
  */
 import { describe, it, expect, vi, beforeEach } from 'vitest'
 import { render, screen, waitFor, within } from '@testing-library/react'
@@ -151,6 +152,13 @@ describe('SearchPage', () => {
     expect(queried).toContain('a')
     expect(queried).toContain('b')
     expect(queried).not.toContain('m1')
+  })
+
+  it('根容器带 safe-top（T15-2 / REQ-51：/search 在 AppLayout 外，需补顶部安全区）', () => {
+    const { container } = renderPage({ bookId: 'a' })
+    const root = container.querySelector('.min-h-screen') as HTMLElement
+    expect(root).toBeInTheDocument()
+    expect(root.className).toContain('safe-top')
   })
 
   it('结果行点击打开 TxEditSheet，携带该行数据（T12-10 / REQ-36）', async () => {

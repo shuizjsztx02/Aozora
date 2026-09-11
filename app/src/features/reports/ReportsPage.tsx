@@ -7,12 +7,11 @@
  * 第十轮 REQ-21（T10-5）：期间切换（复用 PeriodPanel）+ 账本下拉（过滤 master）。
  * period / bookId 为 state，月度概览 / AI 洞察 / 分享文案 / 预算 / 趋势全部跟随。
  *
- * 第十一轮 REQ-25（T11-3，决策 #6）：右上 📅 切换 chart/calendar 两态；
+ * 第十一轮 REQ-25（T11-3，决策 #6）：📅 切换 chart/calendar 两态（T15-4 起钮在账本行右侧）；
  * calendar 态隐藏图卡区、共享 period/bookId state 与派生 txs——零新增桥调用。
  */
 
 import { useState, useEffect, useCallback, useMemo } from 'react'
-import { PageHeader } from '../../components/Layout'
 import { EmptyState } from '../../components/StateViews'
 import { PieChart, Pie, Cell, LineChart, Line, BarChart, Bar, XAxis, YAxis, Tooltip, ResponsiveContainer } from 'recharts'
 import { useBridge } from '../../platform/hooks/use-bridge'
@@ -78,15 +77,28 @@ interface TrendPoint {
 }
 
 /**
- * period 全月逐日零填充（T10-6 / REQ-22 决策 #7）。
- * 当月截至今天（未来日不画）；非当月取满月。balance = 当日净额（income − expense）。
+ * 趋势图 X 轴刻度过滤（T15-5 / REQ-54）：interval=0 保证首末刻度必现，
+ * formatter 只渲染 1/5/10/15/20/25/月末，其余返回空串避免重叠。
+ */
+export function trendTickFormatter(date: string): string {
+  const day = parseInt(date.slice(-2), 10)
+  if (day === 1 || day === 5 || day === 10 || day === 15 || day === 20 || day === 25) return String(day)
+  // 月末：date = "MM-DD"，当月天数即 DD 字符串对应日期减一天后的月内日
+  const mm = parseInt(date.slice(0, 2), 10)
+  // 用平年构造日期取月末，避免传入年份缺失；仅当 day == 月末才显示
+  const lastDay = new Date(2023, mm, 0).getDate()
+  if (day === lastDay) return String(lastDay)
+  return ''
+}
+
+/**
+ * period 全月逐日零填充（T10-6 / REQ-22 决策 #7；T15-5 / REQ-54 满月横轴）。
+ * 无论是否当月，均铺 1→月末（未来日交易量为 0，横轴仍满格）。
  * txs 须已按 period 过滤（调用方保证）——按 bizDate 的 DD 落入对应日。
  */
 export function buildDailySeries(period: string, txs: TransactionData[]): TrendPoint[] {
   const [y, m] = period.split('-').map(Number)
-  const today = new Date()
-  const isCurrentMonth = today.getFullYear() === y && today.getMonth() === m - 1
-  const lastDay = isCurrentMonth ? today.getDate() : new Date(y, m, 0).getDate()
+  const lastDay = new Date(y, m, 0).getDate()
   const mm = String(m).padStart(2, '0')
   const rows: TrendPoint[] = Array.from({ length: lastDay }, (_, i) => {
     const dd = String(i + 1).padStart(2, '0')
@@ -215,8 +227,22 @@ export function ReportsPage() {
 
   return (
     <div className="min-h-screen">
-      <PageHeader
-        right={
+      {/* ─── 账本切换（REQ-21 / T10-5，决策 #6：过滤 master、内联实现不抽组件） ───
+          T15-4（REQ-53）：📅/📤 两钮自 PageHeader 挪来本行右侧，PageHeader 整段删除。 */}
+      <div className="relative px-4 pt-3">
+        <div className="flex items-center justify-between">
+          <button
+            onClick={() => setBookPickerOpen(v => !v)}
+            className="flex items-center gap-1 text-base font-semibold active:opacity-60"
+            style={{ color: 'var(--ink)' }}
+            aria-label="切换账本"
+            aria-expanded={bookPickerOpen}
+          >
+            {selectedBook && <CategoryIcon icon={selectedBook.icon} name={selectedBook.name} fallback="📒" className="text-lg" />}
+            <span>{selectedBook?.name ?? '选择账本'}</span>
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.4" strokeLinecap="round" strokeLinejoin="round" style={{ opacity: 0.5 }}><polyline points="6 9 12 15 18 9" /></svg>
+          </button>
+
           <div className="flex items-center">
             <button
               onClick={() => setView(v => (v === 'chart' ? 'calendar' : 'chart'))}
@@ -252,22 +278,7 @@ export function ReportsPage() {
               📤
             </button>
           </div>
-        }
-      />
-
-      {/* ─── 账本切换（REQ-21 / T10-5，决策 #6：过滤 master、内联实现不抽组件） ─── */}
-      <div className="relative px-4 pt-1">
-        <button
-          onClick={() => setBookPickerOpen(v => !v)}
-          className="flex items-center gap-1 text-base font-semibold active:opacity-60"
-          style={{ color: 'var(--ink)' }}
-          aria-label="切换账本"
-          aria-expanded={bookPickerOpen}
-        >
-          {selectedBook && <CategoryIcon icon={selectedBook.icon} name={selectedBook.name} fallback="📒" className="text-lg" />}
-          <span>{selectedBook?.name ?? '选择账本'}</span>
-          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.4" strokeLinecap="round" strokeLinejoin="round" style={{ opacity: 0.5 }}><polyline points="6 9 12 15 18 9" /></svg>
-        </button>
+        </div>
 
         {bookPickerOpen && (
           <>
@@ -469,7 +480,7 @@ export function ReportsPage() {
                         setActiveDay(typeof i === 'number' ? (daily[i] ?? null) : null)
                       }}
                     >
-                      <XAxis dataKey="date" tick={{ fontSize: 10, fill: 'var(--ink3)' }} interval="preserveStartEnd" axisLine={false} tickLine={false} minTickGap={16} />
+                      <XAxis dataKey="date" tick={{ fontSize: 10, fill: 'var(--ink3)' }} interval={0} tickFormatter={trendTickFormatter} axisLine={false} tickLine={false} />
                       <YAxis hide />
                       <Tooltip
                         formatter={(value) => formatCents(Number(value))}
@@ -487,7 +498,7 @@ export function ReportsPage() {
                         setActiveDay(typeof i === 'number' ? (daily[i] ?? null) : null)
                       }}
                     >
-                      <XAxis dataKey="date" tick={{ fontSize: 10, fill: 'var(--ink3)' }} interval="preserveStartEnd" axisLine={false} tickLine={false} minTickGap={16} />
+                      <XAxis dataKey="date" tick={{ fontSize: 10, fill: 'var(--ink3)' }} interval={0} tickFormatter={trendTickFormatter} axisLine={false} tickLine={false} />
                       <YAxis hide />
                       <Tooltip
                         cursor={{ fill: 'var(--glass)' }}

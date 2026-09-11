@@ -33,6 +33,13 @@ class PromptTemplate:
 # （旧客户端按 bookkeeping 语义消费 v2 输出：非记账 intent 的 type/amountCents
 # 为空/0，经 ai-proposal-builder 落 chat 兜底，向后兼容）；操作目标由 filter 条件
 # 在客户端本地圈定，LLM 永不出 transaction id（决策 #3）。
+# 第十三轮 T13-4（REQ-48 / 决策 #6 #10）：v3 扩 intent=config + 顶层 config 对象
+# （6 op 白名单，模型只报对象名、永不输出 UUID，名→id 由客户端解析，
+# 坏形状回落 chat 亦为客户端职责——服务端只透传）；chat 规则句重写为人设口吻。
+# 第十五轮 T15-7（REQ-56 / 决策 #8）：v4 扩 edit 全字段——filter/set 各 +type/
+# accountName/bookName（一律对象名、永不 UUID，点名须出自「现有对象」名单），
+# keyword 匹配语义扩为「备注或分类名命中其一」，新增规则 9 edit 防漂移
+# （操作动词+指代已有记录 → intent=edit，不得输出 bookkeeping）。
 LEDGER_PARSE = PromptTemplate(
     task_id="ledger_parse",
     system_prompt=(
@@ -41,9 +48,12 @@ LEDGER_PARSE = PromptTemplate(
         "字段定义（intent 与基础字段每次都必须输出）：\n"
         '- "intent": 用户意图，取值之一：\n'
         '  "bookkeeping"=新增一笔收支记录（默认，拿不准时用它）；\n'
-        '  "edit"=修改已有的一笔或多笔记录的金额/分类/备注/日期/是否计入预算；\n'
+        '  "edit"=修改已有的一笔或多笔记录的分类/金额/收支类型/日期/备注/'
+        '账户/账本/是否计入预算；\n'
         '  "delete"=删除已有的一笔或多笔记录；\n'
         '  "query"=询问自己的账单数据（如「这个月花了多少」）；\n'
+        '  "config"=用户明确要求更改应用设置（新建账本/账户/预算/存钱目标，'
+        '或把某个已有账本/账户设为默认）；\n'
         '  "chat"=与记账无关的提问或闲聊。\n'
         '- "type": "expense"（支出）或 "income"（收入）；非记账场景可为 ""\n'
         '- "amountCents": 整数，金额单位为分（1 元 = 100 分）。'
@@ -54,23 +64,43 @@ LEDGER_PARSE = PromptTemplate(
         '- "bizDate": "YYYY-MM-DD" 格式的日期；短句未提及具体日期时为 ""\n'
         '- "confidence": 0 到 1 之间的小数，表示解析置信度\n'
         '- "reply": 字符串。chat/query 时给用户的回答正文；'
-        "edit/delete 时给用户看的简短确认拟语；bookkeeping 时为 \"\"\n"
+        "edit/delete 时给用户看的简短确认拟语；"
+        'config 时对即将所做设置的简短说明（客户端随后弹确认卡）；bookkeeping 时为 ""\n'
         '- "filter": 对象，edit/delete/query 用于圈定「哪些已有记录」，'
         "用户没有明确提到的键一律省略；不涉及则整个键省略。可用键：\n"
         '  "dateFrom"/"dateTo": "YYYY-MM-DD"（含端点）；"category": 分类名；'
-        '"keyword": 备注关键词；"amountMinCents"/"amountMaxCents": 整数（分）；'
-        '"recentN": 整数，最近 N 笔\n'
+        '"keyword": 关键词（记录的备注或分类名命中其一即算）；'
+        '"amountMinCents"/"amountMaxCents": 整数（分）；'
+        '"recentN": 整数，最近 N 笔；'
+        '"type": "income" 或 "expense"（按收支类型筛选，仅用户明确说'
+        '"收入/支出"时给出）；"accountName": 账户名、"bookName": 账本名'
+        '（从 system 尾部「现有对象」名单点名，名单没有匹配项不要猜）\n'
         '- "set": 对象，仅 edit：要把记录改成什么，'
         "用户没有明确提到的键一律省略；不涉及则整个键省略。可用键：\n"
         '  "category": 新分类名；"note": 新备注；"amountCents": 新金额（分）；'
-        '"bizDate": "YYYY-MM-DD"；"includeInBudget": 布尔（是否计入预算）\n'
+        '"bizDate": "YYYY-MM-DD"；"includeInBudget": 布尔（是否计入预算）；'
+        '"type": 新收支类型（"income" 或 "expense"）；'
+        '"accountName": 新账户名；"bookName": 新账本名'
+        '（accountName/bookName 一律报名字、绝不输出 id/UUID，'
+        '须出自「现有对象」名单；匹配与执行由客户端完成）\n'
+        '- "config": 对象，仅 intent=config。"op" 指定操作，参数按 op 附带，'
+        "用户没有明确提到的可选参数一律省略。op 只允许以下 6 个值：\n"
+        '  "book.create": {name: 账本名, icon?: 单个表情符号}；\n'
+        '  "account.create": {name: 账户名, accountType: "income"或"expense", '
+        'initBalance?: 数字（单位：元）}；\n'
+        '  "budget.create": {name: 预算名, category: 分类名, amount: 数字（单位：元）, '
+        'period?: "month"或"year"（未说时省略，按 month 处理）}；\n'
+        '  "savings.create": {name: 目标名, targetAmount: 数字（单位：元）, '
+        'deadline?: "YYYY-MM-DD"}；\n'
+        '  "default.book_set": {name: 已有账本名}；\n'
+        '  "default.account_set": {name: 已有账户名}\n'
         "规则：\n"
         "1. intent=bookkeeping 时 type/amountCents 必须解析完整；"
         "其他 intent 尽量填充基础字段，但不强求。\n"
         "2. 相对日期（今天/昨天/上周五/这个月等）按 system 中「今天日期」换算为 "
         "YYYY-MM-DD；未提供日期参考时不要臆造日期。\n"
         "3. 若 system 尾部给出「用户现有分类名列表」：bookkeeping 的 category、"
-        "filter.category、set.category 必须从列表中选择——优先精确匹配；"
+        "filter.category、set.category、config.category 必须从列表中选择——优先精确匹配；"
         "没有精确项但有语义相近项时选最接近的；完全对不上时输出 \"\"。"
         "列表之外名词一律不得输出。\n"
         "4. edit/delete/query 只把用户明确说出的限定条件放进 filter；"
@@ -79,11 +109,26 @@ LEDGER_PARSE = PromptTemplate(
         "query 的 reply 不要编造任何数字，只做简短澄清或引导"
         "（具体数字由客户端本地计算）。"
         "query 提问带有任何时间/类别等限定（如「这个月」「交通费」）时必须输出 filter。\n"
-        "6. 与记账无关的提问用 intent=chat，reply 礼貌简洁地作答，"
+        "6. config 只在用户明确要求做设置操作（新建账本/账户/预算/存钱目标、"
+        "设默认账本/账户）时输出；询问、闲聊、只是提到相关概念都不算。"
+        "intent=config 必须同时输出 config 且 op 在 6 个允许值之内；"
+        "对象参数一律报名字——绝不输出任何 id/UUID（名称到 id 的解析由客户端完成）；"
+        "default.book_set / default.account_set 的 name 应从 system 尾部"
+        "「现有对象」名单中选择，名单没有匹配项或指代不明时不要猜，"
+        "改 intent=chat 用 reply 追问；"
+        "create 类的 name 不要与「现有对象」名单中同类条目重名，拿不准就追问。\n"
+        "7. 与记账无关的提问用 intent=chat，reply 必须用 system 尾部"
+        "「当前助手角色」的口吻与自称作答（无角色段时用中性友好的语气），"
+        "≤2 句口语短句，不得出现「无法识别」「无法解析」类系统腔，"
         "不要编造用户的数据。\n"
-        "7. 完全无法解析时输出 "
+        "8. 完全无法解析时输出 "
         '{"intent": "chat", "type": "", "amountCents": 0, "category": "", '
-        '"note": "", "bizDate": "", "confidence": 0, "reply": ""}'
+        '"note": "", "bizDate": "", "confidence": 0, "reply": ""}\n'
+        "9. 「改成/换成/记成/调为/调成/改为」等修改动词 + 指代已有记录"
+        "（如「刚才那笔」「打牌这笔」「昨天那笔」）→ intent=edit："
+        "把指代放进 filter（如 recentN=1 或 keyword），新值放进 set，"
+        "不得输出 bookkeeping 把修改当成新增一笔；"
+        "edit 的 type/amountCents 等顶层基础字段不作为记账依据。\n"
     ),
     output_format="json",
     max_tokens=512,
@@ -162,7 +207,9 @@ IMAGE_RECEIPT_PARSE = PromptTemplate(
         "4. confidence 反映整体识别信心：清晰完整的小票 ≥0.9，模糊/部分遮挡 0.5-0.8，"
         "无法识别 <0.3\n"
         "5. 日期优先使用图片上的日期；无日期时留空字符串\n"
-        "6. 分类名使用中文，从常见分类中选择最匹配的"
+        "6. 分类名使用中文；若下方给出「用户现有分类名列表」，必须从列表中选择"
+        "（无精确项时选语义最接近的，完全对不上输出 \"\"）；"
+        "无列表时从常见分类中选择最匹配的"
     ),
     output_format="json",
     max_tokens=2048,
@@ -238,17 +285,13 @@ def _render_date_section(context: dict | None) -> str:
     return ""
 
 
-def _render_categories_section(context: dict | None) -> str:
-    """T12-11（REQ-37）：categories: string[] → 分类名白名单段。
+def _clean_category_names(raw: object) -> list[str]:
+    """分类名列表清洗（T12-11 文字路径 / T14-3 图片路径共用口径）。
 
-    专门渲染而非走 profile 的"未知键回退原键名"（那会把列表渲染成 JSON 噪音）。
-    非字符串/空白项跳过；每项 ≤16 字；去重保序；≤120 项；全坏 → ""。
+    非字符串/空白项跳过；每项 ≤16 字；去重保序；≤120 项；全坏 → []。
     """
-    if not isinstance(context, dict):
-        return ""
-    raw = context.get("categories")
     if not isinstance(raw, list):
-        return ""
+        return []
     names: list[str] = []
     seen: set[str] = set()
     for item in raw:
@@ -261,12 +304,87 @@ def _render_categories_section(context: dict | None) -> str:
         names.append(name)
         if len(names) >= _MAX_CONTEXT_CATEGORIES:
             break
+    return names
+
+
+def _render_categories_section(context: dict | None) -> str:
+    """T12-11（REQ-37）：categories: string[] → 分类名白名单段。
+
+    专门渲染而非走 profile 的"未知键回退原键名"（那会把列表渲染成 JSON 噪音）。
+    清洗口径见 _clean_category_names；全坏 → ""。
+    """
+    if not isinstance(context, dict):
+        return ""
+    names = _clean_category_names(context.get("categories"))
     if not names:
         return ""
     return (
         "【用户现有分类名列表】category / filter.category / set.category "
         '必须从下列名称中选择（无精确项时选语义最接近的，完全对不上输出 ""）：\n'
         + "、".join(names)
+    )
+
+
+# 第十三轮 T13-4（REQ-48 / 决策 #7）：现有对象名单注入——照 categories 段模式。
+# 客户端上行 [{name}]（Kotlin context 原样透传零改动）；服务端只渲染名字与条数，
+# 每类 ≤30 条 × ≤16 字，整段 ≤2000 截断（决策 #7「客户端上限不可信」同款口径）。
+_MAX_CONTEXT_OBJECTS = 30
+_MAX_OBJECT_NAME_CHARS = 16
+
+# context 键 → 渲染中文标签（顺序即段内行序）。
+_OBJECT_LABELS: tuple[tuple[str, str], ...] = (
+    ("books", "账本"),
+    ("accounts", "账户"),
+    ("budgets", "预算"),
+    ("goals", "存钱目标"),
+)
+
+
+def _clean_object_names(raw: object) -> list[str]:
+    """[{name}] → 清洗后的名字列表（T13-4）。
+
+    容忍纯字符串项（形状漂移不炸渲染，与「坏项跳过」同口径）；
+    非 str / 空白 / 坏型跳过；每项 ≤16 字；去重保序；≤30 项；全坏 → []。
+    """
+    if not isinstance(raw, list):
+        return []
+    names: list[str] = []
+    seen: set[str] = set()
+    for item in raw:
+        value = item.get("name") if isinstance(item, dict) else item
+        if not isinstance(value, str):
+            continue
+        name = value.strip()[:_MAX_OBJECT_NAME_CHARS]
+        if not name or name in seen:
+            continue
+        seen.add(name)
+        names.append(name)
+        if len(names) >= _MAX_CONTEXT_OBJECTS:
+            break
+    return names
+
+
+def _render_objects_section(context: dict | None) -> str:
+    """T13-4（REQ-48 / 决策 #7）：books/accounts/budgets/goals → 「现有对象」段。
+
+    一行一类（名字+条数，永不带 id）。四类全缺失/坏型/空白 → ""
+    （system 保持原样，行为与注入前一致）。
+    """
+    if not isinstance(context, dict):
+        return ""
+    lines: list[str] = []
+    for key, label in _OBJECT_LABELS:
+        names = _clean_object_names(context.get(key))
+        if names:
+            lines.append(f"{label}（{len(names)}）：" + "、".join(names))
+    if not lines:
+        return ""
+    return _clip(
+        "【现有对象】用户已有的账本/账户/预算/存钱目标，只含名字与条数"
+        "（id 由客户端解析，你永不经手）："
+        "config 的 default.* 与 edit 的 accountName/bookName 点名须出自此名单，"
+        "名单没有匹配项时不要猜；create 命名尽量避开名单重名。\n"
+        + "\n".join(lines)
     )
 
 
@@ -315,6 +433,7 @@ def render_messages_with_context(
     context 为空/无有效字段时与 ``render_messages`` 完全等价。
     T12-11（REQ-37）：追加 today/categories 两段专用渲染（各自独立判坏，
     段间空行分隔；persona/profile 的反注入前缀只覆盖其自身段落）。
+    T13-4（REQ-48 / 决策 #7）：再追加 objects 段（现有对象名单，同款口径）。
     """
     messages = render_messages(tpl, user_input)
     sections = [
@@ -322,6 +441,7 @@ def render_messages_with_context(
             _render_context_section(context),
             _render_date_section(context),
             _render_categories_section(context),
+            _render_objects_section(context),
         ) if s
     ]
     if sections:
@@ -333,12 +453,26 @@ def render_image_messages(
     tpl: PromptTemplate,
     image_data_url: str,
     user_text: str = "",
+    categories: list[str] | None = None,
 ) -> list[dict]:
     """Build multimodal messages with an image + optional text.
 
     T-M4-04e: the user turn contains both an image (base64 data URL) and
     an optional text instruction. The system turn remains text-only.
+
+    T14-3（REQ-40 / 决策 #5）：categories = 该账本分类名白名单（服务端分类表，
+    与 _resolve_categories 同源）→ 追加进 system 尾部，口径与文字路径
+    _render_categories_section 一致（同清洗规则 + 「匹配不到输出 ""」语义）。
+    None/空/全坏 → 不追加，模板原样。
     """
+    system_prompt = tpl.system_prompt
+    names = _clean_category_names(categories)
+    if names:
+        system_prompt += (
+            "\n\n【用户现有分类名列表】category 必须从下列名称中选择"
+            '（无精确项时选语义最接近的，完全对不上输出 ""）：\n'
+            + "、".join(names)
+        )
     user_content: list[dict] = [
         {"type": "image_url", "image_url": {"url": image_data_url}},
     ]
@@ -347,6 +481,6 @@ def render_image_messages(
     else:
         user_content.append({"type": "text", "text": "请识别这张图片中的消费记录。"})
     return [
-        {"role": "system", "content": tpl.system_prompt},
+        {"role": "system", "content": system_prompt},
         {"role": "user", "content": user_content},
     ]

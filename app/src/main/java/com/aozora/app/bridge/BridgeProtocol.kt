@@ -32,6 +32,8 @@ object BridgeCommands {
     // Book
     const val BOOK_LIST = "book.list"
     const val BOOK_INSERT = "book.insert"
+    // 第十四轮 T14-2（REQ-39 / 决策 #1：桥计数本轮唯一变更点 75→76）：账本编辑
+    const val BOOK_UPDATE = "book.update"
 
     // Category
     const val CATEGORY_LIST = "category.list"
@@ -166,7 +168,7 @@ object BridgeCommands {
     val ALL: List<String> = listOf(
         GET_VERSION,
         TX_INSERT, TX_GET, TX_LIST_BY_BOOK, TX_LIST_BY_DATE, TX_SOFT_DELETE, TX_UPDATE,
-        BOOK_LIST, BOOK_INSERT,
+        BOOK_LIST, BOOK_INSERT, BOOK_UPDATE,
         CATEGORY_LIST, CATEGORY_INSERT, CATEGORY_UPDATE,
         ICON_PICK,
         SAVINGS_LIST, SAVINGS_INSERT, SAVINGS_UPDATE, SAVINGS_ARCHIVE,

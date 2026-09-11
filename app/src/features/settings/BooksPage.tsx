@@ -1,7 +1,9 @@
 /**
  * BooksPage — 账本管理页。
  *
- * 列表展示 + 新增账本 + T9-5b（REQ-11）：默认勾选（radio 语义，master 不提供）
+ * 列表展示 + 新增账本 + T14-2（REQ-39 / 决策 #3）点击行编辑（照搬 AccountsPage
+ * 结构：editing 二态表单 + 长按排序 suppressClickRef 互斥；master 系统账本不给
+ * 编辑入口）+ T9-5b（REQ-11）：默认勾选（radio 语义，master 不提供）
  * 与长按进入的 ↑↓ 排序模式（决策 #4）。顺序/默认写 sync_meta（meta.set），
  * 列表顺序与 isDefault 由 native book.list 出口统一整形（决策 #2），前端不再重排。
  */
@@ -19,11 +21,13 @@ export function BooksPage() {
   const bridge = useBridge()
   const [books, setBooks] = useState<BookData[]>([])
   const [loading, setLoading] = useState(true)
-  const [showAdd, setShowAdd] = useState(false)
+  const [error, setError] = useState<string | null>(null)
+  // T14-2（REQ-39）：新建/编辑共用一个表单 — editing 非空即编辑态（照搬 AccountsPage）
+  const [showForm, setShowForm] = useState(false)
+  const [editing, setEditing] = useState<BookData | null>(null)
   const [newName, setNewName] = useState('')
   // T9-6（REQ-13）：图标改共享 IconPicker（emoji 宫格 + 相册照片），null=用默认 📒
   const [newIcon, setNewIcon] = useState<string | null>('📒')
-  const [error, setError] = useState<string | null>(null)
   // T9-5b（REQ-11）：长按 500ms 进入排序模式（决策 #4，↑↓ 按钮式，不做拖拽）
   const [reorderMode, setReorderMode] = useState(false)
 
@@ -40,31 +44,52 @@ export function BooksPage() {
 
   useEffect(() => { load() }, [load])
 
-  const handleAdd = async () => {
+  const openBookForm = (book: BookData | null) => {
+    if (reorderMode) return // 排序模式禁用进编辑（对齐 AccountsPage 决策 #4）
+    setError(null)
+    setEditing(book)
+    setNewName(book?.name ?? '')
+    // 非预置值（照片 data URI 等）由 IconPicker 自动回填对应控件
+    setNewIcon(book?.icon ?? '📒')
+    setShowForm(true)
+  }
+
+  const closeForm = () => {
+    setShowForm(false)
+    setEditing(null)
+    setError(null)
+  }
+
+  const handleSubmit = async () => {
     if (!newName.trim()) return
     setError(null)
-    // FIX-006 / BUG-007: 同名检测
+    // FIX-006 / BUG-007: 同名检测（编辑态排除自身，对齐 AccountsPage）
     const normalizedName = newName.trim().toLowerCase()
-    const exists = books.some(b => b.name.toLowerCase() === normalizedName)
-    if (exists) {
+    if (books.some(b => b.id !== editing?.id && b.name.toLowerCase() === normalizedName)) {
       setError('该账本名已存在')
       return
     }
-    // 服务端 sync/ai 契约要求 UUID（第六轮 Bug-5.2）
-    const id = newUuid()
     try {
-      // 必须走 insertBook 封装：native 侧期望 {book, mutationId} 包裹结构
-      await bridge.insertBook(
-        { id, ownerId: 'local', name: newName.trim(), icon: newIcon || '📒', version: 1 },
-        newUuid()
-      )
-      setNewName('')
-      setNewIcon('📒')
-      setShowAdd(false)
+      // 必须走 insertBook/updateBook 封装：native 侧期望 {book, mutationId} 包裹结构
+      if (editing) {
+        // T14-2（决策 #3）：book.update 局部合并，version 必须递增
+        await bridge.updateBook(
+          { id: editing.id, ownerId: 'local', name: newName.trim(), icon: newIcon || '📒', version: editing.version + 1 },
+          newUuid()
+        )
+      } else {
+        // 服务端 sync/ai 契约要求 UUID（第六轮 Bug-5.2）
+        await bridge.insertBook(
+          { id: newUuid(), ownerId: 'local', name: newName.trim(), icon: newIcon || '📒', version: 1 },
+          newUuid()
+        )
+      }
+      closeForm()
       await load()
     } catch (err) {
-      console.error('Failed to add book:', err)
-      setError('创建账本失败，请重试。若多次失败请通过意见反馈报告问题')
+      console.error('Failed to save book:', err)
+      setError(editing ? '更新账本失败，请重试' : '创建账本失败，请重试。若多次失败请通过意见反馈报告问题')
+      // 失败时表单与输入保留，供用户改后重试
     }
   }
 
@@ -98,13 +123,17 @@ export function BooksPage() {
     }
   }
 
-  // ─── 长按手势（决策 #4：pointerdown + 500ms timer；move>10px 或 up 取消） ───
+  // ─── 长按手势（决策 #4）；T14-2：本页面行有 click→编辑，长按触发后需吞掉同手势的 click ───
   const pressRef = useRef<{ timer: number; x: number; y: number } | null>(null)
+  const suppressClickRef = useRef(false)
   const onRowPointerDown = (e: React.PointerEvent) => {
-    if (reorderMode || showAdd) return
+    if (reorderMode || showForm) return
     const startX = e.clientX
     const startY = e.clientY
-    const timer = window.setTimeout(() => setReorderMode(true), 500)
+    const timer = window.setTimeout(() => {
+      suppressClickRef.current = true
+      setReorderMode(true)
+    }, 500)
     pressRef.current = { timer, x: startX, y: startY }
   }
   const onRowPointerMove = (e: React.PointerEvent) => {
@@ -120,6 +149,13 @@ export function BooksPage() {
       window.clearTimeout(pressRef.current.timer)
       pressRef.current = null
     }
+  }
+  const takeSuppressedClick = (): boolean => {
+    if (suppressClickRef.current) {
+      suppressClickRef.current = false
+      return true
+    }
+    return false
   }
   useEffect(() => () => {
     if (pressRef.current) window.clearTimeout(pressRef.current.timer)
@@ -155,7 +191,14 @@ export function BooksPage() {
             books.map((book, i) => (
               <div
                 key={book.id}
-                className={`flex items-center gap-3 px-4 py-3 ${i < books.length - 1 ? 'row-line' : ''}`}
+                role="button"
+                onClick={() => {
+                  if (takeSuppressedClick()) return
+                  // T14-2（决策 #3）：master 系统账本不给编辑入口
+                  if (book.isMaster) return
+                  openBookForm(book)
+                }}
+                className={`w-full flex items-center gap-3 px-4 py-3 text-left ${i < books.length - 1 ? 'row-line' : ''}`}
                 onPointerDown={onRowPointerDown}
                 onPointerMove={onRowPointerMove}
                 onPointerUp={onRowPointerUp}
@@ -235,9 +278,9 @@ export function BooksPage() {
         </div>
 
         {/* 添加按钮（排序模式下隐藏，防混写） */}
-        {!showAdd && !reorderMode && (
+        {!showForm && !reorderMode && (
           <button
-            onClick={() => setShowAdd(true)}
+            onClick={() => openBookForm(null)}
             className="w-full py-3 rounded-lg text-sm font-medium transition-colors"
             style={{ background: 'var(--accent)', color: 'white' }}
           >
@@ -245,10 +288,13 @@ export function BooksPage() {
           </button>
         )}
 
-        {/* 添加表单 */}
-        {showAdd && (
-          <div className="glass-card p-4 space-y-3">
-            <div className="text-sm font-medium" style={{ color: 'var(--ink)' }}>新建账本</div>
+        {/* 新建 / 编辑表单（T14-2：editing 二态，编辑态仅开放名称 + 图标——
+            BookEntity 可编辑字段即此两项；isDefault/master 为 meta 键，不经本表单） */}
+        {showForm && (
+          <div className="glass-card p-4 space-y-3" data-testid="book-form">
+            <div className="text-sm font-medium" style={{ color: 'var(--ink)' }}>
+              {editing ? '编辑账本' : '新建账本'}
+            </div>
             <input
               type="text"
               value={newName}
@@ -264,19 +310,19 @@ export function BooksPage() {
             )}
             <div className="flex gap-2">
               <button
-                onClick={() => { setShowAdd(false); setNewName(''); setError(null) }}
+                onClick={closeForm}
                 className="flex-1 py-2 rounded-lg text-sm"
                 style={{ background: 'var(--glass)', color: 'var(--ink2)' }}
               >
                 取消
               </button>
               <button
-                onClick={handleAdd}
+                onClick={handleSubmit}
                 disabled={!newName.trim()}
                 className="flex-1 py-2 rounded-lg text-sm font-medium text-white transition-opacity disabled:opacity-40"
                 style={{ background: 'var(--accent)' }}
               >
-                添加
+                {editing ? '保存' : '添加'}
               </button>
             </div>
           </div>

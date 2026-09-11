@@ -12,9 +12,10 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest'
 import { renderHook, act, waitFor } from '@testing-library/react'
 import { useAssistant, AI_OFFLINE_CANNED } from '../../features/assistant/use-assistant'
+import { useAssistantChatStore } from '../../platform/store/assistant-chat-store'
 import { parseInput } from '../../domain/nlu/parser'
 import type { ActionProposal } from '../../domain/action-proposal'
-import type { TransactionData } from '../../platform/bridge/bridge-types'
+import type { AccountData, BookData, TransactionData } from '../../platform/bridge/bridge-types'
 import { todayBizDate } from '../../domain/date'
 
 const mockBridge = vi.hoisted(() => ({
@@ -98,6 +99,8 @@ describe('use-assistant — AI 意图分发矩阵（T12-11）', () => {
     mockBridge.listTransactionsByBook.mockResolvedValue([])
     mockBridge.triggerSync.mockResolvedValue(undefined)
     mockBridge.isAvailable.mockReturnValue(false)
+    // T14-4：messages 外置到模块级 store——逐用例复位防串
+    useAssistantChatStore.setState({ messages: [] })
   })
 
   it('chat → reply 落文本气泡，不写库不开卡', async () => {
@@ -114,6 +117,39 @@ describe('use-assistant — AI 意图分发矩阵（T12-11）', () => {
     expect(result.current.activeProposal).toBeNull()
     expect(lastMsg(result).text).toBe('你好呀，我是小贝')
     expect(result.current.phase).toBe('idle')
+  })
+
+  // ─── T13-6（REQ-49 / 决策 #10）：人设守卫 —— 闲聊被云端误判 bookkeeping ───
+
+  it('守卫：bookkeeping 误判无金额 → chat 气泡转述 reply，不开记账提案卡', async () => {
+    aiPath({
+      intent: 'bookkeeping', type: '', amountCents: 0, category: '', note: '',
+      bizDate: '', confidence: 0.8, reply: '你好呀，我是你的记账伙伴',
+    })
+    const { result } = setupOp()
+
+    await act(async () => { await result.current.submitInput('你是谁') })
+
+    expect(result.current.activeProposal).toBeNull()
+    expect(mockBridge.insertTransaction).not.toHaveBeenCalled()
+    expect(lastMsg(result).text).toBe('你好呀，我是你的记账伙伴')
+  })
+
+  it('守卫：改判后 reply 空 → 人设化兜底句（含角色名，非「无法识别金额」系统腔）', async () => {
+    aiPath({
+      intent: 'bookkeeping', type: '', amountCents: 0, category: '', note: '',
+      bizDate: '', confidence: 0.8, reply: '',
+    })
+    const { result } = renderHook(() => useAssistant({
+      categories: cats, bookId: 'book-1', defaultAccountId: null, timezone: TZ,
+      persona: { name: '冷面管家', text: '惜字如金的管家' },
+    }))
+
+    await act(async () => { await result.current.submitInput('你是谁') })
+
+    expect(result.current.activeProposal).toBeNull()
+    expect(lastMsg(result).text).toContain('冷面管家')
+    expect(lastMsg(result).text).not.toContain('无法识别金额')
   })
 
   it('query 有 filter → 本地直算优先（不转述 LLM 编造数字）', async () => {
@@ -386,6 +422,8 @@ describe('use-assistant — 操作句式守卫（T12-12）', () => {
     mockBridge.listTransactionsByBook.mockResolvedValue([])
     mockBridge.triggerSync.mockResolvedValue(undefined)
     mockBridge.isAvailable.mockReturnValue(false)
+    // T14-4：messages 外置到模块级 store——逐用例复位防串
+    useAssistantChatStore.setState({ messages: [] })
   })
 
   it('操作句 + 本地高置信误判为新账 → 云端 edit 分发接管，不写库', async () => {
@@ -425,5 +463,142 @@ describe('use-assistant — 操作句式守卫（T12-12）', () => {
     expect(mockBridge.interpretAI).not.toHaveBeenCalled()
     expect(mockBridge.insertTransaction).not.toHaveBeenCalled()
     expect(lastMsg(result).text).toBe(AI_OFFLINE_CANNED)
+  })
+})
+
+// ─── 第十五轮 T15-7（REQ-56 / 决策 #8）：edit 契约 v4 全字段端到端 ─────────────
+
+const v4Accounts: AccountData[] = [
+  { id: 'a-wx', name: '微信零钱', icon: '💬', version: 1 },
+  { id: 'a-test', name: '测试', icon: '🧪', version: 1 },
+]
+const v4Books: BookData[] = [
+  { id: 'book-1', ownerId: 'local', name: '日常', icon: '📒', version: 1 },
+  { id: 'book-2', ownerId: 'local', name: '旅行', icon: '✈️', version: 1 },
+  { id: 'book-m', ownerId: 'local', name: '总账本', icon: '📚', version: 1, isMaster: true },
+]
+
+function setupV4() {
+  return renderHook(() => useAssistant({
+    categories: cats, bookId: 'book-1', defaultAccountId: null, timezone: TZ,
+    books: v4Books, accounts: v4Accounts,
+  }))
+}
+
+describe('use-assistant — edit 契约 v4（T15-7 / REQ-56）', () => {
+  beforeEach(() => {
+    vi.clearAllMocks()
+    mockBridge.insertTransaction.mockResolvedValue({ id: 'tx-1', version: 1 })
+    mockBridge.updateTransaction.mockResolvedValue({ id: 'tx-1', version: 8 })
+    mockBridge.softDeleteTransaction.mockResolvedValue({ success: true })
+    mockBridge.listTransactionsByBook.mockResolvedValue([])
+    mockBridge.triggerSync.mockResolvedValue(undefined)
+    mockBridge.isAvailable.mockReturnValue(false)
+    useAssistantChatStore.setState({ messages: [] })
+  })
+
+  it('改收支类型：set.type=income → 更新收 type 翻转（无同名分类保留原分类）', async () => {
+    aiPath({
+      intent: 'edit', reply: '好', filter: { keyword: '打牌' },
+      set: { type: 'income', amountCents: 42000 },
+    })
+    mockBridge.listTransactionsByBook.mockResolvedValue([opTx({ id: 'a', note: '打牌' })])
+    const { result } = setupV4()
+    await act(async () => { await result.current.submitInput('打牌这笔改成收入420') })
+    await act(async () => { await result.current.confirmOp() })
+    const [input] = mockBridge.updateTransaction.mock.calls[0]
+    expect(input).toMatchObject({ id: 'a', type: 'income', amountCents: 42000, categoryId: 'c-car', version: 8 })
+  })
+
+  it('改账户：set.accountName 命中 → accountId 回写新账户', async () => {
+    aiPath({
+      intent: 'edit', reply: '好', filter: { keyword: '打车' },
+      set: { accountName: '测试', amountCents: 500 },
+    })
+    mockBridge.listTransactionsByBook.mockResolvedValue([opTx({ id: 'a', accountId: 'a-wx' })])
+    const { result } = setupV4()
+    await act(async () => { await result.current.submitInput('打车这笔账户改成测试') })
+    await act(async () => { await result.current.confirmOp() })
+    const [input] = mockBridge.updateTransaction.mock.calls[0]
+    expect(input).toMatchObject({ id: 'a', accountId: 'a-test', amountCents: 500 })
+  })
+
+  it('改账本（挪记录）：filter.bookName 他账 → 跨账本取数，set.bookName 回写新 bookId', async () => {
+    aiPath({
+      intent: 'edit', reply: '好', filter: { bookName: '旅行', keyword: '打车' },
+      set: { bookName: '日常' },
+    })
+    mockBridge.listTransactionsByBook.mockImplementation(async (bid: string) =>
+      bid === 'book-2' ? [opTx({ id: 'r1', bookId: 'book-2' })] : [])
+    const { result } = setupV4()
+    await act(async () => { await result.current.submitInput('旅行账本里的打车那笔挪回日常') })
+    expect(mockBridge.listTransactionsByBook).toHaveBeenCalledWith('book-2')
+    expect(result.current.pendingOp!.candidates.map(t => t.id)).toEqual(['r1'])
+    await act(async () => { await result.current.confirmOp() })
+    const [input] = mockBridge.updateTransaction.mock.calls[0]
+    expect(input).toMatchObject({ id: 'r1', bookId: 'book-1' })
+  })
+
+  it('filter.bookName 指向 master 总账本 → 引导不开卡不查库', async () => {
+    aiPath({ intent: 'edit', reply: '好', filter: { bookName: '总账本' }, set: { amountCents: 500 } })
+    const { result } = setupV4()
+    await act(async () => { await result.current.submitInput('总账本那笔改成5块') })
+    expect(mockBridge.listTransactionsByBook).not.toHaveBeenCalled()
+    expect(result.current.pendingOp).toBeNull()
+    expect(lastMsg(result).text).toContain('没找到叫「总账本」的账本')
+  })
+
+  it('filter.accountName 匹配不到 → 引导（列现有账户）不开卡不查库', async () => {
+    aiPath({
+      intent: 'edit', reply: '好', filter: { accountName: '支付宝', keyword: '打车' },
+      set: { amountCents: 500 },
+    })
+    const { result } = setupV4()
+    await act(async () => { await result.current.submitInput('支付宝里的打车改成5块') })
+    expect(mockBridge.listTransactionsByBook).not.toHaveBeenCalled()
+    expect(result.current.pendingOp).toBeNull()
+    expect(lastMsg(result).text).toContain('没找到叫「支付宝」的账户')
+    expect(lastMsg(result).text).toContain('微信零钱')
+  })
+
+  it('set.accountName 匹配不到但有其他字段 → 引导「该项未改」+ 剔除该键，执行不写账户', async () => {
+    aiPath({
+      intent: 'edit', reply: '好', filter: { keyword: '打车' },
+      set: { accountName: '不存在的账户', amountCents: 500 },
+    })
+    mockBridge.listTransactionsByBook.mockResolvedValue([opTx({ id: 'a', accountId: 'a-wx' })])
+    const { result } = setupV4()
+    await act(async () => { await result.current.submitInput('打车那笔账户改不存在的账户金额改5块') })
+    expect(lastMsg(result).text).toContain('没找到叫「不存在的账户」的账户')
+    expect(lastMsg(result).text).toContain('该项未改')
+    expect(result.current.pendingOp).not.toBeNull()
+    expect(result.current.pendingOp!.set).toEqual({ amountCents: 500 })
+    await act(async () => { await result.current.confirmOp() })
+    const [input] = mockBridge.updateTransaction.mock.calls[0]
+    expect(input).toMatchObject({ id: 'a', accountId: 'a-wx', amountCents: 500 })
+  })
+
+  it('set 仅点名对象且匹配不到 → 只引导不开卡不查库', async () => {
+    aiPath({
+      intent: 'edit', reply: '好', filter: { keyword: '打车' },
+      set: { bookName: '不存在的账本' },
+    })
+    const { result } = setupV4()
+    await act(async () => { await result.current.submitInput('打车那笔挪到不存在的账本') })
+    expect(mockBridge.listTransactionsByBook).not.toHaveBeenCalled()
+    expect(result.current.pendingOp).toBeNull()
+    expect(lastMsg(result).text).toContain('没找到叫「不存在的账本」的账本')
+  })
+
+  it('delete 跨账本圈定：filter.bookName 命中 → 软删他账记录', async () => {
+    aiPath({ intent: 'delete', reply: '', filter: { bookName: '旅行', keyword: '打车' } })
+    mockBridge.listTransactionsByBook.mockImplementation(async (bid: string) =>
+      bid === 'book-2' ? [opTx({ id: 'r1', bookId: 'book-2' })] : [])
+    const { result } = setupV4()
+    await act(async () => { await result.current.submitInput('删掉旅行账本的打车那笔') })
+    expect(mockBridge.listTransactionsByBook).toHaveBeenCalledWith('book-2')
+    expect(result.current.pendingOp!.candidates.map(t => t.id)).toEqual(['r1'])
+    await act(async () => { await result.current.confirmOp() })
+    expect(mockBridge.softDeleteTransaction).toHaveBeenCalledWith('r1', expect.any(String))
   })
 })

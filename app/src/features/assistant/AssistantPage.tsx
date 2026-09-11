@@ -12,6 +12,7 @@
 import { useState, useRef, useEffect, useCallback, useMemo } from 'react'
 import { useNavigate } from 'react-router'
 import { PageHeader } from '../../components/Layout'
+import { CategoryIcon } from '../../components/CategoryIcon'
 import { useBridge } from '../../platform/hooks/use-bridge'
 import { usePermissions } from '../../platform/hooks/use-permissions'
 import { useVoice } from '../../platform/hooks/use-voice'
@@ -20,7 +21,6 @@ import { ConfirmationCard } from './ConfirmationCard'
 import { OpPreviewCard } from './OpPreviewCard'
 import { buildAiCategoryNames } from '../../domain/ai-proposal-builder'
 import { BatchConfirmationCard } from '../ledger/BatchConfirmationCard'
-import { UndoToast } from './UndoToast'
 import type { ActionProposal } from '../../domain/action-proposal'
 import type {
   AccountData, BookData, BudgetData, CategoryData, PersonaData, SavingsGoalData,
@@ -40,18 +40,47 @@ const VOICE_ERROR_ZH: Record<string, string> = {
   not_recording: '当前没有进行中的录音',
   unavailable: '语音服务不可用',
   timeout: '语音操作超时，请重试',
+  // T14-6（REQ-41 / 决策 #6）：code 缺失/未知且 message 无法反推时的中文兜底，
+  // 原生英文 message 一律不透出
+  voice_generic: '录音操作未成功，请重试',
+}
+
+/**
+ * T14-6（REQ-41 / 决策 #6）：语音错误码归一。
+ * WebView 边界 code 丢失/未知时按原生 message 子串反推（如
+ * "RECORD_AUDIO permission not granted" → permission_denied），
+ * 使恢复流（refresh + 「授权」内联钮）与中文文案不依赖 code 完好。
+ */
+function normalizeVoiceCode(err: { code?: string; message?: string } | null): string {
+  if (!err) return ''
+  if (err.code && VOICE_ERROR_ZH[err.code]) return err.code
+  const m = (err.message ?? '').toLowerCase()
+  if (m.includes('permission') || m.includes('not granted') || m.includes('securityexception')) return 'permission_denied'
+  if (m.includes('model')) return 'model_not_loaded'
+  if (m.includes('already recording')) return 'already_recording'
+  return 'voice_generic'
 }
 
 // T12-1（REQ-29 / 决策 #9）：图片链路错误码 → 中文文案。503 被 Kotlin 统一映射为
-// no_ai_provider（AozoraBridge:1406-1412），按决策给配置指引专属文案；未知码回退原生 message
+// no_ai_provider（AozoraBridge:1406-1412），按决策给配置指引专属文案；未知码回退原生 message。
+// T14-3（REQ-40）：补 execute 分支（handleAiExecute 的码集与 handleImageParse 不同：
+// 'network'/'429'/'503'）与服务端 400 ai_missing_category、500 database_error 防御键
 const IMAGE_ERROR_ZH: Record<string, string> = {
   no_ai_provider: 'AI 服务未配置：需在服务器 .env 填 AI_PROVIDER_API_KEY 并重启',
   timeout: '图片解析超时，请检查网络后重试',
   network_error: '网络错误，请检查网络连接后重试',
+  network: '网络错误，请检查网络后重试',
   rate_limited: 'AI 请求过于频繁，请稍后重试',
+  '429': 'AI 请求过于频繁，请稍后重试',
   server_error: 'AI 服务暂时不可用，请稍后重试',
+  '503': 'AI 服务暂时不可用，请稍后重试',
   auth_lost: '登录已失效，请重新登录',
+  ai_missing_category: '有记录未识别到分类，请在卡片中选择分类后重试',
+  database_error: '服务处理失败，请稍后重试',
 }
+
+// T14-3（REQ-40 / 决策 #5）：提案行缺分类的确认前拦截文案（与服务端 400 同语义）
+const IMG_NO_CATEGORY_MSG = '有记录未识别到分类，请在卡片中选择后再确认'
 
 /** T11-6（REQ-27 / 决策 #7）：meta.user_profile → 注入管线画像。
  *  只保留非空字符串字段；坏 JSON/非对象/全空 → null（interpretAI 不带 context）。 */
@@ -88,6 +117,7 @@ export function AssistantPage() {
     status: permStatus,
     requestPermission: requestPerm,
     openSettings,
+    refresh: refreshPermissions,
   } = usePermissions()
   const [micPermissionHint, setMicPermissionHint] = useState<'denied' | 'permanently_denied' | null>(null)
   const [pendingPermission, setPendingPermission] = useState(false)
@@ -174,7 +204,6 @@ export function AssistantPage() {
     phase,
     activeProposal,
     cardStatus,
-    undoRemaining,
     isSlow,
     pendingOp,
     pendingConfig,
@@ -271,9 +300,16 @@ export function AssistantPage() {
   }, [])
 
   /** 批量确认 → ai.execute（服务端权威，与 QuickEntrySheet 批量链路同路径；
-   *  离线/失败错误可见，卡片保留可重试）。 */
+   *  离线/失败错误可见，卡片保留可重试）。
+   *  T14-3（REQ-40 / 决策 #5）：服务端「宁缺勿错」——未匹配行不带 categoryId，
+   *  提交前任一行缺失即引导卡内手选（不发请求，避免旧链路 500 英文错误）；
+   *  catch 与 runImageFlow 同口径走 IMAGE_ERROR_ZH 映射，未知码回退原生 message。 */
   const handleImageConfirm = useCallback(async (edited: ActionProposal) => {
     if (!bookId || imageSubmitting) return
+    if ((edited.transactions ?? []).some(tx => !tx.categoryId)) {
+      setImageError(IMG_NO_CATEGORY_MSG)
+      return
+    }
     setImageSubmitting(true)
     setImageError(null)
     try {
@@ -289,7 +325,9 @@ export function AssistantPage() {
       appendAssistantMessage(`已记录 ${n} 笔交易`)
       bridge.triggerSync().catch(() => { /* best-effort，失败下轮同步自愈 */ })
     } catch (e) {
-      setImageError(e instanceof Error && e.message ? e.message : '记账失败')
+      const code = e instanceof Error && 'code' in e ? (e as { code: string }).code : null
+      const rawMessage = e instanceof Error && e.message ? e.message : '记账失败'
+      setImageError((code ? IMAGE_ERROR_ZH[code] : null) ?? rawMessage)
     } finally {
       setImageSubmitting(false)
     }
@@ -385,11 +423,26 @@ export function AssistantPage() {
     }
   }, [pendingPermission, recordAudioStatus, voiceStartRecording])
 
+  // T14-6（REQ-41 / 决策 #6）：桥返回 permission_denied = 前端 canRecord 滞后真实权限
+  //（系统设置撤销授权后不会推送结果）→ refresh 拉真实态并接入 T12-1 恢复条
+  //（「授权」内联钮重发请求 / permanently_denied「去设置」），不再只是红条死路。
+  useEffect(() => {
+    if (!voiceError || normalizeVoiceCode(voiceError) !== 'permission_denied') return
+    let cancelled = false
+    void refreshPermissions().then(s => {
+      if (cancelled) return
+      setMicPermissionHint(
+        s.permissions.RECORD_AUDIO === 'permanently_denied' ? 'permanently_denied' : 'denied',
+      )
+    })
+    return () => { cancelled = true }
+  }, [voiceError, refreshPermissions])
+
   return (
     <div
       className="flex flex-col h-screen safe-top"
       style={{
-        background: 'var(--bg)',
+        // T13-1（REQ-45 决策#3）：原 var(--bg) 不透明覆盖删除，transparent 透出全局背景图
         // T9-8（REQ-16）：IME 弹起时整体布局收缩、输入区顶到键盘上方
         //（--ime-bottom-px 由 MainActivity 注入，0 时不影响布局）；下缘安全区并入
         paddingBottom: 'calc(env(safe-area-inset-bottom, 0px) + var(--ime-bottom-px, 0px))',
@@ -400,15 +453,24 @@ export function AssistantPage() {
         back
         title={activePersona?.name}
         right={
+          // T13-6（REQ-49）：文字钮 → 24px 当前角色头像圆钮（CategoryIcon 现成
+          // emoji/base64 双形态渲染；无头像/未选角色 → 👤 兜底），点击仍进角色管理。
           <button
             type="button"
             onClick={() => navigate('/settings/personas')}
-            className="text-sm px-2 py-1 rounded-lg"
-            style={{ color: 'var(--accent)', border: '1px solid var(--accent)' }}
+            className="flex items-center justify-center rounded-full shrink-0"
+            style={{
+              width: 24, height: 24, fontSize: 15, overflow: 'hidden',
+              border: '1px solid var(--accent)',
+            }}
             data-testid="persona-manage-button"
             aria-label="角色管理"
           >
-            👤 角色
+            <CategoryIcon
+              icon={activePersona?.avatar}
+              name={activePersona?.name ?? '角色'}
+              fallback="👤"
+            />
           </button>
         }
       />
@@ -523,11 +585,14 @@ export function AssistantPage() {
           />
         )}
 
-        {/* T12-11（REQ-37 / 决策 #5）：edit/delete 意图预览确认卡——破坏性操作必过确认 */}
+        {/* T12-11（REQ-37 / 决策 #5）：edit/delete 意图预览确认卡——破坏性操作必过确认；
+            T15-7（REQ-56 ④）：accounts/books 下传，OpRow 补账户/账本/收支/预算呈现 */}
         {pendingOp && (
           <OpPreviewCard
             op={pendingOp}
             categories={categories}
+            accounts={accounts}
+            books={books}
             onConfirm={confirmOp}
             onCancel={cancelOp}
           />
@@ -567,8 +632,10 @@ export function AssistantPage() {
             🎤 {voicePartialText}
           </div>
         )}
-        {/* T-M4-04b: 语音错误提示（T12-1：错误码映射中文，未知码回退原生 message） */}
-        {voiceError && !voiceIsRecording && (
+        {/* T-M4-04b: 语音错误提示（T12-1：错误码映射中文；T14-6 / 决策 #6：code 缺失
+            按 message 反推，英文一律不透出；permission_denied 由下方恢复条承载，
+            此处不重复渲染） */}
+        {voiceError && !voiceIsRecording && normalizeVoiceCode(voiceError) !== 'permission_denied' && (
           <div
             className="mb-2 px-3 py-1.5 rounded-lg text-xs"
             style={{
@@ -578,7 +645,7 @@ export function AssistantPage() {
             }}
             data-testid="voice-error"
           >
-            {VOICE_ERROR_ZH[voiceError.code] ?? voiceError.message}
+            {VOICE_ERROR_ZH[normalizeVoiceCode(voiceError)]}
           </div>
         )}
         {/* T12-1（REQ-29 / 决策 #8）：未授权红条——denied 内联「授权」重发请求，
@@ -720,12 +787,6 @@ export function AssistantPage() {
           </button>
         </div>
       </div>
-
-      {/* 撤销 toast */}
-      <UndoToast
-        remaining={undoRemaining}
-        onUndo={undoExecution}
-      />
     </div>
   )
 }

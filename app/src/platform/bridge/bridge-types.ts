@@ -24,6 +24,8 @@ export const BridgeCommands = {
   // Book
   BOOK_LIST: 'book.list',
   BOOK_INSERT: 'book.insert',
+  // 第十四轮 T14-2（REQ-39 / 决策 #1：桥计数本轮唯一变更点 75→76）：账本编辑
+  BOOK_UPDATE: 'book.update',
 
   // Category
   CATEGORY_LIST: 'category.list',
@@ -296,6 +298,7 @@ export interface SavingsGoalInput {
 /**
  * 第十一轮 T11-4（REQ-26 / 决策 #4）：定时记账规则（仅本地，不同步）。
  * lastRunDate 由引擎专管（用户编辑不回传该键）；日期均为 'YYYY-MM-DD'。
+ * runHour/runMinute = 执行时刻（第十四轮 T14-5 / REQ-43），引擎到点才生成。
  */
 export interface ScheduledRuleData {
   id: string
@@ -315,6 +318,10 @@ export interface ScheduledRuleData {
   enabled: boolean
   /** 最近一次生成交易的 bizDate；null = 从未执行 */
   lastRunDate: string | null
+  /** 执行时刻-时 0..23（v9 存量规则=8） */
+  runHour: number
+  /** 执行时刻-分 0..59（v9 存量规则=0） */
+  runMinute: number
   createdAt: number
   updatedAt: number
   version: number
@@ -323,7 +330,8 @@ export interface ScheduledRuleData {
 /**
  * scheduled.insert / scheduled.update 入参（包裹在 {rule} 内，无 mutationId）。
  * update 为局部合并语义：键缺省保留原值；accountId/endDate 显式 null = 清除
- * （enabled 快捷开关只传 {id, enabled, version}）。
+ * （enabled 快捷开关只传 {id, enabled, version}）。runHour/runMinute 缺省
+ * 8/0（insert）／保留原值（update）；值域 0..23 / 0..59 由 native 校验。
  */
 export interface ScheduledRuleInput {
   id: string
@@ -340,6 +348,8 @@ export interface ScheduledRuleInput {
   startDate?: string
   endDate?: string | null
   enabled?: boolean
+  runHour?: number
+  runMinute?: number
   createdAt?: number
   version: number
 }
@@ -465,7 +475,10 @@ export interface ReminderStatusData {
  *  persona 段由 T11-7 消费，本键位仅预留形状。
  *  第十二轮 T12-11（REQ-37 / 决策 #3）：+categories（分类名白名单，prompt v2 约束
  *  category/filter.category/set.category 从中选）与 today（相对日期换算基准）；
- *  均可缺省 → 服务端渲染段跳过，行为与旧版一致。桥侧 optJSONObject 原样透传，Kotlin 零改动。 */
+ *  均可缺省 → 服务端渲染段跳过，行为与旧版一致。桥侧 optJSONObject 原样透传，Kotlin 零改动。
+ *  第十三轮 T13-5（REQ-48 / 决策 #7）：+books/accounts/budgets/goals 现有对象名单
+ *  （只给名字，≤30 条 × ≤16 字，服务端 _render_objects_section 渲染「现有对象」段，
+ *  config 意图的点名与避重名依据）；均可缺省/null → 段跳过。仍零 Kotlin 改动。 */
 export interface AiInterpretContext {
   persona: { name: string; text: string } | null
   profile: Record<string, string> | null
@@ -473,7 +486,8 @@ export interface AiInterpretContext {
   categories?: string[] | null
   /** 用户时区今天（YYYY-MM-DD），prompt v2 相对日期换算用 */
   today?: string | null
-  /** T13-5：现有对象名单（只含名字；模型永不经手 id，名→id 由客户端解析） */
+  /** T13-5：现有对象名单（只含名字；模型永不经手 id，名→id 由客户端解析）。
+   *  T15-7（REQ-56）起同时是 edit 契约 v4 的 accountName/bookName 点名依据。 */
   books?: Array<{ name: string }> | null
   accounts?: Array<{ name: string }> | null
   budgets?: Array<{ name: string }> | null

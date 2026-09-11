@@ -8,6 +8,8 @@
  * - 必填校验（名称为空保存禁用；分类未选给可读错误，不发起写入）
  * - 列表卡：周期文案/账本·分类副行/上次·下次执行小字
  * - 点击卡片进编辑（回填 + update version+1）；删除 confirm → archive
+ * - T14-5（REQ-43）：新建默认执行时刻 8:00 进 payload / 编辑回填 + 步进进
+ *   update payload / 列表周期文案含时刻
  */
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
 import { render, screen, waitFor, fireEvent, within } from '@testing-library/react'
@@ -58,7 +60,7 @@ function rule(overrides: Partial<ScheduledRuleData> = {}): ScheduledRuleData {
     id: 'rule-1', ownerId: 'local', type: 'expense', name: '早餐', amountCents: 1500,
     bookId: 'book-1', categoryId: 'cat-food', accountId: 'acc-1', includeInBudget: true,
     note: '', repeat: 'daily', startDate: '2026-09-01', endDate: null, enabled: true,
-    lastRunDate: null, createdAt: 1, updatedAt: 1, version: 3,
+    lastRunDate: null, runHour: 8, runMinute: 0, createdAt: 1, updatedAt: 1, version: 3,
     ...overrides,
   }
 }
@@ -116,6 +118,8 @@ describe('ScheduledPage', () => {
       startDate: todayBizDate(TZ),
       endDate: null,             // 无限制
       enabled: true,
+      runHour: 8,               // REQ-43：新建默认执行时刻 8:00
+      runMinute: 0,
       version: 1,
     })
     // 无 mutationId：规则仅本地
@@ -173,8 +177,8 @@ describe('ScheduledPage', () => {
       rule({ id: 'r-daily', repeat: 'daily', lastRunDate: today }),
       rule({ id: 'r-monthly', repeat: 'monthly', startDate: '2026-08-15' }),
     ])
-    expect(screen.getByTestId('scheduled-repeat-r-weekly')).toHaveTextContent('每周三')
-    expect(screen.getByTestId('scheduled-repeat-r-monthly')).toHaveTextContent('每月 15 日')
+    expect(screen.getByTestId('scheduled-repeat-r-weekly')).toHaveTextContent('每周三 08:00')
+    expect(screen.getByTestId('scheduled-repeat-r-monthly')).toHaveTextContent('每月 15 日 08:00')
     expect(screen.getByTestId('scheduled-subline-r-weekly')).toHaveTextContent('日常账本')
     expect(screen.getByTestId('scheduled-subline-r-weekly')).toHaveTextContent('饮食')
     // 上次执行日期标签（固定日期，与运行日无关）；今天已跑过的每天规则下次=明天
@@ -230,5 +234,41 @@ describe('ScheduledPage', () => {
     await userEvent.click(screen.getByTestId('scheduled-form-type-income'))
     expect(screen.queryByTestId('scheduled-form-category-cat-food')).toBeNull()
     expect(screen.getByTestId('scheduled-form-category-cat-salary')).toBeInTheDocument()
+  })
+
+  // ─── T14-5（REQ-43）：执行时刻 ───
+
+  it('编辑回填：规则 09:30 呈现于 TimeField，步进 1 分钟后 update payload 带时刻', async () => {
+    await renderLoaded([rule({ version: 3, runHour: 9, runMinute: 30 })])
+    await userEvent.click(screen.getByTestId('scheduled-card-rule-1'))
+    expect(screen.getByTestId('scheduled-form-run-time-hour')).toHaveTextContent('09')
+    expect(screen.getByTestId('scheduled-form-run-time-minute')).toHaveTextContent('30')
+
+    await userEvent.click(screen.getByTestId('scheduled-form-run-time-minute-up'))
+    expect(screen.getByTestId('scheduled-form-run-time-minute')).toHaveTextContent('31')
+    await userEvent.click(screen.getByTestId('scheduled-form-save'))
+
+    await waitFor(() => expect(mockBridge.updateScheduledRule).toHaveBeenCalledTimes(1))
+    expect(mockBridge.updateScheduledRule.mock.calls[0][0]).toMatchObject({
+      id: 'rule-1', runHour: 9, runMinute: 31, version: 4,
+    })
+  })
+
+  it('新建改时刻：时 8→9 进 insert payload', async () => {
+    await renderLoaded([])
+    await fillBasicForm()
+    await userEvent.click(screen.getByTestId('scheduled-form-run-time-hour-up'))
+    await userEvent.click(screen.getByTestId('scheduled-form-save'))
+    await waitFor(() => expect(mockBridge.insertScheduledRule).toHaveBeenCalledTimes(1))
+    expect(mockBridge.insertScheduledRule.mock.calls[0][0]).toMatchObject({
+      runHour: 9, runMinute: 0,
+    })
+  })
+
+  it('列表周期文案：非默认时刻也随 chip 呈现（每周三 21:15）', async () => {
+    await renderLoaded([
+      rule({ id: 'r-w', repeat: 'weekly', startDate: '2026-09-09', runHour: 21, runMinute: 15 }),
+    ])
+    expect(screen.getByTestId('scheduled-repeat-r-w')).toHaveTextContent('每周三 21:15')
   })
 })

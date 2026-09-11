@@ -52,7 +52,7 @@ class KillProcessPersistenceTest {
             }
             if (db.categoryDao().getById("cat-kill") == null) {
                 db.categoryDao().insert(com.aozora.app.db.entity.CategoryEntity(
-                    "cat-kill", "owner-kill", null, null, "expense", "KillCat", null, 1
+                    "cat-kill", "owner-kill", null, null, "expense", "KillCat", null, null, 1
                 ))
             }
 

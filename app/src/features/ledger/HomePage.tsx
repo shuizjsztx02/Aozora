@@ -3,19 +3,26 @@
  *
  * 展示：日期问候、今日支出、本月预算进度、近期流水、快捷记账入口。
  * UI 根据四时主题（晨/昼/暮/夜）呈现不同氛围装饰。
+ *
+ * 第十四轮 REQ-38（T14-1）：今日流水行换共享组件 TxListRow，与明细行同构
+ * （title=备注优先、副行「时间 · 分类」、金额 17px bold）。
+ *
+ * 第十五轮 REQ-50（T15-1）：问候行拼昵称（meta display_name 本地镜像）；
+ * 预算匹配口径扩为当月或当年（对齐 BudgetPage）；预算行下新增存钱目标
+ * 内联行（≤2 行，点行跳存钱管理）；删空态引导句。
  */
 
 import { useState, useEffect, useCallback } from 'react'
 import { useNavigate, useSearchParams } from 'react-router'
 import { SyncBadge } from '../../components/SyncBadge'
-import { CategoryIcon } from '../../components/CategoryIcon'
+import { TxListRow } from '../../components/TxListRow'
 import { useBridge } from '../../platform/hooks/use-bridge'
 import { useTheme } from '../../design/theme'
 import { QuickEntrySheet } from './QuickEntrySheet'
 import { TxEditSheet } from './TxEditSheet'
-import type { TransactionData, CategoryData } from '../../platform/bridge/bridge-types'
+import type { TransactionData, CategoryData, SavingsGoalData } from '../../platform/bridge/bridge-types'
 import * as Money from '../../domain/money'
-import { todayBizDate } from '../../domain/date'
+import { todayBizDate, localHHmm } from '../../domain/date'
 import { sumTransactions } from '../../domain/aggregator'
 import { toDomainTransaction } from '../../domain/types'
 import { pickEntryBook } from '../../domain/books'
@@ -87,9 +94,16 @@ function NightEmptyDecor() {
 export function HomePage() {
   const [showSheet, setShowSheet] = useState(false)
   const [todayTxs, setTodayTxs] = useState<TransactionData[]>([])
-  const [monthTxs, setMonthTxs] = useState<TransactionData[]>([])
   const [categories, setCategories] = useState<CategoryData[]>([])
-  const [budget, setBudget] = useState<{ amountCents: number } | null>(null)
+  // T15-1（REQ-50）：matched = 当月 monthly 或当年 annual 预算，展示数据随口径一并算好
+  const [budget, setBudget] = useState<{
+    amountCents: number
+    isAnnual: boolean
+    totalCents: number
+    inBudgetCents: number
+  } | null>(null)
+  const [savingsGoals, setSavingsGoals] = useState<SavingsGoalData[]>([])
+  const [nick, setNick] = useState('')
   const [loadError, setLoadError] = useState<string | null>(null)
   // T12-10（REQ-36）：今日流水行点击开编辑弹层
   const [editTx, setEditTx] = useState<TransactionData | null>(null)
@@ -113,10 +127,12 @@ export function HomePage() {
     setLoadError(null)
     try {
       // 决策 #2 / T7-6：展示目标 = 非 master 账本；T9-5b（决策 #3）default_book_id 优先
+      // T15-1（REQ-50）：顺路多取 display_name（SecurityPage 镜像写，离线可读）
       const [books, meta] = await Promise.all([
         bridge.call('book.list', {}) as Promise<{ id: string; isMaster?: boolean }[]>,
-        bridge.getMeta(['default_book_id']).catch(() => ({}) as Record<string, string | null>),
+        bridge.getMeta(['default_book_id', 'display_name']).catch(() => ({}) as Record<string, string | null>),
       ])
+      setNick(meta['display_name'] || '')
       const bookId = pickEntryBook(books, meta['default_book_id'] ?? null)?.id
       if (!bookId) {
         setLoadError('账本未就绪')
@@ -125,22 +141,45 @@ export function HomePage() {
 
       const today = todayBizDate('Asia/Shanghai')
       const month = today.slice(0, 7)
+      const year = today.slice(0, 4)
 
-      const [allTxs, cats, budgets] = await Promise.all([
+      const [allTxs, cats, budgets, goals] = await Promise.all([
         bridge.call('transaction.listByBook', { bookId }) as Promise<TransactionData[]>,
         bridge.call('category.list', {}) as Promise<CategoryData[]>,
-        bridge.call('budget.list', { bookId }) as Promise<{ amountCents: number; period: string }[]>,
+        bridge.call('budget.list', { bookId }) as Promise<{ amountCents: number; period: string; budgetType: 'monthly' | 'annual' }[]>,
+        // 存钱目标加载失败不挡首页其余渲染（与 AssistantPage 同款回落）
+        bridge.listSavingsGoals().catch(() => [] as SavingsGoalData[]),
       ])
 
       const todayExpenses = allTxs.filter(tx => tx.bizDate === today && tx.type === 'expense' && tx.deletedAt === null)
       const monthExpenses = allTxs.filter(tx => tx.bizDate.startsWith(month) && tx.type === 'expense' && tx.deletedAt === null)
 
       setTodayTxs(todayExpenses)
-      setMonthTxs(monthExpenses)
       setCategories(cats)
+      setSavingsGoals(goals)
 
-      const monthBudget = budgets.find(b => b.period === month)
-      setBudget(monthBudget ? { amountCents: monthBudget.amountCents } : null)
+      // T15-1（REQ-50）：匹配口径对齐 BudgetPage——当月(monthly)优先，否则当年(annual)，一条命中即显
+      const matched =
+        budgets.find(b => b.budgetType === 'monthly' && b.period === month) ??
+        budgets.find(b => b.budgetType === 'annual' && b.period === year)
+      if (matched) {
+        const isAnnual = matched.budgetType === 'annual'
+        const scoped = isAnnual
+          ? allTxs.filter(tx => tx.bizDate.startsWith(year) && tx.type === 'expense' && tx.deletedAt === null)
+          : monthExpenses
+        // 第十轮 REQ-17（决策 #1）：已用% 只统计"计入预算"交易（!== false 口径，
+        // 缺省=计入，兼容旧数据）；期间支出总额不过滤。
+        setBudget({
+          amountCents: matched.amountCents,
+          isAnnual,
+          totalCents: sumTransactions(scoped.map(toDomainTransaction)).totalExpense as number,
+          inBudgetCents: sumTransactions(
+            scoped.filter(tx => tx.includeInBudget !== false).map(toDomainTransaction),
+          ).totalExpense as number,
+        })
+      } else {
+        setBudget(null)
+      }
     } catch (err) {
       const msg = err instanceof Error ? err.message : '加载失败'
       setLoadError(msg)
@@ -152,16 +191,9 @@ export function HomePage() {
   }, [loadData])
 
   const todayExpense = sumTransactions(todayTxs.map(toDomainTransaction))
-  const monthExpense = sumTransactions(monthTxs.map(toDomainTransaction))
-
-  // 第十轮 REQ-17（决策 #1）：预算进度只统计"计入预算"交易（!== false 口径，
-  // 缺省=计入，兼容旧数据）；"今日/本月支出"总额不过滤。
-  const budgetMonthExpense = sumTransactions(
-    monthTxs.filter(tx => tx.includeInBudget !== false).map(toDomainTransaction)
-  )
 
   const budgetProgress = budget
-    ? Math.min(100, Math.round((budgetMonthExpense.totalExpense as number) / budget.amountCents * 100))
+    ? Math.min(100, Math.round(budget.inBudgetCents / budget.amountCents * 100))
     : 0
 
   return (
@@ -173,7 +205,7 @@ export function HomePage() {
             {formatBizDate()}
           </div>
           <div className="text-2xl font-bold mt-1" style={{ color: 'var(--ink)' }}>
-            {getGreeting()}
+            {getGreeting()}{nick ? `，${nick}` : ''}
           </div>
         </div>
         <SyncBadge />
@@ -190,15 +222,15 @@ export function HomePage() {
         </div>
       </div>
 
-      {/* ─── 本月预算（内联行） ─── */}
+      {/* ─── 预算（内联行；当月/当年口径见 loadData T15-1） ─── */}
       {budget && (
         <div className="px-5 pb-4">
           <div className="flex items-center justify-between mb-1.5">
             <span className="text-xs" style={{ color: 'var(--ink2)' }}>
-              本月 {formatCents(monthExpense.totalExpense as number)} · 已用 {budgetProgress}%
+              {budget.isAnnual ? '本年' : '本月'} {formatCents(budget.totalCents)} · 已用 {budgetProgress}%
             </span>
             <span className="text-xs font-medium" style={{ color: 'var(--ink2)' }}>
-              预算 {formatCents(budget.amountCents)}
+              {budget.isAnnual ? '年度预算' : '预算'} {formatCents(budget.amountCents)}
             </span>
           </div>
           <div className="h-1.5 rounded-full overflow-hidden" style={{ background: 'var(--glass-border)' }}>
@@ -210,6 +242,39 @@ export function HomePage() {
               }}
             />
           </div>
+        </div>
+      )}
+
+      {/* ─── 存钱目标（T15-1/REQ-50：有目标才渲染，≤2 行，点行跳存钱管理） ─── */}
+      {savingsGoals.length > 0 && (
+        <div className="px-5 pb-4 space-y-2">
+          {savingsGoals.slice(0, 2).map(g => {
+            const pct = g.targetCents > 0 ? Math.min(100, Math.round((g.currentCents / g.targetCents) * 100)) : 0
+            return (
+              <button
+                key={g.id}
+                type="button"
+                onClick={() => navigate('/settings/savings')}
+                className="block w-full text-left"
+                data-testid="home-savings-row"
+              >
+                <div className="flex items-center justify-between mb-1">
+                  <span className="text-xs" style={{ color: 'var(--ink2)' }}>
+                    {g.icon ?? '🐷'} · {g.name}
+                  </span>
+                  <span className="text-xs font-medium" style={{ color: 'var(--ink2)' }}>
+                    {formatCents(g.currentCents)}/{formatCents(g.targetCents)}
+                  </span>
+                </div>
+                <div className="h-1 rounded-full overflow-hidden" style={{ background: 'var(--glass-border)' }}>
+                  <div
+                    className="h-full rounded-full"
+                    style={{ width: `${pct}%`, background: 'var(--accent)' }}
+                  />
+                </div>
+              </button>
+            )
+          })}
         </div>
       )}
 
@@ -247,38 +312,26 @@ export function HomePage() {
               <p className="text-base font-medium" style={{ color: 'var(--ink2)' }}>
                 今天还没有记录
               </p>
-              <p className="text-xs mt-1" style={{ color: 'var(--ink3)' }}>
-                点下面的 ＋ 记第一笔，或者问问小贝
-              </p>
             </div>
           </div>
         ) : (
           <div className="divide-y" style={{ borderColor: 'var(--glass-border)' }}>
             {todayTxs.slice(0, 10).map(tx => {
               const cat = categories.find(c => c.id === tx.categoryId)
+              const note = tx.note?.trim()
               return (
-                <div key={tx.id} className="flex items-center justify-between py-3 cursor-pointer active:opacity-70"
-                  style={{ borderBottom: '1px solid var(--glass-border)' }}
-                  onClick={() => setEditTx(tx)}>
-                  <div className="flex items-center gap-3">
-                    <CategoryIcon icon={cat?.icon} name={cat?.name ?? ''} className="text-xl" />
-                    <div>
-                      <div className="text-sm font-medium" style={{ color: 'var(--ink)' }}>
-                        {cat?.name || '未分类'}
-                        {tx.source === 'nlu_ai' && (
-                          <span className="ml-1.5 text-[10px] px-1.5 py-0.5 rounded-full"
-                            style={{ background: 'var(--glass)', color: 'var(--accent)', border: '1px solid var(--glass-border)' }}>
-                            AI
-                          </span>
-                        )}
-                      </div>
-                      {tx.note && <div className="text-xs mt-0.5" style={{ color: 'var(--ink3)' }}>{tx.note}</div>}
-                    </div>
-                  </div>
-                  <span className={`money-num text-sm font-medium ${tx.type === 'expense' ? 'text-expense' : 'text-income'}`}>
-                    {tx.type === 'expense' ? '-' : '+'}{formatCents(tx.amountCents)}
-                  </span>
-                </div>
+                <TxListRow
+                  key={tx.id}
+                  icon={cat?.icon}
+                  iconName={cat?.name ?? ''}
+                  title={note || cat?.name || '未分类'}
+                  sub={`${localHHmm(tx.occurredAt)} · ${cat?.name || '未分类'}`}
+                  amountCents={tx.amountCents}
+                  isExpense={tx.type === 'expense'}
+                  aiBadge={tx.source === 'nlu_ai'}
+                  borderBottom
+                  onClick={() => setEditTx(tx)}
+                />
               )
             })}
           </div>

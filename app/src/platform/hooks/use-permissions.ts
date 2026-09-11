@@ -41,8 +41,8 @@ export interface UsePermissionsReturn {
   requestPermission: (permission: PermissionType) => Promise<void>
   /** 打开应用设置页 */
   openSettings: () => Promise<void>
-  /** 手动刷新权限状态 */
-  refresh: () => Promise<void>
+  /** 手动刷新权限状态（T14-6：返回查询结果供调用方即时判定，失败回默认态） */
+  refresh: () => Promise<PermissionStatusData>
 }
 
 export function usePermissions(): UsePermissionsReturn {
@@ -50,17 +50,19 @@ export function usePermissions(): UsePermissionsReturn {
   const [status, setStatus] = useState<PermissionStatusData>(DEFAULT_STATUSES)
   const [loading, setLoading] = useState(true)
 
-  const refresh = useCallback(async () => {
+  const refresh = useCallback(async (): Promise<PermissionStatusData> => {
     if (!bridge.isAvailable()) {
       setLoading(false)
-      return
+      return DEFAULT_STATUSES
     }
     try {
       const data = await bridge.getPermissionStatus()
       setStatus(data)
+      return data
     } catch (error) {
       // 查询失败保持默认值
       console.warn('[usePermissions] refresh failed:', error)
+      return DEFAULT_STATUSES
     } finally {
       setLoading(false)
     }

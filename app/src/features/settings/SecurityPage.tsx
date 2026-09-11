@@ -12,6 +12,7 @@ import { useNavigate } from 'react-router'
 import { PageHeader } from '../../components/Layout'
 import { BridgeError } from '../../platform/bridge/native-bridge'
 import { useBridge } from '../../platform/hooks/use-bridge'
+import { useAssistantChatStore } from '../../platform/store/assistant-chat-store'
 
 export function SecurityPage() {
   const bridge = useBridge()
@@ -118,6 +119,8 @@ export function SecurityPage() {
     setPageError(null)
     try {
       await bridge.logoutAuth()
+      // T14-4（REQ-42 / 决策 #7）：聊天历史随登出清空，防跨账号串会话
+      useAssistantChatStore.getState().clear()
       setConfirmMode(null)
       if (after === 'onboarding') {
         navigate('/onboarding', { replace: true })

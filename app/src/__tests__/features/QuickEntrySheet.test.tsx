@@ -575,4 +575,23 @@ describe('QuickEntrySheet', () => {
     const [tx] = mockBridge.insertTransaction.mock.calls[0]
     expect(tx.includeInBudget).toBe(true)
   })
+
+  // T15-3（REQ-52 / 决策#3）：键盘顶起——只消费既有 --ime-bottom-px 注入通道。
+  // jsdom 不解析 calc/env/var，样式挂载断言即卡验收口径；回落 0 由表达式两处
+  // 0px fallback 保证（未注入环境 = calc(0px + 0px)，与改动前布局一致）。
+  it('T15-3 键盘顶起：外层 fixed 容器挂载 ime 消费 padding（含 0px 回落）', () => {
+    render(
+      <QuickEntrySheet
+        categories={TEST_CATEGORIES}
+        onClose={onClose}
+        onSuccess={onSuccess}
+      />,
+    )
+    const root = screen.getByTestId('quick-entry-root')
+    // 锚定形态不变：bottom 弹层仍 fixed 全屏 + justify-end，padding 由脚本注入变量驱动
+    expect(root.className).toContain('fixed inset-0')
+    expect(root.className).toContain('justify-end')
+    expect(root.style.paddingBottom)
+      .toBe('calc(env(safe-area-inset-bottom, 0px) + var(--ime-bottom-px, 0px))')
+  })
 })

@@ -16,6 +16,7 @@ import org.robolectric.annotation.Config
  * 核心不变量（镜像 RepositorySavingsTest）：规则写操作**绝不产生 pending
  * mutation**（服务端不认 scheduled_rules，入队=422 毒丸）；引擎生成的交易
  * 由 ScheduledTxEngineTest 验证正常入队。
+ * 第十四轮 T14-5（REQ-43）：追加 runHour/runMinute 两列往返、默认值与值域校验。
  */
 @RunWith(RobolectricTestRunner::class)
 @Config(sdk = [33])
@@ -53,13 +54,19 @@ class RepositoryScheduledTest {
     @Test
     fun insert_thenList_roundTripsAllColumns() = runBlocking {
         repository.insertScheduledRule(
-            rule("r1").copy(accountId = "a1", includeInBudget = false, lastRunDate = "2026-09-08")
+            rule("r1").copy(
+                accountId = "a1", includeInBudget = false, lastRunDate = "2026-09-08",
+                runHour = 9, runMinute = 30,
+            )
         )
         val got = repository.listScheduledRules()[0]
         assertEquals("r1", got.id)
         assertEquals("a1", got.accountId)
         assertFalse(got.includeInBudget)
         assertEquals("2026-09-08", got.lastRunDate)
+        // T14-5（REQ-43）：执行时刻两列往返
+        assertEquals(9, got.runHour)
+        assertEquals(30, got.runMinute)
         val s = db.scheduledRuleDao().getById("r1")!!
         assertEquals("expense", s.type)
         assertEquals("早餐", s.name)
@@ -68,6 +75,32 @@ class RepositoryScheduledTest {
         assertEquals("2026-09-01", s.startDate)
         assertNull(s.endDate)
         assertTrue(s.enabled)
+    }
+
+    @Test
+    fun runTime_defaults_are0800() = runBlocking {
+        // v9 迁移语义（引擎测试之外，存取层确认实体默认值）：未显式给时刻 = 8/0
+        repository.insertScheduledRule(rule("r1"))
+        val got = repository.getScheduledRule("r1")!!
+        assertEquals(8, got.runHour)
+        assertEquals(0, got.runMinute)
+    }
+
+    @Test
+    fun insert_rejectsOutOfRangeRunTime() = runBlocking {
+        for (bad in listOf(
+            rule("r1").copy(runHour = -1),
+            rule("r1").copy(runHour = 24),
+            rule("r1").copy(runMinute = -1),
+            rule("r1").copy(runMinute = 60),
+        )) {
+            var threw = false
+            try { repository.insertScheduledRule(bad) } catch (e: IllegalArgumentException) { threw = true }
+            assertTrue("应拒绝: ${bad.runHour}:${bad.runMinute}", threw)
+        }
+        // 边界合法：0:0 与 23:59
+        repository.insertScheduledRule(rule("r1", version = 1).copy(runHour = 0, runMinute = 0))
+        repository.insertScheduledRule(rule("r2").copy(runHour = 23, runMinute = 59))
     }
 
     @Test

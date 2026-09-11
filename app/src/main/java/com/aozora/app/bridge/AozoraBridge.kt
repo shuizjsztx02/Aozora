@@ -14,6 +14,7 @@ import com.aozora.app.image.ImagePicker
 import com.aozora.app.permission.PermissionManager
 import com.aozora.app.permission.PermissionStatus
 import com.aozora.app.reminder.ReminderScheduler
+import com.aozora.app.scheduled.ScheduledTxReceiver
 import com.aozora.app.sync.SyncEngine
 import com.aozora.app.sync.SyncScheduler
 import com.aozora.app.sync.SyncState
@@ -129,6 +130,7 @@ class AozoraBridge(
             // Book
             BridgeCommands.BOOK_LIST -> handleBookList(requestId)
             BridgeCommands.BOOK_INSERT -> handleBookInsert(requestId, payload)
+            BridgeCommands.BOOK_UPDATE -> handleBookUpdate(requestId, payload)
 
             // Category
             BridgeCommands.CATEGORY_LIST -> handleCategoryList(requestId)
@@ -372,6 +374,27 @@ class AozoraBridge(
             archivedAt = null
         )
         repository.insertBook(book, mutationId)
+        return BridgeResponse.success(requestId, JSONObject().put("id", book.id).toString())
+    }
+
+    /**
+     * 第十四轮 T14-2（REQ-39 / 决策 #3）：仿 handleAccountUpdate 局部合并 —
+     * 缺省字段沿用当前值；version 必须递增；master 拒绝（Repository.updateBook 拦截）。
+     */
+    private suspend fun handleBookUpdate(requestId: String, p: JSONObject): BridgeResponse {
+        val bObj = p.getJSONObject("book")
+        val mutationId = p.getString("mutationId")
+        val current = repository.getBook(bObj.getString("id"))
+            ?: throw IllegalArgumentException("book not found")
+        val book = BookEntity(
+            id = current.id,
+            ownerId = current.ownerId,
+            name = BridgePayload.optionalString(bObj, "name") ?: current.name,
+            icon = BridgePayload.optionalString(bObj, "icon") ?: current.icon,
+            archivedAt = current.archivedAt,
+            version = BridgePayload.version(bObj)
+        )
+        repository.updateBook(book, mutationId)
         return BridgeResponse.success(requestId, JSONObject().put("id", book.id).toString())
     }
 
@@ -687,6 +710,7 @@ class AozoraBridge(
                 put("repeat", r.repeat)
                 put("startDate", r.startDate); put("endDate", r.endDate ?: JSONObject.NULL)
                 put("enabled", r.enabled); put("lastRunDate", r.lastRunDate ?: JSONObject.NULL)
+                put("runHour", r.runHour); put("runMinute", r.runMinute)
                 put("createdAt", r.createdAt); put("updatedAt", r.updatedAt); put("version", r.version)
             })
         }
@@ -712,12 +736,17 @@ class AozoraBridge(
             endDate = BridgePayload.optionalString(r, "endDate"),
             enabled = r.optBoolean("enabled", true),
             lastRunDate = null,
+            // T14-5（REQ-43）：执行时刻缺省 8:00（存量语义）；值域由 Repository 把关
+            runHour = r.optInt("runHour", 8),
+            runMinute = r.optInt("runMinute", 0),
             createdAt = if (r.has("createdAt")) r.getLong("createdAt") else now,
             updatedAt = now,
             archivedAt = null,
             version = BridgePayload.version(r)
         )
         repository.insertScheduledRule(entity)
+        // T14-5（决策 #4 B2）：规则增改后即刻重排单闹钟（min-over-rules 重算）
+        ScheduledTxReceiver.scheduleNext(webView.context.applicationContext)
         return BridgeResponse.success(requestId, JSONObject().put("id", entity.id).toString())
     }
 
@@ -743,12 +772,17 @@ class AozoraBridge(
             enabled = if (r.has("enabled")) r.getBoolean("enabled") else current.enabled,
             // lastRunDate 引擎专管，用户编辑不可触碰
             lastRunDate = current.lastRunDate,
+            // T14-5（REQ-43）局部合并：键缺省保留原值（enabled 快捷开关不擦时刻）
+            runHour = if (r.has("runHour")) r.optInt("runHour", current.runHour) else current.runHour,
+            runMinute = if (r.has("runMinute")) r.optInt("runMinute", current.runMinute) else current.runMinute,
             createdAt = current.createdAt,
             updatedAt = System.currentTimeMillis(),
             archivedAt = current.archivedAt,
             version = BridgePayload.version(r)
         )
         repository.updateScheduledRule(entity)
+        // T14-5（决策 #4 B2）：含 enabled 快捷开关在内的一切变更 → 立即重排单闹钟
+        ScheduledTxReceiver.scheduleNext(webView.context.applicationContext)
         return BridgeResponse.success(requestId, JSONObject().put("id", entity.id).toString())
     }
 
@@ -1240,6 +1274,11 @@ class AozoraBridge(
             }
         }
 
+        // T14-6（REQ-41 / 决策 #6）：service.startRecording 的失败路径都先同步回调
+        // onError 再返回 false（VoiceRecognitionService 各早退分支），这里捕获该码，
+        // 让 promise 拒绝与事件推送同码——旧实现固定回 start_failed，会把具体的
+        // permission_denied 语义覆盖掉，前端恢复流（授权内联钮）随之失效。
+        var startFailure: Pair<String, String>? = null
         val started = service.startRecording(object : VoiceRecognitionService.VoiceRecognitionListener {
             override fun onPartialResult(text: String) {
                 dispatchVoicePartial(text)
@@ -1250,6 +1289,7 @@ class AozoraBridge(
             }
 
             override fun onError(code: String, message: String) {
+                startFailure = code to message
                 dispatchVoiceError(code, message)
             }
         })
@@ -1257,7 +1297,8 @@ class AozoraBridge(
         return if (started) {
             BridgeResponse.success(requestId, JSONObject().put("started", true).toString())
         } else {
-            BridgeResponse.error(requestId, "start_failed", "Failed to start recording")
+            val (code, message) = startFailure ?: ("start_failed" to "Failed to start recording")
+            BridgeResponse.error(requestId, code, message)
         }
     }
 

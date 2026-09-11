@@ -5,6 +5,7 @@
  * - 离线降级（无网络时不请求）
  * - 客户端缓存（localStorage，TTL 5 分钟；卡头"刷新"可绕过）
  * - 空数据诊断：云端 0 笔但本地有交易 → 提示 + 「去同步」按钮（T10-7 / 决策 #8）
+ * - 404 'Book not found'：账本未同步 → 同样给出「去同步」引导（T13-2 / 决策 #5）
  * - 加载/错误状态
  */
 
@@ -187,9 +188,28 @@ export function AiInsightCard({ bridge, bookId, period, localCount }: AiInsightC
       )}
 
       {error && (
-        <div className="text-xs text-expense py-2">
-          {error}
-        </div>
+        error.includes('Book not found') ? (
+          // T13-2（决策 #5）：404 'Book not found' = 账本未 push 到云端，
+          // 专用引导 + 去同步（复用 handleSync：triggerAuthSync → 清缓存重查）。
+          <div className="text-xs text-ink3 py-2">
+            该账本尚未同步到云端
+            <div className="flex items-center gap-2 mt-2">
+              <button
+                onClick={handleSync}
+                disabled={syncing}
+                className="text-xs px-3 py-1.5 rounded-lg font-medium disabled:opacity-40"
+                style={{ background: 'var(--accent)', color: 'white' }}
+              >
+                {syncing ? '同步中...' : '去同步'}
+              </button>
+              {syncError && <span className="text-xs text-expense">{syncError}</span>}
+            </div>
+          </div>
+        ) : (
+          <div className="text-xs text-expense py-2">
+            {error}
+          </div>
+        )
       )}
 
       {report && (

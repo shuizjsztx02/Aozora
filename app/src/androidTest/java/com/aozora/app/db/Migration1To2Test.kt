@@ -5,7 +5,6 @@ import androidx.room.testing.MigrationTestHelper
 import androidx.sqlite.db.framework.FrameworkSQLiteOpenHelperFactory
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import androidx.test.platform.app.InstrumentationRegistry
-import com.aozora.app.db.migrations.MIGRATION_1_2
 import com.aozora.app.db.entity.*
 import kotlinx.coroutines.runBlocking
 import org.junit.Assert.*
@@ -48,13 +47,10 @@ class Migration1To2Test {
         }
 
         // 2. 打开 v2 — 自动触发 migration
-        val db = Room.databaseBuilder(
+        val db = AozoraDatabase.open(
             InstrumentationRegistry.getInstrumentation().targetContext,
-            AozoraDatabase::class.java,
             TEST_DB
         )
-            .addMigrations(MIGRATION_1_2)
-            .build()
 
         try {
             // 3. sync_meta 表存在并可写
