@@ -42,7 +42,7 @@ T-M0-07 要求输出：无密码基础设施清单、staging 可用性结论、�
 |---|---|---|
 | 服务器 A（业务） | 公网 `116.62.196.255` / 内网 `192.168.44.13`，2C4G，Nginx 1.16.1 已装（当前未监听端口） | ✅ 确认 |
 | 服务器 B（数据库） | 公网 `47.96.181.37` / 内网 `192.168.44.12`，2C4G，Docker PostgreSQL 18.6 双容器：`pg-prod`（5432 / `prod_db`）和 `pg-test`（15432 / `test_db`），数据目录分别为 `/data/postgresql/prod`、`/data/postgresql/test` | ✅ 确认 |
-| 部署形态 | A：Docker Compose 双实例（`docker-compose.prod.yml`，api-test 绑 `127.0.0.1:18080`、api-prod 绑 `127.0.0.1:8080`，经 Nginx 分流 8081/443）；B：现有 Docker PostgreSQL 双容器，仅接受 A 内网访问（精确 `pg_hba` + 安全组双限） | ✅ 落地文件已入库 |
+| 部署形态 | A：Docker Compose 双实例（`docker-compose.prod.yml`，api-test 绑 `0.0.0.0:18080` 以兼容现有 Nginx 的 A 机内网地址上游、api-prod 绑 `127.0.0.1:8080`，经 Nginx 分流 8081/443）；B：现有 Docker PostgreSQL 双容器，仅接受 A 内网访问（精确 `pg_hba` + 安全组双限） | ✅ 落地文件已入库 |
 | 网络 | 同 VPC 内网 `192.168.44.0/24` 互通；云安全组由账户所有者配置（规则清单见 `infra/deploy/prod/RUNBOOK.md` §1） | ✅ 可放行（已确认） |
 | 域名 / 证书 / 备案 | **仅有 IP，无域名**（阿里云大陆节点，80/443 域名访问需备案） | ⏳ 生产 HTTPS 挂起，T-M6-01a 待办 |
 | 数据迁移 | 不迁移本地联调库；保留 B 机现有初始化库 `prod_db` / `test_db`，由 API 账号执行 `alembic upgrade head` 建表 | ✅ 确认 |
@@ -51,3 +51,8 @@ T-M0-07 要求输出：无密码基础设施清单、staging 可用性结论、�
 
 `R-PROD-09` 保持开放（域名/备案/证书未闭环，阻塞生产发布而非测试链路）；
 `R-PROD-12`（release 基址）与域名同批关闭。执行入口：`infra/deploy/prod/RUNBOOK.md`。
+
+> 2026-09-11 端口边界补充（T-M6-01a）：`api-test` 的主机发布改为
+> `0.0.0.0:18080`，使现有 Nginx 上游 `192.168.44.13:18080` 可连接；
+> **云安全组不得为 TCP 18080 增加公网入方向规则**。对外访问仍必须经 Nginx
+> 的受控入口；若发现 18080 已被公网放行，应先移除该规则再继续测试。

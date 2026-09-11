@@ -5,14 +5,15 @@
 # 服务器 A（192.168.44.13 / 公网 116.62.196.255）上的业务服务。
 #
 # 一台 A 机两个实例，用 profile 隔离（互不干扰，可分别启停）：
-#   测试实例  api-test  ENV=staging     主机端口 127.0.0.1:18080 → B:15432/test_db
+#   测试实例  api-test  ENV=staging     主机端口 0.0.0.0:18080   → B:15432/test_db
 #   生产实例  api-prod  ENV=production  主机端口 127.0.0.1:8080  → B:5432 /prod_db
 #
 #   启用测试：docker compose -f docker-compose.prod.yml --profile test up -d --build
 #   启用生产：docker compose -f docker-compose.prod.yml --profile prod up -d --build
 #
-# 主机端口只绑 127.0.0.1 —— 公网流量必须经 Nginx 转发（8081→18080 / 443→8080），
-# API 不直接暴露。所有变量取自仓库根 .env（服务器本机文件，不进 git）：
+# api-test 为兼容现有 Nginx 的 A 机内网地址上游而绑 0.0.0.0:18080；安全组不得
+# 放行 TCP 18080 的公网入方向。公网流量仍必须经 Nginx 转发（8081→18080 / 443→8080）。
+# 所有变量取自仓库根 .env（服务器本机文件，不进 git）：
 # 模板见 infra/deploy/prod/deploy.env.example，操作步骤见 infra/deploy/prod/RUNBOOK.md。
 
 x-api-build: &api-build
@@ -48,7 +49,7 @@ services:
     profiles: ["test"]
     container_name: aozora-api-test
     ports:
-      - "127.0.0.1:18080:8000"
+      - "0.0.0.0:18080:8000"
     volumes:
       - api-test-data:/data
     environment:

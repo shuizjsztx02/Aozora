@@ -9,7 +9,7 @@
 ```
 公网用户 ──HTTPS:443──┐                       ┌── 内网 TCP 5432 ──▶ B机 Docker pg-prod / prod_db
                       ▼                       ▼
-测试人员 ──IP:8081──▶ A机 Nginx ──▶ api-test/api-prod（容器，只绑 127.0.0.1:18080/8080）
+测试人员 ──IP:8081──▶ A机 Nginx ──▶ api-test/api-prod（api-test 绑 0.0.0.0:18080；api-prod 只绑 127.0.0.1:8080）
                        (192.168.44.13)              │
                                                     └── 内网 TCP 15432 ──▶ B机 Docker pg-test / test_db
                                                     (47.96.181.37 / 192.168.44.12)
@@ -50,6 +50,8 @@ observability 栈（Prometheus/Grafana/Loki/Tempo/OTel/Alertmanager 六件套体
 | B | **仅内网**入网 | TCP `5432` | `192.168.44.13/32` | A→B 生产库（本轮先放行，生产实例后续启用） |
 
 - **绝对不要**给 B 的 5432/15432 开 `0.0.0.0/0`（公网侧）。整机快照兜底 ≠ 不怕泄露。
+- A 的 api-test 为兼容现有 Nginx 上游而监听 `0.0.0.0:18080`，但安全组**不得**放行
+  TCP `18080` 的公网入方向；测试人员只访问 Nginx 入口 `8081`。
 - 阿里云同 VPC 内网互访走内网安全组规则；若两台机器在同一安全组，也可用
   "安全组内互通"替代上面两条，但端口仍建议在组方向上最小化。
 
@@ -132,7 +134,7 @@ vim .env
 ```
 
 脚本自动做：前置检查（docker/.env 完整性/A→B 内网 TCP 连通）→ 构建镜像 →
-起 `aozora-api-test`（只绑 `127.0.0.1:18080`）→ 容器内 `alembic upgrade head` →
+起 `aozora-api-test`（主机绑定 `0.0.0.0:18080`）→ 容器内 `alembic upgrade head` →
 `/health/ready` 探活。失败即停并打印排查方向；看日志：
 `docker compose -f docker-compose.prod.yml --profile test logs --tail 50 api-test`。
 
