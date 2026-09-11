@@ -179,8 +179,10 @@ class Settings(BaseSettings):
     # Daily quota for GUEST users only; ACTIVE users have no daily cap
     # (product decision 2026-09-06). Counted per calendar day in the
     # user's own timezone (User.timezone).
+    # 联测临时提额（2026-09-11，T15 真机+模拟器回归多句连测）——原值 20，
+    # 联测结束后必须恢复为 20（测试面配额值由 conftest 钉死，不随本默认值漂移）。
     ai_daily_quota_guest: int = Field(
-        default=20,
+        default=100000,
         gt=0,
         validation_alias=AliasChoices("AI_DAILY_QUOTA_GUEST", "ai_daily_quota_guest"),
     )
