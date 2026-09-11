@@ -91,7 +91,7 @@ sudo usermod -aG docker $USER && newgrp docker   # 免 sudo 用 docker（可选�
 ### 3.2 获取仓库
 
 ```bash
-# 方式一（默认，需要先把本 RUNBOOK 所在提交 push 到 origin）：
+# 方式一（服务器可访问 GitHub；需要先把本 RUNBOOK 所在提交 push 到 origin）：
 git add .dockerignore docker-compose.prod.yml server/Dockerfile \
   app/src/debug/res/xml/network_security_config.xml \
   docs/adr/ADR-001-infrastructure-baseline.md infra/README.md infra/deploy/prod
@@ -101,7 +101,15 @@ git push origin main
 git clone https://github.com/shuizjsztx02/Aozora.git ~/Aozora && cd ~/Aozora
 # 后续更新：cd ~/Aozora && git pull --ff-only
 
-# 方式二（不 push 时，Windows PowerShell 直接传工作区，排除杂项）：
+# 方式二（本项目当前服务器使用：服务器无法访问 GitHub 时，本机经 SSH 推送）：
+# ① 首次在服务器执行：
+#   mkdir -p ~/git && git init --bare ~/git/aozora.git
+#   git --git-dir=~/git/aozora.git symbolic-ref HEAD refs/heads/main
+# ② Windows 本机将 ~/git/aozora.git 配为 Git remote，用现有 PEM SSH 配置推送 main。
+# ③ 首次在服务器工作目录执行：git clone ~/git/aozora.git ~/Aozora && cd ~/Aozora
+#    后续更新：cd ~/Aozora && git pull --ff-only
+
+# 方式三（不使用 Git 时，Windows PowerShell 直接传工作区，排除杂项）：
 #   scp -r D:\Code2026\aozora\{docker-compose.prod.yml,server,contracts,infra,app,.github,.gitignore} ubuntu@116.62.196.255:~/Aozora/
 #   （服务端镜像构建只用到 server/ + contracts/；app/ 只为 Alembic 之外的完整性）
 cd ~/Aozora
@@ -133,7 +141,9 @@ vim .env
 把仓库带上 B 机（任意方式，脚本自包含）后：
 
 ```bash
-git clone https://github.com/shuizjsztx02/Aozora.git ~/Aozora && cd ~/Aozora
+# 按 §3.2 方式二先将本机 main push 到 ~/git/aozora.git：
+git clone ~/git/aozora.git ~/Aozora && cd ~/Aozora
+# 后续更新：cd ~/Aozora && git pull --ff-only
 bash infra/deploy/prod/b-setup-postgres.sh
 ```
 
