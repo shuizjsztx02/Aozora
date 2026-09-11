@@ -220,3 +220,45 @@ app.include_router(telemetry_router, prefix=cfg.api_prefix)
 @app.get("/", tags=["meta"])
 async def root() -> dict[str, str]:
     return {"message": "Aozora API", "docs": "/docs"}
+
+
+# -- Shared reverse-proxy path prefix ---------------------------------------
+# A 机的 Nginx 是多业务共享配置，`location /aozora-api/` 无法改为剥离前缀，
+# 由应用入口在 ASGI 最外层接受带前缀的请求：/aozora-api/... → /...。
+# 剥离后走的中间件/路由/指标链路与直连完全一致（RequestBodyLimit 的
+# exclude_paths、Prometheus route label 均维持 cfg.api_prefix 规范路径）；
+# 不带前缀的请求（回环探活、容器 healthcheck、本机开发）原样透传，两形态共存。
+
+SHARED_PROXY_PREFIX = "/aozora-api"
+
+
+class SharedProxyPrefixMiddleware:
+    """Pure-ASGI middleware: strips ``SHARED_PROXY_PREFIX`` from http path/raw_path."""
+
+    def __init__(self, asgi_app) -> None:
+        self._app = asgi_app
+
+    async def __call__(self, scope, receive, send) -> None:
+        if scope["type"] == "http":
+            original: str = scope["path"]
+            if original == SHARED_PROXY_PREFIX:
+                stripped: str | None = "/"
+            elif original.startswith(SHARED_PROXY_PREFIX + "/"):
+                stripped = original[len(SHARED_PROXY_PREFIX):]
+            else:
+                stripped = None
+            if stripped is not None:
+                scope = {**scope, "path": stripped}
+                raw = scope.get("raw_path")
+                if isinstance(raw, bytes):
+                    prefix_b = SHARED_PROXY_PREFIX.encode()
+                    if raw == prefix_b:
+                        scope["raw_path"] = b"/"
+                    elif raw.startswith(prefix_b + b"/"):
+                        scope["raw_path"] = raw[len(prefix_b):]
+        await self._app(scope, receive, send)
+
+
+# add_middleware 最后添加 = 用户中间件最外层（在 SecurityHeaders 之外），
+# 且保持 app 仍是 FastAPI 实例（测试与 uvicorn 均直接引用 src.main:app）。
+app.add_middleware(SharedProxyPrefixMiddleware)
