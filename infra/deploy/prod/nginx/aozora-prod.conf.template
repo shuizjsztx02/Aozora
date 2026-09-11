@@ -1,0 +1,50 @@
+# aozora-prod.conf.template — A 机 Nginx 生产入口（截图规划：公网用户 → HTTPS:443）
+#
+# ⚠ 待启用模板：当前只有 IP、无域名、无备案、无证书，本文件【不要】放进
+#   /etc/nginx/conf.d/（放下去 nginx -t 会因证书文件不存在而失败）。
+#   整个 server 块先注释，落地条件（RUNBOOK 第 7 节）：
+#     1. 域名解析到 116.62.196.255 并完成 ICP 备案（大陆节点硬前提）
+#     2. 签发证书（certbot --nginx -d api.aozora.app，或阿里云免费 DV 证书）
+#     3. 替换下方 server_name / 证书路径，去掉注释，nginx -t && reload
+#     4. 安全组放行 A 机 443（及 80，供 certbot HTTP-01 验证）
+#
+# 说明：
+#   • nginx 1.16.1 支持 TLS 1.3（需编译/链接 OpenSSL 1.1.1+，若 ssl_protocols
+#     配置报错就只留 TLSv1.2）。
+#   • 应用层安全头已由服务端中间件下发（T-M5-02b security.py），nginx 只做
+#     TLS 终结 + 透传，不重复叠加。
+
+# server {
+#     listen 443 ssl;
+#     http2 on;                          # nginx ≥1.25；1.16 用 `listen 443 ssl http2;`
+#     server_name api.aozora.app;
+#
+#     ssl_certificate     /etc/letsencrypt/live/api.aozora.app/fullchain.pem;
+#     ssl_certificate_key /etc/letsencrypt/live/api.aozora.app/privkey.pem;
+#     ssl_protocols       TLSv1.2 TLSv1.3;
+#     ssl_prefer_server_ciphers off;
+#
+#     client_max_body_size 12m;
+#
+#     access_log /var/log/nginx/aozora-prod.access.log;
+#     error_log  /var/log/nginx/aozora-prod.error.log;
+#
+#     location / {
+#         proxy_pass http://127.0.0.1:8080;   # api-prod（docker-compose.prod.yml）
+#         proxy_set_header Host              $host;
+#         proxy_set_header X-Real-IP         $remote_addr;
+#         proxy_set_header X-Forwarded-For   $proxy_add_x_forwarded_for;
+#         proxy_set_header X-Forwarded-Proto $scheme;
+#         proxy_connect_timeout 5s;
+#         proxy_send_timeout    60s;
+#         proxy_read_timeout    60s;
+#     }
+# }
+#
+# # 80 仅用于 certbot 签发/续期与跳转
+# server {
+#     listen 80;
+#     server_name api.aozora.app;
+#     location /.well-known/acme-challenge/ { root /var/www/certbot; }
+#     location / { return 301 https://$host$request_uri; }
+# }

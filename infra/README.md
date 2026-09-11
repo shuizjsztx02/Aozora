@@ -12,7 +12,8 @@ infra/
 │   ├── verify-backup.sh  # Daily restore + assertion
 │   └── production-params.md  # D-EXEC-02 backfill checklist
 ├── deploy/               # T-M5-05a: Deployment scripts
-│   └── staging-deploy.sh # Zero-to-staging deployment
+│   ├── staging-deploy.sh # Zero-to-staging deployment
+│   └── prod/             # T-M6-01a: 双服务器生产迁移（RUNBOOK + B 建库/A 部署脚本 + nginx）
 └── monitoring/           # T-M5-05: Observability
     ├── alert-rules.yml   # Prometheus alerting rules
     ├── otel-collector-config.yaml  # OTel Collector routing
@@ -33,6 +34,7 @@ Secret values belong only in external secret storage and never in this repositor
 | `docker-compose.backup.yml` | T-M5-03 backup overlay |
 | `docker-compose.drill.yml` | T-M5-03b drill environment (isolated postgres 18) |
 | `docker-compose.staging.yml` | T-M5-05a staging full stack |
+| `docker-compose.prod.yml` | T-M6-01a 服务器 A 业务实例（api-test/api-prod profiles；DB 在服务器 B，本文件无 db 服务） |
 
 ## Runbooks
 

@@ -1,0 +1,31 @@
+# 服务端镜像构建只需 server/、contracts/（见 server/Dockerfile 的 COPY 清单）。
+# 本文件把仓库其余杂项挡在构建上下文之外——A 机部署走 git clone，
+# 没有它每次 build 都要打包上传整个 .git / node_modules（docker-compose.prod.yml）。
+.git
+.github
+.gradle
+.kotlin
+.pytest_cache
+.ruff_cache
+.scratch
+.superpowers
+.svn
+.env
+**/node_modules
+**/__pycache__
+**/.pytest_cache
+**/.ruff_cache
+**/.venv
+app/build
+app/node_modules
+app/dist
+app/visual-tests
+build/
+gradle
+screenshots
+tmp-shots
+tools
+docs
+*.png
+*.log
+local.properties
