@@ -7,18 +7,18 @@
 ## 0. 拓扑与本轮范围
 
 ```
-公网用户 ──HTTPS:443──┐                       ┌── 内网 TCP 5432 ──▶ B机 postgres 生产实例 aozora_prod
+公网用户 ──HTTPS:443──┐                       ┌── 内网 TCP 5432 ──▶ B机 Docker pg-prod / prod_db
                       ▼                       ▼
 测试人员 ──IP:8081──▶ A机 Nginx ──▶ api-test/api-prod（容器，只绑 127.0.0.1:18080/8080）
                        (192.168.44.13)              │
-                                                    └── 内网 TCP 15432 ──▶ B机 postgres 测试实例 aozora_test
+                                                    └── 内网 TCP 15432 ──▶ B机 Docker pg-test / test_db
                                                     (47.96.181.37 / 192.168.44.12)
 ```
 
 | 机器 | 角色 | 规格 | 跑什么 |
 |---|---|---|---|
 | A `116.62.196.255` / 内网 `192.168.44.13` | 业务 | 2C4G，Nginx 1.16.1 已装 | Docker：`api-test`（:18080）、`api-prod`（:8080，本轮不启动） |
-| B `47.96.181.37` / 内网 `192.168.44.12` | 数据库 | 2C4G，PG 18.6 双实例已装 | 生产 5432 / 测试 15432，只接受 A 机内网访问 |
+| B `47.96.181.37` / 内网 `192.168.44.12` | 数据库 | 2C4G，Docker PG 18.6 双容器已装 | `pg-prod`：5432 / `prod_db`；`pg-test`：15432 / `test_db`；仅接受 A 机内网访问 |
 
 **本轮范围 = 测试链路**（截图规划：测试人员 → `http://116.62.196.255:8081`）。
 选择理由：① 8081 非标端口按 IP 访问，与 ICP 备案管控（域名+80/443）无关，现在就能跑通；
@@ -28,8 +28,9 @@
 ③ 测试实例跑 `ENV=staging + DEV_AUTH_CODE=000000`，短信供应商（D-EXEC-03）未接入前
 **只有 staging 能测手机验证码登录**，这正是测试环境存在的意义。
 
-**数据策略**：本地库仅是联调数据，**不迁移**。两库均空库起步，由部署脚本
-`alembic upgrade head` 建表（当前链至 `0015_feedback`+）。
+**数据策略**：本地联调库**不迁移**。B 机保留现有初始化库 `prod_db` / `test_db` 与
+数据卷；部署脚本仅创建低权限 API 账号并收紧 HBA，由 A 机 `alembic upgrade head`
+建表（当前链至 `0015_feedback`+）。
 
 observability 栈（Prometheus/Grafana/Loki/Tempo/OTel/Alertmanager 六件套体检台）
 **本轮不上**：2C4G 与 API 同挤会互相拖累，测试期 `docker logs` + 直查 B 库足够。
@@ -98,6 +99,7 @@ git diff --cached --check && git diff --cached --name-status
 git commit -m "feat(infra): add dual-server staging deployment assets (T-M6-01a)"
 git push origin main
 git clone https://github.com/shuizjsztx02/Aozora.git ~/Aozora && cd ~/Aozora
+# 后续更新：cd ~/Aozora && git pull --ff-only
 
 # 方式二（不 push 时，Windows PowerShell 直接传工作区，排除杂项）：
 #   scp -r D:\Code2026\aozora\{docker-compose.prod.yml,server,contracts,infra,app,.github,.gitignore} ubuntu@116.62.196.255:~/Aozora/
@@ -126,22 +128,24 @@ vim .env
 `/health/ready` 探活。失败即停并打印排查方向；看日志：
 `docker compose -f docker-compose.prod.yml --profile test logs --tail 50 api-test`。
 
-## 4. 服务器 B：建库建号（一次性，约 5 分钟）
+## 4. 服务器 B：配置 API 账号与 HBA（一次性，约 5 分钟）
 
 把仓库带上 B 机（任意方式，脚本自包含）后：
 
 ```bash
-sudo bash infra/deploy/prod/b-setup-postgres.sh
-# 提示输入 postgres 超级密码（你手里那个）
+git clone https://github.com/shuizjsztx02/Aozora.git ~/Aozora && cd ~/Aozora
+bash infra/deploy/prod/b-setup-postgres.sh
 ```
 
-脚本幂等：建角色/建库（已存在即跳过）→ 备份后追加 `pg_hba.conf` 最小授权行
-（仅 `192.168.44.13/32` 可连对应库）→ reload → 检查 `listen_addresses` 与
-全网宽放行条目（只报告不擅动）→ 打印两条现成的 `DATABASE_URL` 与随机密码
-（密码存 `/root/aozora-db-passwords.txt`，记得单独备份）。
+脚本只操作已存在的 Docker 容器 `pg-prod` / `pg-test`：保留 `prod_db` / `test_db`
+和数据卷，创建低权限 `aozora_api_prod` / `aozora_api_test`，授予 Alembic 所需的
+数据库与 `public` schema 权限。它会先备份容器内 `pg_hba.conf`，再把 initdb 默认的
+`host all all all ...` 宽规则替换为仅 `192.168.44.13/32` 可访问对应库与账号的规则，
+reload 后做规则校验。脚本不读取管理员密码文件；API 密码存
+`/root/aozora-app-db-passwords.txt`（权限 600），并在末尾打印两条 `DATABASE_URL`。
 
-若它报告 `listen_addresses=localhost`：按脚本给出的 sed+systemctl 两步改并重启，
-然后重跑脚本、回到 §3.4。
+若 API 账号已经存在而密码文件缺失，脚本会停止而不是重置未知密码；此时先回传错误
+输出，禁止手动删除角色或密码文件。
 
 **验收（A 机执行）**：
 
@@ -198,8 +202,8 @@ NSC debug 覆盖层已加入 `116.62.196.255` 明文白名单（本轮仓库改�
 4. **落库断言**（B 机）：
 
 ```bash
-sudo -u postgres psql -h 127.0.0.1 -p 15432 -U aozora_test -d aozora_test \
-  -c "select count(*) from transactions; select count(*) from sync_changes;"
+docker exec pg-test sh -c \
+  'psql -U "$POSTGRES_USER" -d test_db -c "select count(*) from transactions; select count(*) from sync_changes;"'
 ```
 
 5. 断网记账 → 恢复 → pending 上行、对账一致（沿用 T15 联调走查项）。
@@ -207,9 +211,11 @@ sudo -u postgres psql -h 127.0.0.1 -p 15432 -U aozora_test -d aozora_test \
 ### 6.4 环境重置（测试库随手清零）
 
 ```bash
-# B 机：
-sudo -u postgres psql -p 15432 -d postgres -c "drop database aozora_test" \
-  && sudo -u postgres psql -p 15432 -d postgres -c "create database aozora_test owner aozora_test encoding 'UTF8'"
+# B 机：这是破坏性操作，仅清空测试库；生产库与数据卷不受影响。
+docker exec pg-test sh -c \
+  'psql -U "$POSTGRES_USER" -d postgres -v ON_ERROR_STOP=1 -c "DROP DATABASE test_db WITH (FORCE);" -c "CREATE DATABASE test_db OWNER test_admin TEMPLATE template0 ENCODING '\''UTF8'\'' LC_COLLATE '\''C'\'' LC_CTYPE '\''C'\'';"'
+# B 机：重新授权既有 API 账号并确认 HBA，输出与密码均不应变化。
+bash infra/deploy/prod/b-setup-postgres.sh
 # A 机：再跑一次 ./infra/deploy/prod/a-deploy.sh test（会重放 alembic）
 ```
 

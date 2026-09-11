@@ -41,11 +41,11 @@ T-M0-07 要求输出：无密码基础设施清单、staging 可用性结论、�
 | 参数 | 实值 | 状态 |
 |---|---|---|
 | 服务器 A（业务） | 公网 `116.62.196.255` / 内网 `192.168.44.13`，2C4G，Nginx 1.16.1 已装（当前未监听端口） | ✅ 确认 |
-| 服务器 B（数据库） | 公网 `47.96.181.37` / 内网 `192.168.44.12`，2C4G，PostgreSQL 18.6 双实例已部署（生产 5432 / 测试 15432，独立账号与数据目录） | ✅ 确认 |
-| 部署形态 | A：Docker Compose 双实例（`docker-compose.prod.yml`，api-test 绑 `127.0.0.1:18080`、api-prod 绑 `127.0.0.1:8080`，经 Nginx 分流 8081/443）；B：原生 PG，仅接受 A 内网访问（pg_hba + 安全组双限） | ✅ 落地文件已入库 |
+| 服务器 B（数据库） | 公网 `47.96.181.37` / 内网 `192.168.44.12`，2C4G，Docker PostgreSQL 18.6 双容器：`pg-prod`（5432 / `prod_db`）和 `pg-test`（15432 / `test_db`），数据目录分别为 `/data/postgresql/prod`、`/data/postgresql/test` | ✅ 确认 |
+| 部署形态 | A：Docker Compose 双实例（`docker-compose.prod.yml`，api-test 绑 `127.0.0.1:18080`、api-prod 绑 `127.0.0.1:8080`，经 Nginx 分流 8081/443）；B：现有 Docker PostgreSQL 双容器，仅接受 A 内网访问（精确 `pg_hba` + 安全组双限） | ✅ 落地文件已入库 |
 | 网络 | 同 VPC 内网 `192.168.44.0/24` 互通；云安全组由账户所有者配置（规则清单见 `infra/deploy/prod/RUNBOOK.md` §1） | ✅ 可放行（已确认） |
 | 域名 / 证书 / 备案 | **仅有 IP，无域名**（阿里云大陆节点，80/443 域名访问需备案） | ⏳ 生产 HTTPS 挂起，T-M6-01a 待办 |
-| 数据迁移 | 不迁移本地联调库；生产/测试均空库 + `alembic upgrade head` | ✅ 确认 |
+| 数据迁移 | 不迁移本地联调库；保留 B 机现有初始化库 `prod_db` / `test_db`，由 API 账号执行 `alembic upgrade head` 建表 | ✅ 确认 |
 | 备份 | 云平台每日整机快照（A+B，非数据库级）；DB 级 pg_dump（ADR-005）待生产阶段在 B 机配置 | ⏳ D-EXEC-02 剩余项 |
 | staging | 本地 docker-compose.staging.yml 保留为演练/演示环境；线上"测试环境"= 本文 api-test 实例 | ✅ 决策 |
 

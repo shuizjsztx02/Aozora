@@ -5,8 +5,8 @@
 # 服务器 A（192.168.44.13 / 公网 116.62.196.255）上的业务服务。
 #
 # 一台 A 机两个实例，用 profile 隔离（互不干扰，可分别启停）：
-#   测试实例  api-test  ENV=staging     主机端口 127.0.0.1:18080 → B:15432/aozora_test
-#   生产实例  api-prod  ENV=production  主机端口 127.0.0.1:8080  → B:5432 /aozora_prod
+#   测试实例  api-test  ENV=staging     主机端口 127.0.0.1:18080 → B:15432/test_db
+#   生产实例  api-prod  ENV=production  主机端口 127.0.0.1:8080  → B:5432 /prod_db
 #
 #   启用测试：docker compose -f docker-compose.prod.yml --profile test up -d --build
 #   启用生产：docker compose -f docker-compose.prod.yml --profile prod up -d --build
@@ -56,7 +56,7 @@ services:
       # 测试实例跑 staging：保留 DEV_AUTH_CODE=000000 全功能可测
       # （短信供应商未接入/D-EXEC-03，production 下手机验证码登录不可用）
       ENV: staging
-      DATABASE_URL: ${TEST_DATABASE_URL:?在 .env 中设置，指向服务器 B 的 aozora_test}
+      DATABASE_URL: ${TEST_DATABASE_URL:?在 .env 中设置，指向服务器 B 的 test_db}
       SECRET_KEY: ${TEST_SECRET_KEY:?在 .env 中设置（openssl rand -hex 32）}
       DEV_AUTH_CODE: "000000"
       CORS_ORIGINS: "*"
@@ -75,7 +75,7 @@ services:
     environment:
       <<: *api-env
       ENV: production
-      DATABASE_URL: ${PROD_DATABASE_URL:?在 .env 中设置，指向服务器 B 的 aozora_prod}
+      DATABASE_URL: ${PROD_DATABASE_URL:?在 .env 中设置，指向服务器 B 的 prod_db}
       SECRET_KEY: ${PROD_SECRET_KEY:?在 .env 中设置（openssl rand -hex 32）}
       # 生产安全校验器硬约束（config.py::_check_production_safety）：
       # DEV_AUTH_CODE 必须为空、CORS 必须为 https://[sub.]aozora.app 列表、
