@@ -390,6 +390,15 @@ type ActionProposal = {
 | 认证失效 | 刷新会话；失败后保留本地待同步数据并引导重新登录 |
 | 数字不一致 | 拒绝动作，绝不入账，记录安全级 AI 校验事件 |
 
+### 6.5 Agent 化目标架构（M7）
+
+本节 6.1–6.4 描述**当前已实现**的单发制契约。M7 起向 **agent 化目标架构**演进，对标 DeepSeek App 的对话框体验：**服务端 Agent Loop + SSE 流式 + 客户端瘦渲染**，配合**设备能力通道**覆盖永远无法上云的设备类能力（权限/语音/分享/提醒等），使用户通过一个对话框完成 App 内全部已有功能。含多轮会话、工具调用、统一智能模式（路径对用户透明）、域路由与 Skill 封装。
+
+- **目标架构全文：** `docs/architecture/ai-agent-architecture.md`
+- **关键决策与替代方案：** `docs/adr/ADR-006-ai-agent-architecture.md`
+- **硬前提：** `savings` / `scheduled` / `personas` 三实体上云（`D-PROD-03` 云端权威的既定需求，非 agent 专属成本）
+- **不变的三条红线（agent 化不放松）：** ① 模型永不输出 UUID，名→id 由确定性代码解析；② 金额与统计由确定性代码计算，写库必经 ActionProposal 校验与审批门（审批四值：只有 `allowed-once` 放行）；③ 快路径（记账/查账）保持 12 s / 25 s SLO 不变，多步任务单步独立计时。
+
 ---
 
 ## 7. 前端与原型设计框架
@@ -784,6 +793,55 @@ app/src/
 
 ---
 
+### M7：AI Agent 能力升级
+
+> 2026-09-16 立项，同日 v2 修订（编排位置改为服务端 Host + SSE，对标 DeepSeek 模式）。目标架构全文与分期依据见 `docs/architecture/ai-agent-architecture.md`，关键决策见 `docs/adr/ADR-006-ai-agent-architecture.md`。本节维持父任务目标与验收边界；子任务范围、文件路径与验证命令在 T-M7-01 开工时补录至 `docs/milestones/production-execution-plan.md` M7 章节。
+> **总目标：** 用户通过一个对话框完成 App 内全部已有功能（25 个页面 / 约 70 个 bridge 命令覆盖的表单任务），新增功能不改动 prompt 主体。
+> **依赖：** M6 收口（T-M6-03）。T-M7-01（数据上云）不触及发布面，可在 M6 期间穿插，但不得阻塞 M6 关键路径；T-M7-02 及之后在 M6 收口后启动。
+> **不变红线：** ① 模型永不输出 UUID（名→id 由确定性代码解析）；② 金额与统计由确定性代码计算，写库必经 ActionProposal 校验与审批门（审批四值，只有 `allowed-once` 放行）；③ 快路径保持 12 s / 25 s SLO。
+
+#### T-M7-01 三实体上云（P0）
+
+- **目标：** `savings` / `scheduled` / `personas` 由「仅本地 Room」升级为「云端权威 + 本地副本」，使服务端可访问全部用户数据。
+- **依赖：** 无。**独立价值：** 多设备、备份、换机恢复本就需要（`D-PROD-03` 云端权威）。
+- **实施：** 服务端建表 + Alembic 迁移；接入现有 sync 模块（增量，不新协议）；客户端 Room 保留为副本（离线可读）；本地既有数据的一次性上行迁移策略；登出/删号的数据生命周期对齐。
+- **验收：** 三实体可同步（双端一致）；离线可读、恢复后上行；迁移用旧版本 fixture 验证；对账不变量全绿；本地既有数据不丢失；旧客户端行为不变。
+- **子任务：** 开工时拆分（savings → scheduled → personas，逐个交付）。
+
+#### T-M7-02 服务端 Agent Loop 与 SSE 流式通道（P1）
+
+- **目标：** 建立服务端 agent loop 与流式通道，使多步任务、多轮澄清（当前痛点）、步骤可见成为可能。
+- **依赖：** T-M7-01。
+- **实施：** Provider tool calling（`DashScopeProvider` payload 增 `tools`、解析 `tool_calls`）；服务端 loop（Turn/Step 分层 + 四条不变式 + 退出条件硬边界，见架构 §4.4）；工具注册表（服务端业务 API 生成 + description 人工审核）；域分组注入；SSE 端点（事件类型见架构 §8.1）；Kotlin 层 `okhttp-sse` 接收 + 桥事件转发（复用 `onPermissionResult` 模式）；`ai.agent` / `ai.cancel` 桥命令；基础会话状态（`AIConversation` 接线）；写工具产出 ActionProposal + 审批四值；配额改「每会话轮数 + token」双限。
+- **验收：** 多步用例通过（查预算 → 改预算 → 审批 → 执行）；多轮澄清用例通过（问 → 追问 → 简答「500」→ 正确解析）；四条不变式各有对应测试；退出边界触发时优雅终止并说明已完成部分；写工具参数一律经校验，无绕过路径；模型输出 UUID 被拒；审批四值行为正确（`unavailable` 视为拒绝）；旧客户端不调 `/ai/agent` 行为不变；Token 不出 Kotlin 层。
+- **子任务：** 开工时拆分。
+
+#### T-M7-03 客户端瘦渲染与多会话管理（P2）
+
+- **目标：** 客户端从「状态机」瘦身为「流渲染器 + 会话列表」，UX 对标 DeepSeek。
+- **依赖：** T-M7-02。
+- **实施：** `use-assistant.ts` 重构（移除 loop/工具选择逻辑，保留渲染与设备能力执行）；SSE 事件消费与步骤卡片流；统一智能模式（路径对用户透明，无模式选择）；多会话列表（新建/切换/重命名/删除）；确认卡对接审批四值；取消/打断交互；`assistant-chat-store` 降级为 UI 投影缓存。
+- **验收：** 步骤卡片流正确渲染（含完成/失败态）；简单任务无步骤展示（统一智能模式）；多会话可新建/切换/删除且互不串扰；取消收敛到一致状态；快路径 12 s / 25 s 体验回归不变。
+- **子任务：** 开工时拆分。
+
+#### T-M7-04 会话事件日志与摘要压缩（P3）
+
+- **目标：** 会话从「聊天记录」升级为「事件日志 + 派生投影」，获得恢复、分叉、压缩无损与审计能力。
+- **依赖：** T-M7-03。
+- **实施：** SessionEvent 日志（`type`/`seq`/`time`/`data`/`ignorable`）；Surface 事件子集定义（只有其进模型上下文）；`replace` 压缩操作（原文保留）；摘要生成与注入；会话恢复与分叉；日志保留期与隐私边界（对齐 `D-PROD-08`）。
+- **验收：** 断连后可按 `conversation_id` 恢复续跑；压缩后原文仍可查（审计）；结构性事件不占 token（实测验证）；摘要不含 ID；日志含用户自然语言的隐私边界有明确结论。
+- **子任务：** 开工时拆分。
+
+#### T-M7-05 全功能覆盖：域路由、Skill 与设备能力通道（P4）
+
+- **目标：** 达成总目标——对话覆盖 App 全部已有功能（含设备类能力），且新增能力不改 prompt 主体。
+- **依赖：** T-M7-04。
+- **实施：** 预路由（域选择，规则/轻量模型待评估）；Skill 封装（复用 `PromptTemplate` 机制，按需加载）；设备能力通道（单向指令 / 需结果两类，见架构 §4.3）；`ActionProposal` v2 覆盖全量 CRUD（先改 `ai-architecture.md` + schema + 前后端校验器 + fixtures）；帮助文档检索（可选，仅产品帮助/理财知识）。
+- **验收：** 功能覆盖清单（架构 §3.2）逐项可用；设备类能力（提醒/权限/分享/小组件/语音/图片/图标）在对话内可达；新增一个表单能力不改 prompt 主体的验证用例；ActionProposal v2 三方一致性通过；v1 契约与旧客户端兼容。
+- **子任务：** 开工时拆分。
+
+---
+
 ## 10. 全局验收与质量门禁
 
 任何 Task 的局部验收之外，还必须遵守：
@@ -843,7 +901,8 @@ app/src/
 |---|---|
 | 产品需求 | `docs/product/` |
 | 数据/API/同步 | 本文件第 5 节、`docs/architecture/data-model.md`、相关 ADR（如已创建） |
-| AI | 本文件第 6 节、`docs/architecture/ai-architecture.md` |
+| AI（当前契约） | 本文件第 6.1–6.4 节、`docs/architecture/ai-architecture.md` |
+| AI（agent 化，M7+） | 本文件第 6.5 节与第 9 节 M7、`docs/architecture/ai-agent-architecture.md`、`docs/adr/ADR-006-ai-agent-architecture.md` |
 | 前端/UI | 本文件第 7 节、`docs/design/tokens.md`、视觉提案 HTML |
 | Android 原生 | `docs/architecture/overview.md`、相关 Kotlin 文件 |
 | 安全/生产 | `docs/architecture/security.md`、`docs/engineering/`、风险登记册 |
@@ -879,6 +938,7 @@ app/src/
 | D-PROD-09 | 已确认 | 商业化是否进入首发 | 首发不接支付，只预留 entitlement 和 AI 配额字段 | M2、M4、M6 |
 | D-PROD-10 | 已确认 | 首发多设备范围 | 只做协议和数据结构预留；首发不实现多设备同步和实时推送 | M3 |
 | D-PROD-11 | 已确认 | 项目与 App 名称 | 唯一正式名称为 `Aozora`；历史名称全部废弃；`小贝`仅保留为 AI 伙伴角色 | M0、M4、M6 |
+| D-PROD-12 | 已确认（2026-09-16） | AI Agent 编排位置 | **服务端 Agent Loop + SSE 流式 + 客户端瘦渲染**，配合设备能力通道覆盖设备类能力；三实体（savings/scheduled/personas）上云为硬前提；写操作安全边界不变（ActionProposal + 审批四值） | M7 |
 
 后续决策变更记录格式：
 

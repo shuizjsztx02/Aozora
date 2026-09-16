@@ -965,6 +965,49 @@
 | T-M6-03b S0 自动止损与回滚阈值 | 03a、T-M6-01d | **S0 判定条件（`docs/operations/s0-conditions.md`）：** 自动监测——(1) 重复入账：同一 `mutationId` 导致多条不同流水；(2) 金额错误：单笔金额与服务端返回不一致 > 0.1%；(3) 数据丢失：用户数据行数骤降 > 10%；(4) crash-free 从基线下降 > 1%；(5) API 可用性 < 99.5%；**自动止损链路：** 监测到 S0 → 自动停止扩量（`tools/rollout/stop-rollout.sh`）→ 通知维护者（即时通讯 + 邮件）→ 触发回滚 runbook（T-M6-01d）；**扩量门槛：** `rollout-strategy.md` 中晋级门槛不仅为放量所用，也作为持续达标条件——任一指标跌破门槛立即停止扩量但不下线，跌破 S0 阈值才触发回滚 | 模拟 S0 条件（注入 crash-free 下降）→ 自动停止扩量脚本运行成功 → 告警到达维护者；SLO 连续达标后扩量阶梯正常晋级 | ⏳ 未开始 |
 | T-M6-03c 兼容策略与事故复盘 | 03b | **兼容策略（`docs/operations/compatibility-strategy.md`）：** 放量期客户端版本共存矩阵——(1) 后端 API 新增字段使用 `optional`/`nullable`，不破坏旧客户端解析；(2) 数据库迁移仅做 `ADD COLUMN`/`CREATE INDEX`，不做 `DROP`/`ALTER COLUMN`，确保放量期新旧代码共存；(3) 旧客户端 `pending_mutations` 中的 `expectedVersion` 在新服务端仍可正常处理；**事故复盘模板（`docs/operations/postmortem-template.md`）：** 时间线（detection→response→mitigation→resolution）、根因（5 Whys）、影响范围（用户数/时长/数据损失）、守护用例（新增自动化测试防止复发）、action items（责任人+DDL）；**发布复盘：** 每次发布后 1 周内完成复盘归档（`docs/postmortems/YYYY-MM-DD-release-N.md`），M6 收口时汇总全部发布复盘 | 兼容策略在放量各阶段可验证（旧 APK 安装后 API 调用正常）；事故复盘模板有时间线/根因/守护用例三要素；M6 收口记录包含全部发布复盘归档列表 | ⏳ 未开始 |
 
+## M7：AI Agent 能力升级
+
+> 2026-09-16 立项，同日 v2 修订：编排位置由「客户端 Host」改为**服务端 Host + SSE 流式**（对标 DeepSeek 模式）。关键决策见 `docs/adr/ADR-006-ai-agent-architecture.md`（已提议 v2，待账户所有者确认），目标架构全文见 `docs/architecture/ai-agent-architecture.md`，父任务边界见 `docs/APP-CONTEXT.md` §9 M7。
+> **总目标：** 用户通过一个对话框完成 App 内全部已有功能（25 个页面 / 约 70 个 bridge 命令覆盖的表单任务），新增功能不改动 prompt 主体。
+> **启动闸门：** T-M7-01（数据上云）不触及发布面，可在 M6 期间穿插或 M6 收口后立即启动；T-M7-02 及之后在 M6 收口（T-M6-03）后启动。ADR-006 确认前，仅允许执行文档与用例设计，不进入实现。
+> **分期与顺序理由：** 见目标架构 §10（P0 上云 → P1 loop+SSE → P2 瘦渲染 → P3 事件日志 → P4 全覆盖）。
+> **不变红线：** ① 模型永不输出 UUID（名→id 由确定性代码解析）；② 金额与统计由确定性代码计算，写库必经 ActionProposal 校验与审批门（四值，只有 `allowed-once` 放行）；③ 快路径保持 12 s / 25 s SLO。
+
+### T-M7-01 三实体上云（P0）
+
+**依赖：** 无。**独立价值：** 多设备、备份、换机恢复本就需要（`D-PROD-03` 云端权威）。
+**交接产物：** `savings` / `scheduled` / `personas` 服务端建表 + Alembic 迁移；接入现有 sync 模块（增量，不新协议）；客户端 Room 降为副本（离线可读）；本地既有数据一次性上行迁移策略；登出/删号数据生命周期对齐。
+**验证：** 三实体双端同步一致；离线可读、恢复后上行；迁移用旧版本 fixture 验证；对账不变量全绿；本地既有数据不丢失；旧客户端行为不变。
+**状态：** ⏳ 未开始
+
+### T-M7-02 服务端 Agent Loop 与 SSE 流式通道（P1）
+
+**依赖：** T-M7-01。
+**交接产物：** `DashScopeProvider` tool calling（payload 增 `tools`、解析 `tool_calls`，错误语义沿用 `ProviderError` 枚举）；服务端 loop（Turn/Step 分层 + 四条不变式 + 退出条件硬边界，架构 §4.4）；工具注册表（服务端业务 API 生成 schema + description 人工审核）；域分组注入；SSE 端点（事件类型见架构 §8.1）；Kotlin 层 `okhttp-sse` 接收 + 桥事件转发（复用 `onPermissionResult` 模式）；`ai.agent` / `ai.cancel` 桥命令；`AIConversation` 接线（基础会话状态）；写工具产出 ActionProposal + 审批四值；配额改「每会话轮数 + token」双限。
+**验证：** 多步用例（查预算 → 改预算 → 审批 → 执行）；多轮澄清用例（问 → 追问 → 简答「500」→ 正确解析）；四条不变式各有对应测试；退出边界触发时优雅终止并说明已完成部分；写工具参数无一绕过校验；模型输出 UUID 被拒；审批四值行为正确（`unavailable` 视为拒绝）；tool calling 异常输出（非法 JSON / 未知工具名）走降级契约；旧客户端不调 `/ai/agent` 行为不变；Token 不出 Kotlin 层。
+**状态：** ⏳ 未开始
+
+### T-M7-03 客户端瘦渲染与多会话管理（P2）
+
+**依赖：** T-M7-02。
+**交接产物：** `use-assistant.ts` 重构（移除 loop/工具选择逻辑，保留渲染与设备能力执行）；SSE 事件消费与步骤卡片流；统一智能模式（路径对用户透明，无模式选择）；多会话列表（新建/切换/重命名/删除）；确认卡对接审批四值；取消/打断交互；`assistant-chat-store` 降级为 UI 投影缓存。
+**验证：** 步骤卡片流正确渲染（含完成/失败态）；简单任务无步骤展示（统一智能模式）；多会话互不串扰；取消收敛到一致状态；快路径 12 s / 25 s 体验回归不变。
+**状态：** ⏳ 未开始
+
+### T-M7-04 会话事件日志与摘要压缩（P3）
+
+**依赖：** T-M7-03。
+**交接产物：** SessionEvent 日志（`type`/`seq`/`time`/`data`/`ignorable`）；Surface 事件子集定义（只有其进模型上下文）；`replace` 压缩操作（原文保留）；摘要生成与注入；会话恢复与分叉；日志保留期与隐私边界（对齐 `D-PROD-08`）。
+**验证：** 断连后可按 `conversation_id` 恢复续跑；压缩后原文仍可查（审计）；结构性事件不占 token（实测）；摘要不含 ID；隐私边界有明确结论。
+**状态：** ⏳ 未开始
+
+### T-M7-05 全功能覆盖：域路由、Skill 与设备能力通道（P4）
+
+**依赖：** T-M7-04。
+**交接产物：** 预路由（域选择，方案对比后定）；Skill 封装（复用 `PromptTemplate` 机制，按需加载）；设备能力通道（单向指令 / 需结果两类，架构 §4.3）；`ActionProposal` v2 覆盖全量 CRUD（先改 `docs/architecture/ai-architecture.md` + `contracts/action-proposal/schema.json` + 前后端校验器 + fixtures）；帮助文档检索（可选）。
+**验证：** 功能覆盖清单（架构 §3.2）逐项可用；设备类能力（提醒/权限/分享/小组件/语音/图片/图标）对话内可达；"新增一个表单能力不改 prompt 主体"验证用例；ActionProposal v2 三方一致性（schema / TS 校验器 / Python 校验器）通过；v1 契约与旧客户端兼容；域路由准确率实测记录（R-PROD-17）。
+**状态：** ⏳ 未开始
+
 ## 实施参数确认清单
 
 | 编号 | 参数 | 最晚确认 | 记录位置 |
