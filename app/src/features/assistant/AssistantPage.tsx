@@ -8,6 +8,8 @@
  * T12-11（REQ-37）：分类名白名单组装（≤120 截断，喂 interpret context.categories）；
  * edit/delete 意图 → OpPreviewCard 预览确认；chat/query → 文本气泡（hook 层分发）
  * T16-2（REQ-58）：带 proposal 的历史消息在气泡下渲染只读账单卡（常驻，无编辑/撤销）
+ * T16-4（REQ-60）：消息行改「头像 + 气泡」两列——助手头像 = 当前角色头像，
+ * 用户头像 = meta['avatar_uri']（同批顺路读），均走 CategoryIcon、圆形带玻璃外框
  */
 
 import { useState, useRef, useEffect, useCallback, useMemo } from 'react'
@@ -112,6 +114,27 @@ function historyCardStatus(s: AssistantMessage['proposalStatus']): CardStatus | 
   return 'committed'
 }
 
+/**
+ * T16-4（REQ-60）：消息头像——角色/用户统一走 CategoryIcon（emoji/data URI 双形态
+ * 已内建），28px 圆形 + 玻璃外框；无头像时 👤 兜底（与 header 角色钮同口径）。
+ * 数据源零新增：助手 = activePersona.avatar，用户 = meta['avatar_uri']。
+ */
+function MessageAvatar({ role, icon, name }: {
+  role: 'user' | 'assistant'
+  icon?: string | null
+  name: string
+}) {
+  return (
+    <span
+      className="w-7 h-7 rounded-full overflow-hidden flex items-center justify-center shrink-0 text-[22px]"
+      style={{ background: 'var(--glass)', border: '1px solid var(--glass-border)' }}
+      data-testid={`msg-avatar-${role}`}
+    >
+      <CategoryIcon icon={icon} name={name} fallback="👤" />
+    </span>
+  )
+}
+
 export function AssistantPage() {
   const bridge = useBridge()
   const navigate = useNavigate()
@@ -150,6 +173,9 @@ export function AssistantPage() {
   // T11-7（REQ-28 / 决策 #8）：聊天角色——header 显示当前角色名 + context.persona 注入；
   // active_persona_id 缺失/失效回退"小贝"→第一条（resolveActivePersona 统一口径）。
   const [activePersona, setActivePersona] = useState<PersonaData | null>(null)
+  // T16-4（REQ-60）：用户头像（meta['avatar_uri']，仅本地）——与 display_name 同批顺路读，
+  // 零新增桥命令；未设置 → 「👤」兜底
+  const [avatarUri, setAvatarUri] = useState<string | null>(null)
   const [inputText, setInputText] = useState('')
   const scrollRef = useRef<HTMLDivElement>(null)
   const prevFinalTextRef = useRef('')
@@ -169,7 +195,8 @@ export function AssistantPage() {
       bridge.listBooks(),
       bridge.listAccounts(),
       // T11-6/T11-7：同批读 user_profile + active_persona_id → 在线 AI 注入画像与角色
-      bridge.getMeta(['default_book_id', 'default_account_id', 'user_profile', 'active_persona_id'])
+      // T16-4（REQ-60）：再加 avatar_uri（用户头像，消息行用户侧渲染用）
+      bridge.getMeta(['default_book_id', 'default_account_id', 'user_profile', 'active_persona_id', 'avatar_uri'])
         .catch(() => ({}) as Record<string, string | null>),
       // T11-7（REQ-28）：加载全部角色，按 active_persona_id 解析当前角色
       bridge.listPersonas().catch(() => [] as PersonaData[]),
@@ -188,6 +215,7 @@ export function AssistantPage() {
       setDefaultAccountId(pickDefaultAccount(accountList, meta['default_account_id'] ?? null)?.id ?? null)
       setProfile(parseProfile(meta['user_profile']))
       setActivePersona(resolveActivePersona(personas, meta['active_persona_id'] ?? null))
+      setAvatarUri(meta['avatar_uri'] ?? null)
       setGoals(goalList)
     }).catch(() => {})
   }, [bridge])
@@ -511,50 +539,56 @@ export function AssistantPage() {
           const p = msg.proposal
           const historyProposal = p && (p.transactions?.length ?? 0) > 0 &&
             p.proposalId !== activeProposal?.proposalId ? p : null
+          // T16-4（REQ-60）：助手侧左上、用户侧右上（flex-row-reverse 将头像与气泡整体镜像）
+          const isUser = msg.role === 'user'
           return (
-            <div
-              key={msg.id}
-              className={`flex flex-col mb-3 ${msg.role === 'user' ? 'items-end' : 'items-start'}`}
-            >
-              <div
-                className="max-w-[80%] px-3 py-2 rounded-xl text-sm"
-                style={{
-                  background: msg.role === 'user'
-                    ? 'var(--accent)'
-                    : 'var(--glass)',
-                  color: msg.role === 'user'
-                    ? 'white'
-                    : 'var(--ink)',
-                  border: msg.role === 'user'
-                    ? 'none'
-                    : '1px solid var(--glass-border)',
-                }}
-              >
-                <div>{msg.text}</div>
-                {msg.proposalStatus === 'error' && (
-                  <div className="text-xs mt-1 opacity-70">执行失败</div>
-                )}
-                {msg.proposalStatus === 'undone' && (
-                  <div className="text-xs mt-1 opacity-70">已撤销</div>
-                )}
-              </div>
-              {historyProposal && (
-                <div className="w-full">
-                  <ConfirmationCard
-                    readonly
-                    proposal={historyProposal}
-                    categories={categories}
-                    status={historyCardStatus(msg.proposalStatus)}
-                    accounts={accounts}
-                    books={books}
-                    bookId={bookId}
-                    bookName={bookName}
-                    selectedAccountId={
-                      historyProposal.transactions?.[0]?.accountId ?? defaultAccountId ?? null
-                    }
-                  />
+            <div key={msg.id} className="mb-3">
+              <div className={`flex items-start gap-2 ${isUser ? 'flex-row-reverse' : ''}`}>
+                <MessageAvatar
+                  role={msg.role}
+                  icon={isUser ? avatarUri : activePersona?.avatar}
+                  name={isUser ? '我' : (activePersona?.name ?? '角色')}
+                />
+                <div
+                  className="max-w-[80%] px-3 py-2 rounded-xl text-sm"
+                  style={{
+                    background: isUser
+                      ? 'var(--accent)'
+                      : 'var(--glass)',
+                    color: isUser
+                      ? 'white'
+                      : 'var(--ink)',
+                    border: isUser
+                      ? 'none'
+                      : '1px solid var(--glass-border)',
+                  }}
+                >
+                  <div>{msg.text}</div>
+                  {msg.proposalStatus === 'error' && (
+                    <div className="text-xs mt-1 opacity-70">执行失败</div>
+                  )}
+                  {msg.proposalStatus === 'undone' && (
+                    <div className="text-xs mt-1 opacity-70">已撤销</div>
+                  )}
                 </div>
-              )}
+              </div>
+                {historyProposal && (
+                  <div className="w-full">
+                    <ConfirmationCard
+                      readonly
+                      proposal={historyProposal}
+                      categories={categories}
+                      status={historyCardStatus(msg.proposalStatus)}
+                      accounts={accounts}
+                      books={books}
+                      bookId={bookId}
+                      bookName={bookName}
+                      selectedAccountId={
+                        historyProposal.transactions?.[0]?.accountId ?? defaultAccountId ?? null
+                      }
+                    />
+                  </div>
+                )}
             </div>
           )
         })}
