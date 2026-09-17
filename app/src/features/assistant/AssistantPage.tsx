@@ -7,6 +7,7 @@
  * 语音/图片桥错误中文本地化；输入行重排 [🎤][🖼️][输入][发送]
  * T12-11（REQ-37）：分类名白名单组装（≤120 截断，喂 interpret context.categories）；
  * edit/delete 意图 → OpPreviewCard 预览确认；chat/query → 文本气泡（hook 层分发）
+ * T16-2（REQ-58）：带 proposal 的历史消息在气泡下渲染只读账单卡（常驻，无编辑/撤销）
  */
 
 import { useState, useRef, useEffect, useCallback, useMemo } from 'react'
@@ -16,7 +17,7 @@ import { CategoryIcon } from '../../components/CategoryIcon'
 import { useBridge } from '../../platform/hooks/use-bridge'
 import { usePermissions } from '../../platform/hooks/use-permissions'
 import { useVoice } from '../../platform/hooks/use-voice'
-import { useAssistant } from './use-assistant'
+import { useAssistant, type AssistantMessage, type CardStatus } from './use-assistant'
 import { ConfirmationCard } from './ConfirmationCard'
 import { OpPreviewCard } from './OpPreviewCard'
 import { buildAiCategoryNames } from '../../domain/ai-proposal-builder'
@@ -97,6 +98,18 @@ function parseProfile(raw: string | null | undefined): Record<string, string> | 
   } catch {
     return null
   }
+}
+
+/**
+ * T16-2（REQ-58）：历史消息 proposalStatus → 只读账单卡状态。
+ * executing/confirming（瞬时态：重启后不存在在途写入）与缺失态一律按「已记录」呈现，
+ * 只有终态语义（undone/error/pending）如实透出。
+ */
+function historyCardStatus(s: AssistantMessage['proposalStatus']): CardStatus | 'undone' {
+  if (s === 'undone') return 'undone'
+  if (s === 'error') return 'error'
+  if (s === 'pending') return 'pending-category'
+  return 'committed'
 }
 
 export function AssistantPage() {
@@ -491,35 +504,60 @@ export function AssistantPage() {
           </div>
         )}
 
-        {messages.map(msg => (
-          <div
-            key={msg.id}
-            className={`flex mb-3 ${msg.role === 'user' ? 'justify-end' : 'justify-start'}`}
-          >
+        {messages.map(msg => {
+          // T16-2（REQ-58）：已记账单卡作为消息常驻——气泡下渲染只读卡（无编辑/撤销，
+          // 撤销依赖内存态 activeTxIdsRef，切页/重启后不可用）；当轮那张卡仍由下方
+          // activeProposal 链路渲染，同一提案不重复出卡。
+          const p = msg.proposal
+          const historyProposal = p && (p.transactions?.length ?? 0) > 0 &&
+            p.proposalId !== activeProposal?.proposalId ? p : null
+          return (
             <div
-              className="max-w-[80%] px-3 py-2 rounded-xl text-sm"
-              style={{
-                background: msg.role === 'user'
-                  ? 'var(--accent)'
-                  : 'var(--glass)',
-                color: msg.role === 'user'
-                  ? 'white'
-                  : 'var(--ink)',
-                border: msg.role === 'user'
-                  ? 'none'
-                  : '1px solid var(--glass-border)',
-              }}
+              key={msg.id}
+              className={`flex flex-col mb-3 ${msg.role === 'user' ? 'items-end' : 'items-start'}`}
             >
-              <div>{msg.text}</div>
-              {msg.proposalStatus === 'error' && (
-                <div className="text-xs mt-1 opacity-70">执行失败</div>
-              )}
-              {msg.proposalStatus === 'undone' && (
-                <div className="text-xs mt-1 opacity-70">已撤销</div>
+              <div
+                className="max-w-[80%] px-3 py-2 rounded-xl text-sm"
+                style={{
+                  background: msg.role === 'user'
+                    ? 'var(--accent)'
+                    : 'var(--glass)',
+                  color: msg.role === 'user'
+                    ? 'white'
+                    : 'var(--ink)',
+                  border: msg.role === 'user'
+                    ? 'none'
+                    : '1px solid var(--glass-border)',
+                }}
+              >
+                <div>{msg.text}</div>
+                {msg.proposalStatus === 'error' && (
+                  <div className="text-xs mt-1 opacity-70">执行失败</div>
+                )}
+                {msg.proposalStatus === 'undone' && (
+                  <div className="text-xs mt-1 opacity-70">已撤销</div>
+                )}
+              </div>
+              {historyProposal && (
+                <div className="w-full">
+                  <ConfirmationCard
+                    readonly
+                    proposal={historyProposal}
+                    categories={categories}
+                    status={historyCardStatus(msg.proposalStatus)}
+                    accounts={accounts}
+                    books={books}
+                    bookId={bookId}
+                    bookName={bookName}
+                    selectedAccountId={
+                      historyProposal.transactions?.[0]?.accountId ?? defaultAccountId ?? null
+                    }
+                  />
+                </div>
               )}
             </div>
-          </div>
-        ))}
+          )
+        })}
 
         {/* 慢速提示 */}
         {isSlow && phase === 'processing' && (

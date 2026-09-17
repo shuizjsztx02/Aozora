@@ -17,6 +17,11 @@
  *
  * 「撤销」= 直连上层 undoExecution 软删该笔（卡片存续期常驻可用，不限 5s 窗）；
  * 撤销后上层卸载本卡，消息流转既有「已撤销」灰态。
+ *
+ * T16-2（REQ-58）：增 `readonly` 只读态——聊天历史消息的账单卡常驻（消息本身持久化，
+ * 卡由 messages 重建）。只读态 = 展示态四行 + 状态徽标，隐藏「编辑」「撤销」且全部
+ * 交互不可用（撤销依赖 activeTxIdsRef 内存态，切页/重启后无意义）；`undone` 整卡灰化、
+ * `error` 红字、`pending-category` 不展开编辑 UI。testid 用 `history-card` 与活动卡区分。
  */
 
 import { useState, useCallback, useRef } from 'react'
@@ -30,11 +35,12 @@ import type { CardStatus, ProposalWriteOverrides } from './use-assistant'
 interface ConfirmationCardProps {
   proposal: ActionProposal
   categories: CategoryData[]
-  /** 上层本地写入状态：executing=保存中 committed=已记录 error=保存失败（可改可重试） */
-  status: CardStatus
-  /** 提交编辑后的完整提案（上层执行替换写）。
+  /** 上层本地写入状态：executing=保存中 committed=已记录 error=保存失败（可改可重试）。
+   *  T16-2：只读历史卡额外接受 `undone`（已撤销）。 */
+  status: CardStatus | 'undone'
+  /** 提交编辑后的完整提案（上层执行替换写）。只读态不提供。
    *  T12-9（REQ-35）：overrides = 卡内账本/预算 chip 的带外覆盖（仅显式改过时非空）。 */
-  onEditCommit: (edited: ActionProposal, overrides?: ProposalWriteOverrides) => void
+  onEditCommit?: (edited: ActionProposal, overrides?: ProposalWriteOverrides) => void
   /** T9-7（REQ-15）：可选账户列表（展示态 chip 下拉 + 编辑态 EntryChipRow） */
   accounts: AccountData[]
   /** T12-9（REQ-35）：编辑态 EntryChipRow 账本列表 */
@@ -45,8 +51,10 @@ interface ConfirmationCardProps {
   bookName: string
   /** T9-7：当前笔落库账户（= tx.accountId ?? defaultAccountId，卡片初始值） */
   selectedAccountId: string | null
-  /** T9-7：撤销该笔（软删，卡片存续期任意时刻可用） */
-  onUndo: () => void
+  /** T9-7：撤销该笔（软删，卡片存续期任意时刻可用）。只读态不提供。 */
+  onUndo?: () => void
+  /** T16-2（REQ-58）：历史消息只读卡——不可编辑/撤销，无任何写路径 */
+  readonly?: boolean
 }
 
 /** 已保存值快照，避免同值重复触发替换写；展示态渲染以此为准。
@@ -71,7 +79,7 @@ export function ConfirmationCard(props: ConfirmationCardProps) {
 
 function ConfirmationCardBody({
   proposal, categories, status, onEditCommit, accounts, books, bookId,
-  bookName, selectedAccountId, onUndo, tx,
+  bookName, selectedAccountId, onUndo, readonly = false, tx,
 }: ConfirmationCardProps & { tx: TransactionItem }) {
   const initial: CommittedSnapshot = {
     type: tx.type,
@@ -83,7 +91,7 @@ function ConfirmationCardBody({
     bookId: bookId ?? '',
     includeInBudget: true, // 聊天路径不传 → native 默认计入（REQ-17 口径）
   }
-  const [editing, setEditing] = useState(status === 'pending-category') // T12-8：待选分类态编辑 UI 预选打开
+  const [editing, setEditing] = useState(!readonly && status === 'pending-category') // T12-8：待选分类态编辑 UI 预选打开（T16-2：只读卡不开）
   const [amountYuan, setAmountYuan] = useState((tx.amountCents / 100).toFixed(2))
   const [categoryId, setCategoryId] = useState(tx.categoryId || '')
   const [bizDate, setBizDate] = useState(tx.bizDate)
@@ -93,7 +101,7 @@ function ConfirmationCardBody({
   const [accountId, setAccountId] = useState<string | null>(selectedAccountId ?? null)
   const [accountMenuOpen, setAccountMenuOpen] = useState(false)
   // T12-9（REQ-35）：v3 编辑态——宫格展开态（待选分类直接展开）+ 受控页码 + chip 覆盖值
-  const [catOpen, setCatOpen] = useState(status === 'pending-category')
+  const [catOpen, setCatOpen] = useState(!readonly && status === 'pending-category')
   const [catPage, setCatPage] = useState(0)
   const [selectedBookId, setSelectedBookId] = useState<string | null>(null)
   const [budgetChoice, setBudgetChoice] = useState<boolean | null>(null)
@@ -151,7 +159,7 @@ function ConfirmationCardBody({
     if (next.includeInBudget === false) overrides.includeInBudget = false
     lastCommittedRef.current = next
     setCommitted(next)
-    onEditCommit(
+    onEditCommit?.(
       { ...proposal, transactions: [editedTx] },
       Object.keys(overrides).length > 0 ? overrides : undefined,
     )
@@ -229,6 +237,8 @@ function ConfirmationCardBody({
   const cardStyle = {
     background: 'var(--glass)',
     border: '1px solid var(--glass-border)',
+    // T16-2（REQ-58）：只读历史卡「已撤销」→ 整卡灰化
+    ...(readonly && status === 'undone' ? { opacity: 0.6 } : {}),
   } as const
   const smallBtnStyle = {
     background: 'var(--glass)',
@@ -236,14 +246,18 @@ function ConfirmationCardBody({
     border: '1px solid var(--glass-border)',
   } as const
 
-  const statusBadge = <StatusBadge status={status} />
+  const statusBadge = <StatusBadge status={status} readonly={readonly} />
 
   // ─────────────── 展示态（REQ-15 四行） ───────────────
   if (!editing) {
     const view = catInfo(committed.categoryId)
     const viewAccount = accounts.find(a => a.id === committed.accountId) ?? null
     return (
-      <div className={cardShell} style={cardStyle} data-testid="confirmation-card">
+      <div
+        className={cardShell}
+        style={cardStyle}
+        data-testid={readonly ? 'history-card' : 'confirmation-card'}
+      >
         {/* 行1+2（左列）+ 金额（右列纵跨两行居中） */}
         <div className="flex gap-2">
           <div className="flex-1 min-w-0 flex flex-col justify-between py-0.5">
@@ -268,7 +282,8 @@ function ConfirmationCardBody({
                 <button
                   key={t}
                   type="button"
-                  onClick={() => handleTypeChange(t, true)}
+                  onClick={readonly ? undefined : () => handleTypeChange(t, true)}
+                  disabled={readonly}
                   className="px-2 py-0.5 rounded-lg text-xs font-medium transition-colors shrink-0"
                   style={{
                     background: committed.type === t
@@ -285,7 +300,8 @@ function ConfirmationCardBody({
               <div className="relative shrink-0 min-w-0">
                 <button
                   type="button"
-                  onClick={() => setAccountMenuOpen(o => !o)}
+                  onClick={readonly ? undefined : () => setAccountMenuOpen(o => !o)}
+                  disabled={readonly}
                   className="flex items-center gap-1 px-2 py-0.5 rounded-full text-xs max-w-full"
                   style={smallBtnStyle}
                   data-testid="card-account-chip"
@@ -297,7 +313,7 @@ function ConfirmationCardBody({
                     className="text-xs leading-none shrink-0"
                   />
                   <span className="truncate">{accountLabel(committed.accountId)}</span>
-                  <span aria-hidden style={{ opacity: 0.6 }}>▾</span>
+                  {!readonly && <span aria-hidden style={{ opacity: 0.6 }}>▾</span>}
                 </button>
                 {accountMenuOpen && (
                   <div
@@ -359,36 +375,38 @@ function ConfirmationCardBody({
             </span>
             {statusBadge}
           </div>
-          <div className="flex items-center gap-1.5 shrink-0">
-            <button
-              type="button"
-              onClick={() => setEditing(true)}
-              className="text-[10px] px-2 py-1 rounded-lg"
-              style={smallBtnStyle}
-              data-testid="card-edit"
-            >
-              编辑
-            </button>
-            <button
-              type="button"
-              onClick={onUndo}
-              className="text-[10px] px-2 py-1 rounded-lg"
-              style={smallBtnStyle}
-              data-testid="card-undo"
-            >
-              撤销
-            </button>
-          </div>
+          {!readonly && (
+            <div className="flex items-center gap-1.5 shrink-0">
+              <button
+                type="button"
+                onClick={() => setEditing(true)}
+                className="text-[10px] px-2 py-1 rounded-lg"
+                style={smallBtnStyle}
+                data-testid="card-edit"
+              >
+                编辑
+              </button>
+              <button
+                type="button"
+                onClick={onUndo}
+                className="text-[10px] px-2 py-1 rounded-lg"
+                style={smallBtnStyle}
+                data-testid="card-undo"
+              >
+                撤销
+              </button>
+            </div>
+          )}
         </div>
 
         {status === 'error' && (
           <div className="text-xs mt-1" style={{ color: 'var(--expense)' }}>
-            保存失败，点「编辑」修改任意字段将自动重试
+            {readonly ? '记账失败，该笔未写入' : '保存失败，点「编辑」修改任意字段将自动重试'}
           </div>
         )}
         {status === 'pending-category' && (
           <div className="text-xs mt-1" style={{ color: 'var(--warning-text, #856404)' }} data-testid="card-pending-hint">
-            未识别到分类，点「编辑」选一个后保存（尚未记账）
+            {readonly ? '未识别到分类，尚未记账' : '未识别到分类，点「编辑」选一个后保存（尚未记账）'}
           </div>
         )}
         {proposal.warnings.length > 0 && (
@@ -568,7 +586,8 @@ function AccountOption({
   )
 }
 
-function StatusBadge({ status }: { status: CardStatus }) {
+/** T16-2（REQ-58）：只读历史卡增 `undone`（已撤销）文案；`error` 在历史卡上口径为「记账失败」。 */
+function StatusBadge({ status, readonly = false }: { status: CardStatus | 'undone'; readonly?: boolean }) {
   return (
     <span
       className="shrink-0 text-[10px] px-1.5 py-0.5 rounded-full"
@@ -580,9 +599,10 @@ function StatusBadge({ status }: { status: CardStatus }) {
       data-testid="card-status"
     >
       {status === 'executing' ? '保存中…'
+        : status === 'undone' ? '已撤销'
         : status === 'committed' ? '✓ 已记录'
         : status === 'pending-category' ? '⚠️ 待选分类'
-        : '⚠️ 保存失败'}
+        : readonly ? '⚠️ 记账失败' : '⚠️ 保存失败'}
     </span>
   )
 }

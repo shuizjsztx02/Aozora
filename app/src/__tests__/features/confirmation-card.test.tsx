@@ -13,6 +13,9 @@
  * - 展示态换账户/换收支柱子 → 即时替换写（含「不使用账户」= accountId null）
  * - 「撤销」按钮直连 onUndo（任意时刻可用）
  * - 待选分类态（T12-8）：编辑 UI 预选打开且宫格直接展开
+ * - T16-2（REQ-58）只读历史卡：四行要素齐但可写路径全无（无编辑/撤销、支柱与账户
+ *   chip 禁用、不展开菜单）、undone 灰化+「已撤销」、error「记账失败」、
+ *   pending-category 不展开编辑 UI
  */
 import { describe, it, expect, vi, type Mock } from 'vitest'
 import { render, screen, fireEvent, within } from '@testing-library/react'
@@ -397,6 +400,78 @@ describe('ConfirmationCard — 编辑态 v3（T12-9 / REQ-35 重排）', () => {
     expect(onEditCommit).toHaveBeenCalledTimes(1)
     fireEvent.click(screen.getByTestId('card-done'))
     expect(screen.getByTestId('card-account-chip').textContent).toContain('现金')
+  })
+})
+
+describe('ConfirmationCard — 只读历史卡（T16-2 / REQ-58）', () => {
+  const renderReadonly = (over: {
+    status?: 'committed' | 'undone' | 'error' | 'pending-category',
+    categoryId?: string,
+  } = {}) => {
+    render(
+      <ConfirmationCard
+        readonly
+        proposal={proposal(over.categoryId)}
+        categories={CATS}
+        status={over.status ?? 'committed'}
+        accounts={ACCOUNTS}
+        books={BOOKS}
+        bookId="book-1"
+        bookName="默认账本"
+        selectedAccountId="acc-bank"
+      />,
+    )
+    return screen.getByTestId('history-card')
+  }
+
+  it('四行要素齐（复用展示态）+ testid=history-card + 无编辑/撤销/编辑 UI', () => {
+    const card = renderReadonly()
+    expect(screen.getByTestId('card-cat-label').textContent).toBe('餐饮 · 午饭')
+    expect(screen.getByTestId('card-account-chip').textContent).toContain('招商银行卡')
+    expect(screen.getByTestId('card-amount-display').textContent).toContain('45.00')
+    expect(screen.getByTestId('card-view-date').textContent).toBe('2026-09-08')
+    expect(screen.getByTestId('card-view-note').textContent).toBe('午饭')
+    expect(screen.getByTestId('card-book-name').textContent).toBe('默认账本')
+    expect(screen.getByTestId('card-status').textContent).toContain('已记录')
+    expect(card.textContent).toContain('🥟')
+    // 可写路径全无：编辑/撤销钮 + 编辑态 UI + 活动卡 testid
+    expect(screen.queryByTestId('card-edit')).toBeNull()
+    expect(screen.queryByTestId('card-undo')).toBeNull()
+    expect(screen.queryByTestId('card-amount')).toBeNull()
+    expect(screen.queryByTestId('card-cat-toggle')).toBeNull()
+    expect(screen.queryByTestId('confirmation-card')).toBeNull()
+  })
+
+  it('只读态收支柱子/账户 chip 不可交互（禁用 + 下拉不展开）', () => {
+    renderReadonly()
+    expect(screen.getByTestId('view-type-expense')).toBeDisabled()
+    expect(screen.getByTestId('view-type-income')).toBeDisabled()
+    expect(screen.getByTestId('card-account-chip')).toBeDisabled()
+    fireEvent.click(screen.getByTestId('view-type-income'))
+    fireEvent.click(screen.getByTestId('card-account-chip'))
+    expect(screen.queryByTestId('card-account-menu')).toBeNull()
+  })
+
+  it('undone：徽标「已撤销」+ 整卡灰化', () => {
+    const card = renderReadonly({ status: 'undone' })
+    expect(screen.getByTestId('card-status').textContent).toBe('已撤销')
+    expect(card.style.opacity).toBe('0.6')
+  })
+
+  it('error：徽标与红字均为「记账失败」口径（无「点编辑重试」引导）', () => {
+    renderReadonly({ status: 'error' })
+    expect(screen.getByTestId('card-status').textContent).toContain('记账失败')
+    expect(screen.getByText('记账失败，该笔未写入')).toBeInTheDocument()
+    expect(screen.queryByText(/点「编辑」/)).toBeNull()
+  })
+
+  it('pending-category：只读不展开编辑 UI，提示不含「点编辑」', () => {
+    renderReadonly({ status: 'pending-category', categoryId: '' })
+    expect(screen.queryByTestId('category-pager')).toBeNull()
+    expect(screen.queryByTestId('card-cat-toggle')).toBeNull()
+    expect(screen.getByTestId('card-cat-label').textContent).toBe('未分类')
+    expect(screen.getByTestId('card-pending-hint').textContent).toBe('未识别到分类，尚未记账')
+    expect(screen.getByTestId('card-status').textContent).toContain('待选分类')
   })
 })
 

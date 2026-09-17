@@ -94,7 +94,8 @@ describe('T14-4 聊天历史持久化 — use-assistant 接线', () => {
     expect(h2.result.current.activeProposal).toBeNull()
     expect(h2.result.current.cardStatus).toBeNull()
     expect(h2.result.current.pendingOp).toBeNull()
-    // 历史气泡只读渲染：proposalStatus 不影响 ConfirmationCard（其门控为内存态）
+    // T16-2（REQ-58）：历史消息现由页面侧渲染只读账单卡（assistant-page-history-card.test.tsx）；
+    // 可写路径（编辑/撤销）门控仍是内存态 activeProposal/activeTxIdsRef——恢复后不复活
   })
 
   it('clear（登出挂钩行为）后 remount 为空', async () => {
