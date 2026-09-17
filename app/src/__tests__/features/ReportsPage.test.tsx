@@ -12,7 +12,7 @@
  * 就绪门用加载完成后唯一出现的 selectedBook 按钮文字「默认账本」。
  */
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
-import { render, screen, fireEvent, waitFor } from '@testing-library/react'
+import { render, screen, fireEvent, waitFor, within } from '@testing-library/react'
 import { MemoryRouter } from 'react-router'
 import { ReportsPage, buildDailySeries, trendTickFormatter, nearestTrendIndex } from '../../features/reports/ReportsPage'
 import { ErrorBoundary } from '../../app/ErrorBoundary'
@@ -425,6 +425,23 @@ describe('ReportsPage 趋势点击（T16-1 / REQ-57）', () => {
     expect(callout).toHaveTextContent('123.45')
     expect(callout).toHaveTextContent(/-\s*¥123\.45/)
     expect(screen.queryByText('出了点问题')).not.toBeInTheDocument()
+  })
+
+  // T16-7（收口修复）：浮层是图表容器的兄弟节点，参与命中测试时会吞掉自身覆盖区
+  // （曲线态实测约 98×92px 的右上角）内的点按——REQ-57 口径是「任意位置可点」。
+  it('T16-7：浮层不吃点击（覆盖区内点按仍落到图表），关闭钮单独可点', async () => {
+    mockCalls(() => TXS_NEG)
+    renderGuarded()
+    await screen.findByText('默认账本')
+    await waitForChart()
+    clickChart(125)
+    const callout = screen.getByTestId('trend-callout')
+    expect(callout).toHaveStyle({ pointerEvents: 'none' })
+    expect(within(callout).getByLabelText('关闭')).toHaveStyle({ pointerEvents: 'auto' })
+
+    // 关闭钮仍可用（不被父级 none 影响）
+    fireEvent.click(within(callout).getByLabelText('关闭'))
+    expect(screen.queryByTestId('trend-callout')).not.toBeInTheDocument()
   })
 })
 

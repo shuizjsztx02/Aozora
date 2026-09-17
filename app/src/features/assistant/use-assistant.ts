@@ -72,6 +72,27 @@ export interface AssistantMessage {
 /** 第八轮：'confirming' 态随免确认改造移除——解析成功后直接本地提交。 */
 export type AssistantPhase = 'idle' | 'processing' | 'executing'
 
+/** T16-7（收口修复）：一笔交易实际写入后的生效字段——回填进消息内提案，
+ *  使只读历史卡显示真正落库的账户，而不是回退读页面默认值。 */
+interface WrittenTx {
+  id: string
+  accountId: string | null
+}
+
+/** T16-7（收口修复）：把实际写入的账户回填进消息内提案。
+ *  提案本身只是草稿（未点名账户时字段缺省），只读卡按 `accountId ?? 页面默认` 渲染，
+ *  而页面默认在卡片挂载时可能尚未就绪（异步 meta 读）→ 历史卡会显示「不使用账户」，
+ *  与库内实际写入的账户不符；且默认账户日后被改，旧卡显示的账户也会随之漂移。
+ *  回填后历史卡与落库值恒等。 */
+function withResolvedAccounts(proposal: ActionProposal, written: WrittenTx[]): ActionProposal {
+  const txs = proposal.transactions ?? []
+  if (txs.length === 0 || txs.length !== written.length) return proposal
+  return {
+    ...proposal,
+    transactions: txs.map((t, i) => ({ ...t, accountId: written[i].accountId })),
+  }
+}
+
 /** 常驻编辑卡的展示状态（error 态下卡片仍可编辑，改动即重试保存）。
  *  T12-8（REQ-30 / 决策 #7）：pending-category = 提案缺分类，未写库，卡内选定后接管首次写入。 */
 export type CardStatus = 'executing' | 'committed' | 'error' | 'pending-category'
@@ -305,8 +326,8 @@ export function useAssistant({
    */
   const writeTransactions = useCallback(async (
     proposal: ActionProposal, overrides?: ProposalWriteOverrides,
-  ): Promise<string[]> => {
-    const ids: string[] = []
+  ): Promise<WrittenTx[]> => {
+    const written: WrittenTx[] = []
     const today = todayBizDate(timezone)
     for (const tx of proposal.transactions ?? []) {
       const id = newUuid()
@@ -316,6 +337,9 @@ export function useAssistant({
         const noon = new Date(tx.bizDate + 'T12:00:00').getTime()
         if (!Number.isNaN(noon)) occurredAt = noon
       }
+      // T9-7（REQ-15）：提案未点名账户（字段缺失）→ 兜底默认账户；
+      // 卡片编辑显式选「不使用账户」（accountId=null）→ 尊重 null，不被默认覆盖。
+      const accountId = tx.accountId === undefined ? defaultAccountId : tx.accountId
       await bridge.insertTransaction({
         id,
         // T12-9（REQ-35）：卡内账本 chip 切换后覆盖 hook 默认账本
@@ -323,9 +347,7 @@ export function useAssistant({
         type: tx.type,
         amountCents: tx.amountCents,
         categoryId: tx.categoryId || '',
-        // T9-7（REQ-15）：提案未点名账户（字段缺失）→ 兜底默认账户；
-        // 卡片编辑显式选「不使用账户」（accountId=null）→ 尊重 null，不被默认覆盖。
-        accountId: tx.accountId === undefined ? defaultAccountId : tx.accountId,
+        accountId,
         note: tx.note,
         bizDate: tx.bizDate,
         occurredAt,
@@ -334,9 +356,9 @@ export function useAssistant({
         ...(overrides?.includeInBudget !== undefined
           ? { includeInBudget: overrides.includeInBudget } : {}),
       }, newUuid()) // mutationId 必须为 UUID（服务端 sync 契约）
-      ids.push(id)
+      written.push({ id, accountId: accountId ?? null })
     }
-    return ids
+    return written
   }, [bridge, bookId, timezone, defaultAccountId])
 
   const pushBookMissingError = useCallback((proposalId?: string) => {
@@ -368,12 +390,13 @@ export function useAssistant({
     setCardStatus('executing')
 
     try {
-      const ids = await writeTransactions(proposal, overrides)
+      const written = await writeTransactions(proposal, overrides)
+      const ids = written.map(w => w.id)
       activeTxIdsRef.current = ids
       setMessages(prev => prev.map(m =>
         m.proposal?.proposalId === proposal.proposalId
           ? {
-              ...m, proposal,
+              ...m, proposal: withResolvedAccounts(proposal, written),
               proposalStatus: 'committed' as const,
               transactionIds: ids,
               text: '已记录 ' + ids.length + ' 笔交易',
@@ -786,12 +809,13 @@ export function useAssistant({
       for (const id of oldIds) {
         await bridge.softDeleteTransaction(id, newUuid())
       }
-      const ids = await writeTransactions(edited, overrides)
+      const written = await writeTransactions(edited, overrides)
+      const ids = written.map(w => w.id)
       activeTxIdsRef.current = ids
       setMessages(prev => prev.map(m =>
         m.proposal?.proposalId === edited.proposalId
           ? {
-              ...m, proposal: edited,
+              ...m, proposal: withResolvedAccounts(edited, written),
               proposalStatus: 'committed' as const,
               transactionIds: ids,
               text: '已更新记录',

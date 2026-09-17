@@ -545,12 +545,15 @@ export function ReportsPage() {
                 {activeDay && (
                   <div
                     className="glass-card absolute top-1 right-1 p-2 text-[11px]"
-                    style={{ boxShadow: 'var(--card-shadow)' }}
+                    /* T16-7 收口：浮层自身不吃点击——它是图表容器的兄弟节点，若参与命中
+                     * 测试，其覆盖区（曲线态约 98×92px）内的点按会落到浮层上而不冒泡到
+                     * 图表，导致「点这个区域没反应」。关闭钮单独恢复 auto。 */
+                    style={{ boxShadow: 'var(--card-shadow)', pointerEvents: 'none' }}
                     data-testid="trend-callout"
                   >
                     <div className="flex items-center justify-between gap-3">
                       <span className="font-semibold" style={{ color: 'var(--ink)' }}>{activeDay.ymd}</span>
-                      <button onClick={() => setActiveDay(null)} aria-label="关闭" style={{ color: 'var(--ink3)' }}>✕</button>
+                      <button onClick={() => setActiveDay(null)} aria-label="关闭" style={{ color: 'var(--ink3)', pointerEvents: 'auto' }}>✕</button>
                     </div>
                     <div className="mt-1 space-y-0.5">
                       {trendMode === 'line' ? (

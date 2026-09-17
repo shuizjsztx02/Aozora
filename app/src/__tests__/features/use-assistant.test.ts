@@ -237,6 +237,35 @@ describe('use-assistant — 免确认本地记账（T8-6）', () => {
     expect(tx.accountId).toBe('acc-own')
   })
 
+  // T16-7（收口修复）：草稿提案未点名账户时，兜底值只存在于写入 payload 里，
+  // 消息内提案仍是空白 → 只读历史卡只能按「页面默认账户」猜，而该默认在卡片挂载
+  // 时可能尚未就绪，会显示「不使用账户」（与库内实际写入不符）。修复=回填。
+  it('T16-7：未点名账户 → 消息内提案回填实际写入账户（历史卡与落库一致）', async () => {
+    vi.mocked(parseInput).mockReturnValue(txProposal())
+    const { result } = setup('book-1', 'acc-def')
+
+    await act(async () => { await result.current.submitInput('吃饭678') })
+    await waitFor(() => expect(result.current.cardStatus).toBe('committed'))
+
+    const msg = useAssistantChatStore.getState().messages.find(m => m.proposal)
+    expect(msg?.proposal?.transactions?.[0].accountId).toBe('acc-def')
+  })
+
+  it('T16-7：编辑链路同样回填（换账户后消息内提案 = 实际写入账户）', async () => {
+    vi.mocked(parseInput).mockReturnValue(txProposal())
+    const { result } = setup('book-1', 'acc-def')
+
+    await act(async () => { await result.current.submitInput('吃饭678') })
+    await waitFor(() => expect(result.current.cardStatus).toBe('committed'))
+
+    const edited = txProposal()
+    edited.transactions![0].accountId = 'acc-new'
+    await act(async () => { await result.current.editProposal(edited) })
+
+    const msg = useAssistantChatStore.getState().messages.find(m => m.proposal)
+    expect(msg?.proposal?.transactions?.[0].accountId).toBe('acc-new')
+  })
+
   it('卡编辑换账户 → softDelete 旧 + insert 新且 accountId 更新', async () => {
     vi.mocked(parseInput).mockReturnValue(txProposal())
     const { result } = setup('book-1', 'acc-def')
