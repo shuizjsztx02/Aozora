@@ -7,18 +7,18 @@
 ## 0. 拓扑与本轮范围
 
 ```
-公网用户 ──HTTPS:443──┐                       ┌── 内网 TCP 5432 ──▶ B机 Docker pg-prod / prod_db
+公网用户 ──HTTPS:443──┐                       ┌── 内网 TCP 5432 ──▶ B机 Docker pg-prod / aozora_prod
                       ▼                       ▼
 测试人员 ──IP:8081──▶ A机 Nginx ──▶ api-test/api-prod（api-test 绑 0.0.0.0:18080；api-prod 只绑 127.0.0.1:8080）
                        (192.168.44.13)              │
-                                                    └── 内网 TCP 15432 ──▶ B机 Docker pg-test / test_db
+                                                    └── 内网 TCP 15432 ──▶ B机 Docker pg-test / aozora_test
                                                     (47.96.181.37 / 192.168.44.12)
 ```
 
 | 机器 | 角色 | 规格 | 跑什么 |
 |---|---|---|---|
 | A `116.62.196.255` / 内网 `192.168.44.13` | 业务 | 2C4G，Nginx 1.16.1 已装 | Docker：`api-test`（:18080）、`api-prod`（:8080，本轮不启动） |
-| B `47.96.181.37` / 内网 `192.168.44.12` | 数据库 | 2C4G，Docker PG 18.6 双容器已装 | `pg-prod`：5432 / `prod_db`；`pg-test`：15432 / `test_db`；仅接受 A 机内网访问 |
+| B `47.96.181.37` / 内网 `192.168.44.12` | 数据库 | 2C4G，Docker PG 18.6 双容器已装 | `pg-prod`：5432 / `aozora_prod`；`pg-test`：15432 / `aozora_test`；仅接受 A 机内网访问 |
 
 **本轮范围 = 测试链路**（截图规划：测试人员 → `http://116.62.196.255:8081`）。
 选择理由：① 8081 非标端口按 IP 访问，与 ICP 备案管控（域名+80/443）无关，现在就能跑通；
@@ -28,9 +28,12 @@
 ③ 测试实例跑 `ENV=staging + DEV_AUTH_CODE=000000`，短信供应商（D-EXEC-03）未接入前
 **只有 staging 能测手机验证码登录**，这正是测试环境存在的意义。
 
-**数据策略**：本地联调库**不迁移**。B 机保留现有初始化库 `prod_db` / `test_db` 与
-数据卷；部署脚本仅创建低权限 API 账号并收紧 HBA，由 A 机 `alembic upgrade head`
-建表（当前链至 `0015_feedback`+）。
+**数据策略**：业务库与运维自建的初始化库分离。B 机两个实例各自新建业务库
+`aozora_prod`（pg-prod 实例）/ `aozora_test`（pg-test 实例），owner 为不可登录的
+归属角色 `aozora`；运维的 `test_db` / `prod_db` 原地保留、不做任何改动。库表由
+A 机 `alembic upgrade head` 建立（当前链至 `0016_cloud_entities`），需要保留旧库
+数据时按 §4.1 迁入。注意 pg-test 实例上还住着其他业务的库（如
+`fame_travel_diary`），是共享实例。
 
 observability 栈（Prometheus/Grafana/Loki/Tempo/OTel/Alertmanager 六件套体检台）
 **本轮不上**：2C4G 与 API 同挤会互相拖累，测试期 `docker logs` + 直查 B 库足够。
@@ -138,7 +141,7 @@ vim .env
 `/health/ready` 探活。失败即停并打印排查方向；看日志：
 `docker compose -f docker-compose.prod.yml --profile test logs --tail 50 api-test`。
 
-## 4. 服务器 B：配置 API 账号与 HBA（一次性，约 5 分钟）
+## 4. 服务器 B：建业务库、配置 API 账号与 HBA（一次性，约 5 分钟）
 
 把仓库带上 B 机（任意方式，脚本自包含）后：
 
@@ -149,15 +152,57 @@ git clone ~/git/aozora.git ~/Aozora && cd ~/Aozora
 bash infra/deploy/prod/b-setup-postgres.sh
 ```
 
-脚本只操作已存在的 Docker 容器 `pg-prod` / `pg-test`：保留 `prod_db` / `test_db`
-和数据卷，创建低权限 `aozora_api_prod` / `aozora_api_test`，授予 Alembic 所需的
-数据库与 `public` schema 权限。它会先备份容器内 `pg_hba.conf`，再把 initdb 默认的
-`host all all all ...` 宽规则替换为仅 `192.168.44.13/32` 可访问对应库与账号的规则，
-reload 后做规则校验。脚本不读取管理员密码文件；API 密码存
-`/root/aozora-app-db-passwords.txt`（权限 600），并在末尾打印两条 `DATABASE_URL`。
+脚本只操作已存在的 Docker 容器 `pg-prod` / `pg-test`，**幂等，可重复执行**：
 
+1. 创建归属角色 `aozora`（`NOLOGIN`，仅作库 owner，不可登录）；
+2. 创建业务库 `aozora_prod` / `aozora_test`（owner=`aozora`）；已存在则保留数据，
+   仅在 owner 不符时纠正 owner；
+3. 创建低权限 API 账号 `aozora_api_prod` / `aozora_api_test`，授予 Alembic 所需的
+   数据库 `CONNECT/TEMPORARY` 与 `public` schema `USAGE/CREATE` 权限；
+4. 确保 `pg_hba.conf` 中存在"仅 `192.168.44.13/32` 可访问该库/账号"的规则：有
+   initdb 宽规则时替换之，否则**追加**一条（改动前先备份为
+   `pg_hba.conf.bak.<时间戳>`），随后 reload 并校验；
+5. 末尾打印两条可直接粘贴到 A 机 `.env` 的 `DATABASE_URL`。
+
+脚本**不会**创建、删除或改名同实例上的其他库（运维的 `test_db` / `prod_db`、其他
+业务的 `fame_travel_diary` 均不受影响），也不会搬数据。
+
+关于表 owner：业务表由 A 机的 API 账号执行 Alembic 建立，因此表 owner 是 API 账号
+本身（谁建表谁拥有），库 owner `aozora` 只是归属标记——两者并存不冲突。
+
+脚本不读取管理员密码文件；API 密码存 `/root/aozora-app-db-passwords.txt`（权限 600）。
 若 API 账号已经存在而密码文件缺失，脚本会停止而不是重置未知密码；此时先回传错误
 输出，禁止手动删除角色或密码文件。
+
+### 4.1 把旧库数据迁入新库（需要保留现有数据时）
+
+**动手前先备份。** B 机目前没有数据库级定时备份（§7.7），云平台整机快照无法单库恢复。
+
+```bash
+# ① B 机：备份旧库（保命步骤，务必先做）
+docker exec pg-test sh -c 'pg_dump -U "$POSTGRES_USER" -d test_db -Fc' > /root/test_db-$(date +%F).dump
+ls -lh /root/test_db-*.dump
+
+# ② B 机：导入新库（新库须已由 §4 脚本建好）
+#    不加 --no-owner：旧库对象属 aozora_api_test，新库沿用同名账号，owner 可直接对齐；
+#    加了反而会把对象归给执行恢复的管理员，导致 API 账号无权访问业务表。
+#    --no-privileges 保留，避免把旧库 ACL 带进新库。
+docker exec -i pg-test sh -c \
+  'pg_restore -U "$POSTGRES_USER" -d aozora_test --no-privileges' \
+  < /root/test_db-$(date +%F).dump
+
+# ③ B 机：核对行数（与 ① 之前记录的旧库计数比对）
+docker exec pg-test sh -c 'psql -U "$POSTGRES_USER" -d aozora_test -c "
+select relname, n_live_tup from pg_stat_user_tables order by n_live_tup desc"'
+```
+
+顺序很重要：**先导入数据，再让 A 机跑 `a-deploy.sh`**。导入会一并恢复
+`alembic_version`，此时 `alembic upgrade head` 是空操作；若反过来（先建表后导入），
+`pg_restore` 会因对象已存在而报错。
+
+回滚：新库是新建的，出问题直接 `DROP DATABASE aozora_test WITH (FORCE);` 再重跑
+§4 脚本即可回到干净状态；旧库 `test_db` 全程未被改动，A 机 `.env` 改回旧连接串
+就能完全回退。
 
 **验收（A 机执行）**：
 
@@ -215,7 +260,7 @@ NSC debug 覆盖层已加入 `116.62.196.255` 明文白名单（本轮仓库改�
 
 ```bash
 docker exec pg-test sh -c \
-  'psql -U "$POSTGRES_USER" -d test_db -c "select count(*) from transactions; select count(*) from sync_changes;"'
+  'psql -U "$POSTGRES_USER" -d aozora_test -c "select count(*) from transactions; select count(*) from sync_changes;"'
 ```
 
 5. 断网记账 → 恢复 → pending 上行、对账一致（沿用 T15 联调走查项）。
@@ -223,12 +268,12 @@ docker exec pg-test sh -c \
 ### 6.4 环境重置（测试库随手清零）
 
 ```bash
-# B 机：这是破坏性操作，仅清空测试库；生产库与数据卷不受影响。
+# B 机：这是破坏性操作，仅清空业务测试库；生产库、旧库与数据卷不受影响。
 docker exec pg-test sh -c \
-  'psql -U "$POSTGRES_USER" -d postgres -v ON_ERROR_STOP=1 -c "DROP DATABASE test_db WITH (FORCE);" -c "CREATE DATABASE test_db OWNER test_admin TEMPLATE template0 ENCODING '\''UTF8'\'' LC_COLLATE '\''C'\'' LC_CTYPE '\''C'\'';"'
-# B 机：重新授权既有 API 账号并确认 HBA，输出与密码均不应变化。
+  'psql -U "$POSTGRES_USER" -d postgres -v ON_ERROR_STOP=1 -c "DROP DATABASE aozora_test WITH (FORCE);"'
+# B 机：重跑脚本重建库、重新授权并确认 HBA（API 账号与密码均不变）
 bash infra/deploy/prod/b-setup-postgres.sh
-# A 机：再跑一次 ./infra/deploy/prod/a-deploy.sh test（会重放 alembic）
+# A 机：再跑一次 ./infra/deploy/prod/a-deploy.sh test（会重放 alembic 建表）
 ```
 
 ## 7. 生产链路待办（域名落地后执行）
@@ -280,7 +325,7 @@ docker compose -f docker-compose.prod.yml --profile test down
 | 症状 | 大概率原因 | 处置 |
 |---|---|---|
 | a-deploy.sh 报"A→B 内网不通" | 安全组没放行 / listen_addresses=localhost / B 机防火墙 | §1、§4 脚本报告、§4 firewalld 提示 |
-| health/ready 503、日志 asyncpg 拒绝 | pg_hba 没有 A 的行 / 密码不符（以 `/root/aozora-db-passwords.txt` 为准） | B 机重跑 §4 脚本（幂等）后 `docker compose ... restart api-test` |
+| health/ready 503、日志 asyncpg 拒绝 | pg_hba 没有 A 的行 / 密码不符（以 `/root/aozora-app-db-passwords.txt` 为准） | B 机重跑 §4 脚本（幂等）后 `docker compose ... restart api-test` |
 | alembic 报 `No 'script_location'` | 镜像是旧版（未含 alembic.ini 的 Dockerfile 改动） | 确认 §3.2 拿到的提交包含本轮改动，`up -d --build` 重建 |
 | 公网 curl 8081 不通、A 机本机 curl 18080 通 | 安全组 / nginx 未 reload / SELinux | §5 两条、`sudo ss -lntp \| grep 8081` |
 | 8081 返回 502 | SELinux `httpd_can_network_connect`（RHEL 系默认拦） | §5-① |
