@@ -542,10 +542,3 @@ describe('ConfirmationCard — 待选分类态（T12-8 + T16-3 融合）', () =>
     expect(screen.getByTestId('card-status').textContent).toBe('⚠️ 待选分类')
   })
 })
-
-async function waitForCommit(spy: Mock, times: number) {
-  for (let i = 0; i < 50 && spy.mock.calls.length < times; i++) {
-    await new Promise(r => setTimeout(r, 10))
-  }
-  expect(spy).toHaveBeenCalledTimes(times)
-}

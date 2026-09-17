@@ -359,12 +359,12 @@ function ConfirmationCardBody({
         <div className="flex items-center justify-between gap-2 mt-1.5">
           <div className="flex items-center gap-1 min-w-0">
             <CategoryIcon
-              name={bookName || '账本'}
+              name={viewBookName}
               fallback="📒"
               className="text-sm leading-none shrink-0"
             />
             <span className="text-xs truncate" style={{ color: 'var(--ink2)' }} data-testid="card-book-name">
-              {bookName || '账本'}
+              {viewBookName}
             </span>
             {statusBadge}
           </div>
