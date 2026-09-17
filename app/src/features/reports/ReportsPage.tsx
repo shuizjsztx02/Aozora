@@ -30,6 +30,27 @@ function formatCents(cents: number): string {
   return Money.formatDisplay(Money.cents(cents))
 }
 
+/**
+ * T16-1（REQ-57）：按点击横坐标反推最近数据点。
+ * recharts 3 的 `activeTooltipIndex` 是字符串且依赖 hover 态（触屏不可靠），故改由点击坐标自算。
+ * 两图轴配置固定（内建边距 5 / 隐藏 YAxis 零宽 / XAxis 满宽），绘制区 x = [5, width - 5]。
+ */
+export function nearestTrendIndex(clickX: number, rectWidth: number, count: number): number | null {
+  if (count <= 0 || !Number.isFinite(clickX) || !Number.isFinite(rectWidth) || rectWidth <= 0) return null
+  const left = Math.min(5, rectWidth / 2)
+  const plotWidth = rectWidth - left * 2
+  const raw = Math.floor((((clickX - left) / plotWidth) * count))
+  return Math.max(0, Math.min(count - 1, raw))
+}
+
+/** 点击处以图表容器左边为原点的横坐标（recharts 事件 currentTarget 即图表容器） */
+function chartClickX(event: { currentTarget?: EventTarget | null; nativeEvent?: { clientX?: number } }): number | null {
+  const rect = event.currentTarget instanceof Element ? event.currentTarget.getBoundingClientRect() : null
+  const clientX = event.nativeEvent?.clientX
+  if (!rect || typeof clientX !== 'number') return null
+  return clientX - rect.left
+}
+
 function currentPeriod(): string {
   const now = new Date()
   return `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}`
@@ -469,23 +490,22 @@ export function ReportsPage() {
                 </div>
               </div>
 
-              <div className="h-40 relative">
+              <div className="h-40 relative" data-testid="trend-chart">
                 <ResponsiveContainer width="100%" height="100%">
                   {trendMode === 'line' ? (
                     <LineChart
                       data={daily}
-                      onClick={(state) => {
-                        // recharts 3.x：图表级 onClick 给 activeTooltipIndex（MouseHandlerDataParam 无 activePayload）
-                        const i = state?.activeTooltipIndex
-                        setActiveDay(typeof i === 'number' ? (daily[i] ?? null) : null)
+                      onClick={(state, event) => {
+                        // T16-1（REQ-57）：按点击坐标反推最近数据点；坐标不可得时回退 activeTooltipIndex
+                        const rect = event.currentTarget.getBoundingClientRect()
+                        const x = chartClickX(event)
+                        // activeTooltipIndex 为字符串索引（recharts 3），仅作兜底
+                        const i = x !== null ? nearestTrendIndex(x, rect.width, daily.length) : Number(state?.activeTooltipIndex)
+                        setActiveDay(i === null || Number.isNaN(i) ? null : (daily[i] ?? null))
                       }}
                     >
                       <XAxis dataKey="date" tick={{ fontSize: 10, fill: 'var(--ink3)' }} interval={0} tickFormatter={trendTickFormatter} axisLine={false} tickLine={false} />
                       <YAxis hide />
-                      <Tooltip
-                        formatter={(value) => formatCents(Number(value))}
-                        contentStyle={{ background: 'var(--glass)', border: '1px solid var(--glass-border)', borderRadius: 8 }}
-                      />
                       {visible.expense && <Line type="monotone" dataKey="expense" name="支出" stroke={SERIES_COLOR.expense} strokeWidth={2} dot={{ r: 2, strokeWidth: 0 }} activeDot={{ r: 4 }} isAnimationActive={false} />}
                       {visible.income && <Line type="monotone" dataKey="income" name="收入" stroke={SERIES_COLOR.income} strokeWidth={2} dot={{ r: 2, strokeWidth: 0 }} activeDot={{ r: 4 }} isAnimationActive={false} />}
                       {visible.balance && <Line type="monotone" dataKey="balance" name="结余" stroke={SERIES_COLOR.balance} strokeWidth={2} dot={{ r: 2, strokeWidth: 0 }} activeDot={{ r: 4 }} isAnimationActive={false} />}
@@ -493,18 +513,15 @@ export function ReportsPage() {
                   ) : (
                     <BarChart
                       data={daily}
-                      onClick={(state) => {
-                        const i = state?.activeTooltipIndex
-                        setActiveDay(typeof i === 'number' ? (daily[i] ?? null) : null)
+                      onClick={(state, event) => {
+                        const rect = event.currentTarget.getBoundingClientRect()
+                        const x = chartClickX(event)
+                        const i = x !== null ? nearestTrendIndex(x, rect.width, daily.length) : Number(state?.activeTooltipIndex)
+                        setActiveDay(i === null || Number.isNaN(i) ? null : (daily[i] ?? null))
                       }}
                     >
                       <XAxis dataKey="date" tick={{ fontSize: 10, fill: 'var(--ink3)' }} interval={0} tickFormatter={trendTickFormatter} axisLine={false} tickLine={false} />
                       <YAxis hide />
-                      <Tooltip
-                        cursor={{ fill: 'var(--glass)' }}
-                        formatter={(value) => formatCents(Number(value))}
-                        contentStyle={{ background: 'var(--glass)', border: '1px solid var(--glass-border)', borderRadius: 8 }}
-                      />
                       <Bar
                         dataKey={barSeries}
                         name={SERIES_LABEL[barSeries]}

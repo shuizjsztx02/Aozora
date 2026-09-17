@@ -10,10 +10,11 @@
  * 故「存在」用 getAllByText(...).length>0、「不存在」用 queryAllByText(...)（getAllBy 零匹配会抛）。
  * 就绪门用加载完成后唯一出现的 selectedBook 按钮文字「默认账本」。
  */
-import { describe, it, expect, vi, beforeEach } from 'vitest'
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
 import { render, screen, fireEvent, waitFor } from '@testing-library/react'
 import { MemoryRouter } from 'react-router'
-import { ReportsPage, buildDailySeries, trendTickFormatter } from '../../features/reports/ReportsPage'
+import { ReportsPage, buildDailySeries, trendTickFormatter, nearestTrendIndex } from '../../features/reports/ReportsPage'
+import { ErrorBoundary } from '../../app/ErrorBoundary'
 import type { TransactionData, BookData, CategoryData } from '../../platform/bridge/bridge-types'
 
 const mockBridge = vi.hoisted(() => ({
@@ -206,6 +207,164 @@ describe('ReportsPage 趋势卡（T10-6）', () => {
     mockCalls(() => [])
     renderPage()
     expect(await screen.findByText('本期暂无记账')).toBeInTheDocument()
+  })
+})
+
+/**
+ * jsdom 无布局引擎（元素 rect 恒 0×0），ResponsiveContainer 因此不渲染图表子树。
+ * 桩化图表容器几何 + ResizeObserver（React 官方 jsdom 测试配方），让 recharts 真实渲染。
+ */
+const CHART_W = 260
+const CHART_H = 160
+const toPx = (v: number | string | undefined, fallback: number) =>
+  typeof v === 'number' ? v : typeof v === 'string' && v.endsWith('px') ? parseFloat(v) : fallback
+
+const stubChartGeometry = () => {
+  const patched = new Map<Element, () => DOMRect>()
+  const stubRect = (el: Element, w: number, h: number) => {
+    const rect = { x: 0, y: 0, left: 0, top: 0, right: w, bottom: h, width: w, height: h, toJSON: () => ({}) } as DOMRect
+    patched.set(el, () => rect)
+  }
+  vi.spyOn(Element.prototype, 'getBoundingClientRect').mockImplementation(function (this: Element) {
+    const stub = patched.get(this)
+    if (stub) return stub()
+    // 图表容器/包裹层尺寸显式钉死；其余元素维持 jsdom 零矩形
+    if (this instanceof HTMLElement && this.className.includes('recharts')) {
+      const w = toPx(this.style.width, CHART_W)
+      const h = toPx(this.style.height, CHART_H)
+      stubRect(this, w, h)
+      return patched.get(this)!()
+    }
+    return { x: 0, y: 0, left: 0, top: 0, right: 0, bottom: 0, width: 0, height: 0, toJSON: () => ({}) } as DOMRect
+  })
+  class StubResizeObserver {
+    observe(el: Element, ...rest: unknown[]) {
+      const w = (el as HTMLElement).style?.width
+      const h = (el as HTMLElement).style?.height
+      stubRect(el, toPx(w, CHART_W), toPx(h, CHART_H))
+      void rest
+    }
+    unobserve() {}
+    disconnect() {}
+  }
+  vi.stubGlobal('ResizeObserver', StubResizeObserver)
+  return () => {
+    vi.restoreAllMocks()
+    vi.unstubAllGlobals()
+  }
+}
+
+/** T16-1（REQ-57）：点击取点 = 坐标反推纯函数（jsdom 无命中判定，几何口径在此锁死） */
+describe('nearestTrendIndex（T16-1 坐标反推）', () => {
+  it('绘制区 [5, width−5] 按等宽带均分，返回最近点下标', () => {
+    // width 260 → 绘制区 [5,255]、带宽 10：第 5 带 = 50~60
+    expect(nearestTrendIndex(55, 260, 25)).toBe(5)
+    expect(nearestTrendIndex(5, 260, 25)).toBe(0)
+    expect(nearestTrendIndex(255, 260, 25)).toBe(24)
+    expect(nearestTrendIndex(0, 260, 25)).toBe(0)     // 左侧越界夹回
+    expect(nearestTrendIndex(400, 260, 25)).toBe(24)  // 右侧越界夹回
+  })
+
+  it('容器宽度非法或数据点为空 → null（不置浮层）', () => {
+    expect(nearestTrendIndex(10, 0, 25)).toBeNull()
+    expect(nearestTrendIndex(10, 260, 0)).toBeNull()
+    expect(nearestTrendIndex(Number.NaN, 260, 25)).toBeNull()
+  })
+})
+
+/**
+ * T16-1（REQ-57）回归：趋势图点击链路。
+ * 数据必含负结余日（day 3 = 支出 123.45 / 收入 0.00 → balance −12345），
+ * 旧实现下 recharts 内建 Tooltip formatter 会对负 balance 调 Money.cents 而抛错，整页被 ErrorBoundary 接管。
+ */
+describe('ReportsPage 趋势点击（T16-1 / REQ-57）', () => {
+  let restoreGeometry = () => {}
+
+  beforeEach(() => {
+    vi.clearAllMocks()
+    restoreGeometry = stubChartGeometry()
+  })
+  afterEach(() => restoreGeometry())
+
+  /** b1 当月：day 3 支出 123.45（负结余）、day 4 收入 800.00、day 5 开支 12.00 */
+  const TXS_NEG: TransactionData[] = [
+    mkTx({ id: 'n1', bookId: 'b1', bizDate: `${curPeriod}-03`, amountCents: 12345 }),
+    mkTx({ id: 'n2', bookId: 'b1', bizDate: `${curPeriod}-04`, type: 'income', amountCents: 80000 }),
+    mkTx({ id: 'n3', bookId: 'b1', bizDate: `${curPeriod}-05`, amountCents: 1200 }),
+  ]
+
+  /** 每个月的天数即趋势横轴点数（本卡几何口径强依赖：绘制区按天数等分） */
+  const dayCount = () => buildDailySeries(curPeriod, []).length
+
+  const renderGuarded = () =>
+    render(
+      <ErrorBoundary>
+        <MemoryRouter>
+          <ReportsPage />
+        </MemoryRouter>
+      </ErrorBoundary>,
+    )
+
+  const clickChart = (clientX: number) => {
+    const box = screen.getByTestId('trend-chart')
+    const svg = box.querySelector('svg.recharts-surface')
+    expect(svg).not.toBeNull()
+    fireEvent.click(svg!, { clientX, clientY: 80 })
+  }
+
+  /** 异步数据路径下图表子树晚一拍挂载（ResponsiveContainer 尺寸 effect 需再刷一轮） */
+  const waitForChart = () => waitFor(() => {
+    expect(screen.getByTestId('trend-chart').querySelector('svg.recharts-surface')).not.toBeNull()
+  })
+
+  it('折线：图上点击置浮层（日期随点击位置变）且界外保镖未接管', async () => {
+    mockCalls(() => TXS_NEG)
+    renderGuarded()
+    await screen.findByText('默认账本')
+    await waitForChart()
+    expect(screen.getByText('每日趋势')).toBeInTheDocument()
+
+    // 首点必落在图表容器上：宽度 260 → 绘制区 [5,255]、带宽 = 250/天数
+    clickChart(125)
+    expect(screen.getByTestId('trend-callout')).toBeInTheDocument()
+    const first = screen.getByText(new RegExp(`^${curPeriod}-\\d{2}$`)).textContent
+
+    // 左移点击 → 落点更早，浮层日期随之更新
+    clickChart(25)
+    const second = screen.getByText(new RegExp(`^${curPeriod}-\\d{2}$`)).textContent
+    expect(second).not.toBe(first)
+
+    // 负结余日（day 3 / day 5 均有支出）亦可点开：绝对值格式化，界外保镖不接管
+    const band = 250 / dayCount()
+    clickChart(5 + 4.5 * band)
+    expect(screen.getByText(`${curPeriod}-05`)).toBeInTheDocument()
+    expect(screen.getAllByText(/12\.00/).length).toBeGreaterThan(0)
+    expect(screen.queryByText('出了点问题')).not.toBeInTheDocument()
+  })
+
+  it('柱状：图上点击置浮层，界外保镖未接管', async () => {
+    mockCalls(() => TXS_NEG)
+    renderGuarded()
+    await screen.findByText('默认账本')
+    await waitForChart()
+    fireEvent.click(screen.getByLabelText('柱状模式'))
+
+    // 柱状默认系列 = 支出
+    const band = 250 / dayCount()
+    clickChart(5 + 2.5 * band)
+    expect(screen.getByText(`${curPeriod}-03`)).toBeInTheDocument()
+    expect(screen.getAllByText(/123\.45/).length).toBeGreaterThan(0)
+    expect(screen.queryByText('出了点问题')).not.toBeInTheDocument()
+
+    // 折线三系列全开点负结余日：绝对值 + 手拼负号（旧崩溃路径的数据点）
+    fireEvent.click(screen.getByLabelText('折线模式'))
+    clickChart(5 + 2.5 * band)
+    expect(screen.getByText(`${curPeriod}-03`)).toBeInTheDocument()
+    const callout = screen.getByTestId('trend-callout')
+    expect(callout).toHaveTextContent('支出')
+    expect(callout).toHaveTextContent('123.45')
+    expect(callout).toHaveTextContent(/-\s*¥123\.45/)
+    expect(screen.queryByText('出了点问题')).not.toBeInTheDocument()
   })
 })
 
