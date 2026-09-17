@@ -299,7 +299,14 @@ class AozoraBridge(
     }
 
     private suspend fun handleTxListByBook(requestId: String, p: JSONObject): BridgeResponse {
-        val txs = repository.listTransactionsByBook(p.getString("bookId"))
+        val bookId = p.getString("bookId")
+        // T16-6（REQ-62 / 决策 #8）：masterId → 全部账本聚合视图；其余账本走原路径。
+        // 命令名 / 入参 / 返回结构零变，前端零感知。
+        val txs = if (bookId == repository.getMasterBookId()) {
+            repository.listTransactionsByMasterAggregate()
+        } else {
+            repository.listTransactionsByBook(bookId)
+        }
         return BridgeResponse.success(requestId, transactionsToJsonStr(txs))
     }
 

@@ -50,6 +50,13 @@ interface TransactionDao {
     @Query("SELECT * FROM transactions WHERE bookId = :bookId AND deletedAt IS NULL ORDER BY bizDate DESC, occurredAt DESC")
     suspend fun listByBook(bookId: String): List<TransactionEntity>
 
+    /**
+     * T16-6（REQ-62）：多账本合并取数（总账本聚合视图）。
+     * bookIds 恒非空（调用方 Repository 已挡空列表——Room 的 IN () 是非法 SQL）。
+     */
+    @Query("SELECT * FROM transactions WHERE bookId IN (:bookIds) AND deletedAt IS NULL ORDER BY bizDate DESC, occurredAt DESC")
+    suspend fun listByBooks(bookIds: List<String>): List<TransactionEntity>
+
     @Query("SELECT * FROM transactions WHERE bizDate BETWEEN :startDate AND :endDate AND deletedAt IS NULL ORDER BY bizDate DESC, occurredAt DESC")
     suspend fun listByDateRange(startDate: String, endDate: String): List<TransactionEntity>
 

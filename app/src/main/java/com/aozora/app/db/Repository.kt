@@ -152,6 +152,19 @@ class Repository(private val db: AozoraDatabase) {
     suspend fun listTransactionsByBook(bookId: String): List<TransactionEntity> =
         db.transactionDao().listByBook(bookId)
 
+    /**
+     * T16-6（REQ-62 / 决策 #8）：总账本聚合 —— 全部活跃（未归档）非 master 账本的交易合并，
+     * 排序与单账本 listByBook 一致（bizDate/occurredAt 倒序）。
+     * master 自身恒无行（listBooks 已过滤 archived、且 bookIds 排除 masterId）；
+     * 全空（无活跃非 master 账本）时直接返回空列表，避免 IN () 非法 SQL。
+     */
+    suspend fun listTransactionsByMasterAggregate(): List<TransactionEntity> {
+        val masterId = getMasterBookId()
+        val bookIds = listBooks().map { it.id }.filter { it != masterId }
+        if (bookIds.isEmpty()) return emptyList()
+        return db.transactionDao().listByBooks(bookIds)
+    }
+
     suspend fun listTransactionsByDateRange(start: String, end: String): List<TransactionEntity> =
         db.transactionDao().listByDateRange(start, end)
 

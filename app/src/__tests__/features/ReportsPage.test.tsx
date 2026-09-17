@@ -1,10 +1,11 @@
 /**
- * ReportsPage 测试（T10-5 / REQ-21 + T10-6 / REQ-22 + T15-5 / REQ-54）。
+ * ReportsPage 测试（T10-5 / REQ-21 + T10-6 / REQ-22 + T15-5 / REQ-54 + T16-6 / REQ-62）。
  *
  * 数据层（buildDailySeries 纯函数）：非当月满月天数；T15-5 起当月亦满月（未来日零填充）；逐日零填充；净额。
  * X 轴（trendTickFormatter）：只渲染 1/5/10/15/20/25/月末，其余返回空串。
- * 报表筛选（T10-5）：默认当前账本；切月重新过滤；账本下拉过滤 master；切账本重新拉取。
+ * 报表筛选（T10-5）：默认当前账本；切月重新过滤；账本下拉含总账本（T16-6 起恢复）；切账本重新拉取。
  * 趋势卡（T10-6）：图例 toggle 显隐；全月零交易空态"本期暂无记账"。
+ * 总账本聚合（T16-6 / REQ-62）：下拉含总账本；选中后请求 masterId、金额为各账本之和；聚合视图不渲染预算卡。
  *
  * 约定：金额数字在概览「支出/结余」两格重复出现，且概览标题可能与期间标签同字，
  * 故「存在」用 getAllByText(...).length>0、「不存在」用 queryAllByText(...)（getAllBy 零匹配会抛）。
@@ -155,13 +156,14 @@ describe('ReportsPage 期间 + 账本筛选（T10-5）', () => {
     expect(screen.queryAllByText(/123\.45/)).toHaveLength(0)
   })
 
-  it('账本下拉过滤 master — 总账本不出现', async () => {
+  it('账本下拉含总账本 — 总账本作为「全部账本」聚合视图入口', async () => {
     mockCalls(id => (id === 'b2' ? TXS_B2 : TXS_B1))
     renderPage()
     await screen.findByText('默认账本')
     fireEvent.click(screen.getByLabelText('切换账本'))
     expect(await screen.findByText('旅游账本')).toBeInTheDocument()
-    expect(screen.queryByText('总账本')).not.toBeInTheDocument()
+    // T16-6（REQ-62）：恢复总账本（旧行为「过滤 master」已废弃）
+    expect(await screen.findByText('总账本')).toBeInTheDocument()
   })
 
   it('切账本 B 只统计 B（按所选 bookId 重新拉取）', async () => {
@@ -175,6 +177,64 @@ describe('ReportsPage 期间 + 账本筛选（T10-5）', () => {
     )
     await waitFor(() => expect(screen.getAllByText(/99\.00/).length).toBeGreaterThan(0))
     expect(screen.queryAllByText(/123\.45/)).toHaveLength(0)
+  })
+})
+
+/**
+ * T16-6（REQ-62 / 决策 #8）：总账本聚合视图。
+ * 桥侧 masterId → 全部账本合并（本卡仅测 UI 侧契约：请求 masterId、金额显示为各账本之和、预算卡不渲染）。
+ */
+describe('ReportsPage 总账本聚合（T16-6 / REQ-62）', () => {
+  beforeEach(() => {
+    vi.clearAllMocks()
+  })
+
+  const BUDGET_ROW = [{ amountCents: 100000, period: curPeriod, budgetType: 'monthly', categoryId: null }]
+  const AGGREGATE_TXS = [...TXS_B1, ...TXS_B2]
+  const mockCallsMaster = (txByBook: (id?: string) => TransactionData[]) => {
+    mockBridge.getMeta.mockResolvedValue({})
+    mockBridge.call.mockImplementation((cmd: string, args?: { bookId?: string }) => {
+      if (cmd === 'book.list') return Promise.resolve(BOOKS)
+      if (cmd === 'category.list') return Promise.resolve(CATS)
+      if (cmd === 'budget.list') return Promise.resolve(BUDGET_ROW)  // 预算行存在 → 若漏掉 isMasterView 门控则预算卡会渲染
+      if (cmd === 'transaction.listByBook') return Promise.resolve(txByBook(args?.bookId))
+      return Promise.resolve([])
+    })
+  }
+
+  it('选中总账本 → 请求 masterId、金额 = 各账本之和（123.45 + 99.00 = 222.45）', async () => {
+    mockCallsMaster(id => (id === 'm' ? AGGREGATE_TXS : id === 'b2' ? TXS_B2 : TXS_B1))
+    renderPage()
+    await screen.findByText('默认账本')
+
+    fireEvent.click(screen.getByLabelText('切换账本'))
+    fireEvent.click(await screen.findByText('总账本'))
+
+    await waitFor(() =>
+      expect(mockBridge.call).toHaveBeenCalledWith('transaction.listByBook', { bookId: 'm' }),
+    )
+    // 当月 b1 123.45 + b2 99.00 = 222.45（概览支出格）
+    await waitFor(() => expect(screen.getAllByText(/222\.45/).length).toBeGreaterThan(0))
+    // 账本按钮切到「总账本」
+    expect(screen.getByText('总账本')).toBeInTheDocument()
+  })
+
+  it('总账本视图不渲染预算卡（预算挂在具体账本，聚合视图不发明跨账本预算）', async () => {
+    mockCallsMaster(id => (id === 'm' ? AGGREGATE_TXS : TXS_B1))
+    renderPage()
+    await screen.findByText('默认账本')
+    // 单账本（默认）下预算卡渲染
+    expect(await screen.findByText(/2026年.+月预算/)).toBeInTheDocument()
+
+    fireEvent.click(screen.getByLabelText('切换账本'))
+    fireEvent.click(await screen.findByText('总账本'))
+    await waitFor(() =>
+      expect(mockBridge.call).toHaveBeenCalledWith('transaction.listByBook', { bookId: 'm' }),
+    )
+    // 切到 master 后预算卡消失
+    await waitFor(() =>
+      expect(screen.queryByText(/2026年.+月预算/)).not.toBeInTheDocument(),
+    )
   })
 })
 

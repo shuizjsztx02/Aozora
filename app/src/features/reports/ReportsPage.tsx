@@ -4,8 +4,11 @@
  * 月度统计、分类占比环图、每日趋势、预算执行、环比。
  * 数据来源：Room + domain/aggregator.ts（纯本地）。
  *
- * 第十轮 REQ-21（T10-5）：期间切换（复用 PeriodPanel）+ 账本下拉（过滤 master）。
+ * 第十轮 REQ-21（T10-5）：期间切换（复用 PeriodPanel）+ 账本下拉。
  * period / bookId 为 state，月度概览 / AI 洞察 / 分享文案 / 预算 / 趋势全部跟随。
+ *
+ * T16-6（REQ-62）：账本下拉恢复总账本——选中即「全部账本」聚合视图（桥侧 masterId 走聚合），
+ * 聚合视图不渲染预算卡（预算挂在具体账本上，不发明跨账本预算）。
  *
  * 第十一轮 REQ-25（T11-3，决策 #6）：📅 切换 chart/calendar 两态（T15-4 起钮在账本行右侧）；
  * calendar 态隐藏图卡区、共享 period/bookId state 与派生 txs——零新增桥调用。
@@ -172,7 +175,7 @@ export function ReportsPage() {
   const loadData = useCallback(async () => {
     setLoading(true)
     try {
-      // 决策 #2 / T7-6：展示目标 = 非 master 账本；T9-5b（决策 #3）default_book_id 优先
+      // 决策 #2 / T7-6：初始展示目标 = 非 master 账本（记账目标语义）；T9-5b（决策 #3）default_book_id 优先
       const [bs, cats, meta] = await Promise.all([
         bridge.call('book.list', {}) as Promise<BookData[]>,
         bridge.call('category.list', {}) as Promise<CategoryData[]>,
@@ -215,14 +218,16 @@ export function ReportsPage() {
     () => allTxs.filter(tx => tx.bizDate.startsWith(period)),
     [allTxs, period],
   )
-  const budget = useMemo(() => {
-    const mb = budgets.find(b => b.period === period && b.budgetType === 'monthly' && !b.categoryId)
-    return mb ? { amountCents: mb.amountCents } : null
-  }, [budgets, period])
 
   const selectedBook = books.find(b => b.id === bookId)
-  // 账本下拉：总账本不提供（决策 #6 — fact pack 按单账本构建，聚合视图无云端对应物）
-  const selectableBooks = books.filter(b => !b.isMaster)
+  // T16-6（REQ-62 / 决策 #8）：总账本聚合视图——预算挂在具体账本上，聚合视图不渲染预算卡（含分享文案中的预算进度）
+  const isMasterView = !!selectedBook?.isMaster
+
+  const budget = useMemo(() => {
+    if (isMasterView) return null
+    const mb = budgets.find(b => b.period === period && b.budgetType === 'monthly' && !b.categoryId)
+    return mb ? { amountCents: mb.amountCents } : null
+  }, [budgets, period, isMasterView])
 
   // 统计
   const stats = sumTransactions(txs.map(toDomainTransaction))
@@ -248,7 +253,7 @@ export function ReportsPage() {
 
   return (
     <div className="min-h-screen">
-      {/* ─── 账本切换（REQ-21 / T10-5，决策 #6：过滤 master、内联实现不抽组件） ───
+      {/* ─── 账本切换（REQ-21 / T10-5；T16-6 / REQ-62：总账本 = 聚合视图） ───
           T15-4（REQ-53）：📅/📤 两钮自 PageHeader 挪来本行右侧，PageHeader 整段删除。 */}
       <div className="relative px-4 pt-3">
         <div className="flex items-center justify-between">
@@ -308,7 +313,7 @@ export function ReportsPage() {
               className="glass-card absolute left-4 right-4 top-full z-20 mt-1 p-2"
               style={{ boxShadow: 'var(--card-shadow)' }}
             >
-              {selectableBooks.map(b => {
+              {books.map(b => {
                 const active = b.id === bookId
                 return (
                   <button
