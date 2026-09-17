@@ -1,6 +1,7 @@
 package com.aozora.app.db
 
 import com.aozora.app.db.entity.ChatPersonaEntity
+import com.aozora.app.db.entity.PendingMutationEntity
 import com.aozora.app.db.entity.SyncMetaEntity
 import kotlinx.coroutines.runBlocking
 import org.junit.After
@@ -14,9 +15,9 @@ import org.robolectric.annotation.Config
 
 /**
  * 第十一轮 T11-7（REQ-28 / 决策 #8）：聊天角色 Repository 层 JVM 测试。
- * 核心不变量（镜像 RepositoryScheduledTest）：角色写操作**绝不产生 pending
- * mutation**（服务端不认 chat_personas，入队=422 毒丸）；种子幂等靠
- * personas_seeded 标记——首启播种、删光不重播。
+ * 种子幂等靠 personas_seeded 标记——首启播种、删光不重播。
+ * T-M7-01：角色上云后写操作（含播种）入队 pending mutation（上行路径反转自
+ * 第十一轮的"刻意不入队"）；bootstrap 重建也随云端权威一并清空重建。
  */
 @RunWith(RobolectricTestRunner::class)
 @Config(sdk = [33])
@@ -73,7 +74,9 @@ class RepositoryPersonaTest {
     fun seed_afterUserDeletedAll_noReplay() = runBlocking {
         // 删光 = 用户意愿，mark 挡住重播（决策 #8）
         repository.ensureSeedPersonas()
-        repository.listChatPersonas().forEach { repository.archiveChatPersona(it.id) }
+        repository.listChatPersonas().forEachIndexed { i, it ->
+            repository.archiveChatPersona(it.id, "m-del-$i")
+        }
         repository.ensureSeedPersonas()
         assertTrue(repository.listChatPersonas().isEmpty())
     }
@@ -81,20 +84,49 @@ class RepositoryPersonaTest {
     // ─── CRUD 契约（镜像 scheduled） ───
 
     @Test
-    fun writes_never_enqueuePendingMutations() = runBlocking {
-        repository.insertChatPersona(persona("p1"))
-        repository.updateChatPersona(persona("p1", version = 2))
-        repository.archiveChatPersona("p1")
-        assertEquals(0, repository.listPendingMutations().size)
+    fun writes_enqueueMatchingMutations() = runBlocking {
+        repository.insertChatPersona(persona("p1"), "m2")
+        repository.updateChatPersona(persona("p1", version = 2), "m3")
+        repository.archiveChatPersona("p1", "m4")
+        // T-M7-01：每次写都入队一条（此前刻意不入队）
+        val byId = repository.listPendingMutations().associateBy { it.mutationId }
+        assertEquals(setOf("m2", "m3", "m4"), byId.keys)
+        for (m in byId.values) {
+            assertEquals("chat_persona", m.entityType)
+            assertEquals("p1", m.entityId)
+            assertEquals(PendingMutationEntity.STATUS_PENDING, m.status)
+        }
+        assertEquals(PendingMutationEntity.OP_INSERT, byId.getValue("m2").operation)
+        assertEquals(PendingMutationEntity.OP_UPDATE, byId.getValue("m3").operation)
+        assertEquals(PendingMutationEntity.OP_DELETE, byId.getValue("m4").operation)
+        assertNull(byId.getValue("m2").expectedVersion)
+        assertEquals(1, byId.getValue("m3").expectedVersion)
+        assertEquals(2, byId.getValue("m4").expectedVersion)
+    }
+
+    @Test
+    fun seed_enqueuesOneInsertPerPersona() = runBlocking {
+        repository.ensureSeedPersonas()
+        // T-M7-01：播种的 5 个内置角色同样上行（换机可恢复默认角色集）
+        val pending = repository.listPendingMutations()
+        assertEquals(5, pending.size)
+        assertTrue(pending.all { it.entityType == "chat_persona" })
+        assertTrue(pending.all { it.operation == PendingMutationEntity.OP_INSERT })
+        assertTrue(pending.all { it.expectedVersion == null })
+        assertEquals(5, pending.map { it.mutationId }.toSet().size)
+        assertEquals(5, pending.map { it.entityId }.toSet().size)
+        // 二次播种不再入队
+        repository.ensureSeedPersonas()
+        assertEquals(5, repository.listPendingMutations().size)
     }
 
     @Test
     fun update_sameVersion_rejected() = runBlocking {
-        repository.insertChatPersona(persona("p1"))
-        repository.updateChatPersona(persona("p1", version = 2, name = "改名"))
+        repository.insertChatPersona(persona("p1"), "m5")
+        repository.updateChatPersona(persona("p1", version = 2, name = "改名"), "m6")
         assertEquals("改名", repository.getChatPersona("p1")!!.name)
         var threw = false
-        try { repository.updateChatPersona(persona("p1", version = 2, name = "再改")) }
+        try { repository.updateChatPersona(persona("p1", version = 2, name = "再改"), "m7") }
         catch (e: IllegalArgumentException) { threw = true }
         assertTrue(threw)
         assertEquals("改名", repository.getChatPersona("p1")!!.name)
@@ -103,26 +135,26 @@ class RepositoryPersonaTest {
     @Test
     fun insert_rejectsNameOver16_andPersonaOver2000() = runBlocking {
         var threw = false
-        try { repository.insertChatPersona(persona("p1", name = "a".repeat(17))) }
+        try { repository.insertChatPersona(persona("p1", name = "a".repeat(17)), "m8") }
         catch (e: IllegalArgumentException) { threw = true }
         assertTrue("昵称 >16 必须拒绝", threw)
         threw = false
         try {
-            repository.insertChatPersona(persona("p1").copy(persona = "x".repeat(2001)))
+            repository.insertChatPersona(persona("p1").copy(persona = "x".repeat(2001)), "m9")
         } catch (e: IllegalArgumentException) { threw = true }
         assertTrue("人设 >2000 必须拒绝", threw)
         // 边界合法：16 字 / 2000 字
-        repository.insertChatPersona(persona("p1", name = "a".repeat(16)))
+        repository.insertChatPersona(persona("p1", name = "a".repeat(16)), "m10")
     }
 
     @Test
     fun archive_activeThenList_excludes_reGetStillWorks() = runBlocking {
-        repository.insertChatPersona(persona("p1"))
-        repository.archiveChatPersona("p1")
+        repository.insertChatPersona(persona("p1"), "m11")
+        repository.archiveChatPersona("p1", "m12")
         assertTrue(repository.listChatPersonas().isEmpty())
         assertNotNull(repository.getChatPersona("p1")) // 软删行保留（镜像 scheduled）
         var threw = false
-        try { repository.archiveChatPersona("p1") } catch (e: IllegalArgumentException) { threw = true }
+        try { repository.archiveChatPersona("p1", "m13") } catch (e: IllegalArgumentException) { threw = true }
         assertTrue("重复归档拒绝", threw)
     }
 
@@ -138,11 +170,13 @@ class RepositoryPersonaTest {
     }
 
     @Test
-    fun clearAllEntities_keepsPersonasAndSeedMark() = runBlocking {
-        // bootstrap 重建只清同步实体；角色与自管键是设备本地数据（同 savings/scheduled）
+    fun clearAllEntities_wipesPersonas_keepsSeedMark() = runBlocking {
+        // T-M7-01：角色上云后随 bootstrap 快照重建（清空前由 migrateCloudEntitiesUp
+        // 入队上行，见 RepositoryCloudUploadTest）。personas_seeded 是 sync_meta 上的
+        // 自管键，clearAllEntities 只重置 cursor，不动其余 meta。
         repository.ensureSeedPersonas()
         repository.clearAllEntities()
-        assertEquals(5, repository.listChatPersonas().size)
+        assertTrue(repository.listChatPersonas().isEmpty())
         assertEquals("1", repository.getMeta(SyncMetaEntity.KEY_PERSONAS_SEEDED))
     }
 }

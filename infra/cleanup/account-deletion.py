@@ -41,7 +41,10 @@ from src.models.deletion import DeactivationToken, DeletionAudit
 from src.models.export import Export
 from src.models.ledger import Account, Book, Category, Transaction
 from src.models.mutation import MutationIdempotency
+from src.models.persona import ChatPersona
 from src.models.proposal import ProposalIdempotency
+from src.models.savings import SavingsGoal
+from src.models.scheduled import ScheduledRule
 from src.models.sync import SyncChange
 from src.models.user import DeviceSession, User, UserStatus
 
@@ -70,6 +73,11 @@ _PER_USER_TABLES: list[tuple[str, object]] = [
     ("attachments", Attachment),
     ("transactions", Transaction),
     ("budgets", Budget),
+    # T-M7-01: 三实体上云后归入账号删除范围。scheduled_rules 引用
+    # categories(RESTRICT) / books(RESTRICT)，必须排在两者之前。
+    ("scheduled_rules", ScheduledRule),
+    ("savings_goals", SavingsGoal),
+    ("chat_personas", ChatPersona),
     ("accounts", Account),
     ("categories", Category),
     ("ai_conversations", AIConversation),

@@ -16,10 +16,12 @@ import java.io.IOException
  * 流程（每次 worker 触发执行一次）：
  * 1. 重置残留 `syncing` 状态的 mutation（崩溃恢复）。
  * 2. 通过 [AuthClient] 获取有效 access_token（必要时自动注册 / 刷新）。
- * 3. T-M3-03: 检测是否需要 bootstrap（见 [needsBootstrap]）。若需要，走 bootstrap 流程。
- * 4. Pull：拉取 cursor 之后的服务端变更 → 合并 → 推进 cursor。
- * 5. Push：分批推送本地 pending mutations → 服务端接受 → 移除对应 mutation。
- * 6. 再次 Pull：echo 回自己的 push → 合并（保证 cursor 与服务端一致）。
+ * 3. T-M7-01: 存量本地数据一次性上行（见 [Repository.migrateCloudEntitiesUp]），
+ *    必须先于 bootstrap 的清空。
+ * 4. T-M3-03: 检测是否需要 bootstrap（见 [needsBootstrap]）。若需要，走 bootstrap 流程。
+ * 5. Pull：拉取 cursor 之后的服务端变更 → 合并 → 推进 cursor。
+ * 6. Push：分批推送本地 pending mutations → 服务端接受 → 移除对应 mutation。
+ * 7. 再次 Pull：echo 回自己的 push → 合并（保证 cursor 与服务端一致）。
  *
  * 错误处理：
  * - [AuthClient.AuthLostException]：清空本地 auth，状态置 ERROR。
@@ -67,7 +69,13 @@ class SyncEngine(
             val ownerId = authClient.currentUserId()
                 ?: return@withLock handleAuthLost("user id missing after token acquisition")
 
-            // 3. T-M3-03: 检测是否需要 bootstrap（新设备 / 清空 Room 后首次同步）
+            // 3. T-M7-01: 存量本地数据一次性上行。**必须先于 bootstrap** ——
+            //    bootstrap 的 clearAllEntities 会连同 savings/scheduled/personas
+            //    三张表一起清空，本地独有数据只能靠此刻入队的 mutation 存活到 push。
+            //    已上行过（meta 标记）时是空操作。
+            repository.migrateCloudEntitiesUp()
+
+            // 4. T-M3-03: 检测是否需要 bootstrap（新设备 / 清空 Room 后首次同步）
             if (needsBootstrap()) {
                 Log.i(TAG, "bootstrap required (cursor=0, no local entities); running bootstrap")
                 // P2-3: REBUILDING 状态让前端可展示"重建中"区分常规 pull
@@ -77,11 +85,11 @@ class SyncEngine(
                 // bootstrap 成功后 cursor 已推进，继续正常 pull/push 流程
             }
 
-            // 4. Pull
+            // 5. Pull
             emit(SyncState.PULLING, pendingCountSnapshot())
             pullUntilCaughtUp(ownerId)
 
-            // 5. Push
+            // 6. Push
             emit(SyncState.PUSHING, pendingCountSnapshot())
             pushAllBatches()
 
@@ -89,7 +97,7 @@ class SyncEngine(
             // 以便后续 emit（echo pull / IDLE）反映最新的 rejected 状态。
             cachedFailedMutations = null
 
-            // 6. 再 Pull（echo of own changes）
+            // 7. 再 Pull（echo of own changes）
             emit(SyncState.PULLING, pendingCountSnapshot())
             pullUntilCaughtUp(ownerId)
 
@@ -134,6 +142,8 @@ class SyncEngine(
             repository.resetSyncingMutations()
             val ownerId = authClient.currentUserId()
                 ?: return@withLock handleAuthLost("user id missing before bootstrap")
+            // T-M7-01: 同 runOnce —— 存量数据上行必须先于 bootstrap 的清空。
+            repository.migrateCloudEntitiesUp()
             // P2-3: REBUILDING 状态区分常规 pull 与全量重建，前端可据此展示"重建中"
             emit(SyncState.REBUILDING, pendingCountSnapshot())
             runBootstrap(ownerId, forced = true)
@@ -233,6 +243,7 @@ class SyncEngine(
      * 3. 重建所有实体到 Room。
      * 4. Checksum 校验：用响应原始 snake_case 数据重新计算，与服务端返回值比对。
      *    - P0-1 修复：此前客户端对 camelCase Map 重算，因键名不同永远无法匹配
+     *    - T-M7-01：优先比对 v2（八类实体）；服务端无 checksum_v2 时回退 legacy（五类）
      *    - 不一致说明客户端解析错误（字段名映射丢失、类型转换丢失等）
      * 5. P1-1: 实体计数校验：对比 response 中每类实体数量与 Room 实际写入数量。
      *    - checksum 只能验证 JSON 解析一致性，无法发现"某个实体因字段缺失被 skip"
@@ -253,15 +264,25 @@ class SyncEngine(
 
         Log.i(TAG, "bootstrap: rebuilding ${response.books.size} books, " +
             "${response.categories.size} categories, ${response.accounts.size} accounts, " +
-            "${response.transactions.size} transactions, ${response.budgets.size} budgets")
+            "${response.transactions.size} transactions, ${response.budgets.size} budgets, " +
+            "${response.savingsGoals.size} savings goals, " +
+            "${response.scheduledRules.size} scheduled rules, " +
+            "${response.chatPersonas.size} chat personas")
         repository.applyBootstrap(response, ownerId)
 
         // P0-1 修复：checksum 在 parseBootstrapResponse 中用原始 snake_case 数据重算，
         // 直接取 response.computedChecksum 与服务端声明的 response.checksum 比对。
         // 旧实现（对 camelCase Map 重算）因 created_at vs createdAt 等键名差异永远不匹配。
-        val computedChecksum = response.computedChecksum
-        if (computedChecksum.isNotEmpty() && computedChecksum != response.checksum) {
-            Log.e(TAG, "bootstrap checksum MISMATCH: computed=$computedChecksum server=${response.checksum}")
+        //
+        // T-M7-01: 三实体上云后，服务端同时下发 legacy（五类）与 v2（八类）两个
+        // checksum。当前客户端用 v2；连到旧服务端（无 checksum_v2）时回退 legacy，
+        // 此时服务端也不会返回三个新列表，计数校验自然通过（0 == 0）。
+        val useV2 = response.checksumV2.isNotEmpty()
+        val declaredChecksum = if (useV2) response.checksumV2 else response.checksum
+        val computedChecksum = if (useV2) response.computedChecksumV2 else response.computedChecksum
+        val checksumLabel = if (useV2) "checksum_v2" else "checksum(legacy)"
+        if (computedChecksum.isNotEmpty() && computedChecksum != declaredChecksum) {
+            Log.e(TAG, "bootstrap $checksumLabel MISMATCH: computed=$computedChecksum server=$declaredChecksum")
             emit(SyncState.ERROR, pendingCountSnapshot(), lastError = "bootstrap checksum mismatch")
             return SyncOutcome.RETRYABLE
         }
@@ -282,7 +303,11 @@ class SyncEngine(
             "categories" to response.categories.size,
             "accounts" to response.accounts.size,
             "transactions" to response.transactions.size,
-            "budgets" to response.budgets.size
+            "budgets" to response.budgets.size,
+            // T-M7-01: 三实体同口径（旧服务端返回空列表 → 期望 0，清空后本地也是 0）
+            "savings_goals" to response.savingsGoals.size,
+            "scheduled_rules" to response.scheduledRules.size,
+            "chat_personas" to response.chatPersonas.size
         )
         val countMismatches = expected.entries.mapNotNull { (type, expectedCount) ->
             val actual = entities[type]?.size ?: 0

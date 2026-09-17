@@ -1,5 +1,6 @@
 package com.aozora.app.db
 
+import com.aozora.app.db.entity.PendingMutationEntity
 import com.aozora.app.db.entity.ScheduledRuleEntity
 import kotlinx.coroutines.runBlocking
 import org.junit.After
@@ -13,10 +14,9 @@ import org.robolectric.annotation.Config
 
 /**
  * 第十一轮 T11-4（REQ-26 / 决策 #4）：定时规则 Repository 层 JVM 测试。
- * 核心不变量（镜像 RepositorySavingsTest）：规则写操作**绝不产生 pending
- * mutation**（服务端不认 scheduled_rules，入队=422 毒丸）；引擎生成的交易
- * 由 ScheduledTxEngineTest 验证正常入队。
  * 第十四轮 T14-5（REQ-43）：追加 runHour/runMinute 两列往返、默认值与值域校验。
+ * T-M7-01：规则上云后写操作入队 pending mutation（上行路径反转自第十一轮的
+ * "刻意不入队"）；bootstrap 重建（clearAllEntities）也随云端权威一并清空。
  */
 @RunWith(RobolectricTestRunner::class)
 @Config(sdk = [33])
@@ -57,7 +57,8 @@ class RepositoryScheduledTest {
             rule("r1").copy(
                 accountId = "a1", includeInBudget = false, lastRunDate = "2026-09-08",
                 runHour = 9, runMinute = 30,
-            )
+            ),
+            "m1"
         )
         val got = repository.listScheduledRules()[0]
         assertEquals("r1", got.id)
@@ -80,7 +81,7 @@ class RepositoryScheduledTest {
     @Test
     fun runTime_defaults_are0800() = runBlocking {
         // v9 迁移语义（引擎测试之外，存取层确认实体默认值）：未显式给时刻 = 8/0
-        repository.insertScheduledRule(rule("r1"))
+        repository.insertScheduledRule(rule("r1"), "m2")
         val got = repository.getScheduledRule("r1")!!
         assertEquals(8, got.runHour)
         assertEquals(0, got.runMinute)
@@ -95,31 +96,46 @@ class RepositoryScheduledTest {
             rule("r1").copy(runMinute = 60),
         )) {
             var threw = false
-            try { repository.insertScheduledRule(bad) } catch (e: IllegalArgumentException) { threw = true }
+            try { repository.insertScheduledRule(bad, "m3") } catch (e: IllegalArgumentException) { threw = true }
             assertTrue("应拒绝: ${bad.runHour}:${bad.runMinute}", threw)
         }
         // 边界合法：0:0 与 23:59
-        repository.insertScheduledRule(rule("r1", version = 1).copy(runHour = 0, runMinute = 0))
-        repository.insertScheduledRule(rule("r2").copy(runHour = 23, runMinute = 59))
+        repository.insertScheduledRule(rule("r1", version = 1).copy(runHour = 0, runMinute = 0), "m4")
+        repository.insertScheduledRule(rule("r2").copy(runHour = 23, runMinute = 59), "m5")
     }
 
     @Test
-    fun writes_never_enqueuePendingMutations() = runBlocking {
-        repository.insertScheduledRule(rule("r1"))
-        repository.updateScheduledRule(rule("r1", version = 2))
-        repository.archiveScheduledRule("r1")
-        // 关键：全程 0 条 pending mutation
-        assertEquals(0, repository.listPendingMutations().size)
+    fun writes_enqueueMatchingMutations() = runBlocking {
+        repository.insertScheduledRule(rule("r1"), "m6")
+        repository.updateScheduledRule(rule("r1", version = 2), "m7")
+        repository.archiveScheduledRule("r1", "m8")
+        // T-M7-01：每次写都入队一条，entityType/entityId/operation/expectedVersion 全对齐
+        val byId = repository.listPendingMutations().associateBy { it.mutationId }
+        assertEquals(setOf("m6", "m7", "m8"), byId.keys)
+        for (m in byId.values) {
+            assertEquals("scheduled_rule", m.entityType)
+            assertEquals("r1", m.entityId)
+            assertEquals(PendingMutationEntity.STATUS_PENDING, m.status)
+        }
+        assertEquals(PendingMutationEntity.OP_INSERT, byId.getValue("m6").operation)
+        assertEquals(PendingMutationEntity.OP_UPDATE, byId.getValue("m7").operation)
+        assertEquals(PendingMutationEntity.OP_DELETE, byId.getValue("m8").operation)
+        assertNull(byId.getValue("m6").expectedVersion)
+        assertEquals(1, byId.getValue("m7").expectedVersion)
+        assertEquals(2, byId.getValue("m8").expectedVersion)
+        // payload 含引擎自管列（lastRunDate 缺省 null）与执行时刻
+        assertTrue(byId.getValue("m7").payload.contains("\"runHour\":8"))
+        assertTrue(byId.getValue("m7").payload.contains("\"lastRunDate\":null"))
     }
 
     @Test
     fun update_sameVersion_rejected_noDoubleApply() = runBlocking {
-        repository.insertScheduledRule(rule("r1"))
-        repository.updateScheduledRule(rule("r1", version = 2, name = "晚餐"))
+        repository.insertScheduledRule(rule("r1"), "m9")
+        repository.updateScheduledRule(rule("r1", version = 2, name = "晚餐"), "m10")
         assertEquals("晚餐", repository.getScheduledRule("r1")!!.name)
         // 版本不递增（重复提交同一 update）→ 拒绝，行保持 v2 状态
         var threw = false
-        try { repository.updateScheduledRule(rule("r1", version = 2, name = "宵夜")) }
+        try { repository.updateScheduledRule(rule("r1", version = 2, name = "宵夜"), "m11") }
         catch (e: IllegalArgumentException) { threw = true }
         assertTrue(threw)
         assertEquals("晚餐", repository.getScheduledRule("r1")!!.name)
@@ -127,14 +143,14 @@ class RepositoryScheduledTest {
 
     @Test
     fun archive_removesFromActive() = runBlocking {
-        repository.insertScheduledRule(rule("r1"))
-        repository.archiveScheduledRule("r1")
+        repository.insertScheduledRule(rule("r1"), "m12")
+        repository.archiveScheduledRule("r1", "m13")
         assertTrue(repository.listScheduledRules().isEmpty())
         // 归档行仍可 get（引擎只遍历 active，行不物理删除）
         assertNotNull(repository.getScheduledRule("r1"))
         // 重复归档 → 拒绝
         var threw = false
-        try { repository.archiveScheduledRule("r1") } catch (e: IllegalArgumentException) { threw = true }
+        try { repository.archiveScheduledRule("r1", "m14") } catch (e: IllegalArgumentException) { threw = true }
         assertTrue(threw)
     }
 
@@ -148,7 +164,7 @@ class RepositoryScheduledTest {
             rule("r1").copy(name = ""),
         )) {
             var threw = false
-            try { repository.insertScheduledRule(bad) } catch (e: IllegalArgumentException) { threw = true }
+            try { repository.insertScheduledRule(bad, "m15") } catch (e: IllegalArgumentException) { threw = true }
             assertTrue("应拒绝: ${bad.repeat}/${bad.type}/${bad.amountCents}", threw)
         }
     }
@@ -162,25 +178,26 @@ class RepositoryScheduledTest {
             rule("r1").copy(endDate = "not-a-date"),
         )) {
             var threw = false
-            try { repository.insertScheduledRule(bad) } catch (e: IllegalArgumentException) { threw = true }
+            try { repository.insertScheduledRule(bad, "m16") } catch (e: IllegalArgumentException) { threw = true }
             assertTrue("应拒绝: start=${bad.startDate} end=${bad.endDate}", threw)
         }
         // 边界合法：end == start（只跑一天）
-        repository.insertScheduledRule(rule("r1", startDate = "2026-09-09", endDate = "2026-09-09"))
+        repository.insertScheduledRule(rule("r1", startDate = "2026-09-09", endDate = "2026-09-09"), "m17")
     }
 
     @Test
     fun clearAllData_wipesScheduledRules() = runBlocking {
-        repository.insertScheduledRule(rule("r1"))
+        repository.insertScheduledRule(rule("r1"), "m18")
         repository.clearAllData()
         assertTrue(repository.listScheduledRules().isEmpty())
     }
 
     @Test
-    fun clearAllEntities_keepsRules() = runBlocking {
-        // bootstrap 重建只清同步实体；规则是设备本地配置（同 savings_goals 语义）
-        repository.insertScheduledRule(rule("r1"))
+    fun clearAllEntities_alsoWipesRules() = runBlocking {
+        // T-M7-01：规则上云后属"云端权威"数据，随 bootstrap 快照一并重建
+        //（上行由 Repository.migrateCloudEntitiesUp 在清空前入队，见 RepositoryCloudUploadTest）
+        repository.insertScheduledRule(rule("r1"), "m19")
         repository.clearAllEntities()
-        assertEquals(1, repository.listScheduledRules().size)
+        assertTrue(repository.listScheduledRules().isEmpty())
     }
 }

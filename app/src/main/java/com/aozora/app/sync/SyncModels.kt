@@ -93,6 +93,82 @@ data class ServerChange(
             period = period, amountCents = amountCents, version = version
         )
     }
+
+    // ─── T-M7-01: 三实体上云 ───
+
+    /**
+     * 服务端的 created_at/updated_at 是 ISO 8601，本地列是 epoch 毫秒。
+     * 服务端恒返回二者，解析失败（格式意外）才回退当前时刻，避免整条被丢弃。
+     */
+    private fun serverTime(key: String): Long =
+        SyncPayloadMapper.isoToEpochMillis(entityPayload[key]) ?: System.currentTimeMillis()
+
+    /**
+     * 归档时间戳同样从 payload 读取（ISO → epoch 毫秒），**不硬编码 null**。
+     *
+     * 既有五实体的 pull 路径恒置 null 是因为它们的归档只经 `applyServerArchive`
+     * 分支落库（服务端 delete → 客户端归档）；三实体上云后，服务端对"重复上行
+     * 已存在实体"的幂等命中会记一条 **update** 变更（见 sync/service.py），此时
+     * 已归档行会出现在非 delete 变更里 —— 硬编码 null 会把它复活。活跃行的
+     * archived_at 恒为 null，行为不变。
+     */
+    private fun archivedAt(): Long? =
+        SyncPayloadMapper.isoToEpochMillis(entityPayload["archivedAt"])
+
+    fun toSavingsGoal(ownerId: String): SavingsGoalEntity? {
+        if (entityType != "savings_goal") return null
+        val id = entityPayload["id"] ?: return null
+        val name = entityPayload["name"] ?: return null
+        val targetCents = entityPayload["targetCents"]?.toLongOrNull() ?: return null
+        return SavingsGoalEntity(
+            id = id, ownerId = ownerId, name = name, targetCents = targetCents,
+            currentCents = entityPayload["currentCents"]?.toLongOrNull() ?: 0L,
+            icon = entityPayload["icon"],
+            periodValue = entityPayload["periodValue"]?.toIntOrNull(),
+            periodUnit = entityPayload["periodUnit"],
+            createdAt = serverTime("createdAt"), updatedAt = serverTime("updatedAt"),
+            archivedAt = archivedAt(), version = version
+        )
+    }
+
+    fun toScheduledRule(ownerId: String): ScheduledRuleEntity? {
+        if (entityType != "scheduled_rule") return null
+        val id = entityPayload["id"] ?: return null
+        val name = entityPayload["name"] ?: return null
+        val type = entityPayload["type"] ?: return null
+        val amountCents = entityPayload["amountCents"]?.toLongOrNull() ?: return null
+        val bookId = entityPayload["bookId"] ?: return null
+        val categoryId = entityPayload["categoryId"] ?: return null
+        val repeat = entityPayload["repeat"] ?: return null
+        val startDate = entityPayload["startDate"] ?: return null
+        return ScheduledRuleEntity(
+            id = id, ownerId = ownerId, type = type, name = name,
+            amountCents = amountCents, bookId = bookId, categoryId = categoryId,
+            accountId = entityPayload["accountId"],
+            includeInBudget = entityPayload["includeInBudget"]?.toBoolean() ?: true,
+            note = entityPayload["note"] ?: "",
+            repeat = repeat, startDate = startDate, endDate = entityPayload["endDate"],
+            enabled = entityPayload["enabled"]?.toBoolean() ?: true,
+            lastRunDate = entityPayload["lastRunDate"],
+            runHour = entityPayload["runHour"]?.toIntOrNull() ?: 8,
+            runMinute = entityPayload["runMinute"]?.toIntOrNull() ?: 0,
+            createdAt = serverTime("createdAt"), updatedAt = serverTime("updatedAt"),
+            archivedAt = archivedAt(), version = version
+        )
+    }
+
+    fun toChatPersona(): ChatPersonaEntity? {
+        if (entityType != "chat_persona") return null
+        val id = entityPayload["id"] ?: return null
+        val name = entityPayload["name"] ?: return null
+        return ChatPersonaEntity(
+            id = id, name = name,
+            avatar = entityPayload["avatar"],
+            persona = entityPayload["persona"] ?: "",
+            createdAt = serverTime("createdAt"), updatedAt = serverTime("updatedAt"),
+            archivedAt = archivedAt(), version = version
+        )
+    }
 }
 
 /** 同步引擎状态（前端展示 + 桥接事件）。 */

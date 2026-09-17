@@ -537,4 +537,190 @@ class SyncPayloadMapperTest {
         assertFalse(wire2.getBoolean("include_in_budget"))
         assertFalse(wire2.has("includeInBudget"))
     }
+
+    // ─── T-M7-01: 三实体上云（savings_goal / scheduled_rule / chat_persona） ───
+
+    @Test
+    fun toWirePayload_renamesSavingsGoalToSnake() {
+        val camel = """{"id":"g1","name":"旅行基金","targetCents":500000,"currentCents":120000,""" +
+            """"icon":null,"periodValue":6,"periodUnit":"month","version":2}"""
+        val wire = SyncPayloadMapper.toWirePayload(camel)
+        assertEquals(500000, wire.getInt("target_cents"))
+        assertEquals(120000, wire.getInt("current_cents"))
+        assertEquals(6, wire.getInt("period_value"))
+        assertEquals("month", wire.getString("period_unit"))
+        assertTrue(wire.isNull("icon"))
+        assertFalse(wire.has("targetCents"))
+        assertFalse(wire.has("periodValue"))
+    }
+
+    @Test
+    fun toWirePayload_renamesScheduledRuleToSnake_andKeepsDateStrings() {
+        val camel = """{"id":"r1","type":"expense","name":"房租","amountCents":350000,""" +
+            """"bookId":"b1","categoryId":"c1","accountId":null,"includeInBudget":true,""" +
+            """"note":"","repeat":"monthly","startDate":"2026-01-01","endDate":null,""" +
+            """"enabled":true,"lastRunDate":"2026-09-01","runHour":9,"runMinute":30,"version":5}"""
+        val wire = SyncPayloadMapper.toWirePayload(camel)
+        assertEquals("b1", wire.getString("book_id"))
+        assertEquals(350000, wire.getInt("amount_cents"))
+        assertTrue(wire.getBoolean("include_in_budget"))
+        assertEquals("monthly", wire.getString("repeat"))
+        assertEquals("2026-01-01", wire.getString("start_date"))
+        assertTrue(wire.isNull("end_date"))
+        assertTrue(wire.getBoolean("enabled"))
+        assertEquals("2026-09-01", wire.getString("last_run_date"))
+        assertEquals(9, wire.getInt("run_hour"))
+        assertEquals(30, wire.getInt("run_minute"))
+        // 日期是 'YYYY-MM-DD' 字符串，**不得**被 epoch→ISO 转换（不是 datetime 语义字段）
+        assertEquals("2026-01-01", wire.getString("start_date"))
+        assertFalse(wire.has("startDate"))
+        assertFalse(wire.has("lastRunDate"))
+    }
+
+    @Test
+    fun toWirePayload_renamesChatPersonaToSnake() {
+        val camel = """{"id":"p1","name":"小贝","avatar":"avatar-x","persona":"一段人设","version":1}"""
+        val wire = SyncPayloadMapper.toWirePayload(camel)
+        assertEquals("小贝", wire.getString("name"))
+        assertEquals("avatar-x", wire.getString("avatar"))
+        assertEquals("一段人设", wire.getString("persona"))
+        assertEquals(1, wire.getInt("version"))
+    }
+
+    @Test
+    fun toMutationWire_acceptsCloudEntityTypes() {
+        for (type in listOf("savings_goal", "scheduled_rule", "chat_persona")) {
+            val pm = PendingMutationEntity(
+                mutationId = "m-$type", entityType = type, entityId = "e1",
+                operation = PendingMutationEntity.OP_INSERT, payload = """{"id":"e1"}""",
+                status = PendingMutationEntity.STATUS_PENDING, retryCount = 0,
+                createdAt = 1L, expectedVersion = null, lastError = null
+            )
+            assertEquals(type, SyncPayloadMapper.toMutationWire(pm).entityType)
+        }
+    }
+
+    @Test
+    fun parsePullResponse_acceptsCloudEntityTypes() {
+        // 上云前这些类型会被 KNOWN_ENTITY_TYPES 过滤丢弃（向前兼容保护）；
+        // 上云后必须被解析，否则云端变更永远落不到本地。
+        val json = """
+            {
+              "changes": [
+                {"entity_type": "savings_goal", "entity_id": "g1", "operation": "update",
+                 "version": 3, "entity": {"id": "g1", "name": "旅行基金", "target_cents": 500000,
+                 "current_cents": 120000, "period_value": 6, "period_unit": "month", "version": 3}},
+                {"entity_type": "scheduled_rule", "entity_id": "r1", "operation": "insert",
+                 "version": 1, "entity": {"id": "r1", "name": "房租", "repeat": "monthly",
+                 "start_date": "2026-01-01", "run_hour": 9, "run_minute": 30, "version": 1}},
+                {"entity_type": "chat_persona", "entity_id": "p1", "operation": "delete",
+                 "version": 4, "entity": null}
+              ],
+              "cursor": 77, "has_more": false
+            }
+        """.trimIndent()
+        val response = SyncPayloadMapper.parsePullResponse(json)
+        assertEquals(77L, response.nextCursor)
+        assertEquals(3, response.changes.size)
+        assertEquals("500000", response.changes[0].entityPayload["targetCents"])
+        assertEquals("month", response.changes[0].entityPayload["periodUnit"])
+        assertEquals("monthly", response.changes[1].entityPayload["repeat"])
+        assertEquals("9", response.changes[1].entityPayload["runHour"])
+        assertEquals(SyncChangeOp.DELETE, response.changes[2].operation)
+    }
+
+    @Test
+    fun parseBootstrapResponse_parsesCloudListsAndChecksumV2() {
+        val json = bootstrapJsonWithCloudEntities()
+        val response = SyncPayloadMapper.parseBootstrapResponse(json)
+        assertEquals(1, response.savingsGoals.size)
+        assertEquals(1, response.scheduledRules.size)
+        assertEquals(1, response.chatPersonas.size)
+        assertEquals("旅行基金", response.savingsGoals[0]["name"])
+        assertEquals("500000", response.savingsGoals[0]["targetCents"])
+        assertEquals("monthly", response.scheduledRules[0]["repeat"])
+        assertEquals("2026-01-01", response.scheduledRules[0]["startDate"])
+        assertEquals("小贝", response.chatPersonas[0]["name"])
+        assertEquals(42L, response.cursor)
+        // 与 Python 侧 compute_bootstrap_checksum_v2 的真实输出逐字节一致
+        // （参考值生成脚本：对同一 8 类输入 + cursor=42 调用服务端函数）
+        assertEquals(
+            "af2c8fda4bd60e312a63c654fa159b64a9982569762ba2d8be559c09c926c841",
+            response.computedChecksumV2,
+        )
+        assertEquals(
+            "af2c8fda4bd60e312a63c654fa159b64a9982569762ba2d8be559c09c926c841",
+            response.checksumV2,
+        )
+        // legacy 只覆盖五类 —— 与上云实体无关
+        assertEquals(
+            "2cfcc3208403af4dde547253e4e0d23cf4e3ec1a5b90ef64caffe101020ef94e",
+            response.computedChecksum,
+        )
+    }
+
+    @Test
+    fun parseBootstrapResponse_withoutCloudKeys_isForwardCompatible() {
+        // 旧服务端：响应里没有三个新键、也没有 checksum_v2
+        val json = """
+            {"books": [], "categories": [], "accounts": [], "transactions": [],
+             "budgets": [], "cursor": 7, "checksum": "x"}
+        """.trimIndent()
+        val response = SyncPayloadMapper.parseBootstrapResponse(json)
+        assertTrue(response.savingsGoals.isEmpty())
+        assertTrue(response.scheduledRules.isEmpty())
+        assertTrue(response.chatPersonas.isEmpty())
+        assertEquals("", response.checksumV2)
+        // 无上云实体时 v2 与 legacy 同值 → SyncEngine 无论走哪条路结果一致
+        assertEquals(response.computedChecksum, response.computedChecksumV2)
+    }
+
+    @Test
+    fun isoToEpochMillis_parsesOffsetAndNaiveTimestamps() {
+        // 生产（PostgreSQL 带时区）
+        assertEquals(
+            1787976000000L,
+            SyncPayloadMapper.isoToEpochMillis("2026-08-29T04:00:00+00:00"),
+        )
+        // SQLite 测试环境可能不带偏移 → 按 UTC 解释（同上同一时刻）
+        assertEquals(
+            1787976000000L,
+            SyncPayloadMapper.isoToEpochMillis("2026-08-29T04:00:00"),
+        )
+        assertNull(SyncPayloadMapper.isoToEpochMillis(null))
+        assertNull(SyncPayloadMapper.isoToEpochMillis(""))
+        assertNull(SyncPayloadMapper.isoToEpochMillis("not-a-time"))
+    }
+
+    /** 与 Python 参考脚本同形的 bootstrap 响应（值刻意与 fixture 一致）。 */
+    private fun bootstrapJsonWithCloudEntities(): String = """
+        {
+          "books": [], "categories": [], "accounts": [], "transactions": [], "budgets": [],
+          "savings_goals": [
+            {"id": "11111111-1111-4111-8111-111111111111", "name": "旅行基金",
+             "target_cents": 500000, "current_cents": 120000, "icon": null,
+             "period_value": 6, "period_unit": "month", "version": 2,
+             "created_at": "2026-09-04T12:00:00+00:00",
+             "updated_at": "2026-09-04T12:00:00+00:00", "archived_at": null}
+          ],
+          "scheduled_rules": [
+            {"id": "22222222-2222-4222-8222-111111111111", "type": "expense", "name": "房租",
+             "amount_cents": 350000, "book_id": "b1", "category_id": "c1", "account_id": null,
+             "include_in_budget": true, "note": "", "repeat": "monthly",
+             "start_date": "2026-01-01", "end_date": null, "enabled": true,
+             "last_run_date": "2026-09-01", "run_hour": 9, "run_minute": 30, "version": 5,
+             "created_at": "2026-09-04T12:00:00+00:00",
+             "updated_at": "2026-09-04T12:00:00+00:00", "archived_at": null}
+          ],
+          "chat_personas": [
+            {"id": "33333333-3333-4333-8333-111111111111", "name": "小贝", "avatar": null,
+             "persona": "hello", "version": 1,
+             "created_at": "2026-09-04T12:00:00+00:00",
+             "updated_at": "2026-09-04T12:00:00+00:00", "archived_at": null}
+          ],
+          "cursor": 42,
+          "checksum": "2cfcc3208403af4dde547253e4e0d23cf4e3ec1a5b90ef64caffe101020ef94e",
+          "checksum_v2": "af2c8fda4bd60e312a63c654fa159b64a9982569762ba2d8be559c09c926c841"
+        }
+    """.trimIndent()
 }

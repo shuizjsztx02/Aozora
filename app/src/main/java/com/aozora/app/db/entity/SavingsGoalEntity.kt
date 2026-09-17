@@ -6,11 +6,10 @@ import androidx.room.PrimaryKey
 /**
  * 存钱目标实体（第八轮 REQ-7）— 轻量储蓄目标。
  *
- * 已知限制：该实体**仅存本地、不上行同步**。服务端 sync 契约的 entity_type
- * 只认 book/category/account/transaction/budget（server/src/modules/sync/schemas.py），
- * 未知实体会让整批 push 422 → SyncEngine 视为可重试 → 毒丸卡死同步队列。
- * 故 Repository 存钱方法签名刻意不含 mutationId、不写 pending_mutations。
- * 多设备/重装（clearAllData 走 clearAllTables）不保留此表数据。
+ * T-M7-01 起**上云**（云端权威 + 本地副本，`D-PROD-03`）：写入经 Repository 与
+ * pending mutation 同事务入队，sync entity_type = `savings_goal`。离线可读；换机/
+ * 多设备由 bootstrap 从云端快照恢复，本地存量数据在首次同步时一次性上行
+ *（Repository.migrateCloudEntitiesUp）。删除＝归档（archivedAt），服务端 archived_at。
  */
 @Entity(tableName = "savings_goals")
 data class SavingsGoalEntity(

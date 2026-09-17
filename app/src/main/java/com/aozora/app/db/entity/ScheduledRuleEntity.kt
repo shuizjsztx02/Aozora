@@ -6,11 +6,11 @@ import androidx.room.PrimaryKey
 /**
  * 定时记账规则实体（第十一轮 REQ-26 / 决策 #4）— 周期性自动记账。
  *
- * 已知限制：该实体**仅存本地、不上行同步**（镜像 SavingsGoalEntity 的理由：
- * 服务端 sync 契约 entity_type 不认 scheduled_rules，入队会整批 422 毒丸）。
- * Repository 方法签名刻意不含 mutationId、不写 pending_mutations；但引擎按
- * 规则**生成的交易**走正常 mutation 上行。多设备/重装（clearAllData →
- * clearAllTables）不保留此表数据。
+ * T-M7-01 起**上云**（云端权威 + 本地副本，`D-PROD-03`）：写入经 Repository 与
+ * pending mutation 同事务入队，sync entity_type = `scheduled_rule`。引擎按规则
+ * **生成的交易**走 transactions 表（source='scheduled'），规则本身的上行不与之冲突。
+ * [lastRunDate] 上云后多设备共享——设备 A 生成后上行，设备 B pull 到即不再重复
+ * 生成（跨设备去重），这是期望语义。
  *
  * 字段语义：
  * - [type]/[amountCents]/[bookId]/[categoryId]/[accountId]/[includeInBudget]/[note]：

@@ -35,25 +35,53 @@ object BootstrapChecksum {
         transactions: List<Map<String, String?>>,
         budgets: List<Map<String, String?>>,
         cursor: Long
+    ): String = computeOver(
+        listOf(books, categories, accounts, transactions, budgets), cursor,
+    )
+
+    /**
+     * T-M7-01: 八类实体 + cursor 的 checksum，与服务端
+     * `compute_bootstrap_checksum_v2` 对应。
+     *
+     * 前五类的**拼接顺序与逐条序列化完全同 [compute]**，只在其后追加三个上云实体
+     * （savings_goals|scheduled_rules|chat_personas）——两个算法共用 [computeOver]，
+     * 不会各自漂移。
+     *
+     * 服务端对旧客户端仍发 legacy 的 `checksum`（五类）；本方法只在响应带
+     * `checksum_v2` 时使用。
+     */
+    fun computeV2(
+        books: List<Map<String, String?>>,
+        categories: List<Map<String, String?>>,
+        accounts: List<Map<String, String?>>,
+        transactions: List<Map<String, String?>>,
+        budgets: List<Map<String, String?>>,
+        savingsGoals: List<Map<String, String?>>,
+        scheduledRules: List<Map<String, String?>>,
+        chatPersonas: List<Map<String, String?>>,
+        cursor: Long
+    ): String = computeOver(
+        listOf(
+            books, categories, accounts, transactions, budgets,
+            savingsGoals, scheduledRules, chatPersonas,
+        ),
+        cursor,
+    )
+
+    /** 按给定顺序拼接各列表的确定性 JSON，末尾追加 `cursor:{cursor}`，取 SHA-256。 */
+    private fun computeOver(
+        entityLists: List<List<Map<String, String?>>>,
+        cursor: Long,
     ): String {
         val parts = mutableListOf<String>()
-
-        fun appendList(items: List<Map<String, String?>>) {
+        for (items in entityLists) {
             val sorted = items.sortedBy { it["id"] ?: "" }
             for (item in sorted) {
                 parts += mapToJson(item)
             }
         }
-
-        appendList(books)
-        appendList(categories)
-        appendList(accounts)
-        appendList(transactions)
-        appendList(budgets)
         parts += "cursor:$cursor"
-
-        val payload = parts.joinToString("|")
-        return sha256Hex(payload)
+        return sha256Hex(parts.joinToString("|"))
     }
 
     /** 计算 UTF-8 字符串的 SHA-256，返回 64 字符小写十六进制。 */
@@ -116,20 +144,44 @@ object BootstrapChecksum {
         return NUMERIC_REGEX.matches(s)
     }
 
-    /** 转义 JSON 字符串中的特殊字符。 */
+    /**
+     * 转义 JSON 字符串中的特殊字符，**逐字节对齐 Python `json.dumps` 的默认口径**
+     * （`ensure_ascii=True`）——服务端 `compute_bootstrap_checksum` 用的就是它。
+     *
+     * P3-3 修复：预分配 StringBuilder 容量 + 用查表/字符串拼接替代 String.format
+     * （每字符一次 format 调用在大 bootstrap 数据量下是热点）。
+     *
+     * T-M7-01 修复：此前只转义 `" \ \b \n \r \t`，**非 ASCII 与其余控制字符原样透传**，
+     * 而 Python 会把它们转成 `\uXXXX`（星平面字符按 UTF-16 代理对逐个转义）。
+     * 于是任何含中文的实体（默认账本「默认账本」、分类「餐饮」、备注……）都会让
+     * 客户端重算值与服务端声明值不等 → bootstrap 判 RETRYABLE 死循环。纯 ASCII
+     * 数据不受影响，故该缺陷长期未被既有测试发现。
+     */
     private fun escapeJsonString(s: String): String {
-        // P3-3 修复：预分配 StringBuilder 容量 + 用查表/字符串拼接替代 String.format
-        // （每字符一次 format 调用在大 bootstrap 数据量下是热点）。
         val sb = StringBuilder(s.length)
         for (c in s) {
             when (c) {
                 '"' -> sb.append("\\\"")
                 '\\' -> sb.append("\\\\")
                 '\b' -> sb.append("\\b")
+                '' -> sb.append("\\f")
                 '\n' -> sb.append("\\n")
                 '\r' -> sb.append("\\r")
                 '\t' -> sb.append("\\t")
-                else -> sb.append(c)
+                else -> {
+                    val code = c.code
+                    // 0x7F(DEL) 及以上的非 ASCII 与控制字符一律 \uXXXX（小写十六进制）；
+                    // Python 对生僻字/emoji 输出的代理对 \udXXX\udXXX 由逐 Char 迭代自然产生。
+                    if (code < 0x20 || code >= 0x7F) {
+                        sb.append("\\u")
+                        sb.append(HEX_CHARS[(code shr 12) and 0x0F])
+                        sb.append(HEX_CHARS[(code shr 8) and 0x0F])
+                        sb.append(HEX_CHARS[(code shr 4) and 0x0F])
+                        sb.append(HEX_CHARS[code and 0x0F])
+                    } else {
+                        sb.append(c)
+                    }
+                }
             }
         }
         return sb.toString()

@@ -238,13 +238,13 @@ class AozoraBridge(
             BridgeCommands.SAVINGS_UPDATE -> handleSavingsUpdate(requestId, payload)
             BridgeCommands.SAVINGS_ARCHIVE -> handleSavingsArchive(requestId, payload)
 
-            // 第十一轮 T11-4（REQ-26 / 决策 #4）：定时记账规则（仅本地，规则不入队）
+            // 第十一轮 T11-4（REQ-26 / 决策 #4）：定时记账规则（T-M7-01 起上云，写入即入队）
             BridgeCommands.SCHEDULED_LIST -> handleScheduledList(requestId)
             BridgeCommands.SCHEDULED_INSERT -> handleScheduledInsert(requestId, payload)
             BridgeCommands.SCHEDULED_UPDATE -> handleScheduledUpdate(requestId, payload)
             BridgeCommands.SCHEDULED_ARCHIVE -> handleScheduledArchive(requestId, payload)
 
-            // 第十一轮 T11-7（REQ-28 / 决策 #8）：聊天角色（仅本地，角色不入队）
+            // 第十一轮 T11-7（REQ-28 / 决策 #8）：聊天角色（T-M7-01 起上云，写入即入队）
             BridgeCommands.PERSONA_LIST -> handlePersonaList(requestId)
             BridgeCommands.PERSONA_INSERT -> handlePersonaInsert(requestId, payload)
             BridgeCommands.PERSONA_UPDATE -> handlePersonaUpdate(requestId, payload)
@@ -668,7 +668,16 @@ class AozoraBridge(
         }
     }
 
-    // ─── 第八轮 REQ-7：存钱目标（仅本地，无 mutation 入队） ───
+    // ── 第八轮 REQ-7 / T-M7-01：存钱目标（已上云，写入即入队 mutation） ───
+
+    /**
+     * T-M7-01：三实体（savings / scheduled / persona）上云后需以 mutationId 入队。
+     * 这三个命令的**桥契约保持不变**（前端不传 mutationId，TS 侧零改动），由 bridge
+     * 本地生成。每次用户保存本就是一独立操作，不存在"复用同一 mutationId 重试"的
+     * 语义需求——这与 transaction/book/account/budget 由前端发号的既有路径不同，
+     * 后者的 mutationId 同时承担前端重复提交的幂等保护。
+     */
+    private fun newMutationId(): String = java.util.UUID.randomUUID().toString()
 
     /**
      * T9-4（REQ-14）：解析存款期限。value/unit 必须成对出现或成对缺省；
@@ -722,7 +731,7 @@ class AozoraBridge(
             archivedAt = null,
             version = BridgePayload.version(g)
         )
-        repository.insertSavingsGoal(entity)
+        repository.insertSavingsGoal(entity, newMutationId())
         return BridgeResponse.success(requestId, JSONObject().put("id", entity.id).toString())
     }
 
@@ -751,12 +760,12 @@ class AozoraBridge(
             archivedAt = current.archivedAt,
             version = BridgePayload.version(g)
         )
-        repository.updateSavingsGoal(entity)
+        repository.updateSavingsGoal(entity, newMutationId())
         return BridgeResponse.success(requestId, JSONObject().put("id", entity.id).toString())
     }
 
     private suspend fun handleSavingsArchive(requestId: String, p: JSONObject): BridgeResponse {
-        repository.archiveSavingsGoal(p.getString("id"))
+        repository.archiveSavingsGoal(p.getString("id"), newMutationId())
         return BridgeResponse.success(requestId, JSONObject().put("success", true).toString())
     }
 
@@ -810,7 +819,7 @@ class AozoraBridge(
             archivedAt = null,
             version = BridgePayload.version(r)
         )
-        repository.insertScheduledRule(entity)
+        repository.insertScheduledRule(entity, newMutationId())
         // T14-5（决策 #4 B2）：规则增改后即刻重排单闹钟（min-over-rules 重算）
         ScheduledTxReceiver.scheduleNext(webView.context.applicationContext)
         return BridgeResponse.success(requestId, JSONObject().put("id", entity.id).toString())
@@ -846,14 +855,14 @@ class AozoraBridge(
             archivedAt = current.archivedAt,
             version = BridgePayload.version(r)
         )
-        repository.updateScheduledRule(entity)
+        repository.updateScheduledRule(entity, newMutationId())
         // T14-5（决策 #4 B2）：含 enabled 快捷开关在内的一切变更 → 立即重排单闹钟
         ScheduledTxReceiver.scheduleNext(webView.context.applicationContext)
         return BridgeResponse.success(requestId, JSONObject().put("id", entity.id).toString())
     }
 
     private suspend fun handleScheduledArchive(requestId: String, p: JSONObject): BridgeResponse {
-        repository.archiveScheduledRule(p.getString("id"))
+        repository.archiveScheduledRule(p.getString("id"), newMutationId())
         return BridgeResponse.success(requestId, JSONObject().put("success", true).toString())
     }
 
@@ -888,7 +897,7 @@ class AozoraBridge(
             archivedAt = null,
             version = BridgePayload.version(o)
         )
-        repository.insertChatPersona(entity)
+        repository.insertChatPersona(entity, newMutationId())
         return BridgeResponse.success(requestId, JSONObject().put("id", entity.id).toString())
     }
 
@@ -907,12 +916,12 @@ class AozoraBridge(
             archivedAt = current.archivedAt,
             version = BridgePayload.version(o)
         )
-        repository.updateChatPersona(entity)
+        repository.updateChatPersona(entity, newMutationId())
         return BridgeResponse.success(requestId, JSONObject().put("id", entity.id).toString())
     }
 
     private suspend fun handlePersonaArchive(requestId: String, p: JSONObject): BridgeResponse {
-        repository.archiveChatPersona(p.getString("id"))
+        repository.archiveChatPersona(p.getString("id"), newMutationId())
         return BridgeResponse.success(requestId, JSONObject().put("success", true).toString())
     }
 

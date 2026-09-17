@@ -37,5 +37,9 @@ data class SyncMetaEntity(
         // seeded 标记由 ensureSeedPersonas 自管（镜像 master_book_id 不开放前端写）。
         const val KEY_ACTIVE_PERSONA_ID = "active_persona_id"  // UUID；空/失效 → 回退"小贝"→第一条
         const val KEY_PERSONAS_SEEDED = "personas_seeded"      // '1' = 已播过内置 5 角色（删光不重播）
+        // T-M7-01（三实体上云）：存量本地数据一次性上行的完成标记。'1' = 已入队。
+        // 仅 Repository.migrateCloudEntitiesUp 自管写入（镜像 personas_seeded 模式），
+        // 随 clearAllTables 一并清空（登出/删号后按新账号重新判定）。
+        const val KEY_CLOUD_ENTITIES_UPLOADED = "cloud_entities_uploaded_v1"
     }
 }

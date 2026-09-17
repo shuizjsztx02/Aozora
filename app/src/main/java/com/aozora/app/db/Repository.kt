@@ -5,6 +5,7 @@ import com.aozora.app.db.entity.*
 import com.aozora.app.sync.FailedMutation
 import com.aozora.app.sync.ServerChange
 import com.aozora.app.sync.SyncChangeOp
+import com.aozora.app.sync.SyncPayloadMapper
 import org.json.JSONException
 import org.json.JSONObject
 import java.time.LocalDate
@@ -501,11 +502,12 @@ class Repository(private val db: AozoraDatabase) {
         }
     }
 
-    // ─── Savings Goals（第八轮 REQ-7，仅本地不同步） ───
+    // ─── Savings Goals（T-M7-01 起上云：云端权威 + 本地副本） ──
     //
-    // 刻意：方法签名不含 mutationId、不写 pending_mutations。
-    // 服务端 sync entity_type 正则不认 savings → 入队会导致整批 push 422
-    // 被 SyncEngine 当可重试 → 毒丸卡死队列。见 SavingsGoalEntity 注释。
+    // 与 book/account 等一致：insert/update/archive 与 pending mutation 在同一
+    // Room 事务内完成。上行 payload 省略超长的照片 icon（服务端 64 上限）。
+    // name 上限对齐服务端 savings_goals.name String(128)：超长会在 push 时
+    // 422 中止整批（毒丸），故在此唯一把关。
 
     suspend fun listSavingsGoals(): List<SavingsGoalEntity> = db.savingsGoalDao().listActive()
 
@@ -525,17 +527,37 @@ class Repository(private val db: AozoraDatabase) {
         }
     }
 
-    suspend fun insertSavingsGoal(goal: SavingsGoalEntity) {
+    suspend fun insertSavingsGoal(goal: SavingsGoalEntity, mutationId: String) {
+        require(mutationId.isNotBlank()) { "mutationId is required" }
         require(goal.id.isNotBlank() && goal.name.isNotBlank()) { "goal id/name required" }
+        require(goal.name.length <= NAME_WIRE_MAX_LEN) { "goal name too long" }
         require(goal.targetCents >= 1) { "targetCents must be positive" }
         require(goal.currentCents >= 0) { "currentCents must be non-negative" }
         require(goal.version > 0 && goal.archivedAt == null) { "invalid goal insert" }
         requireValidSavingsPeriod(goal)
-        db.savingsGoalDao().insert(goal)
+        db.withTransaction {
+            db.savingsGoalDao().insert(goal)
+            db.pendingMutationDao().insert(
+                PendingMutationEntity(
+                    mutationId = mutationId,
+                    entityType = "savings_goal",
+                    entityId = goal.id,
+                    operation = PendingMutationEntity.OP_INSERT,
+                    payload = savingsGoalToJson(goal),
+                    status = PendingMutationEntity.STATUS_PENDING,
+                    retryCount = 0,
+                    createdAt = System.currentTimeMillis(),
+                    expectedVersion = null,
+                    lastError = null
+                )
+            )
+        }
     }
 
-    suspend fun updateSavingsGoal(goal: SavingsGoalEntity) {
+    suspend fun updateSavingsGoal(goal: SavingsGoalEntity, mutationId: String) {
+        require(mutationId.isNotBlank()) { "mutationId is required" }
         require(goal.id.isNotBlank() && goal.name.isNotBlank()) { "goal id/name required" }
+        require(goal.name.length <= NAME_WIRE_MAX_LEN) { "goal name too long" }
         require(goal.targetCents >= 1) { "targetCents must be positive" }
         require(goal.currentCents >= 0) { "currentCents must be non-negative" }
         requireValidSavingsPeriod(goal)
@@ -545,23 +567,52 @@ class Repository(private val db: AozoraDatabase) {
             require(current.archivedAt == null) { "savings goal is archived" }
             require(goal.version > current.version) { "version must increase" }
             db.savingsGoalDao().update(goal)
+            db.pendingMutationDao().insert(
+                PendingMutationEntity(
+                    mutationId = mutationId,
+                    entityType = "savings_goal",
+                    entityId = goal.id,
+                    operation = PendingMutationEntity.OP_UPDATE,
+                    payload = savingsGoalToJson(goal),
+                    status = PendingMutationEntity.STATUS_PENDING,
+                    retryCount = 0,
+                    createdAt = System.currentTimeMillis(),
+                    expectedVersion = current.version,
+                    lastError = null
+                )
+            )
         }
     }
 
-    suspend fun archiveSavingsGoal(id: String) {
+    suspend fun archiveSavingsGoal(id: String, mutationId: String) {
+        require(mutationId.isNotBlank()) { "mutationId is required" }
         db.withTransaction {
             val current = db.savingsGoalDao().getById(id)
             require(current != null && current.archivedAt == null) { "savings goal not found or already archived" }
             db.savingsGoalDao().archive(id, System.currentTimeMillis())
+            db.pendingMutationDao().insert(
+                PendingMutationEntity(
+                    mutationId = mutationId,
+                    entityType = "savings_goal",
+                    entityId = id,
+                    operation = PendingMutationEntity.OP_DELETE,
+                    payload = JSONObject().put("id", id).toString(),
+                    status = PendingMutationEntity.STATUS_PENDING,
+                    retryCount = 0,
+                    createdAt = System.currentTimeMillis(),
+                    expectedVersion = current.version,
+                    lastError = null
+                )
+            )
         }
     }
 
-    // ─── Scheduled Rules（第十一轮 REQ-26 / 决策 #4，仅本地不同步） ───
+    // ─── Scheduled Rules（T-M7-01 起上云：云端权威 + 本地副本） ──
     //
-    // 刻意：方法签名不含 mutationId、不写 pending_mutations（镜像上方 Savings
-    // 段的毒丸理由）。引擎按规则生成的交易才走正常 mutation 上行。
-    // clearAllData() 经 clearAllTables 覆盖本表；clearAllEntities()（bootstrap
-    // 重建）不清——规则是设备本地配置，与服务端数据重建无关（同 savings_goals）。
+    // 与 book/account 等一致：写操作与 pending mutation 同事务。引擎按规则
+    // **生成的交易**走交易表（source='scheduled'），规则本身的上行不与之冲突。
+    // last_run_date 上云后多设备共享——设备 A 生成后上行，设备 B pull 到即
+    // 不再重复生成（跨设备去重），这是期望语义而非数据污染。
 
     suspend fun listScheduledRules(): List<ScheduledRuleEntity> = db.scheduledRuleDao().listActive()
 
@@ -569,12 +620,16 @@ class Repository(private val db: AozoraDatabase) {
 
     /**
      * 规则底线校验——repeat/type 枚举、日期格式与 endDate≥startDate 成序、
-     * 执行时刻值域（T14-5 / REQ-43）。
+     * 执行时刻值域（T14-5 / REQ-43），以及**上云列宽上限**（T-M7-01：
+     * name ≤64 / note ≤2000，对齐服务端 scheduled_rules 列宽——超长会在 push
+     * 时 422 中止整批，故在此唯一把关）。
      * 桥层（handleScheduledInsert/Update）只做形状与必填解析，枚举与成序
      * 在此唯一把关（镜像 requireValidSavingsPeriod 的"防绕过"定位）。
      */
     private fun requireValidScheduledRule(rule: ScheduledRuleEntity) {
         require(rule.id.isNotBlank() && rule.name.isNotBlank()) { "rule id/name required" }
+        require(rule.name.length <= SCHEDULED_NAME_WIRE_MAX_LEN) { "rule name too long" }
+        require(rule.note.length <= NOTE_WIRE_MAX_LEN) { "rule note too long" }
         require(rule.amountCents in 1..9007199254740991L) { "amountCents must be a positive safe integer" }
         require(rule.type in setOf("income", "expense")) { "invalid rule type: ${rule.type}" }
         require(rule.repeat in setOf("daily", "weekly", "monthly", "yearly")) { "invalid repeat: ${rule.repeat}" }
@@ -595,13 +650,31 @@ class Repository(private val db: AozoraDatabase) {
     private fun isoDateOrNullOr(value: String): Boolean =
         Regex("\\d{4}-\\d{2}-\\d{2}").matches(value) && runCatching { LocalDate.parse(value) }.isSuccess
 
-    suspend fun insertScheduledRule(rule: ScheduledRuleEntity) {
+    suspend fun insertScheduledRule(rule: ScheduledRuleEntity, mutationId: String) {
+        require(mutationId.isNotBlank()) { "mutationId is required" }
         require(rule.version > 0 && rule.archivedAt == null) { "invalid rule insert" }
         requireValidScheduledRule(rule)
-        db.scheduledRuleDao().insert(rule)
+        db.withTransaction {
+            db.scheduledRuleDao().insert(rule)
+            db.pendingMutationDao().insert(
+                PendingMutationEntity(
+                    mutationId = mutationId,
+                    entityType = "scheduled_rule",
+                    entityId = rule.id,
+                    operation = PendingMutationEntity.OP_INSERT,
+                    payload = scheduledRuleToJson(rule),
+                    status = PendingMutationEntity.STATUS_PENDING,
+                    retryCount = 0,
+                    createdAt = System.currentTimeMillis(),
+                    expectedVersion = null,
+                    lastError = null
+                )
+            )
+        }
     }
 
-    suspend fun updateScheduledRule(rule: ScheduledRuleEntity) {
+    suspend fun updateScheduledRule(rule: ScheduledRuleEntity, mutationId: String) {
+        require(mutationId.isNotBlank()) { "mutationId is required" }
         requireValidScheduledRule(rule)
         db.withTransaction {
             val current = db.scheduledRuleDao().getById(rule.id)
@@ -609,22 +682,51 @@ class Repository(private val db: AozoraDatabase) {
             require(current.archivedAt == null) { "scheduled rule is archived" }
             require(rule.version > current.version) { "version must increase" }
             db.scheduledRuleDao().update(rule)
+            db.pendingMutationDao().insert(
+                PendingMutationEntity(
+                    mutationId = mutationId,
+                    entityType = "scheduled_rule",
+                    entityId = rule.id,
+                    operation = PendingMutationEntity.OP_UPDATE,
+                    payload = scheduledRuleToJson(rule),
+                    status = PendingMutationEntity.STATUS_PENDING,
+                    retryCount = 0,
+                    createdAt = System.currentTimeMillis(),
+                    expectedVersion = current.version,
+                    lastError = null
+                )
+            )
         }
     }
 
-    suspend fun archiveScheduledRule(id: String) {
+    suspend fun archiveScheduledRule(id: String, mutationId: String) {
+        require(mutationId.isNotBlank()) { "mutationId is required" }
         db.withTransaction {
             val current = db.scheduledRuleDao().getById(id)
             require(current != null && current.archivedAt == null) { "scheduled rule not found or already archived" }
             db.scheduledRuleDao().archive(id, System.currentTimeMillis())
+            db.pendingMutationDao().insert(
+                PendingMutationEntity(
+                    mutationId = mutationId,
+                    entityType = "scheduled_rule",
+                    entityId = id,
+                    operation = PendingMutationEntity.OP_DELETE,
+                    payload = JSONObject().put("id", id).toString(),
+                    status = PendingMutationEntity.STATUS_PENDING,
+                    retryCount = 0,
+                    createdAt = System.currentTimeMillis(),
+                    expectedVersion = current.version,
+                    lastError = null
+                )
+            )
         }
     }
 
-    // ─── Chat Personas（第十一轮 REQ-28 / 决策 #8，仅本地不同步） ───
+    // ─── Chat Personas（T-M7-01 起上云：云端权威 + 本地副本） ───
     //
-    // 刻意：方法签名不含 mutationId、不写 pending_mutations（镜像 Savings/Scheduled
-    // 段的毒丸理由）。clearAllData() 经 clearAllTables 覆盖本表；clearAllEntities()
-    // （bootstrap 重建）不清——角色是设备本地配置，与服务端数据重建无关（同 savings_goals）。
+    // 与 book/account 等一致：写操作与 pending mutation 同事务。本地表无 ownerId
+    // 列（服务端按 token 归属），故 pull/bootstrap 回填不带归属字段。
+    // 播种的 5 个内置角色同样入队上行——换机后可恢复默认角色集。
 
     /**
      * T11-7（决策 #8）：内置 5 角色幂等播种，标记 = meta personas_seeded='1'：
@@ -638,16 +740,31 @@ class Repository(private val db: AozoraDatabase) {
             if (db.chatPersonaDao().listActive().isEmpty()) {
                 val now = System.currentTimeMillis()
                 SEED_PERSONAS.forEach { (name, avatar, text) ->
-                    db.chatPersonaDao().insert(
-                        ChatPersonaEntity(
-                            id = java.util.UUID.randomUUID().toString(),
-                            name = name,
-                            avatar = avatar,
-                            persona = text,
+                    val entity = ChatPersonaEntity(
+                        id = java.util.UUID.randomUUID().toString(),
+                        name = name,
+                        avatar = avatar,
+                        persona = text,
+                        createdAt = now,
+                        updatedAt = now,
+                        archivedAt = null,
+                        version = 1
+                    )
+                    db.chatPersonaDao().insert(entity)
+                    // T-M7-01：种子角色同样上行（换机恢复默认角色集）。此处在
+                    // Room 事务内直接入队（不经 insertChatPersona），避免逐条嵌套事务。
+                    db.pendingMutationDao().insert(
+                        PendingMutationEntity(
+                            mutationId = java.util.UUID.randomUUID().toString(),
+                            entityType = "chat_persona",
+                            entityId = entity.id,
+                            operation = PendingMutationEntity.OP_INSERT,
+                            payload = chatPersonaToJson(entity),
+                            status = PendingMutationEntity.STATUS_PENDING,
+                            retryCount = 0,
                             createdAt = now,
-                            updatedAt = now,
-                            archivedAt = null,
-                            version = 1
+                            expectedVersion = null,
+                            lastError = null
                         )
                     )
                 }
@@ -674,13 +791,31 @@ class Repository(private val db: AozoraDatabase) {
         }
     }
 
-    suspend fun insertChatPersona(persona: ChatPersonaEntity) {
+    suspend fun insertChatPersona(persona: ChatPersonaEntity, mutationId: String) {
+        require(mutationId.isNotBlank()) { "mutationId is required" }
         require(persona.version > 0 && persona.archivedAt == null) { "invalid persona insert" }
         requireValidChatPersona(persona)
-        db.chatPersonaDao().insert(persona)
+        db.withTransaction {
+            db.chatPersonaDao().insert(persona)
+            db.pendingMutationDao().insert(
+                PendingMutationEntity(
+                    mutationId = mutationId,
+                    entityType = "chat_persona",
+                    entityId = persona.id,
+                    operation = PendingMutationEntity.OP_INSERT,
+                    payload = chatPersonaToJson(persona),
+                    status = PendingMutationEntity.STATUS_PENDING,
+                    retryCount = 0,
+                    createdAt = System.currentTimeMillis(),
+                    expectedVersion = null,
+                    lastError = null
+                )
+            )
+        }
     }
 
-    suspend fun updateChatPersona(persona: ChatPersonaEntity) {
+    suspend fun updateChatPersona(persona: ChatPersonaEntity, mutationId: String) {
+        require(mutationId.isNotBlank()) { "mutationId is required" }
         requireValidChatPersona(persona)
         db.withTransaction {
             val current = db.chatPersonaDao().getById(persona.id)
@@ -688,14 +823,43 @@ class Repository(private val db: AozoraDatabase) {
             require(current.archivedAt == null) { "chat persona is archived" }
             require(persona.version > current.version) { "version must increase" }
             db.chatPersonaDao().update(persona)
+            db.pendingMutationDao().insert(
+                PendingMutationEntity(
+                    mutationId = mutationId,
+                    entityType = "chat_persona",
+                    entityId = persona.id,
+                    operation = PendingMutationEntity.OP_UPDATE,
+                    payload = chatPersonaToJson(persona),
+                    status = PendingMutationEntity.STATUS_PENDING,
+                    retryCount = 0,
+                    createdAt = System.currentTimeMillis(),
+                    expectedVersion = current.version,
+                    lastError = null
+                )
+            )
         }
     }
 
-    suspend fun archiveChatPersona(id: String) {
+    suspend fun archiveChatPersona(id: String, mutationId: String) {
+        require(mutationId.isNotBlank()) { "mutationId is required" }
         db.withTransaction {
             val current = db.chatPersonaDao().getById(id)
             require(current != null && current.archivedAt == null) { "chat persona not found or already archived" }
             db.chatPersonaDao().archive(id, System.currentTimeMillis())
+            db.pendingMutationDao().insert(
+                PendingMutationEntity(
+                    mutationId = mutationId,
+                    entityType = "chat_persona",
+                    entityId = id,
+                    operation = PendingMutationEntity.OP_DELETE,
+                    payload = JSONObject().put("id", id).toString(),
+                    status = PendingMutationEntity.STATUS_PENDING,
+                    retryCount = 0,
+                    createdAt = System.currentTimeMillis(),
+                    expectedVersion = current.version,
+                    lastError = null
+                )
+            )
         }
     }
 
@@ -1029,7 +1193,11 @@ class Repository(private val db: AozoraDatabase) {
             "categories" to categories,
             "accounts" to accounts,
             "transactions" to transactions,
-            "budgets" to budgets
+            "budgets" to budgets,
+            // T-M7-01: 三实体上云（bootstrap 计数校验需要同一口径）
+            "savings_goals" to db.savingsGoalDao().listActive().sortedBy { it.id },
+            "scheduled_rules" to db.scheduledRuleDao().listActive().sortedBy { it.id },
+            "chat_personas" to db.chatPersonaDao().listActive().sortedBy { it.id }
         )
     }
 
@@ -1052,11 +1220,54 @@ class Repository(private val db: AozoraDatabase) {
             db.categoryDao().clearAll()
             db.accountDao().clearAll()
             db.budgetDao().clearAll()
+            // T-M7-01: 三实体上云后同样属于"云端权威"数据，随快照重建。
+            // 调用方（SyncEngine）必须先执行 migrateCloudEntitiesUp()，把本地
+            // 独有的存量数据入队为 insert mutation —— 否则本地独有数据会在
+            // 清空后永久丢失。
+            db.savingsGoalDao().clearAll()
+            db.scheduledRuleDao().clearAll()
+            db.chatPersonaDao().clearAll()
             // P2-2 注释：崩溃恢复锚点。若 applyBootstrap 未完成时崩溃，
             // cursor=0 + 无实体 ⇒ needsBootstrap()=true ⇒ 下次启动重试 bootstrap。
             db.syncMetaDao().upsert(
                 SyncMetaEntity(SyncMetaEntity.KEY_CURSOR, "0")
             )
+        }
+    }
+
+    /**
+     * T-M7-01: 存量本地数据一次性上行（旧版本客户端把 savings/scheduled/personas
+     * 仅存本地，升级后这些数据在云端尚不存在）。
+     *
+     * 契约：
+     * - meta 标记 `cloud_entities_uploaded_v1` 一旦写入即不再重复入队；标记与
+     *   mutation 在同一 Room 事务内落盘，崩溃不会留下"标记已写但 mutation 未入队"。
+     * - **只上行活跃实体**：归档＝用户已删除，换机不恢复符合预期，也避免为每条
+     *   归档行多产生 insert+delete 两条 mutation。
+     * - 必须在 [clearAllEntities]（bootstrap 重建）之前调用——清空会连同这三张表
+     *   一起清掉，本地独有数据只能靠已入队的 mutation 存活到 push 之后。
+     * - 服务端对这三类的 insert 是幂等的（同 id 已存在即返回现有版本、不覆盖），
+     *   故第二台设备推同一批 id 既不会冲突也不会覆盖云端副本。
+     * - 登出/删号走 [clearAllData]（clearAllTables），标记随 sync_meta 一并清空；
+     *   换账号后按新账号重新判定，不会把上一账号的数据带给新账号。
+     */
+    suspend fun migrateCloudEntitiesUp() {
+        if (getMeta(SyncMetaEntity.KEY_CLOUD_ENTITIES_UPLOADED) == "1") return
+        db.withTransaction {
+            // 事务内二次检查：并发触发时以先落盘者为准
+            if (db.syncMetaDao().getValue(SyncMetaEntity.KEY_CLOUD_ENTITIES_UPLOADED) == "1") {
+                return@withTransaction
+            }
+            for (goal in db.savingsGoalDao().listActive()) {
+                enqueueInsert("savings_goal", goal.id, savingsGoalToJson(goal))
+            }
+            for (rule in db.scheduledRuleDao().listActive()) {
+                enqueueInsert("scheduled_rule", rule.id, scheduledRuleToJson(rule))
+            }
+            for (persona in db.chatPersonaDao().listActive()) {
+                enqueueInsert("chat_persona", persona.id, chatPersonaToJson(persona))
+            }
+            setMeta(SyncMetaEntity.KEY_CLOUD_ENTITIES_UPLOADED, "1")
         }
     }
 
@@ -1109,6 +1320,28 @@ class Repository(private val db: AozoraDatabase) {
             for (budgetRaw in response.budgets) {
                 val entity = serverChangeMapToBudget(budgetRaw) ?: continue
                 db.budgetDao().upsertFromSync(entity)
+            }
+            // T-M7-01: 三实体上云 —— 同 P2-1 断言：bootstrap 只重建活跃实体。
+            for (goalRaw in response.savingsGoals) {
+                val entity = serverChangeMapToSavingsGoal(goalRaw, ownerId) ?: continue
+                check(entity.archivedAt == null) {
+                    "bootstrap savings goal ${entity.id} has non-null archivedAt"
+                }
+                db.savingsGoalDao().upsertFromSync(entity)
+            }
+            for (ruleRaw in response.scheduledRules) {
+                val entity = serverChangeMapToScheduledRule(ruleRaw, ownerId) ?: continue
+                check(entity.archivedAt == null) {
+                    "bootstrap scheduled rule ${entity.id} has non-null archivedAt"
+                }
+                db.scheduledRuleDao().upsertFromSync(entity)
+            }
+            for (personaRaw in response.chatPersonas) {
+                val entity = serverChangeMapToChatPersona(personaRaw) ?: continue
+                check(entity.archivedAt == null) {
+                    "bootstrap chat persona ${entity.id} has non-null archivedAt"
+                }
+                db.chatPersonaDao().upsertFromSync(entity)
             }
             db.syncMetaDao().upsert(
                 SyncMetaEntity(SyncMetaEntity.KEY_CURSOR, response.cursor.toString())
@@ -1217,6 +1450,49 @@ class Repository(private val db: AozoraDatabase) {
                             db.budgetDao().upsertFromSync(entity)
                         }
                     }
+                    // ─── T-M7-01: 三实体上云（delete → 归档，镜像 category/account） ───
+                    "savings_goal" -> {
+                        if (change.operation == SyncChangeOp.DELETE) {
+                            db.savingsGoalDao().applyServerArchive(
+                                change.entityId, System.currentTimeMillis(), change.version
+                            )
+                        } else {
+                            val entity = change.toSavingsGoal(ownerId) ?: continue
+                            // 照片 icon 本地专属：服务端存的 64 字符版不冲刷本地 data: 版本（决策 #7②）
+                            val localIcon = db.savingsGoalDao().getById(entity.id)?.icon
+                            val mergedIcon = if (
+                                localIcon != null && localIcon.startsWith("data:") &&
+                                entity.icon?.startsWith("data:") != true
+                            ) localIcon else entity.icon
+                            db.savingsGoalDao().upsertFromSync(entity.copy(icon = mergedIcon))
+                        }
+                    }
+                    "scheduled_rule" -> {
+                        if (change.operation == SyncChangeOp.DELETE) {
+                            db.scheduledRuleDao().applyServerArchive(
+                                change.entityId, System.currentTimeMillis(), change.version
+                            )
+                        } else {
+                            val entity = change.toScheduledRule(ownerId) ?: continue
+                            db.scheduledRuleDao().upsertFromSync(entity)
+                        }
+                    }
+                    "chat_persona" -> {
+                        if (change.operation == SyncChangeOp.DELETE) {
+                            db.chatPersonaDao().applyServerArchive(
+                                change.entityId, System.currentTimeMillis(), change.version
+                            )
+                        } else {
+                            val entity = change.toChatPersona() ?: continue
+                            // 同 book/account：本地照片头像不被 pull 冲刷（决策 #7②）
+                            val localAvatar = db.chatPersonaDao().getById(entity.id)?.avatar
+                            val mergedAvatar = if (
+                                localAvatar != null && localAvatar.startsWith("data:") &&
+                                entity.avatar?.startsWith("data:") != true
+                            ) localAvatar else entity.avatar
+                            db.chatPersonaDao().upsertFromSync(entity.copy(avatar = mergedAvatar))
+                        }
+                    }
                 }
             }
             db.syncMetaDao().upsert(
@@ -1293,6 +1569,61 @@ class Repository(private val db: AozoraDatabase) {
             put("period", budget.period)
             put("amountCents", budget.amountCents)
             put("version", budget.version)
+        }.toString()
+    }
+
+    // ─── T-M7-01: 三实体上行 payload（camelCase；SyncPayloadMapper 转 snake_case + ISO） ───
+    //
+    // createdAt/updatedAt 不入 payload —— 服务端用 AuditMixin 自管（镜像 transactionToJson）。
+    // startDate/endDate/lastRunDate 已是 'YYYY-MM-DD'，不经 epoch→ISO 转换
+    //（DATETIME_FIELDS 只含 datetime 语义键）。
+
+    private fun savingsGoalToJson(goal: SavingsGoalEntity): String {
+        return JSONObject().apply {
+            put("id", goal.id)
+            put("name", goal.name)
+            put("targetCents", goal.targetCents)
+            put("currentCents", goal.currentCents)
+            // 照片版 icon（data: URI）超服务端 64 上限 → 键省略，防毒丸（镜像 bookToJson 决策 #7①）
+            if (goal.icon != null && goal.icon.length <= ICON_WIRE_MAX_LEN) put("icon", goal.icon)
+            put("periodValue", goal.periodValue ?: JSONObject.NULL)
+            put("periodUnit", goal.periodUnit ?: JSONObject.NULL)
+            put("version", goal.version)
+        }.toString()
+    }
+
+    private fun scheduledRuleToJson(rule: ScheduledRuleEntity): String {
+        return JSONObject().apply {
+            put("id", rule.id)
+            put("type", rule.type)
+            put("name", rule.name)
+            put("amountCents", rule.amountCents)
+            put("bookId", rule.bookId)
+            put("categoryId", rule.categoryId)
+            put("accountId", rule.accountId ?: JSONObject.NULL)
+            put("includeInBudget", rule.includeInBudget)
+            put("note", rule.note)
+            put("repeat", rule.repeat)
+            put("startDate", rule.startDate)
+            put("endDate", rule.endDate ?: JSONObject.NULL)
+            put("enabled", rule.enabled)
+            put("lastRunDate", rule.lastRunDate ?: JSONObject.NULL)
+            put("runHour", rule.runHour)
+            put("runMinute", rule.runMinute)
+            put("version", rule.version)
+        }.toString()
+    }
+
+    private fun chatPersonaToJson(persona: ChatPersonaEntity): String {
+        return JSONObject().apply {
+            put("id", persona.id)
+            put("name", persona.name)
+            // 照片头像（data: URI）超服务端 64 上限 → 键省略，照片头像保持设备本地专属
+            if (persona.avatar != null && persona.avatar.length <= ICON_WIRE_MAX_LEN) {
+                put("avatar", persona.avatar)
+            }
+            put("persona", persona.persona)
+            put("version", persona.version)
         }.toString()
     }
 
@@ -1380,6 +1711,80 @@ class Repository(private val db: AozoraDatabase) {
         )
     }
 
+    // ─── T-M7-01: 三实体 bootstrap 重建 helper ───
+    //
+    // 服务端的 created_at/updated_at 是 ISO 8601，本地列是 epoch 毫秒，需转换
+    //（区别于既有五实体：它们的本地表没有时间戳列）。archived_at 在 bootstrap
+    // 中恒为 null（服务端只返回活跃实体），仍走同一解析以防未来放宽。
+
+    private fun isoToEpochMillis(value: String?): Long? =
+        SyncPayloadMapper.isoToEpochMillis(value)
+
+    private fun serverChangeMapToSavingsGoal(
+        map: Map<String, String?>, ownerId: String
+    ): SavingsGoalEntity? {
+        val id = map["id"] ?: return null
+        val name = map["name"] ?: return null
+        val targetCents = map["targetCents"]?.toLongOrNull() ?: return null
+        val version = map["version"]?.toIntOrNull() ?: 1
+        return SavingsGoalEntity(
+            id = id, ownerId = ownerId, name = name, targetCents = targetCents,
+            currentCents = map["currentCents"]?.toLongOrNull() ?: 0L,
+            icon = map["icon"],
+            periodValue = map["periodValue"]?.toIntOrNull(),
+            periodUnit = map["periodUnit"],
+            createdAt = isoToEpochMillis(map["createdAt"]) ?: System.currentTimeMillis(),
+            updatedAt = isoToEpochMillis(map["updatedAt"]) ?: System.currentTimeMillis(),
+            archivedAt = isoToEpochMillis(map["archivedAt"]),
+            version = version
+        )
+    }
+
+    private fun serverChangeMapToScheduledRule(
+        map: Map<String, String?>, ownerId: String
+    ): ScheduledRuleEntity? {
+        val id = map["id"] ?: return null
+        val name = map["name"] ?: return null
+        val type = map["type"] ?: return null
+        val amountCents = map["amountCents"]?.toLongOrNull() ?: return null
+        val bookId = map["bookId"] ?: return null
+        val categoryId = map["categoryId"] ?: return null
+        val repeat = map["repeat"] ?: return null
+        val startDate = map["startDate"] ?: return null
+        val version = map["version"]?.toIntOrNull() ?: 1
+        return ScheduledRuleEntity(
+            id = id, ownerId = ownerId, type = type, name = name,
+            amountCents = amountCents, bookId = bookId, categoryId = categoryId,
+            accountId = map["accountId"],
+            includeInBudget = map["includeInBudget"]?.toBoolean() ?: true,
+            note = map["note"] ?: "",
+            repeat = repeat, startDate = startDate, endDate = map["endDate"],
+            enabled = map["enabled"]?.toBoolean() ?: true,
+            lastRunDate = map["lastRunDate"],
+            runHour = map["runHour"]?.toIntOrNull() ?: 8,
+            runMinute = map["runMinute"]?.toIntOrNull() ?: 0,
+            createdAt = isoToEpochMillis(map["createdAt"]) ?: System.currentTimeMillis(),
+            updatedAt = isoToEpochMillis(map["updatedAt"]) ?: System.currentTimeMillis(),
+            archivedAt = isoToEpochMillis(map["archivedAt"]),
+            version = version
+        )
+    }
+
+    private fun serverChangeMapToChatPersona(map: Map<String, String?>): ChatPersonaEntity? {
+        val id = map["id"] ?: return null
+        val name = map["name"] ?: return null
+        val version = map["version"]?.toIntOrNull() ?: 1
+        return ChatPersonaEntity(
+            id = id, name = name,
+            avatar = map["avatar"],
+            persona = map["persona"] ?: "",
+            createdAt = isoToEpochMillis(map["createdAt"]) ?: System.currentTimeMillis(),
+            updatedAt = isoToEpochMillis(map["updatedAt"]) ?: System.currentTimeMillis(),
+            archivedAt = isoToEpochMillis(map["archivedAt"]),
+            version = version
+        )
+    }
+
     // ─── T-M5-04a: Consent ───
 
     suspend fun insertConsent(consent: UserConsentEntity) {
@@ -1414,6 +1819,13 @@ class Repository(private val db: AozoraDatabase) {
         /** 服务端 book/account icon 列上限（String(64)，_validate_name 强校验）——
          *  照片 data URI 超长 push 必 422 成毒丸，见第九轮决策 #7。 */
         private const val ICON_WIRE_MAX_LEN = 64
+
+        /** T-M7-01：三实体上云的列宽上限（对齐服务端列，超长 push 必 422 毒丸）。
+         *  savings_goals.name / scheduled_rules.name / scheduled_rules.note /
+         *  chat_personas.persona 分别见 migrations/versions/0016_cloud_entities.py。 */
+        private const val NAME_WIRE_MAX_LEN = 128
+        private const val SCHEDULED_NAME_WIRE_MAX_LEN = 64
+        private const val NOTE_WIRE_MAX_LEN = 2000
 
         /** T11-7（REQ-28 / 决策 #8）：角色昵称 ≤16 字、人设文本 ≤2000 字（应用层校验）。 */
         const val MAX_PERSONA_NAME_LEN = 16

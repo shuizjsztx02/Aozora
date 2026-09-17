@@ -2,6 +2,7 @@ package com.aozora.app.scheduled
 
 import com.aozora.app.db.AozoraDatabase
 import com.aozora.app.db.Repository
+import com.aozora.app.db.entity.PendingMutationEntity
 import com.aozora.app.db.entity.ScheduledRuleEntity
 import kotlinx.coroutines.runBlocking
 import org.junit.After
@@ -88,7 +89,7 @@ class ScheduledTxEngineTest {
 
     @Test
     fun daily_inWindow_generatesOneTransaction_withCorrectFields() = runBlocking {
-        repository.insertScheduledRule(rule("r1", note = "公司楼下"))
+        repository.insertScheduledRule(rule("r1", note = "公司楼下"), "m1")
         val count = dueOn(wed)
         assertEquals(1, count)
         val tx = txs().single()
@@ -99,8 +100,19 @@ class ScheduledTxEngineTest {
         assertEquals(bookId, tx.bookId)
         assertEquals(categoryId, tx.categoryId)
         assertEquals(1, tx.version)
-        // 生成交易必须正常入队上行（规则本身不入队，见 RepositoryScheduledTest）
+        // 生成交易必须正常入队上行；规则自身的 lastRunDate 锚点更新同样入队
+        //（T-M7-01 上云后规则可变，见 RepositoryScheduledTest.writes_enqueueMatchingMutations）
         assertEquals(1, repository.listPendingMutations().count { it.entityType == "transaction" })
+        val ruleMutations = repository.listPendingMutations().filter { it.entityType == "scheduled_rule" }
+        assertEquals(1, ruleMutations.count { it.operation == PendingMutationEntity.OP_INSERT })
+        assertEquals(1, ruleMutations.count { it.operation == PendingMutationEntity.OP_UPDATE })
+        assertTrue(
+            "lastRunDate 锚点须随 update 上行（跨设备去重）",
+            ruleMutations.any {
+                it.operation == PendingMutationEntity.OP_UPDATE &&
+                    it.payload.contains("\"lastRunDate\":\"2026-09-09\"")
+            }
+        )
         // lastRunDate 锚点更新 + 版本递增
         val r = repository.getScheduledRule("r1")!!
         assertEquals("2026-09-09", r.lastRunDate)
@@ -109,14 +121,14 @@ class ScheduledTxEngineTest {
 
     @Test
     fun daily_noNote_noteIsNameOnly() = runBlocking {
-        repository.insertScheduledRule(rule("r1", note = ""))
+        repository.insertScheduledRule(rule("r1", note = ""), "m2")
         dueOn(wed)
         assertEquals("早餐", txs().single().note)
     }
 
     @Test
     fun includeInBudget_passesThrough() = runBlocking {
-        repository.insertScheduledRule(rule("r1", includeInBudget = false))
+        repository.insertScheduledRule(rule("r1", includeInBudget = false), "m3")
         dueOn(wed)
         assertFalse(txs().single().includeInBudget)
     }
@@ -126,21 +138,21 @@ class ScheduledTxEngineTest {
     @Test
     fun weekly_onlyOnSameWeekdayAsStart() = runBlocking {
         // 2026-09-02 与基准 09-09 同为周三
-        repository.insertScheduledRule(rule("r1", repeat = "weekly", startDate = "2026-09-02"))
+        repository.insertScheduledRule(rule("r1", repeat = "weekly", startDate = "2026-09-02"), "m4")
         assertEquals(0, dueOn(wed.plusDays(1))) // 周四不触发
         assertEquals(1, dueOn(wed))             // 周三触发
     }
 
     @Test
     fun monthly_sameDayOfStart() = runBlocking {
-        repository.insertScheduledRule(rule("r1", repeat = "monthly", startDate = "2026-08-09"))
+        repository.insertScheduledRule(rule("r1", repeat = "monthly", startDate = "2026-08-09"), "m5")
         assertEquals(0, dueOn(wed.plusDays(1)))
         assertEquals(1, dueOn(wed))
     }
 
     @Test
     fun monthly_shortMonthClampsToLastDay() = runBlocking {
-        repository.insertScheduledRule(rule("r1", repeat = "monthly", startDate = "2026-01-31"))
+        repository.insertScheduledRule(rule("r1", repeat = "monthly", startDate = "2026-01-31"), "m6")
         // 2 月无 31 日 → 钳到 2026-02-28（非闰年）
         assertEquals(1, dueOn(LocalDate.of(2026, 2, 28)))
         assertEquals(0, dueOn(LocalDate.of(2026, 3, 30)))
@@ -149,7 +161,7 @@ class ScheduledTxEngineTest {
 
     @Test
     fun yearly_sameMonthAndDay() = runBlocking {
-        repository.insertScheduledRule(rule("r1", repeat = "yearly", startDate = "2025-09-09"))
+        repository.insertScheduledRule(rule("r1", repeat = "yearly", startDate = "2025-09-09"), "m7")
         assertEquals(0, dueOn(wed.plusDays(1)))
         assertEquals(1, dueOn(wed))
     }
@@ -158,20 +170,20 @@ class ScheduledTxEngineTest {
 
     @Test
     fun disabledRule_skipped() = runBlocking {
-        repository.insertScheduledRule(rule("r1", enabled = false))
+        repository.insertScheduledRule(rule("r1", enabled = false), "m8")
         assertEquals(0, dueOn(wed))
         assertTrue(txs().isEmpty())
     }
 
     @Test
     fun beforeStartOrAfterEnd_skipped_endInclusive() = runBlocking {
-        repository.insertScheduledRule(rule("r1", startDate = "2026-09-10"))
+        repository.insertScheduledRule(rule("r1", startDate = "2026-09-10"), "m9")
         assertEquals(0, dueOn(wed)) // 尚未开始
 
-        repository.insertScheduledRule(rule("r2", startDate = "2026-09-01", endDate = "2026-09-08"))
+        repository.insertScheduledRule(rule("r2", startDate = "2026-09-01", endDate = "2026-09-08"), "m10")
         assertEquals(0, dueOn(wed)) // 已结束
 
-        repository.insertScheduledRule(rule("r3", startDate = "2026-09-01", endDate = "2026-09-09"))
+        repository.insertScheduledRule(rule("r3", startDate = "2026-09-01", endDate = "2026-09-09"), "m11")
         assertEquals(1, dueOn(wed)) // 结束日当天仍命中（闭区间）
     }
 
@@ -179,14 +191,14 @@ class ScheduledTxEngineTest {
 
     @Test
     fun alreadyRunToday_skipped_yesterdayRuns() = runBlocking {
-        repository.insertScheduledRule(rule("r1", lastRunDate = "2026-09-09"))
+        repository.insertScheduledRule(rule("r1", lastRunDate = "2026-09-09"), "m12")
         assertEquals(0, dueOn(wed))
         assertEquals(1, dueOn(wed.minusDays(1))) // 昨日补跑锚点不拦
     }
 
     @Test
     fun secondRunSameDay_noDoubleInsert() = runBlocking {
-        repository.insertScheduledRule(rule("r1"))
+        repository.insertScheduledRule(rule("r1"), "m13")
         assertEquals(1, dueOn(wed))
         assertEquals(0, dueOn(wed)) // 闹钟+冷启动双触发幂等
         assertEquals(1, txs().size)
@@ -194,8 +206,8 @@ class ScheduledTxEngineTest {
 
     @Test
     fun multipleRules_eachFires() = runBlocking {
-        repository.insertScheduledRule(rule("r1"))
-        repository.insertScheduledRule(rule("r2"))
+        repository.insertScheduledRule(rule("r1"), "m14")
+        repository.insertScheduledRule(rule("r2"), "m15")
         assertEquals(2, dueOn(wed))
         assertEquals(2, txs().size)
     }
@@ -204,8 +216,8 @@ class ScheduledTxEngineTest {
 
     @Test
     fun brokenRule_skipped_othersStillRun_lastRunDateUntouched() = runBlocking {
-        repository.insertScheduledRule(rule("ghost", bookId = "deleted-book"))
-        repository.insertScheduledRule(rule("ok"))
+        repository.insertScheduledRule(rule("ghost", bookId = "deleted-book"), "m16")
+        repository.insertScheduledRule(rule("ok"), "m17")
         assertEquals(1, dueOn(wed))
         assertEquals(1, txs().size)
         assertNull(repository.getScheduledRule("ghost")!!.lastRunDate) // 失败不写锚点，明日重试
@@ -214,8 +226,8 @@ class ScheduledTxEngineTest {
 
     @Test
     fun archivedRule_notIterated() = runBlocking {
-        repository.insertScheduledRule(rule("r1"))
-        repository.archiveScheduledRule("r1")
+        repository.insertScheduledRule(rule("r1"), "m18")
+        repository.archiveScheduledRule("r1", "m19")
         assertEquals(0, dueOn(wed))
     }
 
@@ -223,7 +235,7 @@ class ScheduledTxEngineTest {
 
     @Test
     fun beforeRunTime_notGenerated_atRunTime_generated() = runBlocking {
-        repository.insertScheduledRule(rule("r1", runHour = 9, runMinute = 30))
+        repository.insertScheduledRule(rule("r1", runHour = 9, runMinute = 30), "m20")
         // 到点前 1 分钟：日命中但时刻未到 → 不生成
         assertEquals(0, engine.runDueNow(LocalDateTime.of(wed, LocalTime.of(9, 29))))
         assertTrue(txs().isEmpty())
@@ -234,7 +246,7 @@ class ScheduledTxEngineTest {
 
     @Test
     fun runTime_dedupStillDayGranularity() = runBlocking {
-        repository.insertScheduledRule(rule("r1", runHour = 9, runMinute = 30))
+        repository.insertScheduledRule(rule("r1", runHour = 9, runMinute = 30), "m21")
         assertEquals(1, engine.runDueNow(LocalDateTime.of(wed, LocalTime.of(9, 30))))
         // 当日去重仍是日粒度锚点（到点后再次触发不双计）
         assertEquals(0, engine.runDueNow(LocalDateTime.of(wed, LocalTime.of(23, 59))))
@@ -247,7 +259,7 @@ class ScheduledTxEngineTest {
     @Test
     fun legacyRules_defaultRunTime_keeps0800Semantics() = runBlocking {
         // v9 迁移语义：缺省 8/0（存量行同）→ 07:59 不抢跑、08:00 生成
-        repository.insertScheduledRule(rule("r1"))
+        repository.insertScheduledRule(rule("r1"), "m22")
         assertEquals(0, engine.runDueNow(LocalDateTime.of(wed, LocalTime.of(7, 59))))
         assertEquals(1, engine.runDueNow(LocalDateTime.of(wed, LocalTime.of(8, 0))))
     }

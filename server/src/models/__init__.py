@@ -15,7 +15,10 @@ from src.models.export import Export
 from src.models.feedback import Feedback
 from src.models.ledger import Account, Book, Category, Transaction
 from src.models.mutation import MutationIdempotency
+from src.models.persona import ChatPersona
 from src.models.proposal import ProposalIdempotency
+from src.models.savings import SavingsGoal
+from src.models.scheduled import ScheduledRule
 from src.models.sync import SyncChange
 from src.models.user import DeviceSession, User
 
@@ -29,6 +32,7 @@ __all__ = [
     "Book",
     "Budget",
     "Category",
+    "ChatPersona",
     "CrashReport",
     "DeactivationToken",
     "DeletionAudit",
@@ -37,6 +41,8 @@ __all__ = [
     "Feedback",
     "MutationIdempotency",
     "ProposalIdempotency",
+    "SavingsGoal",
+    "ScheduledRule",
     "SoftDeleteMixin",
     "SyncChange",
     "Transaction",

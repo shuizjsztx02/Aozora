@@ -17,7 +17,8 @@ class MutationItem(BaseModel):
 
     mutation_id: uuid.UUID
     entity_type: str = Field(
-        pattern=r"^(book|category|account|transaction|budget)$",
+        pattern=r"^(book|category|account|transaction|budget"
+                r"|savings_goal|scheduled_rule|chat_persona)$",
     )
     operation: str = Field(
         pattern=r"^(insert|update|delete)$",
@@ -99,11 +100,30 @@ class BootstrapResponse(BaseModel):
     payload (excluding the checksum itself), formatted as lowercase hex.
     Clients recompute the same hash over the received entities and compare;
     mismatch indicates transport corruption or incomplete rebuild.
+
+    T-M7-01 (三实体上云): `savings_goals` / `scheduled_rules` / `chat_personas`
+    are appended to the snapshot.  Two checksums are emitted so that **older
+    clients keep working unchanged**:
+
+    - ``checksum`` — legacy algorithm, over books|categories|accounts|
+      transactions|budgets|cursor only.  Byte-for-byte identical to what a
+      pre-M7 server would have returned, so an old client's recomputation
+      still matches despite the three new keys being present (unknown keys
+      are ignored by its JSON parser).
+    - ``checksum_v2`` — over all eight lists + cursor, for clients that
+      know about the cloud entities.
+
+    A client that predates T-M7-01 must NOT be switched to `checksum_v2`:
+    bootstrap mismatch puts it into a RETRYABLE loop.
     """
     books: list[dict[str, Any]]
     categories: list[dict[str, Any]]
     accounts: list[dict[str, Any]]
     transactions: list[dict[str, Any]]
     budgets: list[dict[str, Any]]
+    savings_goals: list[dict[str, Any]] = []
+    scheduled_rules: list[dict[str, Any]] = []
+    chat_personas: list[dict[str, Any]] = []
     cursor: int
     checksum: str = ""
+    checksum_v2: str = ""

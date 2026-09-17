@@ -1,0 +1,104 @@
+{
+  "_comment": "T-M7-01 迁移验证 fixture —— 模拟旧版本客户端（Room v9，savings_goals / scheduled_rules / chat_personas 三实体仅存本地、不入队 pending mutation）留下的本地数据快照。字段与 Room 列一一对应（camelCase、时间为 epoch 毫秒、日期为 'YYYY-MM-DD'）。测试把本快照原样写回 Room（直连 DAO，绕开会入队的 Repository 写方法，以忠实还原旧版本留下的状态），再调用 Repository.migrateCloudEntitiesUp() 断言上行 mutation 的形状、幂等性与归档行排除。",
+  "schemaVersion": 9,
+  "savings_goals": [
+    {
+      "id": "11111111-1111-4111-8111-111111111111",
+      "ownerId": "local",
+      "name": "旅行基金",
+      "targetCents": 500000,
+      "currentCents": 120000,
+      "icon": "🎯",
+      "periodValue": 6,
+      "periodUnit": "month",
+      "createdAt": 1757000000000,
+      "updatedAt": 1757000001000,
+      "archivedAt": null,
+      "version": 2
+    },
+    {
+      "id": "11111111-1111-4111-8111-222222222222",
+      "ownerId": "local",
+      "name": "已放弃的目标",
+      "targetCents": 100000,
+      "currentCents": 0,
+      "icon": null,
+      "periodValue": null,
+      "periodUnit": null,
+      "createdAt": 1757000002000,
+      "updatedAt": 1757000003000,
+      "archivedAt": 1757000004000,
+      "version": 3
+    }
+  ],
+  "scheduled_rules": [
+    {
+      "id": "22222222-2222-4222-8222-111111111111",
+      "ownerId": "local",
+      "type": "expense",
+      "name": "房租",
+      "amountCents": 350000,
+      "bookId": "book-1",
+      "categoryId": "cat-1",
+      "accountId": null,
+      "includeInBudget": true,
+      "note": "每月一号",
+      "repeat": "monthly",
+      "startDate": "2026-01-01",
+      "endDate": null,
+      "enabled": true,
+      "lastRunDate": "2026-09-01",
+      "runHour": 9,
+      "runMinute": 30,
+      "createdAt": 1757000010000,
+      "updatedAt": 1757000011000,
+      "archivedAt": null,
+      "version": 5
+    },
+    {
+      "id": "22222222-2222-4222-8222-222222222222",
+      "ownerId": "local",
+      "type": "income",
+      "name": "已停用的补贴",
+      "amountCents": 20000,
+      "bookId": "book-1",
+      "categoryId": "cat-2",
+      "accountId": "acc-1",
+      "includeInBudget": false,
+      "note": "",
+      "repeat": "weekly",
+      "startDate": "2026-03-02",
+      "endDate": "2026-06-29",
+      "enabled": false,
+      "lastRunDate": null,
+      "runHour": 8,
+      "runMinute": 0,
+      "createdAt": 1757000012000,
+      "updatedAt": 1757000013000,
+      "archivedAt": 1757000014000,
+      "version": 2
+    }
+  ],
+  "chat_personas": [
+    {
+      "id": "33333333-3333-4333-8333-111111111111",
+      "name": "小贝",
+      "avatar": "😊",
+      "persona": "你是小贝，一个温柔简洁的记账搭子。",
+      "createdAt": 1757000020000,
+      "updatedAt": 1757000021000,
+      "archivedAt": null,
+      "version": 1
+    },
+    {
+      "id": "33333333-3333-4333-8333-222222222222",
+      "name": "被删除的角色",
+      "avatar": null,
+      "persona": "一段已经被用户删掉的人设。",
+      "createdAt": 1757000022000,
+      "updatedAt": 1757000023000,
+      "archivedAt": 1757000024000,
+      "version": 2
+    }
+  ]
+}

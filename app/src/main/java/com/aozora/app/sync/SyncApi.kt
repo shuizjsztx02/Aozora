@@ -122,9 +122,21 @@ data class BootstrapResponse(
     val accounts: List<Map<String, String?>>,
     val transactions: List<Map<String, String?>>,
     val budgets: List<Map<String, String?>>,
+    // T-M7-01: 三实体上云 — 旧服务端不返回这三个键时为空列表（向前兼容）。
+    val savingsGoals: List<Map<String, String?>> = emptyList(),
+    val scheduledRules: List<Map<String, String?>> = emptyList(),
+    val chatPersonas: List<Map<String, String?>> = emptyList(),
     val cursor: Long,
+    /**
+     * 旧算法 checksum（五类 + cursor）。旧客户端据此重算校验，其值不受三实体
+     * 上云影响 —— 当前客户端不再使用，保留供诊断。
+     */
     val checksum: String,
-    val computedChecksum: String = ""
+    /** T-M7-01: 八类 + cursor 的 checksum；旧服务端为空串。 */
+    val checksumV2: String = "",
+    val computedChecksum: String = "",
+    /** T-M7-01: 八类重算值 —— 与 [checksumV2] 比对。 */
+    val computedChecksumV2: String = ""
 )
 
 /** HTTP 错误；包含状态码与响应体摘要。 */

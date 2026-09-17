@@ -24,9 +24,12 @@ from src.models.ledger import (
     TxSource,
     TxType,
 )
+from src.models.persona import ChatPersona
+from src.models.savings import SavingsGoal
+from src.models.scheduled import ScheduledRule
 from src.models.sync import SyncOperation
 
-from .repository import SyncRepository
+from .repository import ARCHIVED_TYPES, SyncRepository
 from .schemas import (
     BootstrapResponse,
     ChangeItem,
@@ -39,7 +42,20 @@ from .schemas import (
 logger = logging.getLogger(__name__)
 
 # Entity types that use archived_at (soft-archive) vs deleted_at (soft-delete).
-_ARCHIVED_TYPES = {"category", "account"}
+# T-M7-01: 单一来源改为 repository.ARCHIVED_TYPES（含三个上云实体）。
+_ARCHIVED_TYPES = ARCHIVED_TYPES
+
+# T-M7-01: 三实体的**上行迁移友好**语义。旧版本客户端把它们仅存本地，升级后
+# 需一次性上行；多设备场景下第二台设备会推同一批 id。insert 命中已存在实体时
+# 幂等返回现有版本（云端权威优先），而不是 IntegrityError → conflict 垃圾队列。
+_MIGRATION_IDEMPOTENT_TYPES = frozenset({
+    "savings_goal", "scheduled_rule", "chat_persona",
+})
+
+# 定时规则的可变枚举（应用层校验，避免 DB CheckConstraint 报 IntegrityError
+# 被误报为 conflict）。
+_RULE_REPEATS = frozenset({"daily", "weekly", "monthly", "yearly"})
+_PERIOD_UNITS = frozenset({"week", "month"})
 
 
 class SyncService:
@@ -126,6 +142,41 @@ class SyncService:
         etype = mutation.entity_type
         op = mutation.operation
         payload = mutation.payload
+
+        # T-M7-01: 三实体的上行迁移幂等语义（见 _MIGRATION_IDEMPOTENT_TYPES）。
+        # 命中已存在（含已归档）实体时**不覆盖云端副本**，但记一条 **update** 变更：
+        # 发起方的 echo-pull 借此把云端版本（version / archived_at）合并回本地。
+        #   - 不记变更 = 本地副本停在自己的 version（如 5）而云端是 1，下一次
+        #     update 带 expectedVersion=5 必被判 conflict → 终态失败、用户改动丢失。
+        #   - 记成 insert = 客户端 pull 的 insert/update 分支会把实体按"新增"落库；
+        #     客户端 toSavingsGoal/toScheduledRule/toChatPersona 会读 archived_at，
+        #     故已归档行按归档合并（不复活），活跃行按云端版本对齐。
+        if op == "insert" and etype in _MIGRATION_IDEMPOTENT_TYPES:
+            existing = await self.repo.get_entity(
+                etype, mutation.entity_id, user_id, include_deleted=True,
+            )
+            if existing is not None:
+                change = await self.repo.write_change(
+                    user_id=user_id,
+                    entity_type=etype,
+                    entity_id=existing.id,
+                    operation=SyncOperation.UPDATE,
+                    version=existing.version,
+                )
+                await self.repo.record_mutation(
+                    mutation_id=mutation.mutation_id,
+                    user_id=user_id,
+                    entity_type=etype,
+                    entity_id=existing.id,
+                    sync_cursor=change.cursor,
+                    result_version=existing.version,
+                )
+                return MutationResult(
+                    mutation_id=mutation.mutation_id,
+                    status="applied",
+                    cursor=change.cursor,
+                    version=existing.version,
+                )
 
         if op == "insert":
             entity_id, version = await self._apply_insert(
@@ -291,6 +342,100 @@ class SyncService:
             await self.db.flush()
             return budget.id, budget.version
 
+        # ── T-M7-01: 三实体上云 ──────────────────────────────────────────
+
+        if entity_type == "savings_goal":
+            _validate_name(payload["name"], 128, "name")
+            if payload.get("icon") is not None:
+                _validate_name(payload["icon"], 64, "icon")
+            _validate_amount_cents(payload["target_cents"])
+            current_cents = payload.get("current_cents", 0)
+            if isinstance(current_cents, bool) or not isinstance(current_cents, int) or current_cents < 0:
+                raise AppException(
+                    422, "validation_error",
+                    "current_cents must be a non-negative integer",
+                )
+            period_value, period_unit = _validate_savings_period(
+                payload.get("period_value"), payload.get("period_unit"),
+            )
+            goal = SavingsGoal(
+                id=entity_id,
+                owner_id=user_id,
+                name=payload["name"],
+                target_cents=payload["target_cents"],
+                current_cents=current_cents,
+                icon=payload.get("icon"),
+                period_value=period_value,
+                period_unit=period_unit,
+            )
+            self.db.add(goal)
+            await self.db.flush()
+            return goal.id, goal.version
+
+        if entity_type == "scheduled_rule":
+            book_id = _to_uuid(payload["book_id"])
+            category_id = _to_uuid(payload["category_id"])
+            account_id = _to_uuid(payload["account_id"]) if payload.get("account_id") else None
+            await self._verify_book_ownership(book_id, user_id)
+            await self._verify_category_ownership(category_id, user_id)
+            if account_id is not None:
+                await self._verify_account_ownership(account_id, user_id)
+            _validate_amount_cents(payload["amount_cents"])
+            _validate_name(payload["name"], 64, "name")
+            _validate_note(payload.get("note", ""))
+            # 枚举经 ValueError → 422（与 transaction.type 同一路径）
+            TxType(payload["type"])
+            repeat = payload["repeat"]
+            if repeat not in _RULE_REPEATS:
+                raise AppException(422, "validation_error", f"Invalid repeat: {repeat}")
+            start_date = _to_date(payload["start_date"])
+            end_date = _to_date(payload["end_date"]) if payload.get("end_date") else None
+            if end_date is not None and end_date < start_date:
+                raise AppException(
+                    422, "validation_error", "end_date must not precede start_date",
+                )
+            last_run_date = (
+                _to_date(payload["last_run_date"]) if payload.get("last_run_date") else None
+            )
+            rule = ScheduledRule(
+                id=entity_id,
+                owner_id=user_id,
+                type=payload["type"],
+                name=payload["name"],
+                amount_cents=payload["amount_cents"],
+                book_id=book_id,
+                category_id=category_id,
+                account_id=account_id,
+                include_in_budget=bool(payload.get("include_in_budget", True)),
+                note=payload.get("note", ""),
+                repeat=repeat,
+                start_date=start_date,
+                end_date=end_date,
+                enabled=bool(payload.get("enabled", True)),
+                last_run_date=last_run_date,
+                run_hour=_require_int_in_range(payload.get("run_hour", 8), 0, 23, "run_hour"),
+                run_minute=_require_int_in_range(payload.get("run_minute", 0), 0, 59, "run_minute"),
+            )
+            self.db.add(rule)
+            await self.db.flush()
+            return rule.id, rule.version
+
+        if entity_type == "chat_persona":
+            _validate_name(payload["name"], 64, "name")
+            if payload.get("avatar") is not None:
+                _validate_name(payload["avatar"], 64, "avatar")
+            _validate_note(payload.get("persona", ""), field="persona")
+            persona = ChatPersona(
+                id=entity_id,
+                owner_id=user_id,
+                name=payload["name"],
+                avatar=payload.get("avatar"),
+                persona=payload.get("persona", ""),
+            )
+            self.db.add(persona)
+            await self.db.flush()
+            return persona.id, persona.version
+
         raise AppException(422, "validation_error", f"Unknown entity_type: {entity_type}")
 
     # -- Update -----------------------------------------------------------
@@ -372,6 +517,102 @@ class SyncService:
                 if category_id is not None:
                     await self._verify_category_ownership(category_id, user_id)
                 entity.category_id = category_id
+
+        # ── T-M7-01: 三实体上云 ──────────────────────────────────────────
+
+        elif entity_type == "savings_goal":
+            if "name" in payload:
+                _validate_name(payload["name"], 128, "name")
+                entity.name = payload["name"]
+            if "target_cents" in payload:
+                _validate_amount_cents(payload["target_cents"])
+                entity.target_cents = payload["target_cents"]
+            if "current_cents" in payload:
+                current_cents = payload["current_cents"]
+                if isinstance(current_cents, bool) or not isinstance(current_cents, int) or current_cents < 0:
+                    raise AppException(
+                        422, "validation_error",
+                        "current_cents must be a non-negative integer",
+                    )
+                entity.current_cents = current_cents
+            if "icon" in payload:
+                if payload["icon"] is not None:
+                    _validate_name(payload["icon"], 64, "icon")
+                entity.icon = payload["icon"]
+            # 期限成对语义：客户端 update 恒同时下发两键（值或 null），
+            # 任一出现即按成对校验（镜像 Repository.requireValidSavingsPeriod）。
+            if "period_value" in payload or "period_unit" in payload:
+                period_value, period_unit = _validate_savings_period(
+                    payload.get("period_value"), payload.get("period_unit"),
+                )
+                entity.period_value = period_value
+                entity.period_unit = period_unit
+
+        elif entity_type == "scheduled_rule":
+            if "type" in payload:
+                entity.type = TxType(payload["type"])
+            if "name" in payload:
+                _validate_name(payload["name"], 64, "name")
+                entity.name = payload["name"]
+            if "amount_cents" in payload:
+                _validate_amount_cents(payload["amount_cents"])
+                entity.amount_cents = payload["amount_cents"]
+            if "book_id" in payload:
+                book_id = _to_uuid(payload["book_id"])
+                await self._verify_book_ownership(book_id, user_id)
+                entity.book_id = book_id
+            if "category_id" in payload:
+                category_id = _to_uuid(payload["category_id"])
+                await self._verify_category_ownership(category_id, user_id)
+                entity.category_id = category_id
+            if "account_id" in payload:
+                account_id = _to_uuid(payload["account_id"]) if payload["account_id"] else None
+                if account_id is not None:
+                    await self._verify_account_ownership(account_id, user_id)
+                entity.account_id = account_id
+            if "include_in_budget" in payload:
+                entity.include_in_budget = bool(payload["include_in_budget"])
+            if "note" in payload:
+                _validate_note(payload["note"])
+                entity.note = payload["note"]
+            if "repeat" in payload:
+                if payload["repeat"] not in _RULE_REPEATS:
+                    raise AppException(
+                        422, "validation_error", f"Invalid repeat: {payload['repeat']}",
+                    )
+                entity.repeat = payload["repeat"]
+            if "start_date" in payload:
+                entity.start_date = _to_date(payload["start_date"])
+            if "end_date" in payload:
+                entity.end_date = _to_date(payload["end_date"]) if payload["end_date"] else None
+            if "enabled" in payload:
+                entity.enabled = bool(payload["enabled"])
+            # last_run_date 由引擎自管；sync 侧接受上行（跨设备去重锚点）。
+            if "last_run_date" in payload:
+                entity.last_run_date = (
+                    _to_date(payload["last_run_date"]) if payload["last_run_date"] else None
+                )
+            if "run_hour" in payload:
+                entity.run_hour = _require_int_in_range(payload["run_hour"], 0, 23, "run_hour")
+            if "run_minute" in payload:
+                entity.run_minute = _require_int_in_range(payload["run_minute"], 0, 59, "run_minute")
+            # 成序校验按**更新后的最终值**判定（镜像客户端 requireValidScheduledRule）
+            if entity.end_date is not None and entity.end_date < entity.start_date:
+                raise AppException(
+                    422, "validation_error", "end_date must not precede start_date",
+                )
+
+        elif entity_type == "chat_persona":
+            if "name" in payload:
+                _validate_name(payload["name"], 64, "name")
+                entity.name = payload["name"]
+            if "avatar" in payload:
+                if payload["avatar"] is not None:
+                    _validate_name(payload["avatar"], 64, "avatar")
+                entity.avatar = payload["avatar"]
+            if "persona" in payload:
+                _validate_note(payload["persona"], field="persona")
+                entity.persona = payload["persona"]
 
         else:
             raise AppException(422, "validation_error", f"Unknown entity_type: {entity_type}")
@@ -523,13 +764,28 @@ class SyncService:
         accounts = [_serialize_entity(a) for a in entities["accounts"]]
         transactions = [_serialize_entity(t) for t in entities["transactions"]]
         budgets = [_serialize_entity(b) for b in entities["budgets"]]
+        savings_goals = [_serialize_entity(g) for g in entities["savings_goals"]]
+        scheduled_rules = [_serialize_entity(r) for r in entities["scheduled_rules"]]
+        chat_personas = [_serialize_entity(p) for p in entities["chat_personas"]]
 
+        # legacy checksum 的输入保持五个列表不变 —— 旧客户端的重算必须继续命中。
         checksum = compute_bootstrap_checksum(
             books=books,
             categories=categories,
             accounts=accounts,
             transactions=transactions,
             budgets=budgets,
+            cursor=cursor,
+        )
+        checksum_v2 = compute_bootstrap_checksum_v2(
+            books=books,
+            categories=categories,
+            accounts=accounts,
+            transactions=transactions,
+            budgets=budgets,
+            savings_goals=savings_goals,
+            scheduled_rules=scheduled_rules,
+            chat_personas=chat_personas,
             cursor=cursor,
         )
 
@@ -539,8 +795,12 @@ class SyncService:
             accounts=accounts,
             transactions=transactions,
             budgets=budgets,
+            savings_goals=savings_goals,
+            scheduled_rules=scheduled_rules,
+            chat_personas=chat_personas,
             cursor=cursor,
             checksum=checksum,
+            checksum_v2=checksum_v2,
         )
 
 
@@ -559,13 +819,57 @@ def _validate_amount_cents(value: object) -> None:
         )
 
 
-def _validate_note(value: object) -> None:
-    """Reject non-string or over-long ``note`` with 422."""
+def _validate_note(value: object, field: str = "note") -> None:
+    """Reject non-string or over-long text fields with 422.
+
+    ``field`` allows reuse for other 2000-char columns (chat_personas.persona)。
+    """
     if not isinstance(value, str) or len(value) > 2000:
         raise AppException(
             422, "validation_error",
-            "note must be a string of at most 2000 characters",
+            f"{field} must be a string of at most 2000 characters",
         )
+
+
+def _validate_savings_period(
+    period_value: object, period_unit: object,
+) -> tuple[int | None, str | None]:
+    """Validate the paired savings-goal period fields, returning them.
+
+    ``period_value`` / ``period_unit`` must be provided together (both null or
+    both set) and the unit must be 'week' | 'month' — mirrors the client's
+    ``Repository.requireValidSavingsPeriod``.  The client's bridge layer caps
+    value at 1–521 (week) / 1–120 (month); the server accepts any positive
+    integer and lets the app-level contract own the range.
+    """
+    has_value = period_value is not None
+    has_unit = period_unit is not None
+    if has_value != has_unit:
+        raise AppException(
+            422, "validation_error",
+            "period_value/period_unit must be provided together",
+        )
+    if not has_value:
+        return None, None
+    if isinstance(period_value, bool) or not isinstance(period_value, int) or period_value < 1:
+        raise AppException(
+            422, "validation_error", "period_value must be a positive integer",
+        )
+    if period_unit not in _PERIOD_UNITS:
+        raise AppException(
+            422, "validation_error", f"Invalid period_unit: {period_unit}",
+        )
+    return period_value, period_unit
+
+
+def _require_int_in_range(value: object, low: int, high: int, field: str) -> int:
+    """Reject non-integer or out-of-range values with 422 (mirrors DB CHECK)."""
+    if isinstance(value, bool) or not isinstance(value, int) or not (low <= value <= high):
+        raise AppException(
+            422, "validation_error",
+            f"{field} must be an integer between {low} and {high}",
+        )
+    return value
 
 
 def _validate_name(value: object, max_length: int, field: str = "name") -> None:
@@ -674,12 +978,83 @@ def _serialize_entity(entity: object) -> dict:
             "updated_at": entity.updated_at.isoformat(),
             "deleted_at": entity.deleted_at.isoformat() if entity.deleted_at else None,
         }
+    # ── T-M7-01: 三实体上云 ──────────────────────────────────────────────
+    # 日期类字段（start_date / last_run_date）以 ISO 'YYYY-MM-DD' 出网；
+    # 客户端 Room 用同形字符串存储，无需 epoch 转换（区别于 occurred_at）。
+    if isinstance(entity, SavingsGoal):
+        return {
+            "id": str(entity.id),
+            "name": entity.name,
+            "target_cents": entity.target_cents,
+            "current_cents": entity.current_cents,
+            "icon": entity.icon,
+            "period_value": entity.period_value,
+            "period_unit": entity.period_unit,
+            "version": entity.version,
+            "created_at": entity.created_at.isoformat(),
+            "updated_at": entity.updated_at.isoformat(),
+            "archived_at": entity.archived_at.isoformat() if entity.archived_at else None,
+        }
+    if isinstance(entity, ScheduledRule):
+        return {
+            "id": str(entity.id),
+            "type": str(entity.type),
+            "name": entity.name,
+            "amount_cents": entity.amount_cents,
+            "book_id": str(entity.book_id),
+            "category_id": str(entity.category_id),
+            "account_id": str(entity.account_id) if entity.account_id else None,
+            "include_in_budget": entity.include_in_budget,
+            "note": entity.note,
+            "repeat": entity.repeat,
+            "start_date": entity.start_date.isoformat(),
+            "end_date": entity.end_date.isoformat() if entity.end_date else None,
+            "enabled": entity.enabled,
+            "last_run_date": entity.last_run_date.isoformat() if entity.last_run_date else None,
+            "run_hour": entity.run_hour,
+            "run_minute": entity.run_minute,
+            "version": entity.version,
+            "created_at": entity.created_at.isoformat(),
+            "updated_at": entity.updated_at.isoformat(),
+            "archived_at": entity.archived_at.isoformat() if entity.archived_at else None,
+        }
+    if isinstance(entity, ChatPersona):
+        return {
+            "id": str(entity.id),
+            "name": entity.name,
+            "avatar": entity.avatar,
+            "persona": entity.persona,
+            "version": entity.version,
+            "created_at": entity.created_at.isoformat(),
+            "updated_at": entity.updated_at.isoformat(),
+            "archived_at": entity.archived_at.isoformat() if entity.archived_at else None,
+        }
     raise TypeError(f"Cannot serialize {type(entity)}")
 
 
 # ---------------------------------------------------------------------------
 # T-M3-03: Bootstrap checksum
 # ---------------------------------------------------------------------------
+
+def _compute_checksum(entity_lists: list[list[dict]], cursor: int) -> str:
+    """SHA-256 over entity lists + cursor, in the given order.
+
+    Canonical form (shared by the legacy and v2 checksums):
+    - Entity lists in the caller's fixed order.
+    - Each list sorted by ``id`` (UUID string, stable).
+    - Keys within each entity dict sorted alphabetically.
+    - JSON serialized with separators=(",", ":") and sort_keys=True, UTF-8.
+    - Parts joined with ``|``; a final ``cursor:{cursor}`` part.
+
+    Returns lowercase 64-char hex.
+    """
+    parts: list[str] = []
+    for items in entity_lists:
+        for item in sorted(items, key=lambda x: x.get("id", "")):
+            parts.append(json.dumps(item, sort_keys=True, separators=(",", ":")))
+    parts.append(f"cursor:{cursor}")
+    return hashlib.sha256("|".join(parts).encode("utf-8")).hexdigest()
+
 
 def compute_bootstrap_checksum(
     *,
@@ -690,32 +1065,34 @@ def compute_bootstrap_checksum(
     budgets: list[dict],
     cursor: int,
 ) -> str:
-    """Compute deterministic SHA-256 over bootstrap payload.
+    """Legacy bootstrap checksum — five lists + cursor.
 
-    Canonical form:
-    - Entity lists sorted by id (UUID string, stable).
-    - Keys within each entity dict sorted alphabetically.
-    - JSON serialized with separators=(",", ":") and sort_keys=True,
-      encoded as UTF-8.
-    - Concatenated in fixed order: books|categories|accounts|transactions|
-      budgets|cursor.
-
-    Returns lowercase 64-char hex string. Clients must implement the same
-    algorithm to verify.
+    Kept byte-for-byte compatible with pre-T-M7-01 servers: clients built
+    before the cloud entities existed recompute exactly this hash and must
+    keep matching (see ``BootstrapResponse.checksum``).
     """
-    parts: list[str] = []
+    return _compute_checksum(
+        [books, categories, accounts, transactions, budgets], cursor,
+    )
 
-    def _append_list(items: list[dict]) -> None:
-        sorted_items = sorted(items, key=lambda x: x.get("id", ""))
-        for item in sorted_items:
-            parts.append(json.dumps(item, sort_keys=True, separators=(",", ":")))
 
-    _append_list(books)
-    _append_list(categories)
-    _append_list(accounts)
-    _append_list(transactions)
-    _append_list(budgets)
-    parts.append(f"cursor:{cursor}")
-
-    payload = "|".join(parts)
-    return hashlib.sha256(payload.encode("utf-8")).hexdigest()
+def compute_bootstrap_checksum_v2(
+    *,
+    books: list[dict],
+    categories: list[dict],
+    accounts: list[dict],
+    transactions: list[dict],
+    budgets: list[dict],
+    savings_goals: list[dict],
+    scheduled_rules: list[dict],
+    chat_personas: list[dict],
+    cursor: int,
+) -> str:
+    """T-M7-01 checksum — all eight lists + cursor, for current clients."""
+    return _compute_checksum(
+        [
+            books, categories, accounts, transactions, budgets,
+            savings_goals, scheduled_rules, chat_personas,
+        ],
+        cursor,
+    )

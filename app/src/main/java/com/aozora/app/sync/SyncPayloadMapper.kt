@@ -4,6 +4,8 @@ import com.aozora.app.db.entity.PendingMutationEntity
 import org.json.JSONArray
 import org.json.JSONObject
 import java.time.Instant
+import java.time.LocalDateTime
+import java.time.OffsetDateTime
 import java.time.ZoneOffset
 
 /**
@@ -185,36 +187,39 @@ object SyncPayloadMapper {
     fun parseBootstrapResponse(json: String): BootstrapResponse {
         val root = JSONObject(json)
         val serverChecksum = root.optString("checksum", "")
+        // T-M7-01: 旧服务端无此键 → 空串，SyncEngine 回退到 legacy checksum 校验。
+        val serverChecksumV2 = root.optString("checksum_v2", "")
         val cursor = root.optLong("cursor", 0L)
 
-        val booksSnake = mutableListOf<Map<String, String?>>()
-        val booksCamel = mutableListOf<Map<String, String?>>()
-        val catsSnake = mutableListOf<Map<String, String?>>()
-        val catsCamel = mutableListOf<Map<String, String?>>()
-        val accsSnake = mutableListOf<Map<String, String?>>()
-        val accsCamel = mutableListOf<Map<String, String?>>()
-        val txsSnake = mutableListOf<Map<String, String?>>()
-        val txsCamel = mutableListOf<Map<String, String?>>()
-        val budsSnake = mutableListOf<Map<String, String?>>()
-        val budsCamel = mutableListOf<Map<String, String?>>()
-
-        parseEntityListDual(root, "books", booksSnake, booksCamel)
-        parseEntityListDual(root, "categories", catsSnake, catsCamel)
-        parseEntityListDual(root, "accounts", accsSnake, accsCamel)
-        parseEntityListDual(root, "transactions", txsSnake, txsCamel)
-        parseEntityListDual(root, "budgets", budsSnake, budsCamel)
+        val books = parseEntityListDual(root, "books")
+        val categories = parseEntityListDual(root, "categories")
+        val accounts = parseEntityListDual(root, "accounts")
+        val transactions = parseEntityListDual(root, "transactions")
+        val budgets = parseEntityListDual(root, "budgets")
+        // T-M7-01: 三实体上云（旧服务端不返回这三个键 → 空列表）
+        val savingsGoals = parseEntityListDual(root, "savings_goals")
+        val scheduledRules = parseEntityListDual(root, "scheduled_rules")
+        val chatPersonas = parseEntityListDual(root, "chat_personas")
 
         // P0-1: 用原始 snake_case Map 重算 checksum，与服务端算法输入一致
         val computedChecksum = BootstrapChecksum.compute(
-            books = booksSnake, categories = catsSnake, accounts = accsSnake,
-            transactions = txsSnake, budgets = budsSnake, cursor = cursor
+            books = books.snake, categories = categories.snake, accounts = accounts.snake,
+            transactions = transactions.snake, budgets = budgets.snake, cursor = cursor
+        )
+        val computedChecksumV2 = BootstrapChecksum.computeV2(
+            books = books.snake, categories = categories.snake, accounts = accounts.snake,
+            transactions = transactions.snake, budgets = budgets.snake,
+            savingsGoals = savingsGoals.snake, scheduledRules = scheduledRules.snake,
+            chatPersonas = chatPersonas.snake, cursor = cursor
         )
 
         return BootstrapResponse(
-            books = booksCamel, categories = catsCamel, accounts = accsCamel,
-            transactions = txsCamel, budgets = budsCamel,
-            cursor = cursor, checksum = serverChecksum,
-            computedChecksum = computedChecksum
+            books = books.camel, categories = categories.camel, accounts = accounts.camel,
+            transactions = transactions.camel, budgets = budgets.camel,
+            savingsGoals = savingsGoals.camel, scheduledRules = scheduledRules.camel,
+            chatPersonas = chatPersonas.camel,
+            cursor = cursor, checksum = serverChecksum, checksumV2 = serverChecksumV2,
+            computedChecksum = computedChecksum, computedChecksumV2 = computedChecksumV2
         )
     }
 
@@ -239,22 +244,48 @@ object SyncPayloadMapper {
         return out
     }
 
-    private fun parseEntityListDual(
-        root: JSONObject, key: String,
-        snakeOut: MutableList<Map<String, String?>>,
-        camelOut: MutableList<Map<String, String?>>
-    ) {
+    /** 同一实体列表的两套键名视图：snake_case（checksum 重算）与 camelCase（Room upsert）。 */
+    internal data class EntityListDual(
+        val snake: List<Map<String, String?>>,
+        val camel: List<Map<String, String?>>,
+    )
+
+    private fun parseEntityListDual(root: JSONObject, key: String): EntityListDual {
+        val snake = mutableListOf<Map<String, String?>>()
+        val camel = mutableListOf<Map<String, String?>>()
         val arr = root.optJSONArray(key) ?: JSONArray()
         for (i in 0 until arr.length()) {
             val obj = arr.optJSONObject(i) ?: continue
-            snakeOut += rawEntityMap(obj)
-            camelOut += snakeToCamelMap(obj)
+            snake += rawEntityMap(obj)
+            camel += snakeToCamelMap(obj)
         }
+        return EntityListDual(snake, camel)
     }
 
     // ─── internal ───
 
-    private val KNOWN_ENTITY_TYPES = setOf("transaction", "book", "category", "account", "budget")
+    private val KNOWN_ENTITY_TYPES = setOf(
+        "transaction", "book", "category", "account", "budget",
+        // T-M7-01: 三实体上云
+        "savings_goal", "scheduled_rule", "chat_persona",
+    )
+
+    /**
+     * 把服务端的 ISO 8601 时间戳（`created_at` / `updated_at`）转成 epoch 毫秒。
+     *
+     * 客户端 Room 的时间列统一是 epoch ms，而服务端 `_serialize_entity` 出 ISO 8601。
+     * 生产（PostgreSQL，带时区）形如 `2026-01-01T00:00:00+00:00`；SQLite 测试环境
+     * 可能不带偏移（`2026-01-01T00:00:00`），故两条解析路径都试，失败返回 null
+     * 由调用方决定兜底。
+     */
+    fun isoToEpochMillis(value: String?): Long? {
+        if (value.isNullOrEmpty()) return null
+        return runCatching { OffsetDateTime.parse(value).toInstant().toEpochMilli() }
+            .getOrNull()
+            ?: runCatching {
+                LocalDateTime.parse(value).toInstant(ZoneOffset.UTC).toEpochMilli()
+            }.getOrNull()
+    }
 
     /**
      * push（local→wire）方向：把客户端 Room 里以 camelCase 存储、且 datetime 为
@@ -328,6 +359,17 @@ object SyncPayloadMapper {
         "sort_index" to "sortIndex",
         "imported_from" to "importedFrom",
         "budget_type" to "budgetType",
+        // T-M7-01: 三实体上云（savings_goal / scheduled_rule / chat_persona）
+        "target_cents" to "targetCents",
+        "current_cents" to "currentCents",
+        "period_value" to "periodValue",
+        "period_unit" to "periodUnit",
+        "include_in_budget" to "includeInBudget",
+        "start_date" to "startDate",
+        "end_date" to "endDate",
+        "last_run_date" to "lastRunDate",
+        "run_hour" to "runHour",
+        "run_minute" to "runMinute",
         // snake_case 同名直接透传字段
         "name" to "name",
         "icon" to "icon",
@@ -338,6 +380,10 @@ object SyncPayloadMapper {
         "period" to "period",
         "currency" to "currency",
         "color" to "color",
+        // 三实体上云的同名透传字段（显式登记，避免依赖启发式转换）
+        "repeat" to "repeat",
+        "enabled" to "enabled",
+        "persona" to "persona",
         "version" to "version"
     )
 

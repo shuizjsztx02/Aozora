@@ -978,7 +978,29 @@
 **依赖：** 无。**独立价值：** 多设备、备份、换机恢复本就需要（`D-PROD-03` 云端权威）。
 **交接产物：** `savings` / `scheduled` / `personas` 服务端建表 + Alembic 迁移；接入现有 sync 模块（增量，不新协议）；客户端 Room 降为副本（离线可读）；本地既有数据一次性上行迁移策略；登出/删号数据生命周期对齐。
 **验证：** 三实体双端同步一致；离线可读、恢复后上行；迁移用旧版本 fixture 验证；对账不变量全绿；本地既有数据不丢失；旧客户端行为不变。
-**状态：** ⏳ 未开始
+
+**子任务（逐实体交付，共享同一套协议与迁移骨架）：**
+1. `savings_goal` → 2. `scheduled_rule` → 3. `chat_persona`。三者字段语义与既有实体一致（`archived_at` 归档软删、`version` 乐观锁、`AuditMixin` 时间戳），故一次迁移建三表、一次接入 sync 分发。
+
+**实现落点：**
+- 服务端模型：`server/src/models/savings.py`、`scheduled.py`、`persona.py`（`models/__init__.py` 注册）。
+- 迁移：`server/src/migrations/versions/0016_cloud_entities.py`（`0015_feedback` → 0016）。
+- sync 接入：`server/src/modules/sync/{schemas,repository,service}.py`——`entity_type` 正则扩三类；`ARCHIVED_TYPES` 收敛为单一来源（`repository.ARCHIVED_TYPES`）；`_apply_{insert,update,delete}` / `_serialize_entity` / `_get_entities_batch` / `get_all_entities` 各加三路；`scheduled_rule` 的 book/category/account 归属校验复用既有 `_verify_*_ownership`。
+- 账号删除：`infra/cleanup/account-deletion.py` 的 `_PER_USER_TABLES` 加三表（`scheduled_rules` 必须排在 `books`/`categories` 之前，FK RESTRICT）。
+- 客户端：三个 DAO 加 `upsertFromSync`/`applyServerArchive`/`clearAll`/`listAll`；`Repository` 三个实体的写方法改为「实体 + mutationId + pending mutation 同事务」，并新增 `migrateCloudEntitiesUp()`、三路 `applyServerChanges`/`applyBootstrap`/`listAllActiveEntities`/`clearAllEntities`、三路 JSON 序列化与 `serverChangeMapTo*`；`SyncPayloadMapper`（`KNOWN_ENTITY_TYPES` + `SNAKE_TO_CAMEL` + bootstrap 三列表 + `isoToEpochMillis`）；`SyncModels`（`ServerChange.to*`）；`BootstrapChecksum.computeV2`；`SyncEngine`（迁移先于 bootstrap、checksum 走 v2 并回退 legacy、计数校验八类）。
+- 桥：`AozoraBridge` 三个实体的 9 个 handler 由 bridge 本地生成 mutationId（`newMutationId()`）——**桥命令计数与入参契约零变**（仍 77），TS 侧零改动。
+- 契约扩展（纯增量）：`entity_type` 新增 `savings_goal` / `scheduled_rule` / `chat_persona`；bootstrap 响应新增三列表 + `checksum_v2`（八类）；**legacy `checksum` 语义不变**（仍只覆盖原五类 + cursor），旧客户端 bootstrap 校验继续命中。
+
+**一次性上行迁移策略：** meta 键 `cloud_entities_uploaded_v1` 标记，`SyncEngine.runOnce`/`runBootstrapForced` 在 bootstrap 清空**之前**调用 `Repository.migrateCloudEntitiesUp()`——只上行活跃行（归档＝已删除，换机不恢复），标记与 mutation 同事务落盘；服务端对这三类的 `insert` 是**幂等**的（同 id 已存在即返回现有版本、**不写 SyncChange**），故第二台设备推同一批 id 既不冲突也不覆盖云端副本，且不会把已归档实体经 pull 复活。登出/删号走 `clearAllTables`，标记随之清空 → 换账号按新账号重新判定。
+
+**验证命令：**
+```
+cd server && python -m pytest tests/ -q                    # 658 passed, 37 skipped
+cd app && ./gradlew :app:testDebugUnitTest                 # 392 passed
+cd app && npx vitest run                                   # 1104 passed
+```
+
+**状态：** ✅ 完成（2026-09-17：三实体上云 + 一次性上行迁移 + 账号删除对齐；服务端 658 passed / JVM 392 passed / TS 1104 passed 全绿）。**顺带修复**：客户端 `BootstrapChecksum.escapeJsonString` 此前不转义非 ASCII，而服务端 `json.dumps` 默认 `ensure_ascii=True`——任何含中文的实体（默认账本「默认账本」、分类「餐饮」等）都会让 bootstrap 的重算值对不上、判 RETRYABLE 无限重试（纯 ASCII 数据的既有测试覆盖不到）。现按 Python 口径补 `\uXXXX`（星平面按代理对）转义，并加跨语言参考值回归测试。**未覆盖**：真机/双设备实机复认（建议随 T-M7-02 一并在真机走一遍换机 bootstrap）。
 
 ### T-M7-02 服务端 Agent Loop 与 SSE 流式通道（P1）
 

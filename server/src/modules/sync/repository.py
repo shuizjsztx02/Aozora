@@ -10,7 +10,17 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from src.models.budget import Budget
 from src.models.ledger import Account, Book, Category, Transaction
 from src.models.mutation import MutationIdempotency
+from src.models.persona import ChatPersona
+from src.models.savings import SavingsGoal
+from src.models.scheduled import ScheduledRule
 from src.models.sync import SyncChange, SyncOperation
+
+# T-M7-01: 实体类型 → 软删语义。归档型（archived_at）与删除型（deleted_at）在
+# pull/bootstrap 的"是否已删"判定、以及 sync delete 的写入列上分道。
+# service.py 复用同一常量，避免两处各维护一份而漂移。
+ARCHIVED_TYPES = frozenset({
+    "category", "account", "savings_goal", "scheduled_rule", "chat_persona",
+})
 
 
 class SyncRepository:
@@ -170,12 +180,41 @@ class SyncRepository:
         )
         budgets = list(budgets_result.scalars().all())
 
+        # T-M7-01: 三实体按 owner_id 直接归属（scheduled_rules 的 book 归属由
+        # owner_id 兜底——book 软删不物理删，规则仍可读回）。
+        goals_result = await self.db.execute(
+            select(SavingsGoal).where(
+                SavingsGoal.owner_id == user_id,
+                SavingsGoal.archived_at.is_(None),
+            )
+        )
+        savings_goals = list(goals_result.scalars().all())
+
+        rules_result = await self.db.execute(
+            select(ScheduledRule).where(
+                ScheduledRule.owner_id == user_id,
+                ScheduledRule.archived_at.is_(None),
+            )
+        )
+        scheduled_rules = list(rules_result.scalars().all())
+
+        personas_result = await self.db.execute(
+            select(ChatPersona).where(
+                ChatPersona.owner_id == user_id,
+                ChatPersona.archived_at.is_(None),
+            )
+        )
+        chat_personas = list(personas_result.scalars().all())
+
         return {
             "books": books,
             "categories": categories,
             "accounts": accounts,
             "transactions": transactions,
             "budgets": budgets,
+            "savings_goals": savings_goals,
+            "scheduled_rules": scheduled_rules,
+            "chat_personas": chat_personas,
         }
 
     # -- Entity reads (for ownership verification) -------------------------
@@ -239,6 +278,29 @@ class SyncRepository:
         )
         return result.scalar_one_or_none()
 
+    # -- T-M7-01: cloud entities -------------------------------------------
+
+    async def get_savings_goal(self, goal_id: uuid.UUID, user_id: uuid.UUID, include_deleted: bool = False) -> SavingsGoal | None:
+        conditions = [SavingsGoal.id == goal_id, SavingsGoal.owner_id == user_id]
+        if not include_deleted:
+            conditions.append(SavingsGoal.archived_at.is_(None))
+        result = await self.db.execute(select(SavingsGoal).where(*conditions))
+        return result.scalar_one_or_none()
+
+    async def get_scheduled_rule(self, rule_id: uuid.UUID, user_id: uuid.UUID, include_deleted: bool = False) -> ScheduledRule | None:
+        conditions = [ScheduledRule.id == rule_id, ScheduledRule.owner_id == user_id]
+        if not include_deleted:
+            conditions.append(ScheduledRule.archived_at.is_(None))
+        result = await self.db.execute(select(ScheduledRule).where(*conditions))
+        return result.scalar_one_or_none()
+
+    async def get_chat_persona(self, persona_id: uuid.UUID, user_id: uuid.UUID, include_deleted: bool = False) -> ChatPersona | None:
+        conditions = [ChatPersona.id == persona_id, ChatPersona.owner_id == user_id]
+        if not include_deleted:
+            conditions.append(ChatPersona.archived_at.is_(None))
+        result = await self.db.execute(select(ChatPersona).where(*conditions))
+        return result.scalar_one_or_none()
+
     # -- Internal -----------------------------------------------------------
 
     async def _read_entity(
@@ -259,6 +321,12 @@ class SyncRepository:
             return await self.get_transaction(entity_id, user_id, include_deleted)
         if entity_type == "budget":
             return await self.get_budget(entity_id, user_id, include_deleted)
+        if entity_type == "savings_goal":
+            return await self.get_savings_goal(entity_id, user_id, include_deleted)
+        if entity_type == "scheduled_rule":
+            return await self.get_scheduled_rule(entity_id, user_id, include_deleted)
+        if entity_type == "chat_persona":
+            return await self.get_chat_persona(entity_id, user_id, include_deleted)
         return None
 
     # -- F-M3-3: Batch entity loads for pull (N+1 elimination) ---------------
@@ -280,7 +348,7 @@ class SyncRepository:
 
         base_conditions = [lambda model: model.owner_id == user_id]
         if not include_deleted:
-            if entity_type in ("category", "account"):
+            if entity_type in ARCHIVED_TYPES:
                 base_conditions.append(lambda model: model.archived_at.is_(None))
             else:
                 base_conditions.append(lambda model: model.deleted_at.is_(None))
@@ -323,6 +391,21 @@ class SyncRepository:
             )
             if not include_deleted:
                 stmt = stmt.where(Budget.deleted_at.is_(None), Book.deleted_at.is_(None))
+            rows = await self.db.execute(stmt)
+            entities = {e.id: e for e in rows.scalars().all()}
+        elif entity_type == "savings_goal":
+            stmt = select(SavingsGoal).where(SavingsGoal.id.in_(entity_ids))
+            stmt = _apply_conditions(stmt, SavingsGoal)
+            rows = await self.db.execute(stmt)
+            entities = {e.id: e for e in rows.scalars().all()}
+        elif entity_type == "scheduled_rule":
+            stmt = select(ScheduledRule).where(ScheduledRule.id.in_(entity_ids))
+            stmt = _apply_conditions(stmt, ScheduledRule)
+            rows = await self.db.execute(stmt)
+            entities = {e.id: e for e in rows.scalars().all()}
+        elif entity_type == "chat_persona":
+            stmt = select(ChatPersona).where(ChatPersona.id.in_(entity_ids))
+            stmt = _apply_conditions(stmt, ChatPersona)
             rows = await self.db.execute(stmt)
             entities = {e.id: e for e in rows.scalars().all()}
         else:

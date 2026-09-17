@@ -238,4 +238,201 @@ class BootstrapChecksumTest {
         val bytes = digest.digest(input.toByteArray(Charsets.UTF_8))
         return bytes.joinToString("") { "%02x".format(it) }
     }
+
+    // ─── T-M7-01: 八类 checksum（computeV2） ───
+
+    /** 与 fixture 同形的三实体（键名 snake_case，值同服务端 _serialize_entity 输出）。 */
+    private val cloudGoal = mapOf(
+        "id" to "11111111-1111-4111-8111-111111111111",
+        "name" to "旅行基金",
+        "target_cents" to "500000",
+        "current_cents" to "120000",
+        "icon" to null,
+        "period_value" to "6",
+        "period_unit" to "month",
+        "version" to "2",
+        "created_at" to "2026-09-04T12:00:00+00:00",
+        "updated_at" to "2026-09-04T12:00:00+00:00",
+        "archived_at" to null,
+    )
+    private val cloudRule = mapOf(
+        "id" to "22222222-2222-4222-8222-111111111111",
+        "type" to "expense",
+        "name" to "房租",
+        "amount_cents" to "350000",
+        "book_id" to "b1",
+        "category_id" to "c1",
+        "account_id" to null,
+        "include_in_budget" to "true",
+        "note" to "",
+        "repeat" to "monthly",
+        "start_date" to "2026-01-01",
+        "end_date" to null,
+        "enabled" to "true",
+        "last_run_date" to "2026-09-01",
+        "run_hour" to "9",
+        "run_minute" to "30",
+        "version" to "5",
+        "created_at" to "2026-09-04T12:00:00+00:00",
+        "updated_at" to "2026-09-04T12:00:00+00:00",
+        "archived_at" to null,
+    )
+    private val cloudPersona = mapOf(
+        "id" to "33333333-3333-4333-8333-111111111111",
+        "name" to "小贝",
+        "avatar" to null,
+        "persona" to "hello",
+        "version" to "1",
+        "created_at" to "2026-09-04T12:00:00+00:00",
+        "updated_at" to "2026-09-04T12:00:00+00:00",
+        "archived_at" to null,
+    )
+
+    /**
+     * 跨语言一致性：与服务端 `compute_bootstrap_checksum_v2` 对同一输入的输出逐字节
+     * 相同（参考值由 Python 侧真实函数生成，见测试注释里的输入数据）。
+     */
+    @Test
+    fun computeV2_matchesServerReferenceImplementation() {
+        val hash = BootstrapChecksum.computeV2(
+            books = emptyList(), categories = emptyList(), accounts = emptyList(),
+            transactions = emptyList(), budgets = emptyList(),
+            savingsGoals = listOf(cloudGoal), scheduledRules = listOf(cloudRule),
+            chatPersonas = listOf(cloudPersona), cursor = 42,
+        )
+        assertEquals(
+            "af2c8fda4bd60e312a63c654fa159b64a9982569762ba2d8be559c09c926c841",
+            hash,
+        )
+        // 同一输入下 legacy 仍只覆盖五类 —— 与被上云实体无关（旧客户端不失效）
+        assertEquals(
+            "2cfcc3208403af4dde547253e4e0d23cf4e3ec1a5b90ef64caffe101020ef94e",
+            BootstrapChecksum.compute(
+                books = emptyList(), categories = emptyList(), accounts = emptyList(),
+                transactions = emptyList(), budgets = emptyList(), cursor = 42,
+            ),
+        )
+    }
+
+    /**
+     * 三实体为空时 v2 必须与 legacy 完全相等 —— 这是"旧客户端不受影响"的充分条件：
+     * 未上云数据的账号，服务端两个 checksum 值相同，客户端用哪个都一样。
+     */
+    @Test
+    fun computeV2_withEmptyCloudLists_equalsLegacy() {
+        val legacy = BootstrapChecksum.compute(
+            books = emptyList(), categories = emptyList(), accounts = emptyList(),
+            transactions = emptyList(), budgets = emptyList(), cursor = 7,
+        )
+        val v2 = BootstrapChecksum.computeV2(
+            books = emptyList(), categories = emptyList(), accounts = emptyList(),
+            transactions = emptyList(), budgets = emptyList(),
+            savingsGoals = emptyList(), scheduledRules = emptyList(),
+            chatPersonas = emptyList(), cursor = 7,
+        )
+        assertEquals(legacy, v2)
+        assertEquals(sha256Reference("cursor:7"), v2)
+    }
+
+    @Test
+    fun computeV2_isOrderIndependentWithinEachList() {
+        val a = BootstrapChecksum.computeV2(
+            books = emptyList(), categories = emptyList(), accounts = emptyList(),
+            transactions = emptyList(), budgets = emptyList(),
+            savingsGoals = listOf(cloudGoal), scheduledRules = listOf(cloudRule),
+            chatPersonas = listOf(cloudPersona), cursor = 42,
+        )
+        // 列表内顺序不影响结果（各自按 id 排序）
+        val b = BootstrapChecksum.computeV2(
+            books = emptyList(), categories = emptyList(), accounts = emptyList(),
+            transactions = emptyList(), budgets = emptyList(),
+            savingsGoals = listOf(cloudGoal), scheduledRules = listOf(cloudRule),
+            chatPersonas = listOf(cloudPersona), cursor = 42,
+        )
+        assertEquals(a, b)
+    }
+
+    @Test
+    fun computeV2_cloudListsChangeHash() {
+        val withGoal = BootstrapChecksum.computeV2(
+            books = emptyList(), categories = emptyList(), accounts = emptyList(),
+            transactions = emptyList(), budgets = emptyList(),
+            savingsGoals = listOf(cloudGoal), scheduledRules = emptyList(),
+            chatPersonas = emptyList(), cursor = 42,
+        )
+        val without = BootstrapChecksum.computeV2(
+            books = emptyList(), categories = emptyList(), accounts = emptyList(),
+            transactions = emptyList(), budgets = emptyList(),
+            savingsGoals = emptyList(), scheduledRules = emptyList(),
+            chatPersonas = emptyList(), cursor = 42,
+        )
+        assertNotEquals(withGoal, without)
+        // 服务端同样把三实体纳入 v2 的输入，故"漏传一类"必然对不上
+        assertNotEquals(
+            BootstrapChecksum.computeV2(
+                books = emptyList(), categories = emptyList(), accounts = emptyList(),
+                transactions = emptyList(), budgets = emptyList(),
+                savingsGoals = emptyList(), scheduledRules = listOf(cloudRule),
+                chatPersonas = emptyList(), cursor = 42,
+            ),
+            withGoal,
+        )
+    }
+
+    // ─── T-M7-01 修复回归：字符串转义必须逐字节对齐 Python json.dumps ───
+
+    /**
+     * 非 ASCII 必须转成 `\uXXXX`。
+     *
+     * 此前客户端只转义 `" \ \b \n \r \t`，中文原样透传，而服务端
+     * `json.dumps(..., ensure_ascii=True)` 会转义 —— 于是**任何含中文的实体**
+     * （默认账本「默认账本」、分类「餐饮」、备注……）都会让 bootstrap 的
+     * 重算值与服务端声明值不等，判 RETRYABLE 后无限重试。纯 ASCII 数据的既有
+     * 测试覆盖不到，故长期潜伏。
+     */
+    @Test
+    fun compute_escapesNonAsciiLikePython() {
+        val hash = BootstrapChecksum.compute(
+            books = listOf(mapOf("id" to "b1", "name" to "默认账本")),
+            categories = emptyList(), accounts = emptyList(),
+            transactions = emptyList(), budgets = emptyList(), cursor = 0,
+        )
+        // Python: json.dumps({"id":"b1","name":"默认账本"}, sort_keys=True, separators=(",",":"))
+        // → {"id":"b1","name":"默认账本"}
+        val expected = sha256Reference(
+            "{\"id\":\"b1\",\"name\":\"\\u9ed8\\u8ba4\\u8d26\\u672c\"}|cursor:0"
+        )
+        assertEquals(expected, hash)
+    }
+
+    @Test
+    fun compute_escapesControlAndAstralCharsLikePython() {
+        // 控制字符 → \u00XX；星平面字符 → 代理对 \udXXX\udXXX（逐 Char 迭代自然产生）
+        val hash = BootstrapChecksum.compute(
+            books = listOf(
+                mapOf("id" to "b1", "name" to "ab", "icon" to "😀")
+            ),
+            categories = emptyList(), accounts = emptyList(),
+            transactions = emptyList(), budgets = emptyList(), cursor = 0,
+        )
+        // Python: {"icon":"😀","id":"b1","name":"ab"}
+        val expected = sha256Reference(
+            "{\"icon\":\"\\ud83d\\ude00\",\"id\":\"b1\",\"name\":\"a\\u0001b\"}|cursor:0"
+        )
+        assertEquals(expected, hash)
+    }
+
+    @Test
+    fun compute_asciiFastPath_isUnchanged() {
+        // 修复不改变纯 ASCII 输入的结果（既有数据/既有客户端口径不变）
+        val hash = BootstrapChecksum.compute(
+            books = listOf(mapOf("id" to "b1", "name" to "Alice Book", "icon" to null)),
+            categories = emptyList(), accounts = emptyList(),
+            transactions = emptyList(), budgets = emptyList(), cursor = 0,
+        )
+        val expected = sha256Reference(
+            "{\"icon\":null,\"id\":\"b1\",\"name\":\"Alice Book\"}|cursor:0"
+        )
+        assertEquals(expected, hash)
+    }
 }

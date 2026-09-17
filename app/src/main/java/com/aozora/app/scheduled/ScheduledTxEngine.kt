@@ -62,7 +62,8 @@ class ScheduledTxEngine(private val repository: Repository) {
                     mutationId = UUID.randomUUID().toString()
                 )
                 repository.updateScheduledRule(
-                    rule.copy(lastRunDate = todayStr, updatedAt = now, version = rule.version + 1)
+                    rule.copy(lastRunDate = todayStr, updatedAt = now, version = rule.version + 1),
+                    mutationId = UUID.randomUUID().toString()
                 )
                 inserted++
             } catch (_: Exception) {

@@ -20,6 +20,7 @@ import androidx.room.PrimaryKey
 data class PendingMutationEntity(
     @PrimaryKey val mutationId: String,
     val entityType: String,     // "transaction" | "book" | "category" | "account" | "budget"
+                                // | "savings_goal" | "scheduled_rule" | "chat_persona"（T-M7-01 三实体上云）
     val entityId: String,
     val operation: String,      // "insert" | "update" | "delete" | "archive"
     val payload: String,        // JSON 序列化的变更内容
