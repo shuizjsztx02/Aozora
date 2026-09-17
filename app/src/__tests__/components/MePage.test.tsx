@@ -1,5 +1,5 @@
 /**
- * MePage 组件测试 — T-M5-04c: 账号删除按钮与二次确认对话框。
+ * MePage 组件测试 — T-M5-04c: 账号删除按钮与二次确认对话框；T16-5: 背景透明度与自定义背景。
  *
  * 覆盖：
  * - 删除按钮渲染在「危险区」分组内
@@ -8,15 +8,18 @@
  * - 输入 DELETE 后「确认删除」按钮启用
  * - 成功路径：requestAccountDeletionToken → deleteAccount
  * - 失败路径：BridgeError.code 映射到中文错误信息
+ * - T16-5（REQ-61）：透明度滑轴渲染/持久化/即时应用；自定义背景选图/取消/清除
  */
 import { describe, it, expect, vi, beforeEach } from 'vitest'
-import { render, screen, waitFor } from '@testing-library/react'
+import { render, screen, waitFor, fireEvent } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { MemoryRouter } from 'react-router'
 import { BridgeError } from '../../platform/bridge/bridge-types'
+import { clearThemeBackground } from '../../design/theme-backgrounds'
 
 const mockRequestDeletionToken = vi.fn()
 const mockDeleteAccount = vi.fn()
+const mockPickThemeBackground = vi.fn()
 
 // NativeBridge is instantiated inside MePage with `new NativeBridge()`, so
 // we mock the module and construct an object that returns our vi.fns.
@@ -26,6 +29,7 @@ vi.mock('../../platform/bridge/native-bridge', async (importOriginal) => {
   class MockBridge {
     requestAccountDeletionToken = mockRequestDeletionToken
     deleteAccount = mockDeleteAccount
+    pickThemeBackground = mockPickThemeBackground
   }
   return {
     ...actual,
@@ -141,5 +145,74 @@ describe('MePage — T-M5-04c 账号删除', () => {
     await user.type(screen.getByPlaceholderText('DELETE'), 'DELETE')
     await user.click(screen.getByRole('button', { name: /确认删除/ }))
     expect(await screen.findByText(/登录已失效/)).toBeInTheDocument()
+  })
+})
+
+describe('MePage — T16-5（REQ-61）背景透明度与自定义背景', () => {
+  const pickUri = 'data:image/jpeg;base64,UElDSw=='
+
+  beforeEach(async () => {
+    vi.clearAllMocks()
+    localStorage.clear()
+    // 固定手动昼主题，避免 auto 模式随时段漂移
+    localStorage.setItem('aozora-theme', JSON.stringify({ mode: 'manual', manual: 'day', scrim: 0 }))
+    document.documentElement.removeAttribute('style')
+    document.body.removeAttribute('style')
+    await clearThemeBackground('day')
+    mockPickThemeBackground.mockResolvedValue({ dataUri: pickUri, size: 4096 })
+  })
+
+  it('渲染背景透明度滑轴，初值来自存储', () => {
+    localStorage.setItem('aozora-theme', JSON.stringify({ mode: 'manual', manual: 'day', scrim: 35 }))
+    renderPage()
+    expect(screen.getByTestId('bg-opacity-slider')).toHaveValue('35')
+    expect(screen.getByTestId('bg-opacity-value')).toHaveTextContent('35%')
+  })
+
+  it('滑轴变更写入 localStorage 同键并即时应用 --bg-scrim', () => {
+    renderPage()
+    fireEvent.change(screen.getByTestId('bg-opacity-slider'), { target: { value: '40' } })
+    expect(JSON.parse(localStorage.getItem('aozora-theme')!).scrim).toBe(40)
+    expect(document.documentElement.style.getPropertyValue('--bg-scrim')).not.toBe('')
+  })
+
+  it('点击「选自定义背景」调用 bridge（gallery）并把图应用到 body', async () => {
+    const user = userEvent.setup()
+    renderPage()
+    await user.click(screen.getByTestId('theme-pick-background'))
+    expect(mockPickThemeBackground).toHaveBeenCalledWith('gallery')
+    await waitFor(() =>
+      expect(document.body.style.backgroundImage).toContain(pickUri),
+    )
+  })
+
+  it('相册取消（cancelled）无副作用、无错误提示', async () => {
+    mockPickThemeBackground.mockRejectedValueOnce(new BridgeError('cancelled', 'cancelled', 'req-1'))
+    const user = userEvent.setup()
+    renderPage()
+    await user.click(screen.getByTestId('theme-pick-background'))
+    expect(document.body.style.backgroundImage).not.toContain(pickUri)
+    expect(screen.queryByText(/背景选择失败/)).not.toBeInTheDocument()
+    expect(screen.queryByTestId('theme-clear-background')).not.toBeInTheDocument()
+  })
+
+  it('保存成功后出现「清除自定义背景」，点击后移除 body 覆盖', async () => {
+    const user = userEvent.setup()
+    renderPage()
+    await user.click(screen.getByTestId('theme-pick-background'))
+    const clearBtn = await screen.findByTestId('theme-clear-background')
+    await user.click(clearBtn)
+    await waitFor(() =>
+      expect(document.body.style.backgroundImage).not.toContain(pickUri),
+    )
+    expect(screen.queryByTestId('theme-clear-background')).not.toBeInTheDocument()
+  })
+
+  it('失败路径：unavailable 显示环境不支持提示', async () => {
+    mockPickThemeBackground.mockRejectedValueOnce(new BridgeError('unavailable', 'no picker', 'req-1'))
+    const user = userEvent.setup()
+    renderPage()
+    await user.click(screen.getByTestId('theme-pick-background'))
+    expect(await screen.findByText(/当前环境不支持选择照片/)).toBeInTheDocument()
   })
 })

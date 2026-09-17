@@ -1,10 +1,11 @@
 /**
- * 四时主题管理 — 时段映射、主题切换、auto/manual 模式。
+ * 四时主题管理 — 时段映射、主题切换、auto/manual 模式、背景透明度。
  *
- * 依赖：无（纯函数 + React hooks）
+ * 依赖：React hooks + theme-backgrounds（自定义背景应用，type-only 反向依赖）
  */
 
 import { useState, useEffect, useCallback } from 'react'
+import { applyThemeBackground } from './theme-backgrounds'
 
 export type ThemeName = 'dawn' | 'day' | 'dusk' | 'night'
 export type ThemeMode = 'auto' | 'system' | 'manual'
@@ -50,21 +51,51 @@ export function applyTheme(theme: ThemeName): void {
   root.classList.add(`t-${theme}`)
 }
 
-/** 解析已存储的主题模式 */
-function loadThemeState(): { mode: ThemeMode; manual: ThemeName } {
+/** T16-5（REQ-61）：背景透明度最大遮挡档 —— scrim 上限不透明度 */
+export const BG_SCRIM_MAX = 0.85
+
+/**
+ * T16-5（REQ-61）：背景透明度 0–100 → 覆盖 root 的 --bg-scrim
+ * （复用现成通道，body::after 消费）。0 = 不遮挡，回落各主题 CSS 现值。
+ */
+export function applyBgOpacity(value: number): void {
+  const v = Math.max(0, Math.min(100, Math.round(value)))
+  const root = document.documentElement
+  if (v === 0) {
+    root.style.removeProperty('--bg-scrim')
+  } else {
+    root.style.setProperty('--bg-scrim', `rgba(0, 0, 0, ${(BG_SCRIM_MAX * v / 100).toFixed(3)})`)
+  }
+}
+
+interface ThemeState {
+  mode: ThemeMode
+  manual: ThemeName
+  /** T16-5（REQ-61）：背景透明度 0–100；0 = 各主题默认遮挡 */
+  scrim: number
+}
+
+/** 解析已存储的主题模式（旧格式无 scrim → 0，行为与升级前一致） */
+function loadThemeState(): ThemeState {
   try {
     const stored = localStorage.getItem('aozora-theme')
     if (stored) {
       const parsed = JSON.parse(stored)
-      if (parsed.mode && parsed.manual) return parsed
+      if (parsed.mode && parsed.manual) {
+        const scrim =
+          typeof parsed.scrim === 'number' && parsed.scrim >= 0 && parsed.scrim <= 100
+            ? parsed.scrim
+            : 0
+        return { mode: parsed.mode, manual: parsed.manual, scrim }
+      }
     }
   } catch { /* ignore */ }
-  return { mode: 'auto', manual: 'day' }
+  return { mode: 'auto', manual: 'day', scrim: 0 }
 }
 
-function saveThemeState(mode: ThemeMode, manual: ThemeName): void {
+function saveThemeState(state: ThemeState): void {
   try {
-    localStorage.setItem('aozora-theme', JSON.stringify({ mode, manual }))
+    localStorage.setItem('aozora-theme', JSON.stringify(state))
   } catch { /* ignore */ }
 }
 
@@ -87,8 +118,8 @@ export function useTheme() {
 
   const updateTheme = useCallback((mode: ThemeMode, manual?: ThemeName) => {
     setState(prev => {
-      const next = { mode, manual: manual ?? prev.manual }
-      saveThemeState(next.mode, next.manual)
+      const next = { mode, manual: manual ?? prev.manual, scrim: prev.scrim }
+      saveThemeState(next)
       const resolved = resolveTheme(next.mode, next.manual)
       setTheme(resolved)
       applyTheme(resolved)
@@ -96,11 +127,28 @@ export function useTheme() {
     })
   }, [])
 
-  // 应用初始主题
+  /** T16-5（REQ-61）：设置背景透明度（0–100），即时写 localStorage + --bg-scrim */
+  const setBgOpacity = useCallback((value: number) => {
+    const v = Math.max(0, Math.min(100, Math.round(value)))
+    setState(prev => {
+      const next = { ...prev, scrim: v }
+      saveThemeState(next)
+      applyBgOpacity(v)
+      return next
+    })
+  }, [])
+
+  // 应用初始主题 + 背景透明度
   useEffect(() => {
     applyTheme(theme)
+    applyBgOpacity(state.scrim)
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [])
+
+  // T16-5（REQ-61）：自定义背景随主题变化重新应用（无自定义则回落类内默认图）
+  useEffect(() => {
+    void applyThemeBackground(theme)
+  }, [theme])
 
   // auto 模式：每分钟检查时段变化
   useEffect(() => {
@@ -141,6 +189,9 @@ export function useTheme() {
     theme,
     mode: state.mode,
     manualTheme: state.manual,
+    /** T16-5（REQ-61）：背景透明度 0–100（0 = 各主题默认遮挡） */
+    bgOpacity: state.scrim,
+    setBgOpacity,
     setAuto: () => updateTheme('auto'),
     setSystem: () => updateTheme('system'),
     setManual: (t: ThemeName) => updateTheme('manual', t),

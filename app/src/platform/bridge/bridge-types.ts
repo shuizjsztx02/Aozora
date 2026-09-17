@@ -33,6 +33,9 @@ export const BridgeCommands = {
   CATEGORY_INSERT: 'category.insert',
   CATEGORY_UPDATE: 'category.update',
   ICON_PICK: 'icon.pick',
+  // 第十六轮 T16-5（REQ-61 / 决策 #7：桥计数本轮唯一变更点 76→77）：
+  // 主题自定义背景选图（独立压缩参数，结果只落 IndexedDB）
+  THEME_PICK_BACKGROUND: 'theme.pickBackground',
 
   // 第八轮 REQ-7：存钱目标（仅本地，不同步）
   SAVINGS_LIST: 'savings.list',
@@ -260,6 +263,12 @@ export interface CategoryInput {
 
 /** 第八轮 REQ-8：icon.pick 返回（base64 data URI，无服务端上传）。 */
 export interface IconPickResult {
+  dataUri: string
+  size: number
+}
+
+/** 第十六轮 T16-5（REQ-61）：theme.pickBackground 返回（全屏背景 data URI）。 */
+export interface ThemePickBackgroundResult {
   dataUri: string
   size: number
 }

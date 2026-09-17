@@ -43,6 +43,11 @@ object BridgeCommands {
     // 第八轮 REQ-8：分类照片图标选择（返回 base64 data URI，无服务端上传）
     const val ICON_PICK = "icon.pick"
 
+    // 第十六轮 T16-5（REQ-61 / 决策 #7：桥计数本轮唯一变更点 76→77）：
+    // 主题自定义背景选图。不复用 icon.pick 的 128px/48KB 链路（全屏必糊），
+    // 参数独立按全屏背景定；结果只落 IndexedDB（不上行、不进 meta）。
+    const val THEME_PICK_BACKGROUND = "theme.pickBackground"
+
     // 第八轮 REQ-7：存钱目标（仅本地，不同步）
     const val SAVINGS_LIST = "savings.list"
     const val SAVINGS_INSERT = "savings.insert"
@@ -171,6 +176,7 @@ object BridgeCommands {
         BOOK_LIST, BOOK_INSERT, BOOK_UPDATE,
         CATEGORY_LIST, CATEGORY_INSERT, CATEGORY_UPDATE,
         ICON_PICK,
+        THEME_PICK_BACKGROUND,
         SAVINGS_LIST, SAVINGS_INSERT, SAVINGS_UPDATE, SAVINGS_ARCHIVE,
         SCHEDULED_LIST, SCHEDULED_INSERT, SCHEDULED_UPDATE, SCHEDULED_ARCHIVE,
         PERSONA_LIST, PERSONA_INSERT, PERSONA_UPDATE, PERSONA_ARCHIVE,

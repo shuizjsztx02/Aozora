@@ -70,6 +70,14 @@ class AozoraBridge(
     // 第十轮 T10-3（REQ-19）：登录/登出/资料（auth.* 四命令）。
     private val authClient: com.aozora.app.auth.AuthClient? = null
 ) {
+    internal companion object {
+        // T16-5（REQ-61 / 决策 #7）：全屏背景压缩参数 —— 独立于 icon.pick
+        // 的 128px/48KB 链路（缩略图当全屏背景必糊），成品上限留足余量。
+        internal const val BG_MAX_DIMENSION = 1080
+        internal const val BG_QUALITY = 70
+        internal const val BG_MAX_BYTES = 2 * 1024 * 1024
+    }
+
     // NEW-R6-2 fix: 追踪当前活跃的 parse Job，以便取消
     @Volatile
     private var activeParseJob: Job? = null
@@ -224,6 +232,7 @@ class AozoraBridge(
             BridgeCommands.CATEGORY_INSERT -> handleCategoryInsert(requestId, payload)
             BridgeCommands.CATEGORY_UPDATE -> handleCategoryUpdate(requestId, payload)
             BridgeCommands.ICON_PICK -> handleIconPick(requestId, payload)
+            BridgeCommands.THEME_PICK_BACKGROUND -> handleThemePickBackground(requestId, payload)
             BridgeCommands.SAVINGS_LIST -> handleSavingsList(requestId)
             BridgeCommands.SAVINGS_INSERT -> handleSavingsInsert(requestId, payload)
             BridgeCommands.SAVINGS_UPDATE -> handleSavingsUpdate(requestId, payload)
@@ -599,6 +608,56 @@ class AozoraBridge(
             BridgeResponse.error(requestId, "compress_failed", e.message ?: "Image compression failed")
         } catch (e: Exception) {
             BridgeResponse.error(requestId, "internal_error", e.message ?: "Icon pick failed")
+        }
+    }
+
+    /**
+     * T16-5（REQ-61 / 决策 #7）：主题自定义背景选图（桥计数 76→77 的唯一增量）。
+     * 复用 ImagePicker + ImageCompressor，但参数按全屏背景独立定
+     * （[BG_MAX_DIMENSION]/[BG_QUALITY]/[BG_MAX_BYTES]，**不复用** icon.pick
+     * 的 128px/48KB）；返回 base64 data URI，**无服务端上传**——结果只落
+     * 前端 IndexedDB（决策 #6 存储分层）。取消返回 cancelled。
+     */
+    private suspend fun handleThemePickBackground(requestId: String, p: JSONObject): BridgeResponse {
+        val picker = imagePicker
+            ?: return BridgeResponse.error(requestId, "unavailable", "image picker not injected")
+        val ctx = syncContext
+            ?: return BridgeResponse.error(requestId, "unavailable", "context not injected")
+        val source = when (p.optString("source", "gallery")) {
+            "camera" -> ImagePicker.Source.CAMERA
+            "gallery" -> ImagePicker.Source.GALLERY
+            else -> return BridgeResponse.error(requestId, "invalid_input", "Unknown source")
+        }
+        val uri = try {
+            picker.pickImage(source)
+        } catch (e: ImagePicker.PickerCancelled) {
+            return BridgeResponse.error(requestId, "cancelled", "Image picker cancelled")
+        }
+        return try {
+            val input = ctx.contentResolver.openInputStream(uri)
+                ?: return BridgeResponse.error(requestId, "invalid_input", "Cannot open image")
+            val outFile = input.use {
+                com.aozora.app.image.ImageCompressor.compress(
+                    it, ctx.cacheDir, quality = BG_QUALITY, maxDimension = BG_MAX_DIMENSION
+                )
+            }
+            val bytes = outFile.readBytes()
+            outFile.delete()
+            if (bytes.size > BG_MAX_BYTES) {
+                return BridgeResponse.error(requestId, "image_too_large", "Background exceeds size limit after compression")
+            }
+            val b64 = android.util.Base64.encodeToString(bytes, android.util.Base64.NO_WRAP)
+            BridgeResponse.success(
+                requestId,
+                JSONObject()
+                    .put("dataUri", "data:image/jpeg;base64,$b64")
+                    .put("size", bytes.size)
+                    .toString()
+            )
+        } catch (e: com.aozora.app.image.ImageCompressor.ImageCompressException) {
+            BridgeResponse.error(requestId, "compress_failed", e.message ?: "Image compression failed")
+        } catch (e: Exception) {
+            BridgeResponse.error(requestId, "internal_error", e.message ?: "Background pick failed")
         }
     }
 

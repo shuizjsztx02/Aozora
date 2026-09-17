@@ -7,6 +7,12 @@
 
 import { useEffect, useState } from 'react'
 import { useTheme, type ThemeName } from '../../design/theme'
+import {
+  loadThemeBackground,
+  saveThemeBackground,
+  clearThemeBackground,
+  applyCustomBackground,
+} from '../../design/theme-backgrounds'
 import { useNavigate } from 'react-router'
 import { BridgeError } from '../../platform/bridge/native-bridge'
 import { useBridge } from '../../platform/hooks/use-bridge'
@@ -26,7 +32,7 @@ const modeOptions: { value: 'auto' | 'system' | 'manual'; label: string }[] = [
 ]
 
 export function MePage() {
-  const { theme, mode, setAuto, setSystem, setManual } = useTheme()
+  const { theme, mode, bgOpacity, setBgOpacity, setAuto, setSystem, setManual } = useTheme()
   const navigate = useNavigate()
   const [showDeleteDialog, setShowDeleteDialog] = useState(false)
   const [deleteConfirmation, setDeleteConfirmation] = useState('')
@@ -34,6 +40,10 @@ export function MePage() {
   const [deleteError, setDeleteError] = useState<string | null>(null)
   // 使用全局 bridge 单例，避免多实例覆写全局回调导致请求挂起
   const bridge = useBridge()
+
+  // ─── T16-5（REQ-61 / 决策 #6）：当前主题的自定义背景状态 ───
+  const [bgCustomized, setBgCustomized] = useState(false)
+  const [bgError, setBgError] = useState<string | null>(null)
 
   // ─── 第十轮 T10-3（REQ-19 / 决策 #5）：用户卡动态化 ───
   const [registered, setRegistered] = useState(false)
@@ -65,6 +75,38 @@ export function MePage() {
     })()
     return () => { cancelled = true }
   }, [bridge])
+
+  // 切换主题后刷新"当前主题是否已自定义背景"
+  useEffect(() => {
+    let cancelled = false
+    void loadThemeBackground(theme).then(uri => {
+      if (!cancelled) setBgCustomized(!!uri)
+    })
+    return () => { cancelled = true }
+  }, [theme])
+
+  const handlePickBackground = async () => {
+    setBgError(null)
+    try {
+      const r = await bridge.pickThemeBackground('gallery')
+      await saveThemeBackground(theme, r.dataUri)
+      applyCustomBackground(r.dataUri)
+      setBgCustomized(true)
+    } catch (e) {
+      if (e instanceof BridgeError && e.code === 'cancelled') return
+      if (e instanceof BridgeError && e.code === 'unavailable') {
+        setBgError('当前环境不支持选择照片')
+        return
+      }
+      setBgError('背景选择失败，请重试')
+    }
+  }
+
+  const handleClearBackground = async () => {
+    await clearThemeBackground(theme)
+    applyCustomBackground(null)
+    setBgCustomized(false)
+  }
 
   const handleDeleteAccount = async () => {
     if (deleteConfirmation !== 'DELETE') return
@@ -190,6 +232,54 @@ export function MePage() {
                 <span className="text-xs text-ink2">{opt.label}</span>
               </button>
             ))}
+          </div>
+
+          {/* T16-5（REQ-61）：背景透明度 + 当前主题自定义背景 */}
+          <div className="mt-4 pt-3 space-y-3" style={{ borderTop: '1px solid var(--glass-border)' }}>
+            <div>
+              <div className="flex items-center justify-between mb-1">
+                <span className="text-xs text-ink2">背景透明度</span>
+                <span className="text-xs text-ink3" data-testid="bg-opacity-value">{bgOpacity}%</span>
+              </div>
+              <input
+                type="range"
+                min={0}
+                max={100}
+                step={5}
+                value={bgOpacity}
+                onChange={e => setBgOpacity(Number(e.target.value))}
+                className="w-full"
+                aria-label="背景透明度"
+                data-testid="bg-opacity-slider"
+              />
+            </div>
+            <div className="flex flex-wrap items-center gap-2">
+              <button
+                type="button"
+                onClick={handlePickBackground}
+                className="text-xs px-3 py-2 rounded-lg"
+                style={{ background: 'var(--glass)', color: 'var(--ink2)', border: '1px solid var(--glass-border)' }}
+                data-testid="theme-pick-background"
+              >
+                🖼️ 为当前主题（{themeOptions.find(o => o.value === theme)?.label ?? theme}）选自定义背景
+              </button>
+              {bgCustomized && (
+                <button
+                  type="button"
+                  onClick={handleClearBackground}
+                  className="text-xs px-3 py-1.5 rounded-lg"
+                  style={{ color: 'var(--ink3)' }}
+                  data-testid="theme-clear-background"
+                >
+                  清除自定义背景
+                </button>
+              )}
+            </div>
+            {bgError && (
+              <div className="text-xs px-3 py-2 rounded-lg" style={{ background: 'rgba(220,38,38,0.1)', color: '#dc2626' }}>
+                {bgError}
+              </div>
+            )}
           </div>
         </div>
 

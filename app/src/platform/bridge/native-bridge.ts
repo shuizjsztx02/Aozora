@@ -23,6 +23,7 @@ import {
   type CategoryData,
   type CategoryInput,
   type IconPickResult,
+  type ThemePickBackgroundResult,
   type SavingsGoalData,
   type SavingsGoalInput,
   type ScheduledRuleData,
@@ -269,6 +270,15 @@ export class NativeBridge {
    */
   async pickIcon(source: 'camera' | 'gallery'): Promise<IconPickResult> {
     return this.call<IconPickResult>('icon.pick', { source }, { timeoutMs: 0 })
+  }
+
+  /**
+   * 主题自定义背景选图（第十六轮 T16-5 / REQ-61）。打开原生图选取全屏背景图
+   * （1080px/q70，独立于 pickIcon 的 128px/48KB），返回 base64 data URI；
+   * 无服务端上传，结果由调用方落 IndexedDB。取消 reject code='cancelled'。
+   */
+  async pickThemeBackground(source: 'camera' | 'gallery' = 'gallery'): Promise<ThemePickBackgroundResult> {
+    return this.call<ThemePickBackgroundResult>('theme.pickBackground', { source }, { timeoutMs: 0 })
   }
 
   // ─── Savings Goals（第八轮 REQ-7，仅本地） ───
