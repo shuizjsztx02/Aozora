@@ -191,14 +191,33 @@ docker exec -i pg-test sh -c \
   'pg_restore -U "$POSTGRES_USER" -d aozora_test --no-privileges' \
   < /root/test_db-$(date +%F).dump
 
-# ③ B 机：核对行数（与 ① 之前记录的旧库计数比对）
-docker exec pg-test sh -c 'psql -U "$POSTGRES_USER" -d aozora_test -c "
-select relname, n_live_tup from pg_stat_user_tables order by n_live_tup desc"'
+# ③ B 机：核对行数（ANALYZE 后 n_live_tup 才准——刚导入时统计信息未更新，会误读成 0）
+docker exec pg-test sh -c 'psql -U "$POSTGRES_USER" -d aozora_test -c "ANALYZE" -c "
+select relname, n_live_tup from pg_stat_user_tables order by relname"'
+
+# ④ B 机：与旧库逐表比对（无输出 = 完全一致，比肉眼看两个列表可靠）
+docker exec pg-test sh -c 'psql -U "$POSTGRES_USER" -d test_db -c "ANALYZE" -c "select relname, n_live_tup from pg_stat_user_tables order by relname"' > /tmp/old.txt
+docker exec pg-test sh -c 'psql -U "$POSTGRES_USER" -d aozora_test -c "ANALYZE" -c "select relname, n_live_tup from pg_stat_user_tables order by relname"' > /tmp/new.txt
+diff /tmp/old.txt /tmp/new.txt && echo "计数一致"
+
+# ⑤ B 机：用 API 账号实测一次（一次性验证密码文件、HBA 与授权三者自洽；
+#    注意密码文件在宿主机上，不能写进 docker exec 的命令里）
+PW=$(grep '^aozora_api_test=' /root/aozora-app-db-passwords.txt | cut -d= -f2)
+docker exec -e PGPASSWORD="$PW" pg-test psql -h 127.0.0.1 -U aozora_api_test -d aozora_test -Atqc "select count(*) from transactions"
+
+# ⑥ B 机：确认表 owner 是 API 账号（Owner 列应全是 aozora_api_test）
+docker exec pg-test sh -c 'psql -U "$POSTGRES_USER" -d aozora_test -c "\dt"'
 ```
 
+> ⚠ **禁止重复导入。** `pg_restore` 导入非空库时，每张表的 `COPY` 会因主键冲突而
+> **整表失败**（不是只跳过冲突行），此后旧库新增的数据就静默丢了；而 `pg_restore`
+> 只以一行 `warning: errors ignored on restore: N` 收尾，极易被当成成功。
+> 真要重跑，必须先 `DROP DATABASE aozora_test WITH (FORCE);` 重建空库（见 §6.4）
+> 再导入。判据：导入输出里出现 `already exists` / `duplicate key` 即为重复导入。
+
 顺序很重要：**先导入数据，再让 A 机跑 `a-deploy.sh`**。导入会一并恢复
-`alembic_version`，此时 `alembic upgrade head` 是空操作；若反过来（先建表后导入），
-`pg_restore` 会因对象已存在而报错。
+`alembic_version`（应停在 `0016_cloud_entities`），此时 `alembic upgrade head` 是
+空操作；若反过来（先由 A 机建表、再导入），就正好落进上面那条"重复导入"陷阱。
 
 回滚：新库是新建的，出问题直接 `DROP DATABASE aozora_test WITH (FORCE);` 再重跑
 §4 脚本即可回到干净状态；旧库 `test_db` 全程未被改动，A 机 `.env` 改回旧连接串
