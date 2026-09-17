@@ -22,9 +22,16 @@
  * 卡由 messages 重建）。只读态 = 展示态四行 + 状态徽标，隐藏「编辑」「撤销」且全部
  * 交互不可用（撤销依赖 activeTxIdsRef 内存态，切页/重启后无意义）；`undone` 整卡灰化、
  * `error` 红字、`pending-category` 不展开编辑 UI。testid 用 `history-card` 与活动卡区分。
+ *
+ * T16-3（REQ-59）：编辑态改**草稿态**——字段改动只更新本地草稿，卡内**不再有任何即时写路径**
+ * （原 `commit()` 已删）。底部「完成」→「确认修改」展开**新旧对照区**（旧 = 进入编辑前的
+ * 已保存快照 `committed`，新 = 当前草稿 `draft`，逐字段差异高亮、未变更字段弱化）：
+ * 对照区「确认」才调 `onEditCommit`（上层替换写链路零改）、「取消」弃草稿退回展示态（不写库）。
+ * 展示态原有的支柱/账户 chip 快捷改同样落草稿并直接展开对照区（确认后才生效）。
+ * `pending-category`（未写库首提）同走此流，确认后才触发首写。
  */
 
-import { useState, useCallback, useRef } from 'react'
+import { useState } from 'react'
 import type { ActionProposal, TransactionItem } from '../../domain/action-proposal'
 import type { AccountData, BookData, CategoryData } from '../../platform/bridge/bridge-types'
 import { CategoryIcon } from '../../components/CategoryIcon'
@@ -105,9 +112,10 @@ function ConfirmationCardBody({
   const [catPage, setCatPage] = useState(0)
   const [selectedBookId, setSelectedBookId] = useState<string | null>(null)
   const [budgetChoice, setBudgetChoice] = useState<boolean | null>(null)
-  // committed 的 state 镜像（ref 做同值比较，state 驱动展示态响应式刷新）
+  // 已保存基线（T16-3：仅「确认」时前移；展示态与对照区「旧卡」均以此为准）
   const [committed, setCommitted] = useState<CommittedSnapshot>(initial)
-  const lastCommittedRef = useRef<CommittedSnapshot>(initial)
+  // T16-3（REQ-59）：新旧对照区展开态
+  const [confirming, setConfirming] = useState(false)
 
   // C-M2 fix: 字符串解析避免浮点精度问题
   const parseAmountCents = (s: string): number | null => {
@@ -116,122 +124,106 @@ function ConfirmationCardBody({
     return cents
   }
 
-  /**
-   * 构建编辑后提案并（值有变化且合法时）提交。
-   * 未点名的字段取**当前本地态**（如支柱已切收入后点分类，type 用新值而非旧快照）；
-   * 点选类 handler 在 setState 前调用 commit，故被改字段须显式走 patch。
-   * accountId 以 `!== undefined` 判定：null 是合法的显式值（不使用账户），
-   * 不能走 `??` 兜底回退。
-   */
-  const commit = useCallback((patch: Partial<CommittedSnapshot> = {}) => {
-    if (status === 'executing') return // 保存中不接受新提交
-    const prev = lastCommittedRef.current
-    const next: CommittedSnapshot = {
-      type: patch.type ?? txType,
-      amountCents: patch.amountCents ?? parseAmountCents(amountYuan) ?? prev.amountCents,
-      categoryId: patch.categoryId ?? categoryId,
-      bizDate: patch.bizDate ?? bizDate,
-      note: patch.note ?? note,
-      accountId: patch.accountId !== undefined ? patch.accountId : accountId,
-      bookId: patch.bookId ?? selectedBookId ?? bookId ?? '',
-      includeInBudget: patch.includeInBudget ?? budgetChoice ?? true,
-    }
-    if (
-      next.type === prev.type && next.amountCents === prev.amountCents &&
-      next.categoryId === prev.categoryId && next.bizDate === prev.bizDate &&
-      next.note === prev.note && next.accountId === prev.accountId &&
-      next.bookId === prev.bookId && next.includeInBudget === prev.includeInBudget
-    ) return
-    const editedTx: TransactionItem = {
-      ...tx,
-      type: next.type,
-      amountCents: next.amountCents,
-      categoryId: next.categoryId || undefined,
-      bizDate: next.bizDate,
-      note: next.note,
-      // 键显式存在：null = 不使用账户（use-assistant 原样透传），string = 换账户
-      accountId: next.accountId,
-    }
-    // T12-9（决策 #3 注 / REQ-35）：带外字段只在实际偏离默认时下发——
-    // 账本未切换走 hook 层缺省；预算未改「不计入」走 native 缺省计入。
-    const overrides: ProposalWriteOverrides = {}
-    if (next.bookId && next.bookId !== (bookId ?? '')) overrides.bookId = next.bookId
-    if (next.includeInBudget === false) overrides.includeInBudget = false
-    lastCommittedRef.current = next
-    setCommitted(next)
-    onEditCommit?.(
-      { ...proposal, transactions: [editedTx] },
-      Object.keys(overrides).length > 0 ? overrides : undefined,
-    )
-  }, [
-    status, txType, amountYuan, categoryId, bizDate, note, accountId,
-    selectedBookId, budgetChoice, bookId, tx, proposal, onEditCommit,
-  ])
+  /** T16-3：当前草稿快照。金额非法时沿用已保存值（与旧 commit 的兜底同口径）。 */
+  const draft: CommittedSnapshot = {
+    type: txType,
+    amountCents: parseAmountCents(amountYuan) ?? committed.amountCents,
+    categoryId,
+    bizDate,
+    note,
+    accountId,
+    bookId: selectedBookId ?? bookId ?? '',
+    includeInBudget: budgetChoice ?? true,
+  }
+  const diff = diffMask(draft, committed)
 
-  /** 收支柱子切换；展示态点击即替换写，编辑态沿用旧语义（清空分类待重选后再写）。 */
-  const handleTypeChange = (t: TransactionItem['type'], immediate: boolean) => {
+  /** 展示态支柱/账户 chip 快捷改：落草稿并直接展开对照区（确认后才写库）。 */
+  const openCompare = () => {
+    setEditing(true)
+    setConfirming(true)
+  }
+
+  /** 收支柱子切换；清空分类待重选（quick = 展示态快捷改，直接进对照区）。 */
+  const handleTypeChange = (t: TransactionItem['type'], quick: boolean) => {
     if (t === txType) return
     setTxType(t)
     setCategoryId('') // 类型切换后需重选分类再落库
     setCatPage(0)     // T12-6 同款：切收支宫格页码归零
-    if (immediate) commit({ type: t, categoryId: '' })
+    if (quick) openCompare()
   }
 
-  const handleAccountSelect = (id: string | null) => {
+  const handleAccountSelect = (id: string | null, quick = false) => {
     setAccountId(id)
     setAccountMenuOpen(false)
-    commit({ accountId: id })
+    if (quick && id !== committed.accountId) openCompare()
   }
 
   /** T12-9：卡内切账本 = 该笔改挂新账本（替换写由上层执行）。 */
   const handleBookSelect = (id: string) => {
     setSelectedBookId(id)
-    commit({ bookId: id })
   }
 
   const handleBudgetSelect = (v: boolean) => {
     setBudgetChoice(v)
-    commit({ includeInBudget: v })
   }
 
-  const handleAmountBlur = useCallback(() => {
+  const handleAmountBlur = () => {
     const cents = parseAmountCents(amountYuan)
-    if (cents === null) {
-      setAmountError('金额必须大于 0')
-      return
-    }
-    setAmountError(null)
-    if (cents !== lastCommittedRef.current.amountCents) {
-      commit({ amountCents: cents })
-    }
-  }, [amountYuan, commit])
+    setAmountError(cents === null ? '金额必须大于 0' : null)
+  }
 
-  const handleNoteBlur = useCallback(() => {
-    if (note !== lastCommittedRef.current.note) commit({ note })
-  }, [note, commit])
+  /** T16-3（REQ-59）：对照区「确认」——草稿无变更则不写；有变更才调上层替换写。 */
+  const handleConfirmEdit = () => {
+    if (status === 'executing') return // 保存中不接受新提交
+    const next = draft
+    if (!sameSnapshot(next, committed)) {
+      const editedTx: TransactionItem = {
+        ...tx,
+        type: next.type,
+        amountCents: next.amountCents,
+        categoryId: next.categoryId || undefined,
+        bizDate: next.bizDate,
+        note: next.note,
+        // 键显式存在：null = 不使用账户（use-assistant 原样透传），string = 换账户
+        accountId: next.accountId,
+      }
+      // T12-9（决策 #3 注 / REQ-35）：带外字段只在实际偏离默认时下发——
+      // 账本未切换走 hook 层缺省；预算未改「不计入」走 native 缺省计入。
+      const overrides: ProposalWriteOverrides = {}
+      if (next.bookId && next.bookId !== (bookId ?? '')) overrides.bookId = next.bookId
+      if (next.includeInBudget === false) overrides.includeInBudget = false
+      setCommitted(next)
+      onEditCommit?.(
+        { ...proposal, transactions: [editedTx] },
+        Object.keys(overrides).length > 0 ? overrides : undefined,
+      )
+    }
+    setConfirming(false)
+    setEditing(false)
+  }
+
+  /** T16-3（REQ-59）：「取消」= 弃草稿回展示态，不写库（字段复位到已保存值）。 */
+  const handleCancelEdit = () => {
+    setTxType(committed.type)
+    setAmountYuan((committed.amountCents / 100).toFixed(2))
+    setCategoryId(committed.categoryId)
+    setBizDate(committed.bizDate)
+    setNote(committed.note)
+    setAccountId(committed.accountId)
+    setSelectedBookId(committed.bookId === (bookId ?? '') ? null : committed.bookId)
+    setBudgetChoice(committed.includeInBudget ? null : false)
+    setAmountError(null)
+    setAccountMenuOpen(false)
+    setCatOpen(false)
+    setConfirming(false)
+    setEditing(false)
+  }
 
   // ─── 分类宫格（T12-9 v3：QuickEntry 同款平铺，含二级，过滤口径 categories.kind） ───
+  const catInfo = (catId: string) => catInfoOf(categories, catId)
+  const accountLabel = (id: string | null) => accountLabelOf(accounts, id)
   const pagerCats = categories.filter(c => c.kind === txType)
   const editInfo = catInfo(categoryId)
-
-  /** 分类 id →（图标分类, `一级 · 二级` 文字, 图标——二级无图标时沿用一级）。
-   *  function 声明提升：编辑态派生值在其定义前使用。 */
-  function catInfo(catId: string) {
-    const cat = categories.find(c => c.id === catId)
-    if (!cat) return { cat: null, icon: null, label: '未分类' }
-    if (cat.parentId) {
-      const parent = categories.find(c => c.id === cat.parentId)
-      return {
-        cat,
-        icon: cat.icon ?? parent?.icon ?? null,
-        label: parent ? `${parent.name} · ${cat.name}` : cat.name,
-      }
-    }
-    return { cat, icon: cat.icon ?? null, label: cat.name }
-  }
-
-  const accountLabel = (id: string | null) =>
-    id ? (accounts.find(a => a.id === id)?.name || '账户') : '不使用账户'
 
   const cardShell = 'rounded-xl p-3 mx-4 my-2'
   const cardStyle = {
@@ -252,6 +244,7 @@ function ConfirmationCardBody({
   if (!editing) {
     const view = catInfo(committed.categoryId)
     const viewAccount = accounts.find(a => a.id === committed.accountId) ?? null
+    const viewBookName = books.find(b => b.id === committed.bookId)?.name ?? bookName ?? '账本'
     return (
       <div
         className={cardShell}
@@ -323,7 +316,7 @@ function ConfirmationCardBody({
                   >
                     <AccountOption
                       active={committed.accountId === null}
-                      onClick={() => handleAccountSelect(null)}
+                      onClick={() => handleAccountSelect(null, true)}
                     >
                       <span>不使用账户</span>
                     </AccountOption>
@@ -331,7 +324,7 @@ function ConfirmationCardBody({
                       <AccountOption
                         key={a.id}
                         active={committed.accountId === a.id}
-                        onClick={() => handleAccountSelect(a.id)}
+                        onClick={() => handleAccountSelect(a.id, true)}
                       >
                         <CategoryIcon icon={a.icon} name={a.name} fallback="💳" className="text-sm leading-none shrink-0" />
                         <span className="truncate">{a.name}</span>
@@ -493,10 +486,7 @@ function ConfirmationCardBody({
           <CategoryPager
             categories={pagerCats}
             selectedId={categoryId}
-            onSelect={id => {
-              setCategoryId(id)
-              commit({ categoryId: id })
-            }}
+            onSelect={setCategoryId}
             page={catPage}
             onPageChange={setCatPage}
           />
@@ -507,10 +497,7 @@ function ConfirmationCardBody({
       <div className="flex gap-2 mt-2">
         <DateField
           value={bizDate}
-          onChange={v => {
-            setBizDate(v)
-            commit({ bizDate: v })
-          }}
+          onChange={setBizDate}
           testId="card-date"
           className="shrink-0"
         />
@@ -518,7 +505,6 @@ function ConfirmationCardBody({
           type="text"
           value={note}
           onChange={e => setNote(e.target.value)}
-          onBlur={handleNoteBlur}
           placeholder="备注"
           className="flex-1 min-w-0 px-2 py-1 rounded-lg text-xs outline-none"
           style={{
@@ -551,16 +537,226 @@ function ConfirmationCardBody({
         </div>
       )}
 
-      {/* 底部「完成」收起编辑态回展示态 */}
-      <button
-        type="button"
-        onClick={() => setEditing(false)}
-        className="w-full mt-2 py-1.5 rounded-lg text-xs font-medium text-white"
-        style={{ background: 'var(--accent)' }}
-        data-testid="card-done"
-      >
-        完成
-      </button>
+      {/* T16-3（REQ-59）：新旧对照区——旧快照卡 vs 新草稿卡，逐字段差异高亮 */}
+      {confirming && (
+        <div className="mt-2" data-testid="card-compare">
+          <div className="text-[10px] mb-1" style={{ color: 'var(--ink3)' }}>新旧对照</div>
+          <SnapshotCard
+            testId="card-compare-old"
+            snapshot={committed}
+            categories={categories}
+            accounts={accounts}
+            books={books}
+            bookName={bookName}
+            diff={diff}
+          />
+          <div className="text-center text-[10px] my-0.5" style={{ color: 'var(--ink3)' }}>↓</div>
+          <SnapshotCard
+            testId="card-compare-new"
+            snapshot={draft}
+            categories={categories}
+            accounts={accounts}
+            books={books}
+            bookName={bookName}
+            diff={diff}
+          />
+          <div className="flex gap-2 mt-2">
+            <button
+              type="button"
+              onClick={handleCancelEdit}
+              className="flex-1 py-1.5 rounded-lg text-xs font-medium"
+              style={smallBtnStyle}
+              data-testid="card-compare-cancel"
+            >
+              取消
+            </button>
+            <button
+              type="button"
+              onClick={handleConfirmEdit}
+              disabled={status === 'executing'}
+              className="flex-1 py-1.5 rounded-lg text-xs font-medium text-white"
+              style={{ background: 'var(--accent)' }}
+              data-testid="card-compare-confirm"
+            >
+              确认
+            </button>
+          </div>
+        </div>
+      )}
+
+      {/* 底部「确认修改」展开对照区（T16-3：不再直接收起回写）
+       * executing 态不禁止此按钮——对照区的「确认」按钮已禁用，避免 React 对 disabled 按钮
+       * 吞掉点击事件导致对照区打不开。 */}
+      {!confirming && (
+        <button
+          type="button"
+          onClick={() => setConfirming(true)}
+          className="w-full mt-2 py-1.5 rounded-lg text-xs font-medium text-white"
+          style={{ background: 'var(--accent)' }}
+          data-testid="card-done"
+        >
+          确认修改
+        </button>
+      )}
+    </div>
+  )
+}
+
+/** T16-3（REQ-59）：两份快照的逐字段差异掩码（对照区高亮依据）。 */
+interface DiffMask {
+  cat: boolean
+  type: boolean
+  amount: boolean
+  date: boolean
+  note: boolean
+  account: boolean
+  book: boolean
+  budget: boolean
+}
+
+function diffMask(a: CommittedSnapshot, b: CommittedSnapshot): DiffMask {
+  return {
+    cat: a.categoryId !== b.categoryId,
+    type: a.type !== b.type,
+    amount: a.amountCents !== b.amountCents,
+    date: a.bizDate !== b.bizDate,
+    note: a.note !== b.note,
+    account: a.accountId !== b.accountId,
+    book: a.bookId !== b.bookId,
+    budget: a.includeInBudget !== b.includeInBudget,
+  }
+}
+
+function sameSnapshot(a: CommittedSnapshot, b: CommittedSnapshot): boolean {
+  const d = diffMask(a, b)
+  return !Object.values(d).some(Boolean)
+}
+
+/** 分类 id →（图标分类, `一级 · 二级` 文字, 图标——二级无图标时沿用一级）。 */
+function catInfoOf(categories: CategoryData[], catId: string) {
+  const cat = categories.find(c => c.id === catId)
+  if (!cat) return { cat: null, icon: null, label: '未分类' }
+  if (cat.parentId) {
+    const parent = categories.find(c => c.id === cat.parentId)
+    return {
+      cat,
+      icon: cat.icon ?? parent?.icon ?? null,
+      label: parent ? `${parent.name} · ${cat.name}` : cat.name,
+    }
+  }
+  return { cat, icon: cat.icon ?? null, label: cat.name }
+}
+
+function accountLabelOf(accounts: AccountData[], id: string | null) {
+  return id ? (accounts.find(a => a.id === id)?.name || '账户') : '不使用账户'
+}
+
+/** T16-3（REQ-59）：对照区单卡——只读渲染一份快照（展示态四行 + 预算行）。
+ *  差异字段高亮、未变更字段弱化（`diff` 掩码由两份快照比对得出）。 */
+function SnapshotCard({
+  testId, snapshot, categories, accounts, books, bookName, diff,
+}: {
+  testId: string
+  snapshot: CommittedSnapshot
+  categories: CategoryData[]
+  accounts: AccountData[]
+  books: BookData[]
+  bookName: string
+  diff: DiffMask
+}) {
+  const view = catInfoOf(categories, snapshot.categoryId)
+  const viewAccount = accounts.find(a => a.id === snapshot.accountId) ?? null
+  const viewBook = books.find(b => b.id === snapshot.bookId)
+  const viewBookName = viewBook?.name ?? bookName ?? '账本'
+  const mark = (changed: boolean) => changed
+    ? { background: 'rgba(255, 208, 92, 0.30)', borderRadius: 6 }
+    : { opacity: 0.55 }
+  const chip = {
+    background: 'var(--glass)',
+    border: '1px solid var(--glass-border)',
+  } as const
+  return (
+    <div
+      className="rounded-xl p-2.5"
+      style={{ background: 'var(--glass)', border: '1px solid var(--glass-border)' }}
+      data-testid={testId}
+    >
+      <div className="flex gap-2">
+        <div className="flex-1 min-w-0 flex flex-col justify-between py-0.5">
+          <div className="flex items-center gap-1.5 min-w-0" style={mark(diff.cat)} data-testid={`${testId}-cat`}>
+            <CategoryIcon
+              icon={view.icon}
+              name={view.cat?.name || '💰'}
+              className="text-[20px] leading-none shrink-0"
+            />
+            <span className="text-sm truncate" style={{ color: 'var(--ink)' }}>{view.label}</span>
+          </div>
+          <div className="flex items-center gap-1.5 mt-1.5 min-w-0">
+            <span className="shrink-0" style={mark(diff.type)} data-testid={`${testId}-type`}>
+              <span
+                className="px-2 py-0.5 rounded-lg text-xs font-medium inline-block"
+                style={{
+                  background: snapshot.type === 'expense' ? 'var(--expense)' : 'var(--income)',
+                  color: 'white',
+                }}
+              >
+                {snapshot.type === 'expense' ? '支出' : '收入'}
+              </span>
+            </span>
+            <span
+              className="flex items-center gap-1 px-2 py-0.5 rounded-full text-xs min-w-0"
+              style={{ ...chip, ...mark(diff.account), color: 'var(--ink2)' }}
+              data-testid={`${testId}-account`}
+            >
+              <CategoryIcon
+                icon={viewAccount?.icon}
+                name="账户"
+                fallback="💳"
+                className="text-xs leading-none shrink-0"
+              />
+              <span className="truncate">{accountLabelOf(accounts, snapshot.accountId)}</span>
+            </span>
+          </div>
+        </div>
+        <div
+          className="self-center shrink-0 px-1 text-lg font-bold"
+          style={{ color: 'var(--ink)', ...mark(diff.amount) }}
+          data-testid={`${testId}-amount`}
+        >
+          ¥{(snapshot.amountCents / 100).toFixed(2)}
+        </div>
+      </div>
+
+      <div className="flex items-center justify-between gap-2 mt-2">
+        <span
+          className="text-xs shrink-0 px-1 rounded"
+          style={{ color: 'var(--ink2)', ...mark(diff.date) }}
+          data-testid={`${testId}-date`}
+        >
+          {snapshot.bizDate}
+        </span>
+        <span
+          className="text-xs truncate px-1 rounded"
+          style={{ color: 'var(--ink3)', ...mark(diff.note) }}
+          data-testid={`${testId}-note`}
+        >
+          {snapshot.note || '无备注'}
+        </span>
+      </div>
+
+      <div className="flex items-center gap-1 mt-1.5 min-w-0">
+        <CategoryIcon name={viewBookName} fallback="📒" className="text-sm leading-none shrink-0" />
+        <span className="text-xs truncate px-1 rounded" style={{ color: 'var(--ink2)', ...mark(diff.book) }} data-testid={`${testId}-book`}>
+          {viewBookName}
+        </span>
+        <span
+          className="shrink-0 text-[10px] px-1.5 py-0.5 rounded-full"
+          style={{ ...chip, color: 'var(--ink3)', ...mark(diff.budget) }}
+          data-testid={`${testId}-budget`}
+        >
+          {snapshot.includeInBudget ? '计入预算' : '不计入预算'}
+        </span>
+      </div>
     </div>
   )
 }
