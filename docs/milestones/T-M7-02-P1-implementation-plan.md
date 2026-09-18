@@ -912,6 +912,13 @@ cd server && … alembic upgrade 0017:0018 --sql          # ADD COLUMN turn BIGI
 生效、并发唯一索引的真实竞争窗口）；HTTP/SSE 端到端（本卡未接线）；真实模型与真实客户端路径；
 多 worker 语义（架构已定单 worker）。
 
+**复审标为「断言强度不足但未确证为缺陷」、本轮判定不修的三处（留档）：** ①
+`test_window_keeps_at_least_one_turn` 与 `test_window_drops_earliest_turns_under_char_budget`
+只差配置、断言完全相同（同构冗余，一个红另一个必红）——两者的 docstring 各自记录了不同意图，
+合并的收益不抵改动面，保留；② `test_new_conversation_is_created_and_bound_to_book` 里的
+`history(...) == []` 对新会话是必然为真的值；③ `test_within_limits_passes` 对边界值没贴着上限
+取值（`>=` 改 `>` 已由另外两条用例抓住，故不算缺口）。
+
 **下一项未阻塞任务：** **02g（SSE 端点与部署配置）** —— 依赖 02d + 02e，两者均已完成，
 02f 亦已完成。02g 消费本卡的接口：`resolve(user, book_id, conversation_id)` →
 `history(conversation)` → `check_quota(conversation)` → 跑 loop → `append_turn` +
