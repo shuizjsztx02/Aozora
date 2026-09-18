@@ -533,7 +533,9 @@ cd app && npx tsc --noEmit                       # 0 错
 **复审显式列出的未测项：** (1) 规则矩阵里「`disabled` + 空串 `reasoning_content` → 200」一格离线不可复现（本卡真实探针已覆盖）；(2) 真实模型是否会产生重复 `tool_call.id`（推断概率极低）；(3) 收尾指令收紧（字面标签）只做只读复核——本卡已用真实 API 复测，两句标签齐全。
 
 **提交：** `d923d4e`（代码 + 测试 + 本文件与执行计划的状态行）；`e1c2b65`（回填哈希）。
-**推送状态（2026-09-18，如实记录）：** 本地已提交，但 `git push origin main` **失败**——`github.com:443` 不可达（`curl` 返回 `000`，重试一次仍失败）。这是本机网络问题、非本卡问题，并发会话的 `018ac4c` 同样未推。**远端 CI 未能确认**（按规范不得写成通过）；网络恢复后需补推。
+**推送与远端 CI（2026-09-18）：** 首次 `git push` 因本机 `github.com:443` 不可达而失败（curl 返回 `000`），网络恢复后已补推成功：`91308ae..3bf613b`（含并发会话的 `018ac4c` / `0c3e46b` / `3bf613b`，快进无分叉）。
+远端 CI（`3bf613b`）：**Client Lint & Test ✅ / Server Lint & Test ✅ / Android Compile & JVM Test ❌**——Android 作业失败在 `android-actions/setup-android@v3`（`sdkmanager` exit 1，**编译与测试步骤根本没执行**），与 `docs` 已登记的自 2026-09-17 起的长期环境红一致，**非代码回归**（本卡未动客户端代码；JVM 本地 394 tests / 0 failures）。
+推后本地 HEAD 全量为 **902 passed / 37 skipped**（本卡 81 + 并发会话补的快路径 2 条）。
 
 **验证命令与结果：**
 
