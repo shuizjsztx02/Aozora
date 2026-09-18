@@ -284,8 +284,13 @@ class DashScopeProvider:
                 prompt_tokens=int(usage.get("prompt_tokens", 0)),
                 completion_tokens=int(usage.get("completion_tokens", 0)),
             )
-        except (ValueError, KeyError, IndexError, TypeError):
+        except (ValueError, KeyError, IndexError, TypeError, ArithmeticError):
             # Malformed 200 body — treat as retryable provider fault.
+            # ``ArithmeticError``: a usage counter of ``1e400`` decodes to
+            # ``float('inf')`` and ``int(inf)`` raises ``OverflowError``, which
+            # is not a ``ValueError`` — without it the body escapes as a bare
+            # 500 instead of taking the retry-then-degrade path. Same finding
+            # as the agent path (T-M7-02d review F4).
             raise ProviderError(status=200, retryable=True, reason="bad_response")
 
     async def complete_with_images(
@@ -342,7 +347,8 @@ class DashScopeProvider:
                 prompt_tokens=int(usage.get("prompt_tokens", 0)),
                 completion_tokens=int(usage.get("completion_tokens", 0)),
             )
-        except (ValueError, KeyError, IndexError, TypeError):
+        except (ValueError, KeyError, IndexError, TypeError, ArithmeticError):
+            # Same as ``complete()``: ``int(inf)`` raises ``OverflowError``.
             raise ProviderError(status=200, retryable=True, reason="bad_response")
 
 

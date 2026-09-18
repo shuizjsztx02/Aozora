@@ -1318,6 +1318,35 @@ class TestDashScopeProvider:
         assert exc_info.value.retryable is True
         assert exc_info.value.reason == "bad_response"
 
+    @pytest.mark.parametrize("method", ["complete", "complete_with_images"])
+    async def test_infinite_usage_counter_is_bad_response(self, method):
+        """A non-finite usage counter is a malformed body like any other.
+
+        ``1e400`` decodes to ``float('inf')`` and ``int(inf)`` raises
+        ``OverflowError`` — an ``ArithmeticError``, so *not* a ``ValueError``.
+        It escaped the except tuple and surfaced as a bare 500 instead of the
+        retry-then-degrade path. The agent path learned this first (T-M7-02d
+        review F4); this pins the fast path to the same contract.
+        """
+        def handler(request: httpx.Request) -> httpx.Response:
+            # Raw bytes on purpose: httpx's ``json=`` refuses to serialise inf.
+            return httpx.Response(
+                200,
+                content=(
+                    b'{"choices":[{"message":{"role":"assistant","content":"{}"}}],'
+                    b'"usage":{"prompt_tokens":1e400,"completion_tokens":1}}'
+                ),
+                headers={"content-type": "application/json"},
+            )
+
+        with pytest.raises(ProviderError) as exc_info:
+            await getattr(_dashscope(handler), method)(
+                [{"role": "user", "content": "hi"}],
+                model="m", max_tokens=8, timeout=1.0,
+            )
+        assert exc_info.value.retryable is True
+        assert exc_info.value.reason == "bad_response"
+
     async def test_missing_usage_defaults_to_zero(self):
         def handler(request: httpx.Request) -> httpx.Response:
             return httpx.Response(200, json={
