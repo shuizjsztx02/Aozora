@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import json
 import uuid
+from collections.abc import AsyncIterator
 from copy import deepcopy
 from datetime import date
 from typing import Any, Callable
@@ -41,6 +42,7 @@ from src.modules.ai.provider import (
     ProviderError,
     ProviderResult,
     ReasoningLevel,
+    StreamChunk,
     ToolCall,
 )
 
@@ -182,6 +184,34 @@ class ScriptedProvider:
             raise item
         return item
 
+    async def complete_with_tools_stream(
+        self,
+        messages: list[dict],
+        *,
+        model: str,
+        max_tokens: int,
+        timeout: float,
+        tools: list[dict],
+        tool_choice: str | None = None,
+        reasoning: ReasoningLevel = ReasoningLevel.FAST,
+    ) -> AsyncIterator[StreamChunk]:
+        """流式形态（T-M7-02g-2）：loop 自本卡起只走这条路。
+
+        脚本语义与非流式**逐字相同**（同一个调用序号、同一批异常与可调用项），
+        差别只在交付形态：推理一帧、正文一帧、最后是带 ``result`` 的收尾帧。
+        分片粒度不在这里——它按用例需要显式构造（见 ``test_agent_stream``），
+        否则每条既有断言都要按 4 字符/帧改写。
+        """
+        result = await self.complete_with_tools(
+            messages, model=model, max_tokens=max_tokens, timeout=timeout,
+            tools=tools, tool_choice=tool_choice, reasoning=reasoning,
+        )
+        if result.reasoning_content:
+            yield StreamChunk(reasoning_delta=result.reasoning_content)
+        if result.content:
+            yield StreamChunk(delta=result.content)
+        yield StreamChunk(result=result)
+
     # -- 断言辅助 -------------------------------------------------------
 
     @property
@@ -212,6 +242,39 @@ def _tool_messages(messages: tuple[dict, ...]) -> list[dict]:
 def _finish_turn() -> ProviderResult:
     """收尾请求的应答（脚本里最后一项）。"""
     return _text("已完成：查询了账户。未完成：其余步骤已达上限。")
+
+
+def _sse(payload: dict[str, Any]) -> str:
+    return f"data: {json.dumps(payload, ensure_ascii=False)}\n\n"
+
+
+def _sse_answer(
+    *,
+    content: str = "",
+    reasoning: str = "",
+    tool_calls: list[dict[str, Any]] | None = None,
+    prompt_tokens: int = 3,
+    completion_tokens: int = 5,
+) -> str:
+    """一次流式应答的 SSE 正文（推理帧 → 正文 / 工具帧 → usage 尾块 → ``[DONE]``）。
+
+    loop 自 02g-2 起走流式，因此「用**真实** ``DeepSeekProvider`` 断言真正发出的
+    请求体」的那几条用例必须喂它 SSE——喂非流式的 JSON 体在流式路径下解析不出任何
+    东西。形状照真实 provider：用量在**尾块**（``stream_options.include_usage``），
+    工具调用的首片带 ``id`` 与 ``function.name``。
+    """
+    frames = []
+    if reasoning:
+        frames.append(_sse({"choices": [{"delta": {"reasoning_content": reasoning}}]}))
+    if content:
+        frames.append(_sse({"choices": [{"delta": {"content": content}}]}))
+    if tool_calls:
+        frames.append(_sse({"choices": [{"delta": {"tool_calls": tool_calls}}]}))
+    frames.append(_sse({"choices": [], "usage": {
+        "prompt_tokens": prompt_tokens, "completion_tokens": completion_tokens,
+    }}))
+    frames.append("data: [DONE]\n\n")
+    return "".join(frames)
 
 
 # ── 入口推理分级（架构 §4.6）────────────────────────────────────────────
@@ -851,10 +914,9 @@ class TestFastTierThinking:
 
         def handler(request: httpx.Request) -> httpx.Response:
             seen["body"] = json.loads(request.content)
-            return httpx.Response(200, json={
-                "choices": [{"message": {"role": "assistant", "content": "记好了。"}}],
-                "usage": {"prompt_tokens": 11, "completion_tokens": 7},
-            })
+            return httpx.Response(200, text=_sse_answer(
+                content="记好了。", prompt_tokens=11, completion_tokens=7,
+            ))
 
         provider = DeepSeekProvider(
             "sk-test", "https://api.deepseek.com", transport=httpx.MockTransport(handler),
@@ -874,10 +936,9 @@ class TestFastTierThinking:
 
         def handler(request: httpx.Request) -> httpx.Response:
             seen["body"] = json.loads(request.content)
-            return httpx.Response(200, json={
-                "choices": [{"message": {"role": "assistant", "content": "好"}}],
-                "usage": {"prompt_tokens": 1, "completion_tokens": 1},
-            })
+            return httpx.Response(200, text=_sse_answer(
+                content="好", prompt_tokens=1, completion_tokens=1,
+            ))
 
         provider = DeepSeekProvider(
             "sk-test", "https://api.deepseek.com", transport=httpx.MockTransport(handler),
@@ -906,6 +967,7 @@ def _rule_faithful_handler(request: httpx.Request) -> httpx.Response:
 
     为什么要在 mock 里建模这条：02b/02c 的教训——mock 不建模 API 的真实约束，
     这类 400 在单测里**结构上不可能被发现**（02c 的工具名点号 400 即同类）。
+    应答按 SSE 形态给（loop 自 02g-2 起走流式）。
     """
     body = json.loads(request.content)
     enabled = (body.get("thinking") or {}).get("type") == "enabled"
@@ -919,21 +981,18 @@ def _rule_faithful_handler(request: httpx.Request) -> httpx.Response:
                 }})
     last = body["messages"][-1]
     if last.get("role") == "tool":
-        message: dict[str, Any] = {"role": "assistant", "content": "记好了。"}
+        content, tool_calls = "记好了。", None
     else:
-        message = {
-            "role": "assistant", "content": "",
-            "tool_calls": [{
-                "id": "call_1", "type": "function",
-                "function": {"name": "account_list", "arguments": "{}"},
-            }],
-        }
-    if enabled:
-        message["reasoning_content"] = "先列账户再回答。"
-    return httpx.Response(200, json={
-        "choices": [{"message": message}],
-        "usage": {"prompt_tokens": 3, "completion_tokens": 5},
-    })
+        content = ""
+        tool_calls = [{
+            "index": 0, "id": "call_1", "type": "function",
+            "function": {"name": "account_list", "arguments": "{}"},
+        }]
+    return httpx.Response(200, text=_sse_answer(
+        content=content,
+        reasoning="先列账户再回答。" if enabled else "",
+        tool_calls=tool_calls,
+    ))
 
 
 class TestReasoningEchoContract:
@@ -1228,3 +1287,149 @@ class TestToolPayloadHygiene:
         assert _without_ids(payload) == {
             "items": [{"name": "餐饮", "valid": True, "paid": True}],
         }
+
+
+# ── 流式增量（T-M7-02g-2）────────────────────────────────────────────────
+
+
+class _RecordingObserver:
+    """把 loop 的每一次进度回调原样记下来（协议 6 个钩子，全部显式实现）。
+
+    **必须显式**：``AgentLoop._notify`` 用 ``getattr`` 取钩子、异常一律吞掉，
+    少写一个方法只会让那类回调静默消失——用例把「钩子被调到」当作断言对象，
+    所以这里宁可啰嗦也不靠 ``__getattr__`` 兜。
+    """
+
+    def __init__(self) -> None:
+        self.calls: list[tuple[str, dict[str, Any]]] = []
+
+    def _record(self, hook: str, **kwargs: Any) -> None:
+        self.calls.append((hook, kwargs))
+
+    def step_started(self, *, step: int, level: ReasoningLevel) -> None:
+        self._record("step_started", step=step, level=level)
+
+    def step_finished(
+        self, *, step: int, prompt_tokens: int, completion_tokens: int,
+    ) -> None:
+        self._record(
+            "step_finished", step=step,
+            prompt_tokens=prompt_tokens, completion_tokens=completion_tokens,
+        )
+
+    def tool_started(self, *, step: int, name: str) -> None:
+        self._record("tool_started", step=step, name=name)
+
+    def tool_finished(self, *, step: int, name: str, outcome: T.ToolOutcome) -> None:
+        self._record("tool_finished", step=step, name=name, outcome=outcome)
+
+    def delta(self, *, step: int, text: str) -> None:
+        self._record("delta", step=step, text=text)
+
+    def reasoning_delta(self, *, step: int, text: str) -> None:
+        self._record("reasoning_delta", step=step, text=text)
+
+    # -- 断言辅助 -------------------------------------------------------
+
+    @property
+    def increments(self) -> list[tuple[str, str]]:
+        """``(通道, 文本)`` 序列，只保留两个增量钩子。"""
+        return [
+            (hook, kwargs["text"])
+            for hook, kwargs in self.calls
+            if hook in ("delta", "reasoning_delta")
+        ]
+
+
+class _IncrementOnlyProvider:
+    """违约的假 provider：只给增量，不给带 ``result`` 的收尾帧。"""
+
+    name = "increment-only"
+
+    def __init__(self, *increments: StreamChunk) -> None:
+        self._increments = increments
+
+    async def complete_with_tools_stream(self, messages, **kwargs):
+        for chunk in self._increments:
+            yield chunk
+
+
+class TestStreamingIncrements:
+    """模型请求走 token 级流式，正文与推理**分通道**外送（架构 §8.5）。"""
+
+    async def test_answer_and_reasoning_use_separate_hooks(self):
+        """推理不进正文通道——两者在客户端渲染到不同位置，合并就没法分了。"""
+        observer = _RecordingObserver()
+        provider = ScriptedProvider([
+            _text("你好呀！", reasoning="用户只是打招呼，直接回。"),
+        ])
+
+        await _loop(provider, observer=observer).run("你好")
+
+        assert observer.increments == [
+            ("reasoning_delta", "用户只是打招呼，直接回。"),
+            ("delta", "你好呀！"),
+        ]
+        assert all(kwargs["step"] == 1 for hook, kwargs in observer.calls
+                   if hook in ("delta", "reasoning_delta"))
+
+    async def test_blank_answer_emits_no_increment(self):
+        """空回答（thinking 吃光预算的形态）不该发一个空气泡——原因由
+        ``stop_reason`` 交代，与 02g 的帧层同口径。"""
+        observer = _RecordingObserver()
+
+        await _loop(ScriptedProvider([_text("")]), observer=observer).run("你好")
+
+        assert observer.increments == []
+
+    async def test_wrap_up_text_also_reaches_the_delta_hook(self):
+        """撞边界时的收尾文案**不是流式产出的**，但必须照样送到客户端。
+
+        收尾请求刻意不流式（失败会退回确定性兜底，流式会让客户端看到
+        「半截 + 兜底」拼接），所以它由 ``_wrap_up`` 自己发一帧——漏掉的话
+        客户端会拿到一个空气泡加 ``done``。
+        """
+        observer = _RecordingObserver()
+        provider = ScriptedProvider([
+            _tool_turn(_call("budget_list", {})),
+            _finish_turn(),
+        ])
+
+        result = await _loop(
+            provider, observer=observer, limits=AgentLimits(max_steps=1),
+        ).run("看看预算")
+
+        assert result.stop_reason is StopReason.STEP_LIMIT
+        assert ("delta", result.content) in observer.increments
+        assert "已完成：" in result.content  # 收尾文案（模型给的或兜底的）
+
+    async def test_every_step_reports_its_own_increments(self):
+        """两次模型请求各自带自己的 ``step``——客户端据此把增量归到正确的步骤。"""
+        observer = _RecordingObserver()
+        provider = ScriptedProvider([
+            _tool_turn(_call("budget_list", {}), content="我先查一下。"),
+            _text("这个月还没有设置预算。", reasoning="汇总一下再答。"),
+        ])
+
+        await _loop(provider, observer=observer).run("看看预算")
+
+        assert [(hook, kwargs["step"]) for hook, kwargs in observer.calls
+                if hook in ("delta", "reasoning_delta")] == [
+            ("delta", 1),
+            ("reasoning_delta", 2),
+            ("delta", 2),
+        ]
+
+    async def test_stream_without_a_result_chunk_is_a_bad_response(self):
+        """provider 契约是「增量之后**恰好一个**带 ``result`` 的收尾帧」。
+
+        收不到就是实现违约。此时增量已经全部交出去了，因此报**不可重试**——
+        重发会把这些内容再送一遍（与 02b 的流式重试规则同口径）。
+        """
+        provider = _IncrementOnlyProvider(StreamChunk(delta="半句"))
+
+        with pytest.raises(ProviderError) as exc_info:
+            await _loop(provider).run("你好")
+
+        assert exc_info.value.reason == "bad_response"
+        assert exc_info.value.retryable is False

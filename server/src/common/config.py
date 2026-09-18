@@ -299,6 +299,11 @@ class Settings(BaseSettings):
     # **按步**计的（02h 为该长连接单独配置超时）。取 20 s：低于客户端单步 25 s
     # 取消（服务端先失败，才能把 ``error`` 帧发出去），高于 02d 实测的深档单步
     # 5–7 s。
+    #
+    # **自 02g-2 起，这一项计的是「静默」而不是「总时长」**：流式请求下 httpx 的
+    # read timeout 语义即「两个数据块之间最多等多久」，一个在稳定输出的长回答因此
+    # 不会被掐掉（那正是我们要保留的形态），真正被判死的只有「卡住不动」。客户端
+    # 侧（02h）按同一口径用 OkHttp 的 read timeout，不用 ``callTimeout``。
     ai_agent_step_timeout_seconds: float = Field(
         default=20.0,
         gt=0,

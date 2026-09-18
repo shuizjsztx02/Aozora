@@ -1,4 +1,4 @@
-"""T-M7-02d: Agent loop 核心与推理分级（非流式）。
+"""T-M7-02d: Agent loop 核心与推理分级。
 
 本模块是服务端 agent 的编排层：把「用户一句话」变成「若干次模型请求 + 工具
 执行」，直到得出面向用户的回答或撞上硬边界。架构依据 §4.4（Loop 结构）与
@@ -17,9 +17,18 @@
     while await loop.step():   # 即架构伪代码的 while (await turn())
         pass
 
-不做流式（02g）、不做 HTTP 传输（02g）；进度只经 ``observer`` 回调外送（02g 的
-SSE 层据此发 ``phase`` / ``tool_call`` / ``tool_result``）。写操作走 §7.3/§7.4
-的安全路径（02e）：
+流式（T-M7-02g-2）
+------------------
+模型请求走 **token 级流式**（``complete_with_tools_stream``），正文与推理增量
+分通道经 ``observer`` 实时外送（02g 的 SSE 层据此发 ``delta`` 帧，架构 §8.5）。
+两条边界：
+
+- **收尾请求不流式**（:meth:`AgentLoop._wrap_up`）——它是机械交代，且失败会退回
+  确定性兜底文案，流式会让客户端看到「半截模型输出 + 兜底文案」拼在一起。
+- **消息流里放的是最终结果**，不是增量：``ProviderResult`` 由 provider 的累加器
+  拼出，与流式之前逐字相同，因此四条不变式与写路径一行未改。
+
+progress 之外不做 HTTP 传输（02g 的职责）；写操作走 §7.3/§7.4 的安全路径（02e）：
 写工具只产出提案**草案**，由本模块组装（补 ``proposalId`` / ``confidence`` /
 ``requiresConfirmation``）、校验（复用 ``AIService.validate_proposal``）、按策略
 放行或挂起，执行一律经 ``AIService.execute_proposal``（含 TOCTOU 重校验）——
@@ -669,6 +678,22 @@ class AgentObserver(Protocol):
 
     def tool_finished(self, *, step: int, name: str, outcome: ToolOutcome) -> None: ...
 
+    def delta(self, *, step: int, text: str) -> None:
+        """助手**正文**的一个增量（T-M7-02g-2）。
+
+        一次 Step 会有几十上百次调用（实测约 4 字符/帧），因此实现**必须便宜**：
+        回调点在 provider 的增量路径上，02g 的实现只做 ``queue.put_nowait``。
+        合并成整帧是 SSE 层的事（那里的 100 ms 合并窗），不在观察者里攒。
+        """
+
+    def reasoning_delta(self, *, step: int, text: str) -> None:
+        """**推理内容**的一个增量（T-M7-02g-2）。
+
+        与正文分通道外送：它不进回答气泡，而是客户端「深度思考」折叠区的来源
+        （架构 §8.5）。分开送不是洁癖——实测深档带工具那一步 0.45 s 起就有推理、
+        全程 524 字符推理对 0 字符正文，只送正文的话最需要反馈的一步仍然静默。
+        """
+
 
 # ---------------------------------------------------------------------------
 # Loop
@@ -817,13 +842,8 @@ class AgentLoop:
         self._steps += 1
         self._notify("step_started", step=self._steps, level=level)
 
-        result = await self._provider.complete_with_tools(
-            list(self._messages),
-            model=self._model,
-            max_tokens=self._max_tokens,
-            timeout=self._timeout,
-            tools=self._openai_tools,
-            reasoning=level,
+        result = await self._stream_step(
+            list(self._messages), tools=self._openai_tools, reasoning=level,
         )
         self._prompt_tokens += result.prompt_tokens
         self._completion_tokens += result.completion_tokens
@@ -910,6 +930,46 @@ class AgentLoop:
                 "agent observer hook failed",
                 extra={"hook": hook, "error": type(exc).__name__},
             )
+
+    async def _stream_step(
+        self,
+        messages: list[dict[str, Any]],
+        *,
+        tools: list[dict],
+        reasoning: ReasoningLevel,
+    ) -> ProviderResult:
+        """跑一次模型请求，把增量实时交给观察者，返回拼好的结果（T-M7-02g-2）。
+
+        **两个通道分别外送**：正文走 ``delta``、推理走 ``reasoning_delta``
+        （架构 §8.5）。进消息流的是 ``chunk.result``——provider 的累加器拼出的
+        最终 ``ProviderResult``，与流式之前逐字相同，所以四条不变式与写路径
+        一行未改。
+
+        ``result`` 缺位的兜底：provider 的契约是「增量之后恰好一个带 ``result``
+        的收尾帧」（``StreamChunk`` 的 docstring）。收不到就是 provider 实现违约；
+        此时增量已经全部交出去了，因此报 **不可重试**（与 02b 的流式重试规则
+        同口径——重发会把这些内容再送一遍）。
+        """
+        result: ProviderResult | None = None
+        async for chunk in self._provider.complete_with_tools_stream(
+            messages,
+            model=self._model,
+            max_tokens=self._max_tokens,
+            timeout=self._timeout,
+            tools=tools,
+            reasoning=reasoning,
+        ):
+            if chunk.delta:
+                self._notify("delta", step=self._steps, text=chunk.delta)
+            if chunk.reasoning_delta:
+                self._notify(
+                    "reasoning_delta", step=self._steps, text=chunk.reasoning_delta,
+                )
+            if chunk.result is not None:
+                result = chunk.result
+        if result is None:
+            raise ProviderError(status=200, retryable=False, reason="bad_response")
+        return result
 
     def _assistant_tool_calls(self, result: ProviderResult) -> list[tuple[str, ToolCall]]:
         """给每个调用定格一个**唯一且非空**的 id。
@@ -1175,6 +1235,12 @@ class AgentLoop:
 
         收尾指令本身**不进** ``AgentResult.messages``（它是系统产物，不是对话
         内容），只有模型给出的回答作为 assistant 消息入列，历史因此保持一致。
+
+        **刻意不走流式**（T-M7-02g-2）：收尾是一次机械交代，没有实时性的必要；
+        更要紧的是请求失败会退回确定性兜底文案——若它流式，客户端会看到「半截
+        模型输出 + 兜底文案」拼在一起。文本产出后（兜底文案也算）作为**一帧**
+        ``delta`` 外送：正常路径的回答是流式实时送出的，收尾路径不是，客户端
+        靠这一帧拿到它。
         """
         reason = _STOP_REASON_TEXT.get(str(stop), "本轮执行受限")
         messages = [
@@ -1203,6 +1269,7 @@ class AgentLoop:
         if not content:
             content = self._fallback_summary(reason)
             reasoning = ""
+        self._notify("delta", step=self._steps, text=content)
         # 收尾回答同样要带 reasoning_content 键（含空串）：它会被持久化进历史，
         # 而下一轮只要有一步走 thinking 模式，缺键的 assistant 消息就会 400。
         self._append({

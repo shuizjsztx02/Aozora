@@ -40,7 +40,7 @@ from src.modules.ai.conversation import (
     ConversationService,
     _prepare_events,
 )
-from src.modules.ai.provider import ProviderResult, ToolCall
+from src.modules.ai.provider import ProviderResult, StreamChunk, ToolCall
 from src.modules.auth.service import AuthService
 from tests.fixtures_db import db_session, sample_data  # noqa: F401
 
@@ -82,6 +82,24 @@ class _ScriptedProvider:
         self.calls.append([dict(m) for m in messages])
         assert self.results, "scripted provider exhausted"
         return self.results.pop(0)
+
+    async def complete_with_tools_stream(
+        self, messages, *, model, max_tokens, timeout, tools, reasoning,
+    ):
+        """流式形态（T-M7-02g-2）：loop 自本卡起只走这条路。
+
+        复用非流式的取值逻辑（同一个 ``calls`` 记录与脚本消耗顺序），只在交付
+        形态上分帧：推理一帧、正文一帧、收尾帧带 ``result``。
+        """
+        result = await self.complete_with_tools(
+            messages, model=model, max_tokens=max_tokens, timeout=timeout,
+            tools=tools, reasoning=reasoning,
+        )
+        if result.reasoning_content:
+            yield StreamChunk(reasoning_delta=result.reasoning_content)
+        if result.content:
+            yield StreamChunk(delta=result.content)
+        yield StreamChunk(result=result)
 
 
 def _ctx(db: Any, user_id: uuid.UUID, book_id: uuid.UUID) -> T.ToolContext:

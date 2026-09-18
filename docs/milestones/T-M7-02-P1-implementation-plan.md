@@ -18,6 +18,7 @@
 | **02e** | 写工具安全路径 | ✅ 完成 | 2026-09-18 | `1fdffd1` | 批次 3；组装 / 校验 / 审批四值 / 执行接线 + 26 用例，9/9 回退实验变红，详见 §五 |
 | **02f** | 会话状态与配额双限 | ✅ 完成 | 2026-09-18 | `17e7cac` | 批次 3；事件表 + 会话索引 + 429 双限 + 登出/删号清理；37 用例，独立复审 0 P1/1 P2（已修）详见 §五 |
 | **02g** | SSE 端点与部署配置 | ✅ 完成 | 2026-09-18 | `d239dd7` | 批次 4；48 用例 + 直连 ASGI 流式样板，18/18 回退实验变红，详见 §五 |
+| **02g-2** | token 级 delta（含推理增量） | ✅ 完成 | 2026-09-19 | （待回填） | 批次 4.5；协议细化（不改 §8.1 的八类事件）；实测合并窗 24×，12/12 回退实验变红，详见 §五 |
 | **02h** | 客户端桥通道 | ⏳ 未开始 | | | 批次 5 |
 | **02i** | 客户端消费（最小形态） | ⏳ 未开始 | | | 批次 5 |
 | **收口** | P1 四板 + T-M7-01 真机复认 | ⏳ 未开始 | | | 批次 6 |
@@ -31,7 +32,7 @@
 ```
 批次 1  02b ─┐
         02c ─┴─→ 批次 2  02d ─┬─→ 批次 3  02e ─┐
-                              └─→ 批次 3  02f ─┴─→ 批次 4  02g ─→ 批次 5  02h ─→ 02i ─→ 批次 6 收口
+                              └─→ 批次 3  02f ─┴─→ 批次 4  02g ─→ 批次 4.5  02g-2 ─→ 批次 5  02h ─→ 02i ─→ 批次 6 收口
 ```
 
 | 批次 | 卡 | 可并行 | 说明 |
@@ -40,10 +41,13 @@
 | 2 | 02d | — | loop 核心，依赖批次 1 全部 |
 | 3 | 02e、02f | ✅ 两者均只依赖 02d | 安全路径与会话状态互不依赖 |
 | 4 | 02g | — | 流式通道，依赖 02d + 02e |
+| 4.5 | 02g-2 | — | 增量粒度与推理通道，依赖 02g；**必须排在 02h 之前**（见下） |
 | 5 | 02h、02i | — | 客户端，串行（02i 依赖 02h） |
 | 6 | 收口 | — | 四板 + 真机复认 |
 
 **并行切分点：** 若开多会话并行，**批次 1 的 02b/02c** 与 **批次 3 的 02e/02f** 是仅有的两组安全切分。其余串行。
+
+**为什么 02g-2 插在 02h 之前而不是回改 02g：** 它改的正是 02g 记录里写死的协议决策（`delta` 的粒度）与 02d 的核心文件，且需要真实探针情报（已完成，见 §五 02g-2）。独立成卡可以独立提交、独立回退、边界写死。**时机是硬约束**：02h 还没建桥、02i 还没写气泡渲染，此时改 delta 语义是零客户端返工；等 02i 把流式气泡写完再改，就是返工。
 
 **外部阻塞：无。** 02a 已验证 provider 可用；provider / 推理 / 安全边界 / 离线收窄四项决策均已落文档；nginx 决定不改（SSE 缓冲改走应用层响应头）。
 
@@ -102,9 +106,22 @@
 - **验证：** 流式样板可跑（帧格式、事件顺序、heartbeat）；**实测确认 `X-Accel-Buffering: no` 经真实链路（含 nginx）后事件逐条下发而非攒批**——若该头被忽略，须回到改 nginx 的路子并更新 R-PROD-22；开关关闭时端点不可用且旧客户端行为不变（不调 `/ai/agent` 则完全不受影响）。
 - **风险提示：** 本卡是**整链最需留缓冲的一环**——流式测试样板在仓库中**零先例**（现全部为同步 `TestClient`，且无任何 async generator 用于 HTTP 响应）。若它卡住，批次 5 会连带等待。
 
+### 02g-2 token 级 delta（含推理增量）
+
+- **内容：** 把 `delta` 从「一轮一帧」升级为 **token 级增量**，并**同时送推理增量**（架构 §8.5）。
+  - **provider**（`provider.py`）：`StreamChunk` 增 `reasoning_delta`；`_StreamAccumulator.feed` 一并返回推理增量（累加器**已经在收**推理内容，只是没往外给）。
+  - **loop**（`agent.py`）：`step()` 的 provider 调用换成 `complete_with_tools_stream` 的 `async for` 消费；`AgentObserver` 增 `delta` / `reasoning_delta` 两个钩子；**收尾请求（`_wrap_up`）保持非流式**，其文本产出后作为一帧 `delta` 送出。
+  - **SSE**（`stream.py`）：`delta` 载荷增 `channel`（`content` / `reasoning`）与 `step`；删掉收尾时的单帧 `delta`（否则重复）；**帧泵加 100 ms 合并窗**（同通道 + 同 Step 合并成一帧）。
+  - **配置**（`config.py`）：`ai_agent_step_timeout_seconds` 的注释改为「静默超时」口径（§8.3），`.env.example` 同步。
+- **职责边界：** **不改架构 §8.1 的八类事件**（协议是纯增量）；**不改写路径**（02e 的组装 / 校验 / 审批 / 执行一行不动）；**不做断连恢复**（「看到了但没落库」的窗口变大是已知代价，真正的修法归 P3 的完整事件日志）；**不做失败步骤的 token 估算**（见 §五 的「判定为记录不修的一项」）；不碰 02h/02i 的文件。
+- **产出：** `server/src/modules/ai/provider.py`、`agent.py`、`stream.py`、`config.py`、`.env.example`；四个测试文件的假 provider（`test_ai_agent.py` / `test_ai_agent_approval.py` / `test_ai_conversation.py` / `test_agent_stream.py`）
+- **验证：** **真实探针闸门**（三档形态各一次真调用，已完成，见 §五）确认 `stream_options.include_usage` 确实回 usage 尾块、且推理增量先于正文增量；四个假 provider 全部实现流式方法（**不实现就是 `AttributeError`，新路径等于没测**）；增量转发、`channel` 分支、合并窗（含「跨通道不合并」「无新数据时按期冲刷」）、收尾文本只出现一次、推理增量已交出后失败不可重试——各有用例。
+- **时机：** **必须排在 02h 之前**。02h 还没建桥、02i 还没写气泡渲染，此刻改 delta 语义零客户端返工。
+
 ### 02h 客户端桥通道（okhttp-sse + 事件转发）
 
-- **内容：** `app/build.gradle.kts` 加 `com.squareup.okhttp3:okhttp-sse:4.12.0`；`AiGatewayClient` 实现流式接收（**SSE 长连接不能用现有 `callTimeout(25s)`**，需独立 OkHttpClient 配置）；新增 `ai.agent` / `ai.cancel` 桥命令——**命令数 77 → 79，四处同步**：`BridgeProtocol.kt` 的 const 与 `ALL`、`AozoraBridge.dispatch`、`bridge-types.ts`、`native-bridge.ts`，且 `SecurityConfigTest.kt:30-57` 的硬编码 `77` 断言同步更新；事件推送复用 `webView.post { evaluateJavascript }` + 新增 `window.__aozoraAiStream__`（照 `onPermissionResult` 的链式包装写法，已有 7 个全局回调先例）；`activeStreamJob` 仿 `activeParseJob` 支持取消。
+- **内容：** `app/build.gradle.kts` 加 `com.squareup.okhttp3:okhttp-sse:4.12.0`；`AiGatewayClient` 实现流式接收（**SSE 长连接不能用现有 `callTimeout(25s)`**，需独立 OkHttpClient 配置——用 **read timeout** 表达「静默 25 s」，见架构 §8.3）；新增 `ai.agent` / `ai.cancel` 桥命令——**命令数 77 → 79，四处同步**：`BridgeProtocol.kt` 的 const 与 `ALL`、`AozoraBridge.dispatch`、`bridge-types.ts`、`native-bridge.ts`，且 `SecurityConfigTest.kt:30-57` 的硬编码 `77` 断言同步更新；事件推送复用 `webView.post { evaluateJavascript }` + 新增 `window.__aozoraAiStream__`（照 `onPermissionResult` 的链式包装写法，已有 7 个全局回调先例）；`activeStreamJob` 仿 `activeParseJob` 支持取消。
+- **02g-2 追加约束：** `delta` 帧现在**多且带 `channel`**（`content` / `reasoning`，架构 §8.5），桥层必须**逐帧原样转发、不合并也不丢弃**（服务端已经做过 100 ms 合并）；`ai.cancel` 仍是关掉长连接，服务端把断连当取消。
 - **职责边界：** **Token 不出 Kotlin 层**（ADR-003 不变）。**不做 UI**（那是 02i）。
 - **产出：** `app/build.gradle.kts`、`AiGatewayClient.kt`、`AozoraBridge.kt`、`BridgeProtocol.kt`、`native-bridge.ts`、`bridge-types.ts`、`SecurityConfigTest.kt`
 - **验证：** 桥命令计数断言 79；TS 命令完整性契约测试；SSE 事件从服务端到 WebView 端到端送达；取消能终止 loop。
@@ -112,6 +129,7 @@
 ### 02i 客户端消费（最小形态）
 
 - **内容：** `use-assistant.ts` 的 `submitInput` 改走 `ai.agent`。**v2 intent 在流式中无法预知**（chat/query/edit/delete/config 的 UI 形态互异），定型为：流式期间只渲染文本气泡，`done` 到达后按既有 v2 分发矩阵（`use-assistant.ts:669-691`）走原有卡路径，用户感知为「思考完毕展开卡」；保留非流式 `ai.interpret` 作为开关关闭时的降级。
+- **02g-2 追加约束（写代码前先落这三条，之后改就是返工）：** ①`delta` 帧按 `channel` 分流——`content` 进正文气泡，`reasoning` 进**灰字折叠区**（对标 DeepSeek 的「深度思考」，P1 允许先只记录不渲染，但**不能把它混进正文**）；②`error` 帧到达时**保留气泡里的半截文本并标注失败，不清空**（架构 §8.5）；③正文气泡会收到**多帧** `delta`（服务端已按 100 ms 合并，颗粒度约每帧几十字符），按追加渲染，不要假设「一轮一帧」。
 - **职责边界：** **不做步骤卡片流、不做多会话、不做模式选择**——归 P2（T-M7-03）。三个互斥瞬时态（`activeProposal` / `pendingOp` / `pendingConfig`）的约束不变。
 - **产出：** `app/src/features/assistant/use-assistant.ts`（改造 `submitInput`）
 - **验证：** 多步任务端到端可完成；多轮澄清可用；非 chat intent 下流式气泡正确卸载并展开卡；开关关闭时回落现有单发链路且 12 s / 25 s 体验不变；既有 assistant 测试全绿。
@@ -140,6 +158,11 @@ cd app && npx tsc --noEmit                       # 0 错
 ```
 
 > 原记录为 658 / 392 / 1104，与实测不符（2026-09-18 由 02c 复核修正）。数字以实测为准。
+>
+> **当前实测基线（2026-09-19，02g-2 交付后）：** 服务端 **1029 passed + 37 skipped**；
+> JVM 394 tests / 0 failures；vitest **1107 passed**；tsc 0 错。**逐卡增量以上面各卡的记录为准**
+> ——各卡的收口与复审都补过用例，拿上游数字累加推算不可靠；**并发会话下以 `--collect-only` 为准**
+> （见下「多会话陷阱」）。
 >
 > **服务端基线推导（2026-09-18 复核）：** 659（02b 前既有）+ 54（02b）+ 95（02c）= 808（批次 1 交付时）；收口核查再各补用例（02b +6、02c +5）后为 **819**（= 659 + 60 + 100）；02d 再 +81（79 个 loop 用例 + 2 个 provider 用例，含 5 个 `reasoning_content` 回归）→ **900**；02e 再 +26（`test_ai_agent_approval.py`，另一条 02d 用例改名改写、数量不变）→ **926**，其后 02e 的收尾提交再 +1 → **927**；02f 再 +32（`test_ai_conversation.py`）→ **962**（该卡记录的同树基线为 930，与 927 的 3 例差额出自并发会话的在途改动，按下面的「多会话陷阱」以 `--collect-only` 为准）。
 > ⚠️ **多会话陷阱：** 02b 提交信息里的「782 passed」**不是**本卡基线——当时 02c 的 `test_ai_tools.py` 正被并发会话在途写入（已 69 例），全量计数把它一并算进去了（713 + 69 = 782）。**在并发会话下跑全量套件，数字不可作为本卡基线**，须以 `pytest <本卡测试文件>` 的增量与 `--collect-only` 为准。02e 交付时全量为 **957**（= 926 + 并发会话 02f 在途的 31），同为此理。
@@ -1124,6 +1147,169 @@ Android Compile & JVM Test **作业级 cancelled**——但**失败点不在代�
 （服务端把断连当取消，没有单独的取消端点）；②事件名与载荷照 `stream.py` 的「各事件的载荷」表
 （`phase` / `tool_call` / `tool_result` / `confirm` / `delta` / `done` / `error`，`device_request`
 P1 不会出现）；③`done.conversation_id` 必须留存并在下一轮带上，否则会一直开新会话。
+
+---
+
+### 02g-2 · token 级 delta（含推理增量）（✅ 2026-09-19）
+
+**任务编号：** T-M7-02g-2
+
+**卡面前的真实探针（用户提供，三档形态各一次真调用）：**
+
+| 探针 | 帧数 | 首个推理增量 | 首个正文增量 | 推理字符 | 正文字符 | 总耗时 | usage 尾块 |
+|---|---|---|---|---|---|---|---|
+| P1 快档 + tools（第 1 步真实形态） | 25 | — | 1.57 s | 0 | 48 + 1 次工具调用 | 1.76 s | ✅ 3522/51 |
+| P2 深档 + tools | 138 | 0.45 s | 无 | 524 | 0 | 1.05 s | ✅ 3610/166 |
+| P3 深档纯聊天（回答步形态） | 164 | 0.46 s | 0.66 s | 229 | 142 | 0.95 s | ✅ 3556/163 |
+
+**它定下了本卡的三条依据：** ①`stream_options.include_usage` **确实回 usage 尾块**——02b 挂了
+一个多月的「未经真实链路验证，否则 agent 每轮计费恒为 0」到此闭环；②**推理增量先于正文增量
+且量大**（P2：524 字符推理对 **0 字符正文**），而 02d 实测深档单步 5–7 s——只转发正文增量的话，
+最需要「有反应」的那一步仍然长时间静默，**收益接近于零**；③帧粒度约 **4 字符/帧**（138–164
+帧/步），一轮三步就是 400–500 帧，直连透传会把客户端桥调用量推高一个数量级。
+
+**完成范围 / 明确未做：**
+
+- **完成（方案 B：正文增量 + 推理增量）：**
+  - **provider**（`provider.py`）：`StreamChunk` 增 `reasoning_delta`；`_StreamAccumulator.feed`
+    改为返回 `(text, reasoning)` —— 累加器**本来就在收**推理内容（为下一轮回传），本卡只是
+    开始往外给。`emitted`（「增量已交出 → 后续失败不可重试」）由**任一通道**置位。
+  - **loop**（`agent.py`）：新增 `_stream_step`，`step()` 的模型请求改走
+    `complete_with_tools_stream` 的 `async for`；`AgentObserver` 增 `delta` / `reasoning_delta`
+    两个钩子（分通道）；**收尾请求（`_wrap_up`）保持非流式**，其文本（含确定性兜底文案）产出后
+    作为**一帧** `delta` 送出。
+  - **SSE**（`stream.py`）：`DeltaChannel`（`content` / `reasoning`）+ 载荷增 `channel` 与 `step`；
+    **帧泵加 100 ms 合并窗**（同通道 + 同 Step 并成一帧）；删掉 02g 在收尾时补发的那一帧 `delta`。
+  - **配置**（`config.py` / `.env.example`）：`ai_agent_step_timeout_seconds` 的注释改为
+    **「静默超时」**口径（流式下 httpx 的 read timeout 语义）。
+- **明确未做（逐条对应职责边界）：**
+  1. **不改架构 §8.1 的八类事件**——`channel` 是载荷内的纯增量字段，02h 的事件解析器一次写对即可。
+  2. **不改写路径**——02e 的组装 / 校验 / 审批 / 执行一行未动。
+  3. **不做断连恢复**——「看到了但没落库」的窗口变大是已知代价（见下「决策 3」）。
+  4. **不做失败步骤的 token 估算**（判定不修，见下）。
+  5. **不碰 02h / 02i 的文件**。
+
+**本卡的真实探针（2026-09-19，同一脚本、三档形态各一次真调用，`deepseek-flash`）：**
+
+| 探针 | 帧数 | **合并后** | 首个推理 | 首个正文 | 推理字符 | 正文字符 | 总耗时 | usage | 工具调用 |
+|---|---|---|---|---|---|---|---|---|---|
+| P1 快档 + tools | 0 | 0 | — | — | 0 | 0 | 0.67 s | ✅ 3538/21 | `category_list` |
+| P2 深档 + tools | 218 | **9** | 0.35 s | 无 | 927 | 0 | 1.41 s | ✅ 3570/257 | `transaction_recent` |
+| P3 深档纯聊天 | 18 | **2** | — | 0.47 s | 0 | 28 | 0.58 s | ✅ 49/19 | — |
+
+**结论：** ①**合并窗效果实测约 24×**（P2 218 帧 → 9 帧；P3 18 → 2）——这是「必须合并」这个判断的
+直接证据；②形态与卡面前探针一致（推理先行、正文可为零、usage 恒有尾块），差异只在采样（P1 这次
+模型直接调工具、**没说前言**，故帧数为 0；P3 这次没产生推理）；③**P1 的 0 帧值得记一笔**：快档
+直接调工具时这一步**没有任何可显示的增量**——「步骤可见性由 `tool_call` / `tool_result` 承担」
+（02g 的结论）在本卡之后仍然成立，`delta` 补的是「模型正在说什么」，不是「正在做哪件事」。
+
+**关键设计决策（02h / 02i 必读）：**
+
+| # | 决策 | 理由 |
+|---|---|---|
+| 1 | **推理与正文分两个通道**（`channel`），不合并成一个字符串 | 两者在客户端渲染到**不同位置**（推理进灰字折叠区、正文进气泡）。合并就没法分了 |
+| 2 | **合并窗放服务端**（帧泵，100 ms，同通道 + 同 Step） | 架构的立场是客户端瘦渲染（§2.1）——一处解决对所有客户端生效；桥层（02h）因此只需**逐帧原样转发**。实测收益见上表 |
+| 3 | **收尾请求不流式**，文本产出后发一帧 | 它是机械交代，没有实时性的必要；更要紧的是失败会退回确定性兜底文案，流式会让客户端看到「半截模型输出 + 兜底文案」拼在一起 |
+| 4 | **`emitted` 由任一通道置位** | 重试的代价是「用户已经看到的内容再来一遍」，思考内容也一样（折叠区里已经渲染出来了） |
+| 5 | **`delta` 不再保证「已落库」**——只有 `done` 保证 | 02g 的「提交成功后才发 delta / done」在流式下对 `delta` 不再成立（它必须实时发）。**这是本卡的主要代价**，见下 |
+| 6 | **单步超时口径改为「静默时长」**（服务端 httpx read timeout、客户端 OkHttp read timeout） | 一个在稳定输出的长回答不该被掐掉；非流式下「总时长」是唯一可用判据，流式下「静默」才是真正该判的异常 |
+
+**给 02i 的三条硬约束（写渲染代码前先落，之后改就是返工）：** ①`delta` 按 `channel` 分流——
+`reasoning` 进灰字折叠区、**绝不混进正文**；②`error` 帧到达时**保留气泡里的半截文本并标注失败、
+不清空**（架构 §8.5）；③正文气泡会收到**多帧** `delta`，按追加渲染，不要假设「一轮一帧」。
+
+**判定为「记录不修」的一项——失败那一步的 token 捞不回来：** 可选修法是把累加器里的部分用量挂到
+`ProviderError` 上，但**累加器里也没有东西可捞**——`deepseek-flash` 的 usage 在**尾块**，流断了就是
+零。加这条只会得到一个在真实链路下永远取不到值的分支（02e 的「假防御空转代码」是同一类）。
+与非流式失败「无响应体 = 无 usage」同口径，**不是回归**。真正的修法（让 provider 每块带 usage，或
+做估算）依赖 provider 行为，随 P3 的断连恢复一起评估。**责任人：P3（T-M7-04）。**
+
+**修改的文档、契约与代码：**
+
+- 代码：`server/src/modules/ai/provider.py`、`agent.py`、`stream.py`、`server/src/common/config.py`、
+  `server/.env.example`
+- 测试：`server/tests/test_ai_agent_provider.py`（1 条改写 + 1 条新增）、`test_ai_agent.py`（+6，
+  含 3 条「用真实 provider 断言请求体」的用例改喂 SSE）、`test_agent_stream.py`（+7）、
+  `test_ai_agent_approval.py` / `test_ai_conversation.py`（各 +1 个流式方法）
+- 文档：本文件 §一 / §二 / §三 / §四 / §五；`production-execution-plan.md` 的 T-M7-02g-2 行与
+  02h / 02i 卡面；`ai-agent-architecture.md` §8.1 / §8.3 / **§8.5（新增）**；`risk-register.md`
+- **契约零改动**：`contracts/` 一行未动
+
+**验证命令与结果：**
+
+```
+cd server && python -m pytest tests/test_ai_agent.py -q            # 84 passed（02d 基线 79 + 5）
+cd server && python -m pytest tests/test_agent_stream.py -q        # 55 passed（02g 基线 48 + 7）
+cd server && python -m pytest tests/test_ai_agent_provider.py -q   # 63 passed（基线 62 + 1）
+cd server && python -m pytest tests/ -q                            # 1029 passed, 37 skipped
+                                                                   # （同树基线 1016 = 02g 后的实测值；本卡 +13）
+cd server && python -m ruff check src/ tests/                      # All checks passed
+cd app && npx tsc --noEmit / npx vitest run                        # 0 错 / 1107 passed
+./gradlew :app:testDebugUnitTest --rerun-tasks                     # BUILD SUCCESSFUL
+```
+
+**回退实验（12/12 全红，脚本在系统临时目录、不入库；逐处按 sha256 逐字节还原）：**
+
+| # | 变异 | 变红的用例 |
+|---|---|---|
+| M1 | `_stream_step` 不转发正文增量 | 增量分通道 |
+| M2 | `_stream_step` 不转发推理增量 | 增量分通道 |
+| M3 | provider 不给收尾帧时不报错（静默返回空结果） | 流式契约违约 |
+| M4 | `_wrap_up` 不发收尾文本 | 收尾文本经 delta 送出（2 条） |
+| M5 | provider 的 `feed` 不返回推理增量 | 推理分通道（provider 侧） |
+| M6 | `emitted` 只看正文、不看推理 | 推理增量后失败不可重试 |
+| M7 | 合并窗归零（每片一帧） | 窗内分片并成一帧 |
+| M8 | 合并忽略通道（推理与正文会拼进同一帧） | 增量分通道（帧侧） |
+| M9 | 合并只剩「空闲就冲刷」（时间窗不再成立） | 窗内分片并成一帧 |
+| M10 | 非 `delta` 事件不冲刷缓冲 | 工具事件不得抢在正文前面 |
+| M11 | 帧层恢复 02g 的收尾 `delta`（收尾文本发两遍） | 收尾文本只出现一次 |
+| M12 | 观察者把正文发到推理通道 | 增量分通道（帧侧） |
+
+> **M9 暴露的一个覆盖缺口（本卡内已补）：** 「合并窗的**时长**是唯一合并判据」这一条原本**测不到**——
+> fixture 的 `ai_agent_heartbeat_seconds`（0.05）比合并窗（0.1）还短，于是「空闲就冲刷」的退化实现
+> 照样能通过。已把用例改成 `monkeypatch` 把窗调到 1.0 s、分片间隔给 0.3 s：此时**唯一**能把分片并
+> 起来的机制就是合并窗本身（M9 随即变红）。
+
+**数据 / 同步 / AI / 安全影响：**
+
+- **数据与同步：零影响**——无模型改动、无迁移、不进 sync 协议。
+- **AI：** agent 路径的**输出形态**变了（一轮从一帧 `delta` 变成多帧、且多了一个通道），但**输入
+  侧与写路径一字未动**：进消息流的仍是累加器拼出的 `ProviderResult`，四条不变式与三条铁律照旧。
+  默认关闭（`ai_agent_enabled=false`）时端点 503、provider 一次都不调。
+- **安全：** 新增面是「推理内容也进客户端帧」。推理是**模型自己的自述**，不含工具结果与用户数据
+  （工具结果走 `tool_result` 摘要，回喂模型的历史里 id 仍被剥净）；帧格式与脱敏口径不变。
+  `error` 帧仍只给安全枚举码。
+- **隐私：** 无新增日志面（观察者回调只入队，帧泵不记日志）。
+
+**兼容与回退方式：**
+
+- **向前兼容：** 协议是**纯增量**——`channel` / `step` 是新字段，八类事件一个不多一个不少；
+  02i 之前的客户端看到多帧 `delta` 也只需追加渲染（02g 交付时本就是「对任意分片成立」的帧格式）。
+  默认关闭时旧客户端与快路径行为逐字不变。
+- **回退** = 把 `step()` 换回 `complete_with_tools`、删 `_stream_step` 与两个钩子、`feed` 改回返回
+  单值、帧泵去掉合并缓冲、恢复 `_execute_turn` 的收尾 `delta`（约 120 行）；写路径 / 校验器 /
+  工具层 / 契约未被触碰，回退面干净。
+
+**开放风险与责任人：**
+
+- **「看到了但没落库」的窗口变大**（决策 5）——02g 的「正文与落库几乎同时」变成「整段正文期间」，
+  断连即「用户看完了答案、历史里什么都没有」。P1 接受并记录；真正的修法（轮中途落库 / 完整事件
+  日志）归 P3。**责任人：P3（T-M7-04）。**
+- **失败步的 token 捞不回**（见上「判定不修」）。**责任人：P3。**
+- **合并窗的两个参数是初值**——100 ms 与「同通道 + 同 Step」的分组键由 02g-2 探针的帧粒度（约
+  4 字符/帧）推得，真实分布要等 02h/02i 接通后统计。**责任人：收口。**
+- **快档 + 直接调工具时这一步没有任何 `delta`**（本卡探针 P1：0 帧）——不是缺陷，但意味着
+  「有反应」在那种形态下仍靠 `tool_call` / `tool_result`。02i 的渲染不能假设「每条回复都从
+  `delta` 开始」。**责任人：02i（知情即可）。**
+- **02b 的 `stream_options.include_usage` 未经真实链路验证——已闭环**：本卡探针三次调用**全部**
+  拿到 usage 尾块。**责任人：已闭环。**
+- **真实 nginx 链路上的 SSE 行为仍待部署后确认**（R-PROD-22 第 1 项，同 02g）。本卡新增的
+  **合并窗恰好降低了桥调用量**（24×），对那条链路是顺带的利好，但不替代端到端确认。
+
+**下一项未阻塞任务：** **02h（客户端桥通道）** —— 依赖 02g-2，已完成。02h 除了 02g 交接的三件事
+（桥命令 / 事件名与载荷 / `conversation_id` 留存），还要吃本卡的两条：①**`delta` 帧多且带
+`channel`**，桥层逐帧原样转发、不合并也不丢弃（服务端已合并）；②**超时用 read timeout 表达
+「静默 25 s」**，不用 `callTimeout`（架构 §8.3）。
 ---
 
 ## 六、参考

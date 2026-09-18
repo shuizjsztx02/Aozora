@@ -33,7 +33,7 @@
 ``confirm``               写提案**挂起**时（02e 决策 2），载荷为完整提案
 ``device_request``        **无生产者**——P1 没有设备类工具（域只有记账 / 预算 /
                           账户账本三个），设备能力通道归 P2（架构 §4.3）
-``delta``                 助手回复文本，见下「delta 的粒度」
+``delta``                 助手正文与推理的增量，见下「delta 的粒度与两个通道」
 ``done``                  收尾（含 usage、stop_reason、提案与执行回执）
 ``error``                 中途失败的安全枚举码（见下「失败收尾」）
 ========================  ================================================
@@ -62,7 +62,8 @@
                  ``code``* / ``message``*（仅 ``status="error"``，安全枚举码）
 ``confirm``      ``step``、``proposal``（**完整 ActionProposal**，含服务端解析的
                  id——客户端要拿它回投 ``/ai/execute``）
-``delta``        ``text``（助手回复增量；P1 一轮通常一帧，见上）
+``delta``        ``text``（增量）、``channel``（``content`` / ``reasoning``，
+                 见上「delta 的粒度与两个通道」）、``step``
 ``done``         ``conversation_id``、``stop_reason``、``steps``、``tool_calls``、
                  ``writes``、``usage``{prompt_tokens, completion_tokens}、
                  ``proposals``、``executions``、``pending_input``
@@ -75,13 +76,28 @@
 ``empty_response`` / ``step_limit`` / ``tool_call_limit`` / ``write_limit`` /
 ``no_progress``；``cancelled`` 在 P1 不可达——断连走的是连接取消，不发帧）。
 
-delta 的粒度（P1 的如实口径）
------------------------------
-P1 的 loop 是**非流式**的（02d 的边界，provider 的 token 级流式留给后续卡），
-所以 ``delta`` 在**助手文本产出的那一刻**整段送出、一轮通常只有一帧。SSE 的
-实时性在 P1 由 **``tool_call`` / ``tool_result`` 的步骤可见性**承担（02d 实测：
-深档单步 5–7 s，两步就超出 12 s，步骤可见性是必需品而非观感优化）。帧格式对
-任意分片都成立，后续卡换成 token 级流式不需要改协议。
+delta 的粒度与两个通道（T-M7-02g-2）
+-----------------------------------
+loop 自 02g-2 起走 **token 级流式**（``agent.py`` 的 ``_stream_step``），``delta``
+因此一轮会有几十上百帧，分**两个通道**（载荷的 ``channel``）：
+
+- ``content`` —— 助手回答正文，客户端渲染为气泡（实测约 4 字符/帧）。
+- ``reasoning`` —— 模型的自述推理（DeepSeek 的 ``reasoning_content``），客户端
+  渲染为**灰字折叠区**，对标 DeepSeek App 的「深度思考」。
+
+**推理通道不是锦上添花，是本卡存在的理由**：02g-2 的真实探针显示推理增量先于
+正文增量到达且量大（深档带工具那一步 0.45 s 起有推理、全程 524 字符推理对
+**0 字符正文**），而深档单步要跑 5–7 s——只送正文的话，最需要「有反应」的那一步
+仍然长时间静默，收益接近于零。
+
+帧泵把同一通道、同一 Step 的增量在 :data:`_DELTA_MERGE_SECONDS`（100 ms）内并成
+一帧（实测帧粒度约 4 字符/帧，一轮三四百帧直连透传会压桥）。**收尾文本（撞硬
+边界时的交代）不流式**，产出后作为一帧送出；客户端因此**不能**假设「一轮一帧」，
+按追加渲染。协议细节见架构 §8.5。
+
+SSE 的实时性仍由**步骤可见性**共同承担（``tool_call`` / ``tool_result``，02d
+实测：深档单步 5–7 s，两步就超出 12 s）——它给的是「在做哪件事」，``delta`` 给
+的是「正在说什么」，两者互补。
 
 失败收尾（不是重发）
 --------------------
@@ -178,6 +194,19 @@ class Phase(StrEnum):
     TOOL_CALLING = "tool_calling"
 
 
+class DeltaChannel(StrEnum):
+    """``delta`` 帧的内容通道（架构 §8.5，T-M7-02g-2）。
+
+    客户端据此分流，**两个通道不能混**：``REASONING`` 是模型的自述推理
+    （DeepSeek 的 ``reasoning_content``），进灰字折叠区；``CONTENT`` 才是回答
+    正文，进气泡。载荷里带 ``channel`` 而不是另立事件类型——八类事件是 02h 的
+    解析依据，本卡只做纯增量。
+    """
+
+    CONTENT = "content"
+    REASONING = "reasoning"
+
+
 class StreamErrorCode(StrEnum):
     """``error`` 帧的安全枚举码（绝不透传异常正文）。
 
@@ -198,6 +227,16 @@ _ERROR_MESSAGES: dict[StreamErrorCode, str] = {
 #: 心跳注释帧。SSE 规范里以 ``:`` 开头的行是注释，客户端必须忽略——它只用于
 #: 让 nginx 的 60 s 读超时看到流量。
 HEARTBEAT_FRAME = ": ping\n\n"
+
+#: delta 合并窗（秒）。实测帧粒度约 **4 字符/帧**（02g-2 探针：单步 138–164 帧），
+#: 一轮三步就是 400–500 帧——直连透传会把客户端的桥调用量推高一个数量级。帧泵
+#: 把**同一通道、同一 Step** 的增量在窗内并成一帧再发：帧数降一个数量级，首帧
+#: 延迟最多只多这一窗。合并只改帧的**分法**不改内容——把一帧里的若干增量顺序
+#: 拼接，与逐帧拼接逐字节相同，客户端按追加渲染即可。
+#:
+#: **放在服务端而不是客户端**：架构的立场是客户端瘦渲染（§2.1），一处解决对所有
+#: 客户端生效，且桥层（02h）因此只需逐帧原样转发。
+_DELTA_MERGE_SECONDS = 0.1
 
 
 def format_frame(event: EventType | str, payload: Mapping[str, Any]) -> str:
@@ -314,6 +353,25 @@ class QueueObserver:
             "tool": name, "step": step, **summarize_outcome(outcome),
         }))
 
+    def delta(self, *, step: int, text: str) -> None:
+        """助手**正文**的一个增量（T-M7-02g-2）。
+
+        **不在观察者里攒**：回调点在 provider 的增量路径上，一次 Step 会来几十上
+        百次，这里只如实入队；合并成整帧是帧泵的事（:data:`_DELTA_MERGE_SECONDS`）。
+        """
+        self._queue.put_nowait((EventType.DELTA, {
+            "text": text, "channel": DeltaChannel.CONTENT, "step": step,
+        }))
+
+    def reasoning_delta(self, *, step: int, text: str) -> None:
+        """**推理内容**的一个增量（T-M7-02g-2）。
+
+        与正文分通道送出（载荷的 ``channel``），客户端渲染为灰字折叠区。
+        """
+        self._queue.put_nowait((EventType.DELTA, {
+            "text": text, "channel": DeltaChannel.REASONING, "step": step,
+        }))
+
 
 # ---------------------------------------------------------------------------
 # 帧泵（生成器）
@@ -357,6 +415,10 @@ async def agent_event_stream(
         today=today,
     ))
     pending: asyncio.Future[Any] | None = None
+    #: 待发的 delta 缓冲与其冲刷时刻（见 :data:`_DELTA_MERGE_SECONDS`）。
+    #: ``None`` = 没有待发增量。
+    buffered: dict[str, Any] | None = None
+    flush_at = 0.0
     #: 收到终止项 = 工作协程已经跑完并落库。**此时不取消它**——它正在收尾
     #: （关 session），取消会把「归还连接」打断在半路。
     normal_end = False
@@ -364,10 +426,17 @@ async def agent_event_stream(
         while True:
             if pending is None:
                 pending = asyncio.ensure_future(queue.get())
-            done, _ = await asyncio.wait(
-                {pending}, timeout=cfg.ai_agent_heartbeat_seconds,
+            # 有增量待发时只再等合并窗的**剩余**时间，到点就冲刷；否则按心跳等。
+            wait_for = (
+                cfg.ai_agent_heartbeat_seconds if buffered is None
+                else max(0.0, flush_at - asyncio.get_running_loop().time())
             )
+            done, _ = await asyncio.wait({pending}, timeout=wait_for)
             if not done:
+                if buffered is not None:
+                    yield format_frame(EventType.DELTA, buffered)
+                    buffered = None
+                    continue
                 # 空闲：发心跳。``pending`` 刻意**不取消**——取消一个恰好已就绪
                 # 的 ``Queue.get`` 有丢件的窗口，而这个协程本来就只等这一件事。
                 if worker.done() and queue.empty():
@@ -378,11 +447,35 @@ async def agent_event_stream(
                 continue
             item = pending.result()
             pending = None
-            if item is _TERMINAL:
-                normal_end = True
-                break
-            event, payload = item
-            yield format_frame(event, payload)
+            # 非 delta 的一律先冲刷缓冲：**事件顺序即语义**，``done`` 跑到半截
+            # 正文前面会让客户端提前收尾。
+            if item is _TERMINAL or item[0] != EventType.DELTA:
+                if buffered is not None:
+                    yield format_frame(EventType.DELTA, buffered)
+                    buffered = None
+                if item is _TERMINAL:
+                    normal_end = True
+                    break
+                event, payload = item
+                yield format_frame(event, payload)
+                continue
+            _, payload = item
+            now = asyncio.get_running_loop().time()
+            if buffered is not None and (
+                buffered["channel"] != payload["channel"]
+                or buffered["step"] != payload["step"]
+                or now >= flush_at
+            ):
+                # 通道或 Step 换了 / 窗已到期：旧的先走，另起一个。用时刻判窗而
+                # 不是「等队列空」——增量是连续到达的，靠队列空判会把密集输出
+                # 整段攒成一帧。
+                yield format_frame(EventType.DELTA, buffered)
+                buffered = None
+            if buffered is None:
+                buffered = dict(payload)
+                flush_at = now + _DELTA_MERGE_SECONDS
+            else:
+                buffered["text"] += payload["text"]
     finally:
         # 收尾**全同步**：客户端断连时生成器处于取消态，任何 await 都会立刻再
         # 抛一次 CancelledError（anyio 的取消是作用域级的）。工作协程是普通
@@ -457,7 +550,13 @@ async def _execute_turn(
 
     **落库时机**：正常结束时先 ``append_turn``（本轮消息进会话日志）+ 一次
     ``record_turn``（一条用量行，会话级配额与 guest 日配额共用这张表），提交成功
-    后才发 ``delta`` / ``done``——``done`` 因此意味着「这一轮已经存下来了」。
+    后才发 ``done``——``done`` 因此意味着「这一轮已经存下来了」。
+
+    ``delta`` **不再享有这个保证**（T-M7-02g-2）：它是 loop 跑的过程中实时送出的
+    （这是流式的全部意义），所以「用户看完了答案但历史里什么都没有」的窗口从
+    「正文与落库几乎同时」变成「整段正文期间」——断连即如此。这是 P1 的已知代价
+    （02f 的一轮原子写入决定了不能在轮中途落库），真正的修法归 P3 的完整事件日志；
+    架构 §8.5 已把客户端侧的契约写死（保留半截文本 + 标注失败）。
 
     失败**不写事件、不写正文**（02f 的一轮原子写入决定：流式路径不能在轮中途
     落库），但仍记一条用量行：已经发生的 provider 调用是计费的，不记就成了
@@ -505,8 +604,6 @@ async def _execute_turn(
         queue.put_nowait((EventType.ERROR, _error_payload(exc, conversation_id)))
         return
 
-    if result.content.strip():
-        queue.put_nowait((EventType.DELTA, {"text": result.content}))
     queue.put_nowait((EventType.DONE, _done_payload(result, conversation)))
 
 

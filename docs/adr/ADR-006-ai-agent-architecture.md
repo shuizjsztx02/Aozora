@@ -104,13 +104,15 @@ tool calling 的参数**仍然只是提案**：
 
 | 项 | 选择 | 理由 |
 |---|---|---|
-| Provider | **保持 DashScope（qwen3.7-flash）** | OpenAI 兼容模式支持 function calling；国内网络与合规无风险 |
+| Provider | **保持 DashScope（qwen3.7-flash）** ⚠️ 见下方修订 | OpenAI 兼容模式支持 function calling；国内网络与合规无风险 |
 | MCP | **暂不引入真 MCP** | 无第三方工具接入需求；先按架构模式设计内部接口 |
 | 向量 RAG | **首发不引入** | 用户数据是结构化的，SQL/API 更准更便宜可审计 |
 | DeepSeek Harness | **仅作设计参考，不作依赖** | Developer Preview，官方明确不建议生产使用 |
 | Skill | 按需加载的任务模板 | 解决「枚举制」天花板 |
 
 **若未来引入其他 provider（含 Claude 等）：** 按 `AGENTS.md`「技术栈替换必须先通过 ADR」单独决策，不在本 ADR 范围。
+
+> **⚠️ Provider 条款已被修订（2026-09-18，`ADR-007`）：** 上述「保持 DashScope」的适用条件在 P1 阶段被本 ADR 末尾的条款触发——qwen3.7-flash 的二值 `enable_thinking` 无法在「loop 需要推理」与「单步 25 s 预算」之间折中（T12-11 实测 20–24 s）。经单独 ADR 决策：**agent 路径改用 DeepSeek `deepseek-flash`，快路径（`/ai/interpret` 等）继续使用 qwen3.7-flash 不变。** 其余各项（MCP / 向量 RAG / DSH / Skill）不受影响。详见 `docs/adr/ADR-007-deepseek-provider.md`。
 
 ## 拒绝的替代方案
 
@@ -162,3 +164,17 @@ tool calling 的参数**仍然只是提案**：
 | `docs/risk-register.md` | R-PROD-15 ~ 19 | ✅ 已完成 |
 | `docs/architecture/ai-architecture.md` | ActionProposal v2 契约（落地时） | ⏳ P1 |
 | `contracts/action-proposal/schema.json` | v2（落地时） | ⏳ P1 |
+
+## P1 定型补充（2026-09-18）
+
+立项两日后，基于对代码现状的逐项核对与 P1 工作量评估，对 P1 做了实施层面的定型。**方向未变**（决策 1–5 全部保持），定型的是交付边界与拆解粒度：
+
+| 项 | 定型结论 |
+|---|---|
+| **P1 / P2 边界** | P1 = 服务端能力闭环 + 客户端**最小接通**（SSE 接收、桥事件转发、终态按既有 v2 intent 分发）；P2 = 观感与结构（流式气泡、步骤卡片流、多会话、统一智能模式）。原因：原文「SSE 与 loop 是同一交付」与「P2 期间客户端可用非流式降级」并存，存在内部张力 |
+| **P1 拆解** | 由 1 张含 10 项链式交付的卡，拆为 02a–02i 九张可独立验收的子卡；**02a 为 go/no-go 闸门**（`qwen3.7-flash` 的 tool calling × thinking × stream 实测）。详见 `docs/milestones/production-execution-plan.md` T-M7-02 |
+| **审批策略收敛** | 单 Step 任务沿用现有置信度策略（≥0.9 自动 + 撤销窗）；**多步 loop 的写操作一律强制确认**。收敛 §7.3 与 §7.4 的表述张力 |
+| **SLO 适用性** | `APP-CONTEXT §10.3` 的 25 s 超时**只适用于快路径**；agent 路径改为单步 25 s + 整体无上限（架构 §8.3） |
+| **新增登记** | R-PROD-21（混合推理与单步预算冲突）、R-PROD-22（SSE 部署前提五项未就位）；架构新增 §8.4「部署与运行前提」 |
+
+**现状核对结论（供后续参考）：** 文档假设的现状大体属实，但 loop 依赖的四项基建**全部是空白而非"接线"**——tool calling、SSE、事件日志、多会话均需从零新建。这改变了 P1 的工程量预期，也是本次拆解的直接动因。

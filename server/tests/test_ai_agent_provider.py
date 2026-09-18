@@ -646,9 +646,14 @@ class TestStreaming:
         result = chunks[-1].result
         assert (result.prompt_tokens, result.completion_tokens) == (30, 12)
 
-    async def test_reasoning_deltas_accumulated_not_forwarded(self, provider_factory):
-        """Reasoning is persisted for the next turn's echo, but the assistant's
-        visible text must stay free of it."""
+    async def test_reasoning_deltas_forwarded_on_their_own_channel(self, provider_factory):
+        """推理与正文**分通道**送出（T-M7-02g-2），且推理仍被累加进 ``result``
+        供下一轮回传（ADR-007 的推理连续性）。
+
+        两个通道不能合并成一个字符串：客户端要把推理渲染进「深度思考」折叠区、
+        正文渲染进气泡。真实探针显示深档带工具那一步 524 字符推理对 0 字符正文，
+        只送正文的话最需要反馈的一步仍然静默。
+        """
         def handler(request: httpx.Request) -> httpx.Response:
             return httpx.Response(200, text=_sse(
                 _delta(reasoning_content="先查"),
@@ -657,10 +662,40 @@ class TestStreaming:
             ))
 
         chunks = await self._collect(provider_factory(handler))
-        assert [chunk.delta for chunk in chunks] == ["好的", ""]
+        assert [(c.delta, c.reasoning_delta) for c in chunks] == [
+            ("", "先查"),
+            ("", "预算。"),
+            ("好的", ""),
+            ("", ""),  # 收尾帧（result），两个通道都空
+        ]
         result = chunks[-1].result
         assert result.reasoning_content == "先查预算。"
         assert result.content == "好的"
+
+    async def test_failure_after_a_reasoning_delta_is_not_retryable(
+        self, provider_factory,
+    ):
+        """**推理增量也算「已交给调用方」**（T-M7-02g-2）。
+
+        重试的代价是「用户已经看到的内容再来一遍」——思考内容也一样（客户端
+        已经在折叠区里渲染出来了）。因此 ``emitted`` 由**任一通道**置位。
+        """
+        def handler(request: httpx.Request) -> httpx.Response:
+            return httpx.Response(200, text=_sse(
+                _delta(reasoning_content="先查"),
+                json.dumps({"choices": [{"delta": {"tool_calls": ["not-an-object"]}}]}),
+                done=False,
+            ))
+
+        chunks: list[StreamChunk] = []
+        with pytest.raises(ProviderError) as exc_info:
+            async for chunk in provider_factory(handler).complete_with_tools_stream(
+                [{"role": "user", "content": "hi"}],
+                model=MODEL, max_tokens=64, timeout=5.0, tools=TOOLS,
+            ):
+                chunks.append(chunk)
+        assert [c.reasoning_delta for c in chunks] == ["先查"], "第一帧已交给调用方"
+        assert exc_info.value.retryable is False
 
     async def test_comment_and_blank_frames_are_ignored(self, provider_factory):
         """Heartbeat/keep-alive frames carry no payload and must not abort."""

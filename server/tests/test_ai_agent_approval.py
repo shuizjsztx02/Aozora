@@ -24,6 +24,7 @@ from __future__ import annotations
 import inspect
 import json
 import uuid
+from collections.abc import AsyncIterator
 from copy import deepcopy
 from datetime import date
 from typing import Any
@@ -45,7 +46,12 @@ from src.modules.ai.agent import (
     confirm_reason,
     validation_context_for,
 )
-from src.modules.ai.provider import ProviderResult, ReasoningLevel, ToolCall
+from src.modules.ai.provider import (
+    ProviderResult,
+    ReasoningLevel,
+    StreamChunk,
+    ToolCall,
+)
 from src.modules.ai.service import AIService
 
 TODAY = date(2026, 9, 18)
@@ -145,6 +151,32 @@ class ScriptedProvider:
         if index < len(self.script):
             return self.script[index]
         return _text("（脚本已用尽）")
+
+    async def complete_with_tools_stream(
+        self,
+        messages: list[dict],
+        *,
+        model: str,
+        max_tokens: int,
+        timeout: float,
+        tools: list[dict],
+        tool_choice: str | None = None,
+        reasoning: ReasoningLevel = ReasoningLevel.FAST,
+    ) -> AsyncIterator[StreamChunk]:
+        """流式形态（T-M7-02g-2）：loop 自本卡起只走这条路。
+
+        脚本语义与非流式**逐字相同**（同一个调用序号、同一批脚本项），差别只在
+        交付形态：推理一帧、正文一帧、最后是带 ``result`` 的收尾帧。
+        """
+        result = await self.complete_with_tools(
+            messages, model=model, max_tokens=max_tokens, timeout=timeout,
+            tools=tools, tool_choice=tool_choice, reasoning=reasoning,
+        )
+        if result.reasoning_content:
+            yield StreamChunk(reasoning_delta=result.reasoning_content)
+        if result.content:
+            yield StreamChunk(delta=result.content)
+        yield StreamChunk(result=result)
 
 
 class FakeApprover:

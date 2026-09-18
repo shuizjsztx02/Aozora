@@ -36,6 +36,7 @@ import json
 import shutil
 import tempfile
 import uuid
+from collections.abc import AsyncIterator
 from copy import deepcopy
 from pathlib import Path
 from typing import Any
@@ -53,6 +54,7 @@ from src.modules.ai.provider import (
     ProviderError,
     ProviderResult,
     ReasoningLevel,
+    StreamChunk,
     ToolCall,
 )
 from src.modules.ai.tools import DOMAINS, tools_for_domains
@@ -119,6 +121,10 @@ class ScriptedProvider:
 
     脚本项可以是 ``ProviderResult``、异常实例、可调用对象，或返回可等待对象的
     可调用对象（后者用于「请求进行中」制造空闲 / 断连）。脚本用尽后重复最后一项。
+
+    **两条交付路径共用同一份脚本取值**（``_resolve``）：``complete_with_tools``
+    返回整段结果，``complete_with_tools_stream`` 把它分帧下发。loop 自 02g-2 起
+    只走后者，前者仍保留——收尾请求（``_wrap_up``）刻意不流式。
     """
 
     name = "scripted"
@@ -134,6 +140,21 @@ class ScriptedProvider:
         self.calls = []
         self.cancelled = 0
 
+    async def _resolve(self, messages: list[dict], **record: Any) -> Any:
+        """取第 n 个脚本项：记录调用，处理可调用 / 可等待 / 异常项。"""
+        index = len(self.calls)
+        self.calls.append({"messages": deepcopy(messages), **record})
+        item: Any = self.script[index] if index < len(self.script) else self.script[-1]
+        try:
+            if callable(item):
+                item = item()
+            if inspect.isawaitable(item):
+                item = await item
+        except asyncio.CancelledError:
+            self.cancelled += 1
+            raise
+        return item
+
     async def complete_with_tools(
         self,
         messages: list[dict],
@@ -145,29 +166,96 @@ class ScriptedProvider:
         tool_choice: str | None = None,
         reasoning: ReasoningLevel = ReasoningLevel.FAST,
     ) -> ProviderResult:
-        index = len(self.calls)
-        self.calls.append({
-            "messages": deepcopy(messages),
-            "tools": list(tools),
-            "reasoning": reasoning,
-            "timeout": timeout,
-        })
-        item: Any = self.script[index] if index < len(self.script) else self.script[-1]
-        try:
-            if callable(item):
-                item = item()
-            if inspect.isawaitable(item):
-                item = await item
-        except asyncio.CancelledError:
-            self.cancelled += 1
-            raise
+        item = await self._resolve(
+            messages, tools=list(tools), reasoning=reasoning, timeout=timeout,
+        )
         if isinstance(item, Exception):
             raise item
-        return item
+        return item.result if isinstance(item, StreamScript) else item
+
+    async def complete_with_tools_stream(
+        self,
+        messages: list[dict],
+        *,
+        model: str,
+        max_tokens: int,
+        timeout: float,
+        tools: list[dict],
+        tool_choice: str | None = None,
+        reasoning: ReasoningLevel = ReasoningLevel.FAST,
+    ) -> AsyncIterator[StreamChunk]:
+        item = await self._resolve(
+            messages, tools=list(tools), reasoning=reasoning, timeout=timeout,
+        )
+        if isinstance(item, Exception):
+            raise item
+        if isinstance(item, StreamScript):
+            for chunk in item.chunks():
+                yield chunk
+                if item.gap:
+                    await asyncio.sleep(item.gap)
+            if item.error is not None:
+                # 增量已交出后断流：调用方必须当作「不可重试」（02b 的规则）。
+                raise item.error
+            yield StreamChunk(result=item.result)
+            return
+        # 默认形态：整段一帧。既有用例的断言因此不必按 4 字符/帧改写。
+        if item.reasoning_content:
+            yield StreamChunk(reasoning_delta=item.reasoning_content)
+        if item.content:
+            yield StreamChunk(delta=item.content)
+        yield StreamChunk(result=item)
 
     def sent(self, index: int = 0) -> str:
         """第 index 次请求的全部消息文本（用于「载荷里有没有某内容」类断言）。"""
         return json.dumps(self.calls[index]["messages"], ensure_ascii=False)
+
+
+class StreamScript:
+    """脚本项：把一次应答拆成若干分片下发（建模真实 provider 的帧粒度）。
+
+    默认的 ``ProviderResult`` 脚本项走「整段一帧」，既有用例不必改写；需要验
+    **逐帧下发 / 合并窗 / 推理通道 / 中途断流**的用例才用它显式给出规格：
+
+    - ``chunk_size`` —— 每片字符数（实测真实链路约 4 字符/帧）；
+    - ``gap`` —— 两片之间的等待。**要跨过帧泵的合并窗就得给它**（约 0.1 s）：
+      窗内的同通道增量会被并成一帧，这正是生产形态；
+    - ``error`` —— 分片送完后不提结果、改抛它（模拟「说到一半断流」）。
+    """
+
+    def __init__(
+        self,
+        result: ProviderResult,
+        *,
+        chunk_size: int = 4,
+        gap: float = 0.0,
+        error: Exception | None = None,
+    ) -> None:
+        self.result = result
+        self.chunk_size = chunk_size
+        self.gap = gap
+        self.error = error
+
+    def chunks(self) -> list[StreamChunk]:
+        """分片序列：推理在前、正文在后（真实 provider 的形状）。"""
+        chunks: list[StreamChunk] = []
+        if self.result.reasoning_content:
+            chunks += [
+                StreamChunk(reasoning_delta=piece)
+                for piece in _split(self.result.reasoning_content, self.chunk_size)
+            ]
+        if self.result.content:
+            chunks += [
+                StreamChunk(delta=piece)
+                for piece in _split(self.result.content, self.chunk_size)
+            ]
+        return chunks
+
+
+def _split(text: str, size: int) -> list[str]:
+    if size <= 0:
+        return [text]
+    return [text[i:i + size] for i in range(0, len(text), size)]
 
 
 class FakeFastProvider:
@@ -636,6 +724,141 @@ class TestStreamEvents:
         _, body = await stream_env.turn("看看预算")
 
         assert "device_request" not in event_names(body)
+
+
+# ── 2.5 增量：两个通道、合并窗、中途断流（02g-2）────────────────────────
+
+
+class TestIncrements:
+    """T-M7-02g-2：``delta`` 从「一轮一帧」升级为 token 级增量（架构 §8.5）。"""
+
+    async def test_reasoning_and_content_arrive_on_separate_channels(
+        self, stream_env: StreamEnv,
+    ):
+        """推理与正文**分通道**：客户端据 ``channel`` 把推理放进灰字折叠区、正文
+        放进气泡。合并窗按通道隔离，两者的头尾绝不会拼进同一帧。"""
+        stream_env.provider.reset([
+            StreamScript(_text("这个月还没有设置预算。", reasoning="先看预算表再回答。")),
+        ])
+        _, body = await stream_env.turn("看看预算")
+
+        deltas = [p for name, p in parse_frames(body) if name == "delta"]
+        assert [(d["channel"], d["text"]) for d in deltas] == [
+            ("reasoning", "先看预算表再回答。"),
+            ("content", "这个月还没有设置预算。"),
+        ]
+        assert all(d["step"] == 1 for d in deltas)
+
+    async def test_fragments_inside_the_merge_window_collapse_into_one_frame(
+        self, stream_env: StreamEnv, monkeypatch,
+    ):
+        """实测约 4 字符/帧、一轮三四百帧——帧泵把**窗内**的同通道增量并成一帧，
+        桥调用量因此降一个数量级。合并只改帧的**分法**：拼接结果与逐帧一致。
+
+        窗刻意调到远大于心跳（fixture 的 ``ai_agent_heartbeat_seconds`` 是 0.05），
+        分片间隔也刻意大于心跳：这样一来**唯一**能把它们并起来的机制就是合并窗
+        本身——退化成「空闲了就冲刷」的实现会在这里裂成两帧。
+        """
+        monkeypatch.setattr(S, "_DELTA_MERGE_SECONDS", 1.0)
+        answer = "这个月还没有设置预算，你可以先设一个。"
+        stream_env.provider.reset([
+            StreamScript(_text(answer), chunk_size=len(answer) // 2, gap=0.3),
+        ])
+        _, body = await stream_env.turn("看看预算")
+
+        deltas = [p["text"] for name, p in parse_frames(body) if name == "delta"]
+        assert deltas == [answer], "窗内的分片应当并成一帧"
+
+    async def test_fragments_beyond_the_merge_window_are_sent_separately(
+        self, stream_env: StreamEnv,
+    ):
+        """分片之间超过合并窗就各成一帧——客户端**不能**假设「一轮一帧」，
+        按追加渲染即可（拼接结果仍与整段一致）。"""
+        stream_env.provider.reset([
+            StreamScript(_text("甲乙丙丁戊己庚辛"), chunk_size=4, gap=0.15),
+        ])
+        _, body = await stream_env.turn("你好")
+
+        deltas = [p["text"] for name, p in parse_frames(body) if name == "delta"]
+        assert deltas == ["甲乙丙丁", "戊己庚辛"]
+        assert "".join(deltas) == "甲乙丙丁戊己庚辛"
+
+    async def test_each_step_tags_its_own_increments(self, stream_env: StreamEnv):
+        """增量带 ``step``：两次模型请求的正文归到各自的分组，不会串台。"""
+        stream_env.provider.reset([
+            _tool_turn(_call("budget_list", _budget_args()), content="我先查一下。"),
+            StreamScript(_text("没有设置预算。", reasoning="汇总一下。")),
+        ])
+        _, body = await stream_env.turn("看看预算")
+
+        assert [(p["channel"], p["step"]) for name, p in parse_frames(body)
+                if name == "delta"] == [
+            ("content", 1), ("reasoning", 2), ("content", 2),
+        ]
+
+    async def test_tool_events_never_overtake_the_text_that_preceded_them(
+        self, stream_env: StreamEnv,
+    ):
+        """模型先交代一句、再调工具（很常见的形态）：那句话必须**排在**工具事件
+        之前。帧泵的增量缓冲因此不能无限期挂着——任何非 ``delta`` 事件到达都要
+        先把它冲刷出去，否则客户端会看到「正在查询预算…」抢在「我先查一下」前面。"""
+        stream_env.provider.reset([
+            _tool_turn(_call("budget_list", _budget_args()), content="我先查一下。"),
+            _text("没有设置预算。"),
+        ])
+        _, body = await stream_env.turn("看看预算")
+
+        assert event_names(body) == [
+            "phase",        # step 1 入口
+            "delta",        # 「我先查一下。」——冲在工具事件前面
+            "phase",        # 工具批次入口
+            "tool_call",
+            "tool_result",
+            "phase",        # step 2 入口
+            "delta",
+            "done",
+        ]
+
+    async def test_wrap_up_text_is_emitted_exactly_once(self, stream_env: StreamEnv):
+        """撞边界时的收尾文案**不是流式产出的**（收尾请求刻意不流式，见
+        ``agent._wrap_up``），由 loop 自己发一帧；帧层自本卡起不再补发——02g 的
+        收尾 ``delta`` 已随之删除，重复发会让客户端把同一段话渲染两遍。"""
+        stream_env.provider.reset(
+            [_tool_turn(_call("budget_list", _budget_args())) for _ in range(8)]
+            + [_text("已完成：查完了。未完成：没有了。")]
+        )
+        _, body = await stream_env.turn("看看预算")
+
+        deltas = [p["text"] for name, p in parse_frames(body) if name == "delta"]
+        assert deltas == ["已完成：查完了。未完成：没有了。"]
+        assert payload_of(body, "done")["stop_reason"] == "step_limit"
+
+    async def test_a_cut_stream_leaves_the_partial_text_on_the_wire(
+        self, stream_env: StreamEnv,
+    ):
+        """说到一半断流：客户端**已经拿到半截正文**（架构 §8.5 的契约是「保留
+        半截 + 标错」而不是清空）。服务端要做的只是别把它擦掉——``error`` 帧排在
+        增量**之后**，客户端按追加渲染即可。
+
+        这一步的 token 拿不回来（usage 在尾块），且它是首次调用 → 一条用量行都
+        不写，与 02g 的「首次调用即失败 = 零计费」同口径。
+        """
+        stream_env.provider.reset([
+            StreamScript(
+                _text("这个月还没有设置预算，你可以先"),
+                chunk_size=4, gap=0.15,
+                error=ProviderError(status=503, retryable=False, reason="transport"),
+            ),
+        ])
+        _, body = await stream_env.turn("看看预算")
+
+        assert event_names(body)[-1] == "error"
+        assert payload_of(body, "error")["code"] == "ai_unavailable"
+        deltas = [p["text"] for name, p in parse_frames(body) if name == "delta"]
+        assert "".join(deltas) == "这个月还没有设置预算，你可以先"
+        # 失败轮不写事件、不写正文（02f 的一轮原子写入）
+        assert await _rows(stream_env, AIConversationEvent) == []
+        assert await _rows(stream_env, AIUsage, user_id=stream_env.user_id) == []
 
 
 # ── 3. heartbeat ──────────────────────────────────────────────────────────

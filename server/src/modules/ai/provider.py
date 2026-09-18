@@ -96,14 +96,21 @@ class ProviderResult:
 
 @dataclass(frozen=True, slots=True)
 class StreamChunk:
-    """One increment of a streaming completion (T-M7-02b).
+    """One increment of a streaming completion (T-M7-02b; T-M7-02g-2 adds the
+    reasoning channel).
 
-    ``delta`` carries assistant-visible text. ``result`` is set exactly once,
-    on the final chunk, holding the fully assembled ``ProviderResult`` (text,
-    tool calls and usage all merged from the fragments).
+    ``delta`` carries assistant-visible text. ``reasoning_delta`` carries the
+    thinking channel's increment (DeepSeek's ``reasoning_content``) — the two
+    are **separate fields rather than one merged stream** because the client
+    renders them in different places: reasoning goes to a collapsed "thinking"
+    area, never into the answer bubble (architecture §8.5). ``result`` is set
+    exactly once, on the final chunk, holding the fully assembled
+    ``ProviderResult`` (text, reasoning, tool calls and usage all merged from
+    the fragments).
     """
 
     delta: str = ""
+    reasoning_delta: str = ""
     result: ProviderResult | None = None
 
 
@@ -460,8 +467,14 @@ class _StreamAccumulator:
         self._prompt_tokens = 0
         self._completion_tokens = 0
 
-    def feed(self, chunk: Any) -> str:
-        """Merge one SSE payload; return that chunk's assistant text."""
+    def feed(self, chunk: Any) -> tuple[str, str]:
+        """Merge one SSE payload; return its ``(text, reasoning)`` increments.
+
+        Both channels come out of the same call so the caller can forward them
+        separately without re-reading the fragment — ``reasoning_content`` was
+        already being accumulated here (for the next turn's echo, ADR-007);
+        T-M7-02g-2 only starts handing it back out.
+        """
         if not isinstance(chunk, dict):
             raise ProviderError(status=200, retryable=True, reason="bad_response")
         usage = chunk.get("usage")
@@ -472,23 +485,26 @@ class _StreamAccumulator:
         choices = chunk.get("choices")
         if not choices:
             # Usage-only trailer (stream_options.include_usage) — no delta.
-            return ""
+            return "", ""
         choice = choices[0]
         delta = choice.get("delta") if isinstance(choice, dict) else None
         if not isinstance(delta, dict):
-            return ""
+            return "", ""
 
         reasoning = delta.get("reasoning_content")
-        if isinstance(reasoning, str):
+        if not isinstance(reasoning, str):
+            reasoning = ""
+        if reasoning:
             self._reasoning.append(reasoning)
         for fragment in delta.get("tool_calls") or []:
             self._merge_tool_call(fragment)
 
         content = delta.get("content")
-        if isinstance(content, str) and content:
+        if not isinstance(content, str):
+            content = ""
+        if content:
             self._text.append(content)
-            return content
-        return ""
+        return content, reasoning
 
     def _merge_tool_call(self, fragment: Any) -> None:
         if not isinstance(fragment, dict):
@@ -645,16 +661,17 @@ class DeepSeekProvider:
     ) -> AsyncIterator[StreamChunk]:
         """Stream a tool-calling completion.
 
-        Yields text increments as they arrive, then exactly one final chunk
-        carrying the assembled result.
+        Yields text and reasoning increments as they arrive (each in its own
+        field, see :class:`StreamChunk`), then exactly one final chunk carrying
+        the assembled result.
 
-        **Retryability rule.** A stream that fails *before* the first delta is
-        retryable like any other provider fault. Once a delta has been handed
-        to the caller, every later failure — a connection drop, a malformed
-        frame, a stream that ends without ``[DONE]`` — is reported as **not**
-        retryable: the retry contract keys on ``retryable`` (``service.py``),
-        and replaying the request would send the caller text it has already
-        forwarded.
+        **Retryability rule.** A stream that fails *before* the first increment
+        is retryable like any other provider fault. Once an increment has been
+        handed to the caller — **on either channel** — every later failure (a
+        connection drop, a malformed frame, a stream that ends without
+        ``[DONE]``) is reported as **not** retryable: the retry contract keys on
+        ``retryable`` (``service.py``), and replaying the request would send the
+        caller text it has already forwarded.
         """
         payload = self._payload(
             messages,
@@ -692,15 +709,15 @@ class DeepSeekProvider:
                         ended = True
                         break
                     try:
-                        delta = accumulator.feed(json.loads(data))
+                        text, reasoning = accumulator.feed(json.loads(data))
                     except ProviderError as exc:
                         # The accumulator classifies its own shape errors (a
                         # ``tool_calls`` entry that is not an object) and raises
                         # ``ProviderError`` itself — which the tuple below would
                         # not catch. The retry verdict still belongs to this
-                        # layer: once a delta has gone out, a later failure must
-                        # be reported as not retryable (see the docstring), or a
-                        # retrying caller re-sends half an answer.
+                        # layer: once an increment has gone out, a later failure
+                        # must be reported as not retryable (see the docstring),
+                        # or a retrying caller re-sends half an answer.
                         raise ProviderError(
                             status=exc.status,
                             retryable=not emitted,
@@ -715,9 +732,12 @@ class DeepSeekProvider:
                         raise ProviderError(
                             status=200, retryable=not emitted, reason="bad_response",
                         )
-                    if delta:
+                    if text or reasoning:
+                        # Either channel counts as "handed to the caller": a
+                        # replay would re-send content the user has already
+                        # seen, reasoning included.
                         emitted = True
-                        yield StreamChunk(delta=delta)
+                        yield StreamChunk(delta=text, reasoning_delta=reasoning)
         except httpx.TimeoutException:
             # Not retryable, same as the non-streaming path: the client's own
             # cancel line is the real budget, not the provider's speed.
