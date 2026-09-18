@@ -12,8 +12,8 @@
 | 卡 | 内容 | 状态 | 完成日 | 提交 | 备注 |
 |---|---|---|---|---|---|
 | **02a** | DeepSeek 能力实测闸门（go/no-go） | ✅ 完成 | 2026-09-18 | —（实测，无代码改动） | 九项全过，详见 §五 |
-| **02b** | Provider 接入与扩展（DeepSeek） | ⏳ 未开始 | | | 批次 1 |
-| **02c** | 工具注册表与域分组 | ✅ 完成 | 2026-09-18 | 见 §五 | 批次 1；15 个工具 / 3 域，详见 §五 |
+| **02b** | Provider 接入与扩展（DeepSeek） | ✅ 完成 | 2026-09-18 | `953d664` | 批次 1；54 用例，快路径零改动，详见 §五 |
+| **02c** | 工具注册表与域分组 | ✅ 完成 | 2026-09-18 | `2f09c30` | 批次 1；15 个工具 / 3 域，详见 §五 |
 | **02d** | Agent Loop 核心与推理分级 | ⏳ 未开始 | | | 批次 2 |
 | **02e** | 写工具安全路径 | ⏳ 未开始 | | | 批次 3，可与 02f 并行 |
 | **02f** | 会话状态与配额双限 | ⏳ 未开始 | | | 批次 3，可与 02e 并行 |
@@ -131,13 +131,16 @@
 ### 验证基线（每卡完成后必跑）
 
 ```
-cd server && python -m pytest tests/ -q          # 基线 713 passed + 37 skipped（2026-09-18 实测）
+cd server && python -m pytest tests/ -q          # 基线 819 passed + 37 skipped（2026-09-18 批次 1 收口实测；02d 在途的 tests/test_ai_agent.py 不计入）
 cd app && ./gradlew :app:testDebugUnitTest       # 基线 394 tests / 0 failures（2026-09-18 实测）
 cd app && npx vitest run                         # 基线 1107 passed（2026-09-18 实测）
 cd app && npx tsc --noEmit                       # 0 错
 ```
 
 > 原记录为 658 / 392 / 1104，与实测不符（2026-09-18 由 02c 复核修正）。数字以实测为准。
+>
+> **服务端基线推导（2026-09-18 复核）：** 659（02b 前既有）+ 54（02b）+ 95（02c）= 808（批次 1 交付时）；收口核查再各补用例（02b +6、02c +5）后为 **819**（= 659 + 60 + 100）。
+> ⚠️ **多会话陷阱：** 02b 提交信息里的「782 passed」**不是**本卡基线——当时 02c 的 `test_ai_tools.py` 正被并发会话在途写入（已 69 例），全量计数把它一并算进去了（713 + 69 = 782）。**在并发会话下跑全量套件，数字不可作为本卡基线**，须以 `pytest <本卡测试文件>` 的增量与 `--collect-only` 为准。
 
 每卡只允许在基线上**增加**，不得减少。基线随卡推进更新，更新时须在本文件 §一 状态看板与 `production-execution-plan.md` 同步。
 
@@ -175,6 +178,81 @@ cd app && npx tsc --noEmit                       # 0 错
 - **分级的主要收益是省 token 而非省时间**——简单任务下三档耗时差异 <0.5 s。复杂任务下的差异需在 02d 补测。
 
 **结论：** go/no-go **通过**。02b 及之后全部解除依赖。
+
+---
+
+### 02b · Provider 接入与扩展（DeepSeek）（✅ 2026-09-18）
+
+**任务编号：** T-M7-02b　**提交：** `953d664`
+
+**完成范围 / 明确未做：**
+
+- **完成：** `server/src/modules/ai/provider.py`（+571 行）——`DeepSeekProvider`（OpenAI 兼容，base `https://api.deepseek.com`）实现既有 `LLMProvider` Protocol，并额外提供 `complete_with_tools()` / `complete_with_tools_stream()`；`ProviderResult` 增 `tool_calls` / `reasoning_content`（带默认值，位置构造向后兼容）；`ToolCall` + `parse_arguments()`；`ReasoningLevel` 三档 + `_REASONING_PARAMS`；`_StreamAccumulator` 分片合并；`_parse_message` / `_parse_tool_calls` / `_raise_for_status`；`ProviderPurpose` + `build_provider(cfg, purpose)`；`get_agent_provider()` 并纳入 `reset_llm_provider()` / `close_llm_provider()`。`server/src/common/config.py` 增 `ai_agent_provider_{api_key,model,base_url}`；`server/.env.example` 同步模板；`conftest.py` 密封 agent key（防 ambient `.env` 污染）。
+- **明确未做：** 不接线（无路由、无 loop）——`get_agent_provider()` 目前**无生产调用点**；不校验工具名（注册表归 02c）；不实现 loop（02d）；不处理 SSE 帧格式与心跳（02g）。
+
+**修改的文档、契约与代码：**
+
+- 代码：`server/src/modules/ai/provider.py`、`server/src/common/config.py`、`server/tests/conftest.py`、`server/.env.example`、`server/tests/test_ai_agent_provider.py`（新建）
+- **契约零改动**；**快路径零改动已核**——本卡 diff 对 `provider.py` 仅 6 行删除，全部是 `build_provider` / 工厂函数的签名与 docstring，`DashScopeProvider` 类体与 qwen 调用面一行未动
+
+**验证命令与结果：**
+
+```
+cd server && python -m pytest tests/test_ai_agent_provider.py -q   # 60 passed（交付时 54，本卡收口 +6）
+cd server && python -m pytest tests/ -q                            # 819 passed, 37 skipped（批次 1 交付时 808，收口后 +11）
+cd server && python -m ruff check src/ tests/                      # All checks passed
+cd app && npx tsc --noEmit / npx vitest run                        # 0 错 / 1107 passed（本卡未动前端，回归确认）
+./gradlew :app:testDebugUnitTest                                   # 394 tests / 0 failures（同上）
+```
+
+**收口核查与修复（2026-09-18，本卡交付后的独立复审）：**
+
+复审方法：`pytest` 基线上逐条注入单点变异，以「实现改坏后测试是否变红」判定覆盖真假，并对每个怀疑点写独立复现脚本实跑。**共修 6 处实质问题（每处各补一条可失败的回归用例）＋ 定型 1 条跨层契约 ＋ 判定 1 项不修；6 处修复的变异实测 6/6 变红，契约本身亦有变异用例（共 7/7）。**
+
+| # | 缺陷 | 触发场景 | 修复 |
+|---|---|---|---|
+| 1 | **分片 `index` 缺失时的兜底是错的**（`_merge_tool_call`） | 兜底写的是 `len(self._tool_calls)`，只在**整个流的第一片**上等于 0；任何**后续**无 index 的分片都会新开一个空槽 → 一次调用的参数被劈成多个 `name=""` 的残废 ToolCall，`tool_call_id` 全部对不上。原测试恰好让 index 等于插入序，**该分支零覆盖** | 改为续接当前已打开的调用（`max(self._tool_calls) if self._tool_calls else 0`），并补「无 index 续片」用例 |
+| 2 | **流中断被标成可重试**，与自身 docstring 契约相反 | docstring 写明「已转发 delta 的调用方不应重试（会重复文本）」，代码却给 `retryable=True`；而 `service.py` 的重试契约正是 `if not exc.retryable … 降级`。02d 照抄该模式会让用户看到重复的「半句话」 | 引入 `emitted` 标记：**首个 delta 转发之后的一切中途失败一律不可重试**（transport / bad_response / 组装期违规同一规则）；转发前失败仍可重试，保留恢复能力 |
+| 3 | 畸形 SSE 帧以**裸 `KeyError`** 逃出生成器 | `choices` 是非空 dict 时 `choices[0]` 抛 `KeyError`，不在 `except (ValueError, TypeError)` 内 → 穿透整个 async generator，02g 的 `StreamingResponse` 会中途 500，loop 的 `except ProviderError` 接不住。非流式路径同形状却正确归 `bad_response`——**两条路径分类不一致** | 捕获元组扩为 `(ValueError, TypeError, KeyError, IndexError, ArithmeticError)`（含 `int(inf)` 的 `OverflowError`） |
+| 4 | **空 `data:` 行会把整条流判死** | SSE 允许空 data 字段，网关常拿它当 keep-alive；代码已容忍 `: ping` 注释帧与空行，却把空 data 喂给 JSON 解码器 → `bad_response` → 流中断 | 先判空再判 `[DONE]` |
+| 5 | **空 name 在流式与非流式之间行为相反，且 docstring 与代码自相矛盾** | 非流式对空 name 抛 `bad_response`，流式却静默放行；而 `_parse_tool_calls` 的 docstring 写的是「未知**或空**名字透传给 loop 处理」——与它下面三行的代码直接冲突。02d 不知该按哪个契约写 | 统一为**透传 `""`**（与 docstring 的降级哲学一致：loop 回一个工具名错误的 tool-result 让模型自纠）；改掉 docstring 与代码的矛盾，两侧各补用例 |
+| 6 | **空 `id` 被静默变成 `""`**（原样放行） | loop 若把它原样回传成 `{"role":"tool","tool_call_id":""}`，DeepSeek 必 400，且**失败点延后到下一轮**，归因困难 | **判定为跨层契约，不在 provider 层拦**：id 只需在 loop 自己的消息列表内成对，loop 补一个稳定 id 并**同时写回 assistant 消息**（``agent.AgentLoop._assistant_tool_calls``，02d 已实现）——provider 在此拒绝只会把一个调用方处理得了的情况变成失败的回合。契约由 ``test_tool_call_without_id_passes_through_empty`` / 流式同名用例钉住 |
+| 7 | `test_provider_repr_hides_the_key` 是**空转测试** | 类没有自定义 `__repr__`，默认 repr 永远不含密钥，该断言在任何实现下都不可能失败——对「密钥不外泄」给出的是**虚假保证** | 给 `DeepSeekProvider` 加脱敏 `__repr__`，测试同时断言「脱敏 repr 在位」（删掉即变红），把空转断言变成真信号 |
+| 8 | `reset_llm_provider()` 只清引用不做 `aclose()` | 池化 AsyncClient 泄漏。文档标明 test-only，MockTransport 下无真实连接。**判定为不修**，仅记录 | — |
+
+**判定为「记录不修、交 02d」的一项：** `finish_reason` 两条路径都不读，`ProviderResult` 也无该字段。当 `max_tokens` 恰好在 tool_call 中途截断时，拼出的 `arguments` 是断 JSON，`parse_arguments()` 抛错 → loop 会判成「模型给了非法参数」让它重试，**认不出这是截断**，一路撞到「连续无进展 ≤2」才停。P1 的 `max_tokens` 余量很大（384K 输出），实际风险低，故不扩 `ProviderResult` 字段；**02d 若要让 loop 区分截断，须自行加字段**。
+
+**关键设计决策（02d / 02g 必须知道）：**
+
+1. **`ToolCall.arguments` 保真原始 JSON 文本**，在使用点经 `parse_arguments()` 解析。非法 JSON 是模型输出问题，须回喂模型自纠，不能在 provider 层吞成传输故障。
+2. **provider 不校验工具名**（注册表层在 02c），未知名如实透传，由 loop 回 tool-result 错误。
+3. **「快」档必须显式发 `thinking: {"type": "disabled"}`**——`deepseek-flash` 默认开启 thinking，省略参数不等于关闭。
+4. **流式 tool_calls 按 `index` 拼接**（首片带 id+name，后续片只有 arguments 增量）；无 index 的续片续接当前调用。
+5. **流式请求带 `stream_options.include_usage`**，否则 agent 每轮 token 计费恒为 0；**该参数未经真实链路验证，待 02g 确认**。
+6. **重试规则（本轮新增，02g 必读）：** 首个 delta 转发之后的一切中途失败**不可重试**——`retryable` 是调用方的唯一判据，`reason` 枚举未新增值。02g 的 SSE 层必须按此实现「报错收尾」而非「重发请求」。
+7. **输入契约（本轮统一，02d 必读）：** 工具名缺失/为空 → 透传 `""`（loop 回工具名错误让模型自纠）；**工具调用缺 `id` → 也透传 `""`**，由 loop 补稳定 id 并写回 assistant 消息（配对只发生在 loop 的消息列表内，见 `agent.AgentLoop._assistant_tool_calls`）。两条都由 provider 单测钉住。
+8. **`messages` 原样透传** → 多轮 `reasoning_content` 回传不被剥离（ADR-007 决策 1 的实现方式）。
+9. **`ai_agent_provider_model` 目前只声明、未被消费**——接线 agent 路由时**必须读它**（`cfg.ai_agent_provider_model`），勿硬编码模型名；快路径的对应项 `ai_provider_model` 是在 `service.py:182` 消费的，可照此办理。
+
+**数据 / 同步 / AI / 安全影响：**
+
+- **数据与同步：零影响**——无模型改动、无迁移、无同步协议改动、无前端改动。
+- **AI：** agent 路径**尚未接线**（`get_agent_provider()` 无生产调用点），现有 `/ai/interpret` 快路径行为完全不变。
+- **安全：** 新增攻击面是「模型可控的工具名 + 参数」（02c 承接）；密钥新增一条（`AI_AGENT_PROVIDER_API_KEY`，经 `.env` / Secrets 注入，不进仓库）；生产**不强制**该 key——agent 路径默认关闭，未配置的部署照常服务快路径。密钥不外泄已测：`str(exc)`、`caplog`、`repr(provider)` 三条路径均无密钥。
+
+**兼容与回退方式：**
+
+- 纯增量，**不接线即零影响**：留空 `AI_AGENT_PROVIDER_API_KEY` 时 `build_provider(AGENT)` 返回 `None`，快路径与旧客户端行为不变。
+- 回退 = 恢复 `build_provider` 签名并删除 `DeepSeekProvider` 及其内部函数（约 570 行）——`DashScopeProvider` 与 qwen 调用面未被触碰，回退面干净。
+
+**开放风险与责任人：**
+
+- **`stream_options.include_usage` 未经真实链路验证** — 若 DeepSeek 不返回 usage 尾块，agent 每轮计费恒为 0（R-PROD-15 的成本评估会失真）。**责任人：02g**（流式接头时实测）。
+- **三档推理参数的收益未经真实任务验证** — 02a 的耗时数据来自简单任务（三档差异 <0.5 s），分档的实际收益（省 token）与入口判定阈值需 02d 用真实多步用例补测。**责任人：02d**。
+- **`finish_reason` 未采集** — 见上「记录不修」项。**责任人：02d**（若需区分截断）。
+- **provider 层的输入契约无 conformance 断言** — 本轮把空 name / 空 id 的契约固化为用例，但**DeepSeek 其它未实测的响应形态**（如 `tool_choice` 强制、多 choice、非流式 `finish_reason=length` 下的 tool_calls）仍可能触发未分类分支；02g 真机联调是唯一能覆盖的面。
+
+**下一项未阻塞任务：** **02d（Agent Loop 核心与推理分级）**——依赖 02b 与 02c，两者均已完成。
 
 ---
 
@@ -276,6 +354,32 @@ cd app && npx tsc --noEmit                       # 0 错
 - **`category.*` 在 P1 无写入工具** — 模型不能新建/改名/归档分类（`create_category` action 存在于契约中，但 `execute_proposal` 不放行）。归 P4 的 ActionProposal v2 一并处理。
 
 **下一项未阻塞任务：** **02b（Provider 接入与扩展）**——与 02c 同属批次 1、互不依赖；02d 需等 02b 与 02c 全部完成。
+
+**第三轮复审（2026-09-18 收口，跨卡实测）：** 批次 1 两卡交付后做了一次收口核查，02c 侧发现并修复 5 处，另发现 **1 处跨卡阻断缺陷**（见下）。
+
+| # | 问题 | 触发场景 | 处理 |
+|---|---|---|---|
+| ★ | **工具名带点号，provider 直接 400——整条 agent 路径不可用** | 15 个工具全部命名为 ``transaction.add`` 式（对齐桥命令的 ``domain.action`` 命名）。**DeepSeek 真实调用实测**：``Invalid 'tools[0].function.name': string does not match pattern. Expected a string that matches the pattern '^[a-zA-Z0-9_-]+$'`` → **400 invalid_request_error**，整轮请求失败。02b 的 MockTransport 单测**结构上不可能发现**（不经过真实接口），而 provider 层按设计不校验工具名——两层各自的正确假设合起来是个死局 | 全部改为下划线（``transaction_add`` …）；约束固化为 ``PROVIDER_TOOL_NAME_PATTERN`` 常量 + ``test_tool_names_are_provider_safe`` 兜底；**改完后用真实注册表载荷复测：200，模型正确产出 ``transaction_add`` 调用** |
+| 1 | **归档账户口径不一致**：``account_balances`` 不剔除归档账户，而 ``account_list`` 与名字映射都剔除 | 归档账户仍有历史流水 → 模型看得见该账户名，用户却记不进去（``unknown_account``）——「看得见却记不了」的死路，与分类/预算侧已修过的同一类问题 | balances 加 ``Account.archived_at.is_(None)``，与另两处同口径 |
+| 2 | **账本归属校验没有真正被测试兜住** | 原用例传的是**不存在的**账本 id，只证明「不存在 → 404」；删掉 ``Book.owner_id == user_id`` 一行仍全绿。02e 若透传客户端来的 book_id，这就是唯一防线 | 新增「另一个用户的库中账本」用例（存在但非本人） |
+| 3 | 同名账本报 ``unknown_book``，提示**不可行动** | 两个同名账本时，``book_list`` 明明列出两行该名字，写路径却说「不在账本清单中」——模型无路可走。账户侧早已有 ``ambiguous_account``，账本侧漏了 | 增 ``ERR_AMBIGUOUS_BOOK`` + ``book_ids_named``，与账户侧同口径 |
+| 4 | ``transaction_recent`` 的 description 与排序口径不符 | description 写「刚才那笔记的什么」（暗示录入序），实现是 ``biz_date DESC``。补记旧日期账目时会答错，而 description 是模型选工具的唯一语义来源（R-PROD-17） | 改成如实声明「按业务日期倒序，不是录入顺序」。**「recent 是否该按录入序」属产品口径，留给 02d/产品决定**（见残余风险） |
+| 5 | 名字索引截断（``_OBJECT_NAME_LIMIT = 200``）→ 读路径**静默空集** | 分类/账户超过 200 个时，被截断掉的名字在 ``account_ids_named`` 里查不到 → 读工具返回 0 条，模型据此对用户断言「这个账户没有支出」——事实错误 | 上限提到 2000 并改写注释说明**索引必须完整**（截断会让读语义静默失真；真实数据若要逼近该值，正确做法是给 list 工具加分页，而不是在这里截断索引）；新增 205 个分类的完整性用例钉住 |
+
+**五处修复的每一处都做了「改回旧写法 → 用例是否变红」实测，5/5 均变红。** 跨卡那处（★）用真实 API 复测：改名后完整 15 工具载荷返回 200，模型正确产出 ``transaction_add`` 调用并带上 ``amountCents``/``categoryName``/``bizDate``。
+
+**判定为挂账、不修的项（复审已确认非「实现错误」，但都是 02d 会把结果喂给模型时要知道的边界）：**
+
+| 项 | 影响 | 责任人 |
+|---|---|---|
+| ``transaction_summary`` 的分组数组无上限 | 区间由模型自选（``dateFrom``/``dateTo``），十年按天可产生数千个分组 → 顶上下文窗口、抬高每步 token 成本。与 ``transaction_list`` 已有 ``truncated`` 的做法不一致 | 02d（或按需补卡）|
+| 月度分组用 ``substr(CAST(date AS String), 1, 7)`` 自造口径 | 未复用 ``statistics/service.py`` 的 ``YearMonth``（PG ``TO_CHAR``）。SQLite 与 ISO DateStyle 的 PG 上结果一致；PG 若 ``DateStyle`` 非 ISO 会得到垃圾键。测试面永远覆盖不到 | 02d / 生产联调 |
+| ``budget_list`` 条目不区分收支类型 | 支出/收入各挂一条同名分类预算时，两行同名、无法分辨；``budget_status`` 取哪条只由确定序决定 | 02d |
+| ``_EXECUTABLE_ACTIONS`` 是 ``service.py`` 放行集合的手抄副本 | 02e 若调整 ``execute_proposal`` 的放行集，验收断言仍会对旧集合全绿 | 02e |
+
+**测试缺口的残余（回退实验全绿 = 无人管）：** ``category_ids_named`` 的全集语义（账户侧已有等价用例，分类侧没有）、``groupBy="day"`` 分支、``_period_range`` 的 12 月跨年分支、``created_at`` 兜底排序键。均已记录，建议随 02d 补。
+
+**验证（第三轮后）：** ``python -m pytest tests/ -q`` → **819 passed / 37 skipped**（02c 交付时 808，02b 收口 +6、02c 收口 +5）。``ruff check src/ tests/`` 通过（唯一告警是 02d 在途文件 ``agent.py`` 缺尾换行，不属本卡）。
 
 ---
 
