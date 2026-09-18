@@ -969,7 +969,8 @@
 
 > 2026-09-16 立项，同日 v2 修订：编排位置由「客户端 Host」改为**服务端 Host + SSE 流式**（对标 DeepSeek 模式）。关键决策见 `docs/adr/ADR-006-ai-agent-architecture.md`（已提议 v2，待账户所有者确认），目标架构全文见 `docs/architecture/ai-agent-architecture.md`，父任务边界见 `docs/APP-CONTEXT.md` §9 M7。
 > **总目标：** 用户通过一个对话框完成 App 内全部已有功能（25 个页面 / 约 70 个 bridge 命令覆盖的表单任务），新增功能不改动 prompt 主体。
-> **启动闸门：** T-M7-01（数据上云）不触及发布面，可在 M6 期间穿插或 M6 收口后立即启动；T-M7-02 及之后在 M6 收口（T-M6-03）后启动。ADR-006 确认前，仅允许执行文档与用例设计，不进入实现。
+> **启动闸门（2026-09-18 修订）：** 原定「T-M7-02 及之后在 M6 收口（T-M6-03）后启动」**已撤销**。理由：M6 属发布 / 推广 / 验证性质的工作，而 M7 是对 App 功能的**重大新增更新**，须在正式发布前完成——先发布再做大改会带来兼容与灰度上的双重负担。故 **M7 优先推进，M6 实现滞后**（发布动作顺延至 M7 收口之后）。T-M7-02 自 02a 实测闸门起可直接开工，不依赖任何发布面。
+> **M6 的外部前置不变：** 域名 / 备案 / TLS（`D-EXEC-01`）仍挂起，M6 各子任务按原状挂账，本轮不推进（见 `R-PROD-09`）。
 > **分期与顺序理由：** 见目标架构 §10（P0 上云 → P1 loop+SSE → P2 瘦渲染 → P3 事件日志 → P4 全覆盖）。
 > **不变红线：** ① 模型永不输出 UUID（名→id 由确定性代码解析）；② 金额与统计由确定性代码计算，写库必经 ActionProposal 校验与审批门（四值，只有 `allowed-once` 放行）；③ 快路径保持 12 s / 25 s SLO。
 
@@ -1005,21 +1006,89 @@ cd app && npx vitest run                                   # 1104 passed
 ### T-M7-02 服务端 Agent Loop 与 SSE 流式通道（P1）
 
 **依赖：** T-M7-01。
-**交接产物：** `DashScopeProvider` tool calling（payload 增 `tools`、解析 `tool_calls`，错误语义沿用 `ProviderError` 枚举）；服务端 loop（Turn/Step 分层 + 四条不变式 + 退出条件硬边界，架构 §4.4）；工具注册表（服务端业务 API 生成 schema + description 人工审核）；域分组注入；SSE 端点（事件类型见架构 §8.1）；Kotlin 层 `okhttp-sse` 接收 + 桥事件转发（复用 `onPermissionResult` 模式）；`ai.agent` / `ai.cancel` 桥命令；`AIConversation` 接线（基础会话状态）；写工具产出 ActionProposal + 审批四值；配额改「每会话轮数 + token」双限。
-**验证：** 多步用例（查预算 → 改预算 → 审批 → 执行）；多轮澄清用例（问 → 追问 → 简答「500」→ 正确解析）；四条不变式各有对应测试；退出边界触发时优雅终止并说明已完成部分；写工具参数无一绕过校验；模型输出 UUID 被拒；审批四值行为正确（`unavailable` 视为拒绝）；tool calling 异常输出（非法 JSON / 未知工具名）走降级契约；旧客户端不调 `/ai/agent` 行为不变；Token 不出 Kotlin 层。
-**状态：** ⏳ 未开始
+**实施推进计划：** `docs/milestones/T-M7-02-P1-implementation-plan.md`——逐卡职责边界、批次与并行切分点、验证基线、状态看板与中间结果记录。**领取任一张子卡前必读**；本节的验收列是权威标准，该文件只细化推进方式、不改验收。
+**总目标：** 服务端具备多步 loop 与流式通道的**能力闭环**，客户端以最小形态接通并端到端验证。观感打磨（步骤卡片流、多会话、统一智能模式）归 T-M7-03。
+
+**P1 / P2 边界（2026-09-18 定型）：**
+
+| 期 | 客户端交付 | 不交付 |
+|---|---|---|
+| **P1** | SSE 接收（Kotlin）、桥事件转发、`ai.agent` / `ai.cancel` 命令、**终态按既有 v2 intent 分发渲染** | 步骤卡片流、多会话、模式选择、流式气泡打磨 |
+| **P2** | 流式渲染、步骤可见、会话列表、统一智能模式、确认卡对接四值 | — |
+
+理由：P1 必须端到端可验证（服务端 loop 的价值只有客户端接通才能验证），但 UX 打磨不阻塞能力验证。原表述「P2 期间客户端可用非流式降级」与「SSE 与 loop 是同一交付」并存，现统一为：**P1 交付流式通道并做最小消费，P2 做观感**。
+
+**为什么拆成子任务：** 原卡含 10 项链式交付、跨服务端 / 客户端 / 桥 / 契约四个面，任一项卡住则整卡不可交付，无法独立验收。按 `docs/engineering/需求变更规范.md` §五.1（文档/协议 → 数据与服务 → 客户端能力 → UI → 联调）拆分。
+
+**现状基线（2026-09-18 核对）：** 四项基建**全部空白，是从零新建而非「接线」**——tool calling（`provider.py` 无 `tools` 参数，纯文本 JSON）、SSE（前后端均无，`okhttp-sse` 未引入）、事件日志（无 `SessionEvent` 结构）、多会话（单会话，`assistant-chat-store` 仅一个 `messages[]`）。
+
+**可直接复用（无需改造）：** `validator.validate_proposal` / `context.load_validation_context` / `prompts.render_messages*` 均为纯函数、无 FastAPI 耦合，loop 内部可直调；`LLMProvider` Protocol 支持 `transport=MockTransport` 注入，loop 可确定性单测；`AIConversation` 表已存在但从未写入（docstring 自陈为 schema 占位），无历史包袱；`AozoraBridge` 的 `webView.post { evaluateJavascript }` + `window.__aozora*__` 全局回调模式已有 7 个先例；`activeParseJob` 取消模式；`app.dependency_overrides[get_llm_provider]` 测试范式。
+
+**关键前提与已知约束（2026-09-18 新增登记）：**
+
+1. **推理策略已定（2026-09-18，ADR-007）**——`provider.py:109-119` 记录 T12-11 实测：`qwen3.7-flash` 为混合推理模型、默认开启 thinking，edit/delete/query 多字段输出耗时 **20–24 s**，超出单步预算并静默降级。其 `enable_thinking` 是**二值开关**，开了击穿预算、关了多步规划质量不足，无法折中。故 agent 路径改用 **DeepSeek `deepseek-flash`**（`reasoning_effort` 三档 + loop 内按 Step 数升级），快路径继续用 qwen 不动。详见 `docs/adr/ADR-007-deepseek-provider.md` 与架构 §4.6。
+2. **`ai_daily_quota_guest` 默认值待恢复**——`config.py:184` 现为 `100000`（T15 联测临时提额，注释自陈「联测结束后必须恢复为 20」）。P1 的配额实测与 R-PROD-15 成本评估前须先恢复，否则数据失真。
+3. **nginx 无 SSE 配置**——服务器实际部署的 `/usr/local/nginx/conf.d/api.conf`（A 机 nginx 为源码编译安装，见 `infra/deploy/prod/nginx/DEPLOYED.md`）无 `proxy_buffering off`，nginx 默认 buffering on 会把事件攒批下发，中间步骤实时性归零；且未设 `proxy_read_timeout`（用 nginx 默认 60 s），要求服务端 heartbeat。
+4. **无 feature flag 基建**——架构 §11.3 要求「服务端开关 + 客户端开关」双层灰度，现状服务端仅零散 `enable_*` 配置项、客户端仅构建期 `buildConfigField`，需新建。
+5. **单 worker 部署**——`server/Dockerfile:52` 为 `uvicorn ... --port 8000`，无 `--workers`。会话状态可暂用进程内 + DB 持久化，无需 Redis；但限流字典（`service.py:64`）已是单实例假设，注释已声明多实例须换 Redis。
+6. **配额临时值恢复后须实测**——见 2。
+
+**子任务拆解：**
+
+| 子任务 | 硬依赖 | 交接产物 | 最低验证 | 状态 |
+|---|---|---|---|---|
+| **T-M7-02a DeepSeek 能力实测闸门（go/no-go）** | 无 | **`deepseek-flash` 的真实调用实测记录**（官方文档已核实的能力不再重复验证）——(1) tool calls 基本流程与参数编码；(2) **thinking 与 tools 组合**（`thinking:{"type":"enabled"}`）能否正常返回 `tool_calls`；(3) **`reasoning_content` 回传要求**——官方文档明确「含 `tools` 时多轮必须回传前序 `reasoning_content`，否则 400」，需验证多轮循环的实际行为与保存格式；(4) **官方「Chat Completion API 不支持在对话中途插入 tool calls」的确切含义**——是否影响多轮 tool calling 循环本身（若影响，需评估 Responses 或 Anthropic 格式接口）；(5) `stream=true` + `tools` 的流式 tool_calls 分片是否完整（含 name/id）；(6) 三档 `reasoning_effort`（`low`/`high`/`max`）与 thinking 关闭态的**实测耗时**，用于校准推理分级阈值。结论与原始响应片段写入交接说明 | 六项各有真实调用记录与结论。**2026-09-18 实测进展（4/6，go/no-go 已通过）：** (1) tool calls 可用、`arguments` 为单层 JSON；(2) thinking + tools 组合可用；(3) **`reasoning_content` 回传非硬约束**——不回传亦返回 200，与官方文档「含 tools 时否则 400」**不符**（实现上仍建议回传以保持推理连续性）；(4) **多轮 tool calling 循环正常**——官方「不支持在对话中途插入 tool calls」**不影响标准 loop**。另实测：thinking 默认开启会把 `max_tokens` 吃光（`reasoning_tokens` 计入 `completion_tokens`，`content` 返回空串——「快」档必须显式传 `disabled`）、prompt cache 生效、`effort=low` + tools 耗时 **0.7–0.95 s**。(5) **`stream=true` + `tools` 可用**，分片为标准 OpenAI 格式（首块含 `id` + `function.name`，后续块为 `arguments` 增量），**name/id 不丢失**；(6) **四档耗时实测**：thinking `disabled` **0.67 s** / `low` 0.68 s / `high` 0.84 s / `max` 1.15 s，均远低于单步 25 s 预算。**结论：** 简单任务下三档耗时差异极小（0.67–1.15 s），分档的主要收益是**省 token 成本**而非省时间；复杂任务下的差异需在 02d 用真实多步用例补测。 | ✅ 完成（2026-09-18） |
+| **T-M7-02b Provider 接入与扩展（DeepSeek）** | 02a | 新建 `DeepSeekProvider`（OpenAI 兼容，base `https://api.deepseek.com`，实现既有 `LLMProvider` Protocol）；`complete_with_tools()`（payload 增 `tools` / `tool_choice`，解析 `tool_calls`）与流式能力；`ProviderResult` 增 `tool_calls` 与 `reasoning_content` 字段；**推理档位参数**（`thinking` + `reasoning_effort` 三档）；**`reasoning_content` 的保存与回传**（含 `tools` 时多轮必须带回，否则 400）；`config.py` 新增 DeepSeek 配置项与密钥（经 `.env` / Secrets 注入，**不进仓库**）；`build_provider()` 按用途选择 provider（agent 路径 → DeepSeek，快路径 → DashScope） | MockTransport 单测：正常 `tool_calls` / 非法 JSON arguments / 未知工具名 / 流式 chunk 拼接（**含 name/id 完整性**）/ `[DONE]` 终止 / 中途断流 / **多轮 `reasoning_content` 回传** / 三档推理参数正确注入；超时仍走不可重试路径（`provider.py:128-132` 语义不变）；密钥不出现在日志与响应中 | ⏳ 未开始 |
+| **T-M7-02c 工具注册表与域分组（P1 最小集）** | 02a | 新建 `server/src/modules/ai/tools.py`——工具定义（name / description / JSON Schema parameters / 读写标记 / 执行体）。**P1 只做够验证的域**：记账（`transaction.*`）、预算（`budget.*`）、账户账本（`account.*` / `book.*` 读）。description 为模型可见的唯一语义来源，**须人工审核**。按域分组注入（每域 5-8 个，见架构 §7.2） | 四条验收各固化为测试：action 枚举无冲突（读 `schema.json` 的**真实枚举**断言）；每域工具数 ≤8（实测 **5 / 5 / 5**）；未知工具名走降级契约（**不抛异常**，返回安全枚举错误码）；全量注入被明确排除（总数 **15** < 70）。**2026-09-18 交付：** `tools.py` + `test_ai_tools.py`（95 用例）；服务端 808 passed / 37 skipped（本卡基线 713 + 95）；四板全绿；契约零改动。**同卡修复既有缺陷：** `validator.py` 的 `format: date` 检查器对非字符串实例抛 `TypeError`（模型写 `20260918` 会让整轮 loop 500）——加类型守卫，工具路径与 `validate_proposal` 一并受益。**两轮独立复审**（均以「回退 → 测试是否失败」实测）共修 7 处缺陷、修 2 个空转测试，详见 §五。**设计边界（02d/02e 必读）：** 写工具只产出草案不执行；P1 写工具仅在记账域（预算/账户账本为只读）；读工具结果不含任何 id；**草案含 id，回喂模型前必须剔除**。详见 `docs/milestones/T-M7-02-P1-implementation-plan.md` §五 | ✅ 完成（2026-09-18） |
+| **T-M7-02d Agent Loop 核心与推理分级（非流式）** | 02b、02c | 新建 `server/src/modules/ai/agent.py`——Turn/Step 分层（`while (await turn())`）；四条跨请求不变式（工具调用与结果配对 / 中途输入进正确的下一步 / 取消收敛到一致状态 / 历史可恢复可分叉）；退出条件硬边界（单 Turn ≤8 Step、≤5 写操作、≤20 工具调用、连续无进展 ≤2），任一触发即优雅终止并说明已完成部分；**入口推理分级**（规则表判定快 / 中 / 深三档，**不额外调用 LLM**）与 **loop 内按 Step 数升级**（进入第 2 个 Step 即升到「深」档——步数是复杂度的直接证据，使入口误判不再致命）。**先做非流式**（同步返回完整结果），以便复用现有同步 `TestClient` 基建单测 | 注入 fake provider 的确定性单测（`app.dependency_overrides[get_llm_provider]` 范式已存在）：四条不变式各有用例；四条硬边界各有用例；优雅终止输出含「已完成 / 未完成」两部分；三档判定规则各有用例；**Step 升级在入口误判时正确生效**（构造「入口判快、实际多步」的用例）；「快」档必须显式传 thinking `disabled`（该模型默认开启，省略参数不等于关闭） | ⏳ 未开始 |
+| **T-M7-02e 写工具安全路径（ActionProposal + 审批四值）** | 02d | 写工具**不直接执行**——产出 ActionProposal 后 loop 挂起；复用 `validator.validate_proposal` + `context.load_validation_context`（纯函数，loop 内直调）；执行复用 `AIService.execute_proposal`（含 TOCTOU 重校验）；审批四值 `allowed-once`（唯一放行值）/ `rejected` / `cancelled` / `unavailable`（视为拒绝）。**审批策略（2026-09-18 定型）：** 单 Step 完成的任务沿用现有策略（confidence ≥0.9 自动执行 + 撤销窗，`service.py:563` 阈值）；**多步 loop（≥2 Step）中的写操作一律强制确认**——多步场景下模型连续写库的风险高于单发，收紧以保护 PR-2 | 模型输出 UUID 被拒（名→id 由确定性代码解析）；三条铁律各有用例；`unavailable` 视为拒绝；`allowed-once` 执行后即失效、不产生长期授权；多步场景下写操作必出确认卡 | ⏳ 未开始 |
+| **T-M7-02f 会话状态与配额双限** | 02d | 新建最小会话事件表（`conversation_id` / `seq` / `type` / `data` / `created_at`），P3 演进为完整事件日志（补 `ignorable` 与 Surface 子集定义），P1 只做够多轮上下文的读写；激活 `AIConversation`（现为空表）作会话索引。配额：`AIUsage` 增 `conversation_id` 列，会话级「轮数 + token」双限按聚合查询实现。上下文窗口 **N 初始 8 轮**；历史与摘要只含自然语言，**不得出现 UUID / 内部 ID** | 多轮澄清用例（问 → 追问 → 简答「500」→ 正确解析）；会话级轮数 / token 超限返回 429（code 沿用 `ai_quota_exceeded`）；历史窗口无 UUID；登出 / 删号清理会话行 | ⏳ 未开始 |
+| **T-M7-02g SSE 端点与部署配置** | 02d、02e | `routes.py` 新增 `POST /ai/agent` 返回 `StreamingResponse`（`text/event-stream`）；事件类型按架构 §8.1（`phase` / `tool_call` / `tool_result` / `confirm` / `device_request` / `delta` / `done` / `error`）；**零新依赖**——Starlette 原生 `StreamingResponse` + 手写帧格式化（约 30 行），不引 `sse-starlette`；heartbeat（空闲期发注释帧，防 nginx 60 s 读超时）；**`db: AsyncSession` 生命周期**——流式响应下不能沿用 `Depends(get_db_session)`（请求作用域 session 在响应返回后即关闭，而生成器仍在运行），改用 `get_session_factory()` 自行管理。**SSE 缓冲（2026-09-18 决策：不改 nginx）**——服务端在响应中发 `X-Accel-Buffering: no`（nginx 默认尊重该头并对此响应关闭 `proxy_buffering`），**无需改动服务器 nginx 配置**；须实测确认该头生效，若被忽略再评估改配置。**测试基建：** 仓库无流式测试先例（现全部为同步 `TestClient`）——新建 `httpx.AsyncClient(ASGITransport(app))` 流式样板。**灰度开关：** 服务端 env + 客户端开关双层，默认关闭 | 流式样板可跑（帧格式、事件顺序、heartbeat）；开关关闭时 `/ai/agent` 不可用且旧客户端行为不变；实测确认 `X-Accel-Buffering: no` 经实际链路（含 nginx）后事件逐条下发而非攒批 | ⏳ 未开始 |
+| **T-M7-02h 客户端桥通道（okhttp-sse + 事件转发）** | 02g | `app/build.gradle.kts` 加 `com.squareup.okhttp3:okhttp-sse:4.12.0`；`AiGatewayClient` 新增流式接收（**注意：SSE 长连接不能用现有 `callTimeout(25s)`**，需独立 OkHttpClient 配置）；新桥命令 `ai.agent` / `ai.cancel`——**桥命令 77 → 79，四处同步**（`BridgeProtocol.kt` 的 const + `ALL`、`AozoraBridge.dispatch`、`bridge-types.ts`、`native-bridge.ts`），且 `SecurityConfigTest.kt:30-57` 的硬编码 `77` 断言同步更新；事件推送复用 `webView.post { evaluateJavascript }` + `window.__aozoraAiStream__`（照 `onPermissionResult` 的链式包装写法）；`activeStreamJob` 仿 `activeParseJob` 支持取消 | 桥命令计数断言 79；TS 命令完整性契约测试；SSE 事件从服务端到 WebView 端到端送达；取消能终止 loop；Token 不出 Kotlin 层（ADR-003 不变） | ⏳ 未开始 |
+| **T-M7-02i 客户端消费（最小形态）** | 02h | `use-assistant.ts` 接入流式：`submitInput` 走 `ai.agent`。**v2 intent 在流式中无法预知**（chat/query/edit/delete/config 的 UI 形态互异），定型为：流式期间只渲染文本气泡，`done` 到达后按既有 v2 分发矩阵（`use-assistant.ts:669-691`）走原有卡路径，用户感知为「思考完毕展开卡」；`AssistantPhase` / `CardStatus` / 三个互斥瞬时态（`activeProposal` / `pendingOp` / `pendingConfig`）约束不变；保留非流式 `ai.interpret` 作为开关关闭时的降级路径 | 多步任务端到端可完成；多轮澄清可用；非 chat intent 下流式气泡正确卸载并展开卡；开关关闭时回落现有单发链路且 12 s / 25 s 体验不变；既有 assistant 测试全绿 | ⏳ 未开始 |
+
+**执行顺序（串行闸门，不可跳）：**
+
+```
+02a 实测闸门 ──┬─→ 02b Provider ──┐
+（go/no-go）   └─→ 02c 工具注册表 ─┴─→ 02d Loop 核心（非流式，可独立验收）
+                                        ├─→ 02e 写工具安全路径 ─┐
+                                        └─→ 02f 会话与配额     │
+                                                              ├─→ 02g SSE 端点+部署
+                                                              │
+                                                              02d+02e ─→ 02g ─→ 02h 客户端桥 ─→ 02i 客户端消费
+```
+
+- **02a 必须先做**：结论决定 02b 的接口形态，也决定 loop 是否要退回文本 JSON 工具调用。未出结论前不动 02d 之后的卡。
+- **02d 独立可验收**：非流式形态可复用现有同步测试基建，不依赖 02g 的流式样板。
+- **02f 与 02e 并行**：都只依赖 02d，无相互依赖。
+- **02h 依赖 02g 的事件协议冻结**：事件类型在此确定，客户端桥按协议实现。
+
+**验证命令（全轮收口）：**
+
+```
+cd server && python -m pytest tests/ -q                    # 基线 713 passed + 37 skipped，本轮新增 agent 测试
+cd app && ./gradlew :app:testDebugUnitTest                 # 基线 394 tests / 0 failures
+cd app && npx vitest run                                   # 基线 1107 passed
+cd app && npx tsc --noEmit                                 # 0 错
+```
+
+> 原记录为 658 / 392 / 1104，与实测不符（2026-09-18 由 02c 复核修正）。
+
+**状态：** 🔄 进行中（2026-09-18 完成方案定型与细分拆解；**02a 实测闸门 ✅ / 02c 工具注册表 ✅**，下一张为 02b）。
 
 ### T-M7-03 客户端瘦渲染与多会话管理（P2）
 
 **依赖：** T-M7-02。
-**交接产物：** `use-assistant.ts` 重构（移除 loop/工具选择逻辑，保留渲染与设备能力执行）；SSE 事件消费与步骤卡片流；统一智能模式（路径对用户透明，无模式选择）；多会话列表（新建/切换/重命名/删除）；确认卡对接审批四值；取消/打断交互；`assistant-chat-store` 降级为 UI 投影缓存。
+**范围（2026-09-18 定型）：** P1 已交付流式通道与最小消费（终态走既有 v2 intent 分发）；P2 做**观感与结构**——流式渲染打磨、步骤可见、多会话、统一智能模式。
+**交接产物：** `use-assistant.ts` 拆分重构（把编排逻辑与渲染态分离。**注意：P1 起客户端本就不含 loop / 工具选择逻辑**——v2 是服务端 Host 方案，此处不存在「移除 loop」动作；改述为「拆为流式事件消费 + 卡渲染 + 设备能力执行三段」）；步骤卡片流（`phase` / `tool_call` / `tool_result` 事件可见化，可折叠，含完成 / 失败态）；统一智能模式（无模式开关，路径对用户透明）；多会话列表（新建 / 切换 / 重命名 / 删除）——`assistant-chat-store` 由单 `messages[]` 扩为按 `conversationId` 分桶，并降级为 UI 投影缓存；确认卡对接审批四值；取消 / 打断交互收敛。
 **验证：** 步骤卡片流正确渲染（含完成/失败态）；简单任务无步骤展示（统一智能模式）；多会话互不串扰；取消收敛到一致状态；快路径 12 s / 25 s 体验回归不变。
 **状态：** ⏳ 未开始
 
 ### T-M7-04 会话事件日志与摘要压缩（P3）
 
 **依赖：** T-M7-03。
-**交接产物：** SessionEvent 日志（`type`/`seq`/`time`/`data`/`ignorable`）；Surface 事件子集定义（只有其进模型上下文）；`replace` 压缩操作（原文保留）；摘要生成与注入；会话恢复与分叉；日志保留期与隐私边界（对齐 `D-PROD-08`）。
+**交接产物：** SessionEvent 日志（`type`/`seq`/`time`/`data`/`ignorable`）；Surface 事件子集定义（只有其进模型上下文）；`replace` 压缩操作（原文保留）；摘要生成与注入；会话恢复与分叉；日志保留期与隐私边界（对齐 `D-PROD-08`）。**前置阻塞（2026-09-18 登记）：** `docs/architecture/security.md` 第 6 行「禁止记录 token、完整对话、原始票据和账本明细」是绝对禁令，与本任务的日志形态直接冲突，**须先在该文档层面解决**（修订条款或调整日志形态）方可开工。P1 的 02f 只建最小会话表，不触碰此边界。
 **验证：** 断连后可按 `conversation_id` 恢复续跑；压缩后原文仍可查（审计）；结构性事件不占 token（实测）；摘要不含 ID；隐私边界有明确结论。
 **状态：** ⏳ 未开始
 

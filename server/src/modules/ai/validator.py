@@ -66,7 +66,17 @@ _FORMAT_CHECKER = FormatChecker()
 
 
 @_FORMAT_CHECKER.checks("date", raises=())
-def _check_biz_date_format(value: str) -> bool:
+def _check_biz_date_format(value: object) -> bool:
+    """``format: date`` 断言。
+
+    ``isinstance`` 守卫是必需的：jsonschema 对 ``format`` 关键字**不做类型
+    前置过滤**（与 ``pattern`` 不同，后者有 ``is_type(instance,"string")``
+    守卫），任何类型的实例都会被送进校验器。缺了守卫时，模型把日期写成
+    数字（``20260918``）或 ``null`` 会让 ``re.match`` 抛 ``TypeError``，
+    异常穿过 ``iter_errors`` —— 调用方看到的是 500 而不是「校验失败」。
+    """
+    if not isinstance(value, str):
+        return False
     return _is_valid_biz_date(value)
 
 
