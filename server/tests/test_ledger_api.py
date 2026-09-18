@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import pytest
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
-from sqlalchemy.pool import StaticPool
 from starlette.testclient import TestClient
 
 from src.common.database import get_db_session
@@ -21,7 +20,23 @@ def auth_client():
     # Clear rate limiter for tests
     _rate_limits.clear()
 
-    engine = create_async_engine("sqlite+aiosqlite:///:memory:", poolclass=StaticPool)
+    # 用**临时文件库**而不是 `:memory:` + StaticPool：内存库依附唯一一条连接，
+    # 而本 fixture 里有多个生命周期不同的 asyncio 循环（`asyncio.run` 建表、
+    # TestClient 的 portal loop、用例里 ad-hoc 的 `asyncio.run`）。连接跨 loop 复用
+    # 又从不释放，aiosqlite 的工作线程就会在旧 loop 关闭后回投结果 → 线程里抛
+    # `RuntimeError: Event loop is closed`，被 filterwarnings=["error"] 提升成 error，
+    # 且**记在哪个用例上纯看时机**（2026-09-18 定位，服务端作业偶发 1 error 的真因）。
+    # 文件库让每个 loop 各用各的连接，teardown 里也就能干净释放（实测线程归零）。
+    import shutil
+    import tempfile
+    from pathlib import Path
+
+    # 临时目录用 mkdtemp 而不是 pytest 的 tmp_path：与本仓库其它测试
+    # （test_attachments / test_image_parse / test_stats_exports）一致。
+    db_dir = Path(tempfile.mkdtemp(prefix="aozora_test_db_"))
+    engine = create_async_engine(
+        f"sqlite+aiosqlite:///{(db_dir / 'test.db').as_posix()}"
+    )
     factory = async_sessionmaker(bind=engine, expire_on_commit=False)
 
     import asyncio
@@ -41,6 +56,8 @@ def auth_client():
     with TestClient(app) as c:
         yield c
 
+    asyncio.run(engine.dispose())
+    shutil.rmtree(db_dir, ignore_errors=True)
     app.dependency_overrides.clear()
     _rate_limits.clear()
 

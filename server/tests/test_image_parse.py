@@ -108,8 +108,14 @@ def img_env(upload_dir):
     reset_config()
 
     # Configure upload dir
+    db_dir = Path(tempfile.mkdtemp(prefix="aozora_test_db_"))
+    # 临时文件库（而不是 `:memory:`）：内存库会让 `database.py` 选 StaticPool —— 唯一
+    # 一条连接跨多个短命 asyncio 循环复用、且从不释放，aiosqlite 工作线程会在旧 loop
+    # 关闭后回投结果，线程里抛 `RuntimeError: Event loop is closed`，被
+    # filterwarnings=["error"] 提升成 error 并记在无关用例上（2026-09-18 定位）。
+    # 文件库走默认连接池，每个 loop 各用各的连接。
     cfg = Settings(
-        database_url="sqlite+aiosqlite:///:memory:",
+        database_url=f"sqlite+aiosqlite:///{(db_dir / 'test.db').as_posix()}",
         upload_dir=str(upload_dir),
         secret_key="test-secret",
     )
@@ -169,6 +175,7 @@ def img_env(upload_dir):
     _ai_rate_limits.clear()
     reset_llm_provider()
     reset_config()
+    shutil.rmtree(db_dir, ignore_errors=True)
 
 
 # ── Helpers ──────────────────────────────────────────────────────────────
