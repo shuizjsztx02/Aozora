@@ -876,6 +876,21 @@ sha256 逐字节还原并校验。
 `AgentLoop.run(history=…)`（不必再过一遍清洗）；本轮结束后**必须落库**，否则下一轮没有
 上下文。02e 的 `AgentResult.proposals` / `executions` 与 `pending_input` 按 02e 记录消费。
 
+**给 02g 的两条交接补充（本卡复核时发现，属端点职责、本卡不做）：**
+
+1. **agent 路径同样要吃 guest 的日配额**——`AIUsage` 的行是按「用户/按天」计数的
+   （`AIService._check_daily_quota`，`service.py`），agent 轮次也写进同一张表，所以
+   口径天然对齐；但那个检查目前是 `AIService` 的**私有方法**、且构造 `AIService`
+   需要一个 provider。02g 的端点若只调 `ConversationService.check_quota`，guest 就
+   **没有日上限**（只剩会话级上限，而会话可以随便新建）——这是成本/滥用口子。
+   建议做法：把日配额检查提成模块级纯函数或 `ConversationService` 上的公开方法，
+   由端点在同一处一起调（**别在端点里手抄一份 SQL**，会与快路径漂移）。
+2. **`resolve()` 换账本会改 `book_id`，而 `AIConversation.updated_at` 带
+   `onupdate=func.now()`**——flush 后该属性在 ORM 侧被过期。端点若在换账本之后
+   `model_validate(conversation)` 序列化它，会触发同步 lazy-load →
+   `MissingGreenlet`（`auth/service.py:update_profile` 踩过同一个坑，那里用
+   `await self._db.refresh(user)` 解决）。要在响应里回显会话行就照此办理。
+
 ---
 
 ## 六、参考
