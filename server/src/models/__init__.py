@@ -4,7 +4,7 @@ All models are re-exported here so Alembic can discover them via a
 single import in ``env.py``.
 """
 
-from src.models.ai import AIConversation, AIUsage
+from src.models.ai import AIConversation, AIConversationEvent, AIUsage
 from src.models.attachment import Attachment
 from src.models.base import AuditMixin, Base, SoftDeleteMixin, VersionedMixin
 from src.models.budget import Budget
@@ -24,6 +24,7 @@ from src.models.user import DeviceSession, User
 
 __all__ = [
     "AIConversation",
+    "AIConversationEvent",
     "AIUsage",
     "Account",
     "Attachment",

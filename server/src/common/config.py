@@ -179,8 +179,10 @@ class Settings(BaseSettings):
     # Daily quota for GUEST users only; ACTIVE users have no daily cap
     # (product decision 2026-09-06). Counted per calendar day in the
     # user's own timezone (User.timezone).
-    # 联测临时提额（2026-09-11，T15 真机+模拟器回归多句连测）——原值 20，
-    # 联测结束后必须恢复为 20（测试面配额值由 conftest 钉死，不随本默认值漂移）。
+    # 联测临时提额（2026-09-11，T15 真机+模拟器回归多句连测）——原值 20。
+    # **T-M7-02f 领取时按用户明确指示保持 100000 不变**（该值仍被用于人工
+    # 联测，改回 20 会打断测试）；卡面「前置动作」因此未执行，已在交付记录
+    # 里登记为挂账项，由 M7 收口时统一恢复。测试面配额由 conftest 钉死。
     ai_daily_quota_guest: int = Field(
         default=100000,
         gt=0,
@@ -231,6 +233,44 @@ class Settings(BaseSettings):
         default="https://api.deepseek.com",
         validation_alias=AliasChoices(
             "AI_AGENT_PROVIDER_BASE_URL", "ai_agent_provider_base_url",
+        ),
+    )
+
+    # --- AI agent 会话窗口与配额 (T-M7-02f) ---
+    # 上下文窗口「最近 N 轮」（架构 §6.3；§12.2 未决 #2：初始 8，需实测调优）。
+    # 「轮」= 一次用户输入跑完整个 loop，不是一次模型请求——工具任务的
+    # 第 2 步起恒为深档（02d 实测），按请求数计窗口会让上下文忽长忽短。
+    ai_agent_history_turns: int = Field(
+        default=8,
+        gt=0,
+        validation_alias=AliasChoices(
+            "AI_AGENT_HISTORY_TURNS", "ai_agent_history_turns",
+        ),
+    )
+    # 与轮数并行的字符双限（架构 §6.4「按 N 轮 + 字符双限」）。工具结果会留在
+    # 历史里被每个后续 Step 重发，轮数够小也可能撑爆单步预算。
+    ai_agent_history_chars: int = Field(
+        default=8000,
+        gt=0,
+        validation_alias=AliasChoices(
+            "AI_AGENT_HISTORY_CHARS", "ai_agent_history_chars",
+        ),
+    )
+    # 会话级双限（R-PROD-15；§12.2 未决 #8：数值由 P1 实测确定，此处取初始值）。
+    # 轮数按 02d 实测「单轮多步 ≈ 8.2k prompt tokens」估算：50 轮 ≈ 500k tokens，
+    # 故 token 上限取与之同量级的 500000。两者都是**上限哨兵**，不是成本目标。
+    ai_agent_conversation_max_turns: int = Field(
+        default=50,
+        gt=0,
+        validation_alias=AliasChoices(
+            "AI_AGENT_CONVERSATION_MAX_TURNS", "ai_agent_conversation_max_turns",
+        ),
+    )
+    ai_agent_conversation_max_tokens: int = Field(
+        default=500_000,
+        gt=0,
+        validation_alias=AliasChoices(
+            "AI_AGENT_CONVERSATION_MAX_TOKENS", "ai_agent_conversation_max_tokens",
         ),
     )
 

@@ -1,11 +1,26 @@
-"""T-M2-02: AI-related models — AIConversation, AIUsage."""
+"""T-M2-02: AI-related models — AIConversation, AIUsage.
+
+T-M7-02f 起 ``AIConversation`` 不再是占位表：它是 agent 会话的**索引**，事件
+正文落在 ``ai_conversation_events``（同一文件），会话级配额落在 ``ai_usage``
+的 ``conversation_id`` 列上。
+"""
 
 from __future__ import annotations
 
 import uuid
 from datetime import datetime
+from typing import Any
 
-from sqlalchemy import BigInteger, DateTime, ForeignKey, Index, String, Text, func
+from sqlalchemy import (
+    JSON,
+    BigInteger,
+    DateTime,
+    ForeignKey,
+    Index,
+    String,
+    Text,
+    func,
+)
 from sqlalchemy.dialects.postgresql import UUID
 from sqlalchemy.orm import Mapped, mapped_column
 
@@ -13,20 +28,19 @@ from src.models.base import AuditMixin, Base
 
 
 class AIConversation(Base, AuditMixin):
-    """Reserved for future multi-turn AI conversation context.
+    """Agent 会话索引（T-M7-02f 激活；此前是 schema 占位）。
 
-    Current gateway flow (T-M4-01) is stateless single-shot interpret —
-    there is no conversation_id in the request schema and no consumer of
-    these rows. The table exists because T-M2-02 created the schema and
-    the 0001_initial migration owns it; deleting the model would break
-    model/migration parity.
+    一行 = 一个会话。正文不在这里——事件落在 :class:`AIConversationEvent`，
+    模型上下文由那些事件**投影**出来（架构 §6.2：会话不是聊天记录，而是
+    append-only 事件日志 + 派生投影）。
 
-    T-M4-01c planned "AIConversation context storage and trimming" as a
-    deliverable, but the product surface (multi-turn follow-ups per
-    §6.4 "追问") is not yet built out. Wired up when T-M4-02c's
-    assistant dialog feature needs conversation state; until then, the
-    table stays empty and the row is just schema infrastructure.
+    ``summary`` 字段保留给 P3 的 ``replace`` 压缩（把超窗轮次替换为摘要，
+    原文仍留在日志里）。**P1 不生成摘要，该列保持空串**。
+
+    ``book_id`` 是会话绑定的账本——系统提示里的「现有对象」名单由它决定，
+    换账本后同一段历史不能复用（见 ``agent.AgentLoop`` 的系统提示一节）。
     """
+
     __tablename__ = "ai_conversations"
 
     id: Mapped[uuid.UUID] = mapped_column(
@@ -45,14 +59,70 @@ class AIConversation(Base, AuditMixin):
     summary: Mapped[str] = mapped_column(Text, default="", server_default="", nullable=False)
 
 
+class AIConversationEvent(Base):
+    """会话事件日志（P1 最小形态）。
+
+    P1 只做「够多轮上下文读写」的那一形态——这里存的就是 loop 的消息流本身
+    （``type`` 即消息角色），读出来直接作为下一次 ``AgentLoop.run(history=…)``
+    的输入。P3（T-M7-04）演进为完整事件日志：补 ``ignorable`` 与 Surface 子集
+    定义，那时才出现工具调用、审批、设备指令等**不占 token** 的结构性事件。
+
+    固定语义（不要在这些点上顺手扩展）：
+
+    - ``seq`` 是**会话内**单调递增的序号，从 1 开始，唯一索引钉死。
+    - ``data`` 是消息字典（含 ``reasoning_content``；assistant 消息**必须**带该
+      键，空串可——真实 API 探针实测缺键会让整轮 400，见 §五 02d 记录）。
+    - ``type`` P1 取值只有 ``user`` / ``assistant`` / ``tool``；**不存 system**
+      ——系统提示由 loop 每轮按 ToolContext 现算（含当天日期与本账本对象名单），
+      存下来会在换账本后变成过期数据，且会出现两条 system。
+    - 事件**按轮原子写入**（一轮 = 一次用户输入跑完 loop），因此按轮边界截断
+      历史永远不会切断「带 tool_calls 的 assistant 消息」与其 ``role:"tool"``
+      结果之间——孤立结果会被 API 以 400 拒绝。
+    """
+
+    __tablename__ = "ai_conversation_events"
+    __table_args__ = (
+        # 会话内序号唯一：并发写入撞车时由数据库兜底（读历史要按 seq 有序）。
+        Index(
+            "ix_ai_conversation_events_conv_seq",
+            "conversation_id", "seq",
+            unique=True,
+        ),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), primary_key=True, default=uuid.uuid4,
+    )
+    conversation_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("ai_conversations.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    seq: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    type: Mapped[str] = mapped_column(String(16), nullable=False)
+    data: Mapped[dict[str, Any]] = mapped_column(JSON, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), nullable=False,
+    )
+
+
 class AIUsage(Base):
-    """Per-request AI usage record — append-only audit trail."""
+    """Per-request AI usage record — append-only audit trail.
+
+    T-M7-02f：一个 agent **Turn 一条行**（``tokens`` 为该轮全部 provider 调用
+    之和），``conversation_id`` 落在这条行上——会话级「轮数 + token」双限因此
+    是同一张表上的 COUNT / SUM 聚合查询（架构 §12.2 已定表第 3 项）。快路径
+    的 interpret / report / parse-image 各行保持 ``conversation_id = NULL``。
+    """
 
     __tablename__ = "ai_usage"
     __table_args__ = (
         # T-M4-01: guest daily-quota check counts rows by
         # (user_id, created_at >= day start) on every /ai/interpret call.
         Index("ix_ai_usage_user_created", "user_id", "created_at"),
+        # T-M7-02f: conversation-level turn / token quota aggregates by
+        # conversation_id over the conversation's lifetime.
+        Index("ix_ai_usage_conversation_created", "conversation_id", "created_at"),
     )
 
     id: Mapped[uuid.UUID] = mapped_column(
@@ -62,6 +132,14 @@ class AIUsage(Base):
         UUID(as_uuid=True),
         ForeignKey("users.id", ondelete="CASCADE"),
         nullable=False,
+    )
+    # **SET NULL 而不是 CASCADE**：会话行会被登出清理删掉，而 ai_usage 是
+    # guest 日配额的计数基座——若随会话一起删，用户只要登出再登入就能把当天
+    # 的配额刷回满额。审计行必须活得比会话长。
+    conversation_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("ai_conversations.id", ondelete="SET NULL"),
+        nullable=True,
     )
     provider: Mapped[str] = mapped_column(String(64), nullable=False)
     model: Mapped[str] = mapped_column(String(128), nullable=False)

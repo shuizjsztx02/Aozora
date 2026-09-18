@@ -31,7 +31,7 @@ class TestMigrationConsistency:
             "0010_attachment_user_id_backfill", "0011_user_consents",
             "0012_account_deletion", "0013_crash_reports",
             "0014_deletion_token_unique", "0015_feedback",
-            "0016_cloud_entities",
+            "0016_cloud_entities", "0017_conversation_events",
         ):
             try:
                 m = importlib.import_module(f"src.migrations.versions.{rev}")
@@ -71,7 +71,7 @@ class TestMigrationConsistency:
             "0010_attachment_user_id_backfill", "0011_user_consents",
             "0012_account_deletion", "0013_crash_reports",
             "0014_deletion_token_unique", "0015_feedback",
-            "0016_cloud_entities",
+            "0016_cloud_entities", "0017_conversation_events",
         ):
             try:
                 m = importlib.import_module(f"src.migrations.versions.{rev}")
@@ -134,8 +134,8 @@ class TestMigrationConsistency:
                 f"{table_name} missing CHECK constraint on amount_cents"
             )
 
-    def test_22_tables_registered(self):
-        """The schema must define exactly 22 tables.
+    def test_23_tables_registered(self):
+        """The schema must define exactly 23 tables.
 
         T-M4-02b added ``proposal_idempotency`` (migration 0008) for AI
         execute dedup, bringing the total from 13 to 14.
@@ -147,8 +147,10 @@ class TestMigrationConsistency:
         T-M7-01 added ``savings_goals`` + ``scheduled_rules`` + ``chat_personas``
         (migration 0016), 19 → 22 — the three client-only entities that became
         cloud-authoritative.
+        T-M7-02f added ``ai_conversation_events`` (migration 0017), 22 → 23 —
+        the minimal conversation event log backing multi-turn context.
         """
-        assert len(Base.metadata.tables) == 22
+        assert len(Base.metadata.tables) == 23
 
     def test_transaction_note_column_bounded(self):
         """N-13: transactions.note must be bounded at the DB layer too.
@@ -210,3 +212,10 @@ class TestMigrationConsistency:
         m16 = importlib.import_module("src.migrations.versions.0016_cloud_entities")
         assert m16.down_revision == m15.revision
         assert m16.revision == "0016_cloud_entities"
+
+    def test_conversation_events_migration_chains_onto_0016(self):
+        """T-M7-02f: 0017_conversation_events must extend the migration chain."""
+        m16 = importlib.import_module("src.migrations.versions.0016_cloud_entities")
+        m17 = importlib.import_module("src.migrations.versions.0017_conversation_events")
+        assert m17.down_revision == m16.revision
+        assert m17.revision == "0017_conversation_events"

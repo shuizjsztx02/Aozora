@@ -153,6 +153,47 @@ def local_day_start_utc(tz_name: str) -> datetime:
     return day_start.astimezone(UTC)
 
 
+def build_usage_row(
+    *,
+    user_id: uuid.UUID,
+    provider: str,
+    model: str,
+    request_id: str,
+    tokens: int,
+    cfg: Settings | None = None,
+    conversation_id: uuid.UUID | None = None,
+) -> AIUsage:
+    """Build one ``ai_usage`` row.
+
+    Single implementation point for the cost formula and the
+    ``request_id`` truncation, shared by the fast path (:class:`AIService`)
+    and the agent path (``conversation.ConversationService``).
+
+    ``conversation_id`` is set for agent turns only — one row per **Turn**
+    (``tokens`` = that turn's total provider calls), which is what makes
+    the conversation-level "turns + tokens" quota a plain COUNT/SUM
+    aggregate over this table. Fast-path rows leave it ``NULL``.
+    """
+    price = (cfg or get_config()).ai_price_per_1m_tokens
+    cost = round(tokens * price / 1_000_000) if price else 0
+    if len(request_id) > 64:
+        logger.debug(
+            "X-Request-Id truncated to 64 chars",
+            extra={"request_id_prefix": request_id[:16], "original_length": len(request_id)},
+        )
+    return AIUsage(
+        user_id=user_id,
+        provider=provider,
+        model=model,
+        tokens=tokens,
+        cost=cost,
+        # X-Request-Id is client-supplied and unbounded; the column is
+        # String(64) — truncation keeps PostgreSQL from erroring.
+        request_id=request_id[:64],
+        conversation_id=conversation_id,
+    )
+
+
 class AIService:
     def __init__(
         self,
@@ -367,26 +408,14 @@ class AIService:
         responsible for computing the total token counts (including any
         retry extras). See ``_record_usage`` for the success-path wrapper.
         """
-        total_tokens = prompt_tokens + completion_tokens
-        price = self._cfg.ai_price_per_1m_tokens
-        cost = round(total_tokens * price / 1_000_000) if price else 0
-        if len(request_id) > 64:
-            logger.debug(
-                "X-Request-Id truncated to 64 chars",
-                extra={"request_id_prefix": request_id[:16], "original_length": len(request_id)},
-            )
-        self._db.add(
-            AIUsage(
-                user_id=user.id,
-                provider=provider_name,
-                model=model,
-                tokens=total_tokens,
-                cost=cost,
-                # X-Request-Id is client-supplied and unbounded; the column
-                # is String(64) — truncation keeps PostgreSQL from erroring.
-                request_id=request_id[:64],
-            )
-        )
+        self._db.add(build_usage_row(
+            user_id=user.id,
+            provider=provider_name,
+            model=model,
+            request_id=request_id,
+            tokens=prompt_tokens + completion_tokens,
+            cfg=self._cfg,
+        ))
         await self._db.flush()
 
     async def _record_usage(
@@ -437,18 +466,14 @@ class AIService:
         total = extra_prompt_tokens + extra_completion_tokens
         if total == 0:
             return
-        price = self._cfg.ai_price_per_1m_tokens
-        cost = round(total * price / 1_000_000) if price else 0
-        self._db.add(
-            AIUsage(
-                user_id=user.id,
-                provider=self._provider.name,
-                model=model,
-                tokens=total,
-                cost=cost,
-                request_id=request_id[:64],
-            )
-        )
+        self._db.add(build_usage_row(
+            user_id=user.id,
+            provider=self._provider.name,
+            model=model,
+            request_id=request_id,
+            tokens=total,
+            cfg=self._cfg,
+        ))
         await self._db.flush()
         await self._db.commit()
 

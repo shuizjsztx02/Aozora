@@ -33,7 +33,7 @@ if str(_REPO_ROOT / "server") not in sys.path:
 from sqlalchemy import delete, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 from src.common.database import get_session_factory
-from src.models.ai import AIConversation, AIUsage
+from src.models.ai import AIConversation, AIConversationEvent, AIUsage
 from src.models.attachment import Attachment
 from src.models.budget import Budget
 from src.models.consent import UserConsent
@@ -80,6 +80,9 @@ _PER_USER_TABLES: list[tuple[str, object]] = [
     ("chat_personas", ChatPersona),
     ("accounts", Account),
     ("categories", Category),
+    # T-M7-02f: 事件正文挂在会话下、会话挂在用户下——按 FK 依赖顺序，事件必须
+    # 排在会话之前（事件表本身没有 user_id 列，归属经 conversation_id 追溯）。
+    ("ai_conversation_events", AIConversationEvent),
     ("ai_conversations", AIConversation),
     ("proposal_idempotency", ProposalIdempotency),
     ("exports", Export),
@@ -107,6 +110,8 @@ def _ownership_filter(model, user_id: uuid.UUID):
     ``book_id`` → ``Book.owner_id``, so we use a sub-select in those cases.
     ``UserConsent`` is keyed by ``device_id``, so we join through
     ``DeviceSession`` to find the devices owned by *user_id*.
+    ``AIConversationEvent`` (T-M7-02f) is keyed by ``conversation_id``, so
+    ownership flows through ``AIConversation.user_id``.
     """
     if hasattr(model, "user_id"):
         return model.user_id == user_id
@@ -115,6 +120,9 @@ def _ownership_filter(model, user_id: uuid.UUID):
     if model in (Transaction, Budget):
         book_subq = select(Book.id).where(Book.owner_id == user_id)
         return model.book_id.in_(book_subq)
+    if model is AIConversationEvent:
+        conv_subq = select(AIConversation.id).where(AIConversation.user_id == user_id)
+        return model.conversation_id.in_(conv_subq)
     if model is UserConsent:
         device_subq = select(DeviceSession.device_id).where(
             DeviceSession.user_id == user_id,

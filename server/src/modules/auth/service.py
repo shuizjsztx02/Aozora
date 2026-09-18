@@ -134,7 +134,17 @@ class AuthService:
     # ------------------------------------------------------------------
 
     async def logout(self, raw_refresh_token: str, device_id: str) -> None:
-        """Revoke a single device session."""
+        """Revoke a single device session, then purge the user's AI conversations.
+
+        T-M7-02f / R-PROD-20：会话事件日志按决策记录**完整对话内容**，其隐私
+        边界的一条硬约束就是「登出联动清理」（`security.md`），所以登出必须
+        把会话行删掉——客户端登出后本地也不再持有 conversation_id，留着只会
+        是服务端的孤儿数据。
+
+        P1 口径是「删该用户的全部会话」，不按设备区分：P1 客户端只有单会话，
+        且 ``ai_conversations`` 没有设备维度。多会话/多设备是 P2（T-M7-03）的
+        面，那时再引入归属维度。删不到会话（会话本来就没有）时无副作用。
+        """
         token_hash = hash_refresh_token(raw_refresh_token)
         result = await self.db.execute(
             select(DeviceSession).where(
@@ -144,8 +154,14 @@ class AuthService:
         )
         session = result.scalar_one_or_none()
         if session:
+            user_id = session.user_id
             await self.db.delete(session)
             await self.db.flush()
+            # 延迟导入：auth 在 ai 的导入链上游（ai.routes 依赖 auth.dependencies），
+            # 模块级导入会把这条边固化成一个环。
+            from src.modules.ai.conversation import ConversationService
+
+            await ConversationService(self.db).purge_user(user_id)
 
     async def revoke_all_sessions(self, user_id: uuid.UUID) -> int:
         """Revoke all sessions for a user. Returns count of revoked sessions.
