@@ -7,7 +7,11 @@
 P1 范围（架构 §10 的 P1 期）
 - **记账域**（``transaction.*``）：2 写 + 3 读
 - **预算域**（``budget.*``）：5 读
-- **账户账本域**（``account.*`` / ``book.*`` / ``category.list``）：5 读
+- **账户账本域**（``account_*`` / ``book_*`` / ``category_list``）：5 读
+
+工具名一律用下划线，**不沿用桥命令的 ``domain.action`` 点号命名**——provider
+对 ``function.name`` 只接受 ``[a-zA-Z0-9_-]``，带点号会 400。约束、实测证据与
+兜底用例见 ``PROVIDER_TOOL_NAME_PATTERN`` 与 ``test_tool_names_are_provider_safe``。
 
 不做全量：P4 才扩到 77 个 bridge 命令对应的全集（架构 §3.2）。
 
@@ -74,11 +78,19 @@ DOMAINS: tuple[str, ...] = (DOMAIN_TRANSACTION, DOMAIN_BUDGET, DOMAIN_LEDGER)
 #: 架构 §7.2 的经验上限：单域工具数超过 8 会显著降低模型的选择准确率。
 MAX_TOOLS_PER_DOMAIN = 8
 
+#: provider 对 ``tools[].function.name`` 的字符集约束（OpenAI 兼容规范）。
+#: DeepSeek 实测：带点号的名字（``transaction.add``）会返回 **400
+#: invalid_request_error**，整轮请求直接失败 —— 而工具名是本模块提供给模型的
+#: 唯一调用凭据，名字不合规等于整条 agent 路径不可用（02b 的 MockTransport
+#: 单测发现不了：它不经过真实接口）。故工具名一律用下划线，**不沿用桥命令的
+#: ``domain.action`` 点号命名**（桥命令是另一套命名空间，不受此约束）。
+PROVIDER_TOOL_NAME_PATTERN = r"^[a-zA-Z0-9_-]{1,64}$"
+
 #: P1 工具总数上限。防「顺手把全量工具塞进来」——全量（约 70 个）明确排除
 #: 在 P1 之外，见架构 §3.2 与 §10。
 MAX_TOOLS_P1 = 20
 
-#: 单次批量的交易条数上限（``transaction.add_batch``）。执行是原子的，
+#: 单次批量的交易条数上限（``transaction_add_batch``）。执行是原子的，
 #: 上限保护单次写操作的影响面（架构 §4.4「单 Turn 最大写操作数」的下游）。
 MAX_BATCH_TRANSACTIONS = 20
 
@@ -90,6 +102,7 @@ ERR_UNKNOWN_CATEGORY = "unknown_category"
 ERR_UNKNOWN_ACCOUNT = "unknown_account"
 ERR_AMBIGUOUS_ACCOUNT = "ambiguous_account"
 ERR_UNKNOWN_BOOK = "unknown_book"
+ERR_AMBIGUOUS_BOOK = "ambiguous_book"
 ERR_INVALID_PERIOD = "invalid_period"
 
 _TOOL_ERROR_MESSAGES: dict[str, str] = {
@@ -102,6 +115,10 @@ _TOOL_ERROR_MESSAGES: dict[str, str] = {
         "不要自行猜测。"
     ),
     ERR_UNKNOWN_BOOK: "账本名不在现有账本中，请先查询账本清单。",
+    ERR_AMBIGUOUS_BOOK: (
+        "存在多个同名账本，无法确定是哪一个。请向用户说明这一情况并请其指明，"
+        "不要自行猜测。"
+    ),
     ERR_INVALID_PERIOD: "月份格式必须是 YYYY-MM。",
 }
 
@@ -150,6 +167,11 @@ class ToolContext:
     #: 那是事实错误，比拒绝回答糟得多。
     account_names_by_id: Mapping[str, str] = field(default_factory=dict)
     book_names: Mapping[str, str] = field(default_factory=dict)
+    #: 未删除账本的 id → 名字（不剔除重名）。只为 ``book_ids_named`` 服务：
+    #: 账本重名时**读**能正常返回（``book_list`` 里两行都在），若写路径只报
+    #: 「名字不存在」，模型会被叫去查一份明明列着该名字的清单——没有可尝试的
+    #: 下一步。与账户侧 ``ambiguous_account`` 同口径。
+    book_names_by_id: Mapping[str, str] = field(default_factory=dict)
 
     def resolve_category(self, kind: str, name: str) -> str | None:
         """按（收支类型, 分类名）解析。同名跨类型时由 ``kind`` 消歧。"""
@@ -173,6 +195,12 @@ class ToolContext:
         """某名字对应的全部账户 id —— 读过滤用，含重名。"""
         return tuple(
             aid for aid, aname in self.account_names_by_id.items() if aname == name
+        )
+
+    def book_ids_named(self, name: str) -> tuple[str, ...]:
+        """某名字对应的全部账本 id —— 重名判定用。"""
+        return tuple(
+            bid for bid, bname in self.book_names_by_id.items() if bname == name
         )
 
 
@@ -234,7 +262,12 @@ class Tool:
 # 工具上下文加载
 # ---------------------------------------------------------------------------
 
-_OBJECT_NAME_LIMIT = 200
+#: 名字索引的单表行数上限。**这是失控保护，不是分页**：名字→id 索引必须
+#: **完整**，截断会让读路径的「名字匹配的都算」静默退化成空集——模型据此对
+#: 用户断言「这个账户没有支出」，是事实错误。故取值远高于任何真实数据规模
+#: （客户端开箱只有十来个分类、几个账户），真实数据若要逼近它，正确做法是
+#: 给 list 类工具加分页，而不是在这里截断索引。
+_OBJECT_NAME_LIMIT = 2000
 
 
 def _unique_name_map(pairs: Iterable[tuple[str, str]]) -> dict[str, str]:
@@ -274,7 +307,7 @@ async def load_tool_context(
     未经校验的账本 id：读工具的每一条查询都用 ``ctx.book_id`` 过滤，放行一个
     别人的账本等于把它的数据交出去。
 
-    所有查询都带 ``ORDER BY``——加上限 200 行时，无序查询会返回任意子集，
+    所有查询都带 ``ORDER BY``——配合行数上限，无序查询会返回任意子集，
     让名字解析的结果随数据库行序漂移。
     """
     owned = await db.scalar(
@@ -299,7 +332,7 @@ async def load_tool_context(
     # 两轮构建，让**本账本分类覆盖同名的全局分类**：唯一约束含 book_id，两者
     # 可以共存（客户端默认分类就是全局的，用户再给某个账本建一套同名分类很自然）。
     # 全局那轮打底、本账本轮覆盖，于是解析结果确定且符合直觉——比随手拒绝更好，
-    # 否则模型会看到合法分类名却永远写不进去（category.list 显示两行同名，
+    # 否则模型会看到合法分类名却永远写不进去（category_list 显示两行同名，
     # 写操作恒 unknown_category，模型无路可走）。
     by_kind: dict[str, dict[str, str]] = {}
     for kind, name, cid, book_scoped in categories:
@@ -322,6 +355,7 @@ async def load_tool_context(
             Book.deleted_at.is_(None),
         ).order_by(Book.name, Book.id).limit(_OBJECT_NAME_LIMIT),
     )
+    books = book_rows.all()
     return ToolContext(
         db=db,
         user_id=user_id,
@@ -330,7 +364,8 @@ async def load_tool_context(
         category_names_by_id={str(cid): name for _kind, name, cid, _b in categories},
         account_names=_unique_name_map((name, str(aid)) for name, aid in accounts),
         account_names_by_id={str(aid): name for name, aid in accounts},
-        book_names=_unique_name_map((name, str(bid)) for name, bid in book_rows.all()),
+        book_names=_unique_name_map((name, str(bid)) for name, bid in books),
+        book_names_by_id={str(bid): name for name, bid in books},
     )
 
 
@@ -370,7 +405,7 @@ _LIMIT_SCHEMA: dict[str, Any] = {
     "description": "最多返回的条数。",
 }
 
-#: ``transaction.add`` 的单笔参数；``add_batch`` 的数组元素复用它，
+#: ``transaction_add`` 的单笔参数；``add_batch`` 的数组元素复用它，
 #: 使两处的字段语义、必填项与校验口径完全一致。
 _TX_ITEM_PROPERTIES: dict[str, Any] = {
     "type": _TX_TYPE_SCHEMA,
@@ -388,7 +423,7 @@ _TX_ITEM_PROPERTIES: dict[str, Any] = {
         "minLength": 1,
         "description": (
             "分类名，必须与现有分类完全一致（不要写简称、不要改写）。"
-            "拿不准时先调用 category.list 查询。"
+            "拿不准时先调用 category_list 查询。"
         ),
     },
     "bizDate": _BIZ_DATE_SCHEMA,
@@ -498,13 +533,20 @@ def _resolve_account(ctx: ToolContext, name: str) -> str | ToolOutcome:
 
 
 def _resolve_book(ctx: ToolContext, name: str | None) -> uuid.UUID | ToolOutcome:
-    """账本名 → id；``name`` 为空时返回当前账本。"""
+    """账本名 → id；``name`` 为空时返回当前账本。
+
+    账本重名时区分出 ``ambiguous_book``（可行动：请用户指明）而不是笼统的
+    「不存在」——``book_list`` 会把两行同名都列出来，若这里报「名字不在清单
+    中」，模型面对一份列着该名字的清单将无路可走。
+    """
     if name is None:
         return ctx.book_id
     resolved = ctx.book_names.get(name)
-    if resolved is None:
-        return ToolOutcome.failure(ERR_UNKNOWN_BOOK, argument=name)
-    return uuid.UUID(resolved)
+    if resolved is not None:
+        return uuid.UUID(resolved)
+    if len(ctx.book_ids_named(name)) > 1:
+        return ToolOutcome.failure(ERR_AMBIGUOUS_BOOK, argument=name)
+    return ToolOutcome.failure(ERR_UNKNOWN_BOOK, argument=name)
 
 
 def _normalize_note(raw: Any) -> str:
@@ -825,7 +867,7 @@ async def _budget_rows(
 ) -> list[Budget]:
     """某月的月度预算行。
 
-    归档分类的预算被剔除：``budget.status`` 对归档分类返回 ``unknown_category``，
+    归档分类的预算被剔除：``budget_status`` 对归档分类返回 ``unknown_category``，
     列表若仍显示它，模型就会「看得见却查不到」，也无法向用户解释那一条是什么。
     """
     conditions = [
@@ -836,7 +878,7 @@ async def _budget_rows(
     ]
     if category_ids is not None:
         conditions.append(Budget.category_id.in_(category_ids))
-    # 确定序：``budget.status`` / ``budget.check`` 命中多条时取 ``rows[0]``
+    # 确定序：``budget_status`` / ``budget_check`` 命中多条时取 ``rows[0]``
     # （支出侧与收入侧的同名分类各挂一条预算时），无序会让「给哪条」随数据库
     # 行序漂移。
     rows = await ctx.db.execute(
@@ -920,7 +962,7 @@ async def _handle_budget_list(ctx: ToolContext, params: dict[str, Any]) -> ToolO
     if _resolve_period(period) is None:
         return ToolOutcome.failure(ERR_INVALID_PERIOD, argument=period)
     # 刻意不给「各项之和」：总预算与分类预算并存时相加会重复计数，而那个数
-    # 会与 budget.summary 的口径打架。逐项本来就已含全部信息。
+    # 会与 budget_summary 的口径打架。逐项本来就已含全部信息。
     return ToolOutcome.result({
         "period": period,
         "items": await _budget_status_payload(ctx, period),
@@ -1078,6 +1120,10 @@ async def _handle_account_balances(ctx: ToolContext, params: dict[str, Any]) -> 
         Transaction.book_id == ctx.book_id,
         Transaction.deleted_at.is_(None),
         Transaction.account_id.is_not(None),
+        # 归档账户与 ``account_list`` / 名字映射同口径剔除：它不在清单里、也
+        # 解析不到，若这里仍列出来，模型会看到一个用户根本记不进去的账户名
+        # （「看得见却记不了」），与分类/预算侧已修过的同一类死路。
+        Account.archived_at.is_(None),
     ]
     if date_from is not None:
         conditions.append(Transaction.biz_date >= date_from)
@@ -1201,7 +1247,7 @@ async def _handle_category_list(ctx: ToolContext, params: dict[str, Any]) -> Too
 TOOLS: tuple[Tool, ...] = (
     # ── 记账域 ──────────────────────────────────────────────────────────
     Tool(
-        name="transaction.add",
+        name="transaction_add",
         domain=DOMAIN_TRANSACTION,
         kind="write",
         proposal_action="add_tx",
@@ -1209,20 +1255,20 @@ TOOLS: tuple[Tool, ...] = (
             "新增一笔收支记录。用户说「记一笔」「花了 30 块打车」「今天收入 500」"
             "这类要往账上添一笔的诉求时用它。金额单位是分，你需要自己把口语金额"
             "换算成分。分类名必须与现有分类完全一致。只记一笔时用它；一次要记"
-            "多笔请用 transaction.add_batch。"
+            "多笔请用 transaction_add_batch。"
         ),
         parameters=_tx_item_schema(),
         handler=_handle_transaction_add,
     ),
     Tool(
-        name="transaction.add_batch",
+        name="transaction_add_batch",
         domain=DOMAIN_TRANSACTION,
         kind="write",
         proposal_action="add_tx_batch",
         description=(
             "一次新增多笔收支记录，整批要么全部写入要么全部不写。用户一口气报"
-            "多笔账（「早饭 12、午饭 25、打车 30」）时用它，比连续调用 transaction.add "
-            "更快也更安全。每笔的字段规则与 transaction.add 完全相同。"
+            "多笔账（「早饭 12、午饭 25、打车 30」）时用它，比连续调用 transaction_add "
+            "更快也更安全。每笔的字段规则与 transaction_add 完全相同。"
         ),
         parameters=_object_schema(
             {
@@ -1231,7 +1277,7 @@ TOOLS: tuple[Tool, ...] = (
                     "minItems": 1,
                     "maxItems": MAX_BATCH_TRANSACTIONS,
                     "items": _tx_item_schema(),
-                    "description": "要记录的多笔交易，字段规则与 transaction.add 相同。",
+                    "description": "要记录的多笔交易，字段规则与 transaction_add 相同。",
                 },
             },
             required=["transactions"],
@@ -1239,14 +1285,14 @@ TOOLS: tuple[Tool, ...] = (
         handler=_handle_transaction_add_batch,
     ),
     Tool(
-        name="transaction.list",
+        name="transaction_list",
         domain=DOMAIN_TRANSACTION,
         kind="read",
         description=(
             "按条件查询交易明细，返回每笔的收支类型、金额、分类名、账户名、备注和日期。"
             "用户想看「上周都记了什么」「餐饮花了哪些」这类带条件的明细时用它。"
             "结果按日期倒序。所有条件都是可选的，条件越具体结果越准。"
-            "只想看最近几笔、没有任何筛选条件时请用 transaction.recent。"
+            "只想看最近几笔、没有任何筛选条件时请用 transaction_recent。"
         ),
         parameters=_object_schema({
             "dateFrom": {
@@ -1279,13 +1325,14 @@ TOOLS: tuple[Tool, ...] = (
         handler=_handle_transaction_list,
     ),
     Tool(
-        name="transaction.recent",
+        name="transaction_recent",
         domain=DOMAIN_TRANSACTION,
         kind="read",
         description=(
-            "查看最近记账的几笔交易，不含任何筛选条件。用户说「我最近记了什么」"
-            "「刚才那笔记的什么」时用它。需要按时间、分类、关键词筛选时请改用 "
-            "transaction.list。它不能用来修改或删除记录。"
+            "查看最近几笔交易，不含任何筛选条件。结果按**业务日期**倒序"
+            "（补充录入的旧日期账目会排在后面），**不是按录入顺序**。用户说"
+            "「我最近记了什么」「最近几笔账」时用它。需要按时间、分类、关键词"
+            "筛选时请改用 transaction_list。它不能用来修改或删除记录。"
         ),
         parameters=_object_schema({
             "limit": {
@@ -1298,14 +1345,14 @@ TOOLS: tuple[Tool, ...] = (
         handler=_handle_transaction_recent,
     ),
     Tool(
-        name="transaction.summary",
+        name="transaction_summary",
         domain=DOMAIN_TRANSACTION,
         kind="read",
         description=(
             "统计某段时间的收支合计与笔数（收入、支出、结余），可选按分类、按日或"
             "按月分组。用户问「这个月花了多少」「上个月收支情况」「最近哪天花得最多」"
             "时用它。金额由服务端计算，你不需要也不应该自己算。"
-            "要的是逐笔明细而不是合计时请用 transaction.list。"
+            "要的是逐笔明细而不是合计时请用 transaction_list。"
         ),
         parameters=_object_schema(
             {
@@ -1349,19 +1396,19 @@ TOOLS: tuple[Tool, ...] = (
     ),
     # ── 预算域 ──────────────────────────────────────────────────────────
     Tool(
-        name="budget.list",
+        name="budget_list",
         domain=DOMAIN_BUDGET,
         kind="read",
         description=(
             "列出某个月的月度预算，含每项的分类名、额度、已用、剩余与使用百分比。"
             "用户问「我这个月有哪些预算」「预算都设了多少」时用它。"
-            "查单个分类的预算请用 budget.status。"
+            "查单个分类的预算请用 budget_status。"
         ),
         parameters=_object_schema({"period": _PERIOD_SCHEMA}, required=["period"]),
         handler=_handle_budget_list,
     ),
     Tool(
-        name="budget.status",
+        name="budget_status",
         domain=DOMAIN_BUDGET,
         kind="read",
         description=(
@@ -1382,7 +1429,7 @@ TOOLS: tuple[Tool, ...] = (
         handler=_handle_budget_status,
     ),
     Tool(
-        name="budget.check",
+        name="budget_check",
         domain=DOMAIN_BUDGET,
         kind="read",
         description=(
@@ -1408,7 +1455,7 @@ TOOLS: tuple[Tool, ...] = (
         handler=_handle_budget_check,
     ),
     Tool(
-        name="budget.summary",
+        name="budget_summary",
         domain=DOMAIN_BUDGET,
         kind="read",
         description=(
@@ -1416,13 +1463,13 @@ TOOLS: tuple[Tool, ...] = (
             "分类预算的条数、额度合计与已用合计，以及超支项数与超支清单。"
             "总预算覆盖全部支出、分类预算只覆盖本分类，两者是两个层面，"
             "结果里分开给出、不相加。用户问「这个月预算情况怎么样」「预算还够用吗」"
-            "时用它。要看逐项的明细请用 budget.list。"
+            "时用它。要看逐项的明细请用 budget_list。"
         ),
         parameters=_object_schema({"period": _PERIOD_SCHEMA}, required=["period"]),
         handler=_handle_budget_summary,
     ),
     Tool(
-        name="budget.overspent",
+        name="budget_overspent",
         domain=DOMAIN_BUDGET,
         kind="read",
         description=(
@@ -1434,19 +1481,19 @@ TOOLS: tuple[Tool, ...] = (
     ),
     # ── 账户账本域 ──────────────────────────────────────────────────────
     Tool(
-        name="account.list",
+        name="account_list",
         domain=DOMAIN_LEDGER,
         kind="read",
         description=(
             "列出用户现有的全部账户（名称与图标），不含已归档账户。用户问「我有"
             "哪些账户」时用它，或在需要确认账户名时用它核对。"
-            "查账户下的金额流向请用 account.balances。"
+            "查账户下的金额流向请用 account_balances。"
         ),
         parameters=_object_schema({}),
         handler=_handle_account_list,
     ),
     Tool(
-        name="account.balances",
+        name="account_balances",
         domain=DOMAIN_LEDGER,
         kind="read",
         description=(
@@ -1471,7 +1518,7 @@ TOOLS: tuple[Tool, ...] = (
         handler=_handle_account_balances,
     ),
     Tool(
-        name="book.list",
+        name="book_list",
         domain=DOMAIN_LEDGER,
         kind="read",
         description=(
@@ -1483,7 +1530,7 @@ TOOLS: tuple[Tool, ...] = (
         handler=_handle_book_list,
     ),
     Tool(
-        name="book.detail",
+        name="book_detail",
         domain=DOMAIN_LEDGER,
         kind="read",
         description=(
@@ -1499,7 +1546,7 @@ TOOLS: tuple[Tool, ...] = (
         handler=_handle_book_detail,
     ),
     Tool(
-        name="category.list",
+        name="category_list",
         domain=DOMAIN_LEDGER,
         kind="read",
         description=(

@@ -10,6 +10,7 @@
 from __future__ import annotations
 
 import json
+import re
 import uuid
 from datetime import UTC, date, datetime
 from pathlib import Path
@@ -96,6 +97,23 @@ class TestRegistryContract:
         names = [t.name for t in T.TOOLS]
         assert len(names) == len(set(names))
 
+    def test_tool_names_are_provider_safe(self):
+        """工具名是模型调用工具的唯一凭据，必须落在 provider 允许的字符集内。
+
+        DeepSeek 实测（2026-09-18，真实调用）：``transaction.add`` 这类带点号的
+        名字返回 **400 invalid_request_error**
+        （``Invalid 'tools[0].function.name': string does not match pattern.
+        Expected a string that matches the pattern '^[a-zA-Z0-9_-]+$'``），
+        整轮请求直接失败——即 P1 的 15 个工具全部不可用。02b 的 MockTransport
+        单测发现不了这一点，因为它不经过真实接口，而 provider 层按设计不校验
+        工具名。故把约束固化在这里。
+        """
+        pattern = re.compile(T.PROVIDER_TOOL_NAME_PATTERN)
+        for tool in T.TOOLS:
+            assert pattern.fullmatch(tool.name), (
+                f"{tool.name} 不是 provider 可接受的工具名"
+            )
+
     def test_every_tool_belongs_to_a_declared_domain(self):
         for tool in T.TOOLS:
             assert tool.domain in T.DOMAINS, tool.name
@@ -117,7 +135,7 @@ class TestRegistryContract:
         """description 是模型可见的唯一语义来源，必须是人写的中文而非占位符。
 
         刻意不禁止 description 里出现其他工具名——工具间互相引导（「只想看最近
-        几笔请用 transaction.recent」）是降低误选率的主要手段。
+        几笔请用 transaction_recent」）是降低误选率的主要手段。
         """
         for tool in T.TOOLS:
             assert len(tool.description) >= 20, tool.name
@@ -159,7 +177,7 @@ class TestRegistryContract:
                 assert tool.domain == T.DOMAIN_TRANSACTION, tool.name
 
     def test_get_tool_unknown_returns_none(self):
-        assert T.get_tool("transaction.add") is not None
+        assert T.get_tool("transaction_add") is not None
         assert T.get_tool("transaction.does_not_exist") is None
         assert T.get_tool("") is None
 
@@ -196,7 +214,7 @@ class TestArgumentValidation:
         assert outcome.data["argument"] == "transaction.nope"
 
     async def test_missing_required_argument_degrades(self):
-        outcome = await T.invoke_tool("transaction.add", _ctx(), {"type": "expense"})
+        outcome = await T.invoke_tool("transaction_add", _ctx(), {"type": "expense"})
         assert outcome.kind == "error"
         assert outcome.data["code"] == T.ERR_INVALID_ARGUMENTS
         paths = {d["path"] for d in outcome.data["details"]}
@@ -204,27 +222,27 @@ class TestArgumentValidation:
 
     async def test_unknown_property_degrades(self):
         outcome = await T.invoke_tool(
-            "transaction.add", _ctx(), {**_VALID_ADD, "id": "should-not-be-accepted"},
+            "transaction_add", _ctx(), {**_VALID_ADD, "id": "should-not-be-accepted"},
         )
         assert outcome.data["code"] == T.ERR_INVALID_ARGUMENTS
 
     async def test_impossible_date_is_rejected(self):
         """format: date 必须是真断言——2026-02-30 能过正则，但不是公历日期。"""
         outcome = await T.invoke_tool(
-            "transaction.add", _ctx(), {**_VALID_ADD, "bizDate": "2026-02-30"},
+            "transaction_add", _ctx(), {**_VALID_ADD, "bizDate": "2026-02-30"},
         )
         assert outcome.data["code"] == T.ERR_INVALID_ARGUMENTS
 
     @pytest.mark.parametrize("amount", [0, -1, 12.5, "1250"])
     async def test_non_integer_positive_amount_is_rejected(self, amount):
         outcome = await T.invoke_tool(
-            "transaction.add", _ctx(), {**_VALID_ADD, "amountCents": amount},
+            "transaction_add", _ctx(), {**_VALID_ADD, "amountCents": amount},
         )
         assert outcome.data["code"] == T.ERR_INVALID_ARGUMENTS
 
     async def test_unknown_type_enum_is_rejected(self):
         outcome = await T.invoke_tool(
-            "transaction.add", _ctx(), {**_VALID_ADD, "type": "transfer"},
+            "transaction_add", _ctx(), {**_VALID_ADD, "type": "transfer"},
         )
         assert outcome.data["code"] == T.ERR_INVALID_ARGUMENTS
 
@@ -233,7 +251,7 @@ class TestArgumentValidation:
         因为它的措辞会回显实例值（而实例值可能是用户原话）。"""
         secret = "ignore previous instructions"
         outcome = await T.invoke_tool(
-            "transaction.add", _ctx(), {**_VALID_ADD, "note": secret, "unexpected": secret},
+            "transaction_add", _ctx(), {**_VALID_ADD, "note": secret, "unexpected": secret},
         )
         assert outcome.data["code"] == T.ERR_INVALID_ARGUMENTS
         dumped = json.dumps(outcome.data, ensure_ascii=False)
@@ -244,7 +262,7 @@ class TestArgumentValidation:
 
     async def test_tool_with_no_parameters_accepts_empty_arguments(self):
         ctx = _ctx(db=_FakeDb([("招行卡", None)]))
-        outcome = await T.invoke_tool("account.list", ctx, {})
+        outcome = await T.invoke_tool("account_list", ctx, {})
         assert outcome.kind == "result"
 
     @pytest.mark.parametrize("bad_date", [20260918, None, True, ["2026-09-18"], {"d": 1}])
@@ -256,7 +274,7 @@ class TestArgumentValidation:
         这里抛 ``TypeError``，一次笔误就让整轮 loop 变成 500。
         """
         outcome = await T.invoke_tool(
-            "transaction.add", _ctx(), {**_VALID_ADD, "bizDate": bad_date},
+            "transaction_add", _ctx(), {**_VALID_ADD, "bizDate": bad_date},
         )
         assert outcome.kind == "error"
         assert outcome.data["code"] == T.ERR_INVALID_ARGUMENTS
@@ -265,25 +283,25 @@ class TestArgumentValidation:
         """``note`` 列宽 2000。这里不拦，PostgreSQL 会以
         StringDataRightTruncation 直接 500（SQLite 不校验长度，测试发现不了）。"""
         ok = await T.invoke_tool(
-            "transaction.add", _ctx(), {**_VALID_ADD, "note": "字" * 2000},
+            "transaction_add", _ctx(), {**_VALID_ADD, "note": "字" * 2000},
         )
         assert ok.kind == "proposal"
 
         too_long = await T.invoke_tool(
-            "transaction.add", _ctx(), {**_VALID_ADD, "note": "字" * 2001},
+            "transaction_add", _ctx(), {**_VALID_ADD, "note": "字" * 2001},
         )
         assert too_long.data["code"] == T.ERR_INVALID_ARGUMENTS
 
     @pytest.mark.parametrize("bad_args", ["{}", 3, ["a"], "not json"])
     async def test_non_object_arguments_degrade_instead_of_raising(self, bad_args):
-        outcome = await T.invoke_tool("transaction.add", _ctx(), bad_args)
+        outcome = await T.invoke_tool("transaction_add", _ctx(), bad_args)
         assert outcome.kind == "error"
         assert outcome.data["code"] == T.ERR_INVALID_ARGUMENTS
 
     async def test_batch_errors_point_at_the_offending_item(self):
         """分批录入时模型必须知道是第几笔出错——路径丢掉数组下标就只能猜。"""
         outcome = await T.invoke_tool(
-            "transaction.add_batch", _ctx(),
+            "transaction_add_batch", _ctx(),
             {"transactions": [dict(_VALID_ADD), {"type": "expense"}]},
         )
         assert outcome.data["code"] == T.ERR_INVALID_ARGUMENTS
@@ -298,7 +316,7 @@ class TestArgumentValidation:
 class TestWriteTools:
     async def test_add_resolves_category_name_against_the_given_type(self):
         ctx = _ctx()
-        outcome = await T.invoke_tool("transaction.add", ctx, dict(_VALID_ADD))
+        outcome = await T.invoke_tool("transaction_add", ctx, dict(_VALID_ADD))
 
         assert outcome.kind == "proposal"
         draft = outcome.data
@@ -310,26 +328,26 @@ class TestWriteTools:
         assert item["note"] == "午饭"
 
     async def test_add_without_account_omits_account_id(self):
-        outcome = await T.invoke_tool("transaction.add", _ctx(), dict(_VALID_ADD))
+        outcome = await T.invoke_tool("transaction_add", _ctx(), dict(_VALID_ADD))
         assert "accountId" not in outcome.data["transactions"][0]
 
     async def test_add_with_account_resolves_it(self):
         ctx = _ctx()
         outcome = await T.invoke_tool(
-            "transaction.add", ctx, {**_VALID_ADD, "accountName": "招行卡"},
+            "transaction_add", ctx, {**_VALID_ADD, "accountName": "招行卡"},
         )
         assert outcome.data["transactions"][0]["accountId"] == ctx.account_names["招行卡"]
 
     async def test_unknown_category_degrades_before_proposing(self):
         outcome = await T.invoke_tool(
-            "transaction.add", _ctx(), {**_VALID_ADD, "categoryName": "夜宵"},
+            "transaction_add", _ctx(), {**_VALID_ADD, "categoryName": "夜宵"},
         )
         assert outcome.kind == "error"
         assert outcome.data["code"] == T.ERR_UNKNOWN_CATEGORY
 
     async def test_unknown_account_degrades_before_proposing(self):
         outcome = await T.invoke_tool(
-            "transaction.add", _ctx(), {**_VALID_ADD, "accountName": "不存在的卡"},
+            "transaction_add", _ctx(), {**_VALID_ADD, "accountName": "不存在的卡"},
         )
         assert outcome.kind == "error"
         assert outcome.data["code"] == T.ERR_UNKNOWN_ACCOUNT
@@ -338,7 +356,7 @@ class TestWriteTools:
         ctx = _ctx()
         second = {**_VALID_ADD, "amountCents": 3000, "categoryName": "交通", "note": "打车"}
         outcome = await T.invoke_tool(
-            "transaction.add_batch", ctx, {"transactions": [dict(_VALID_ADD), second]},
+            "transaction_add_batch", ctx, {"transactions": [dict(_VALID_ADD), second]},
         )
         assert outcome.kind == "proposal"
         assert outcome.data["action"] == "add_tx_batch"
@@ -347,14 +365,14 @@ class TestWriteTools:
 
     async def test_batch_rejects_empty_list(self):
         outcome = await T.invoke_tool(
-            "transaction.add_batch", _ctx(), {"transactions": []},
+            "transaction_add_batch", _ctx(), {"transactions": []},
         )
         assert outcome.data["code"] == T.ERR_INVALID_ARGUMENTS
 
     async def test_draft_leaves_governance_fields_to_the_proposal_assembler(self):
         """confidence / proposalId / requiresConfirmation 取决于 loop 的 Step 数
         与审批策略（架构 §7.4），不属于工具层。"""
-        outcome = await T.invoke_tool("transaction.add", _ctx(), dict(_VALID_ADD))
+        outcome = await T.invoke_tool("transaction_add", _ctx(), dict(_VALID_ADD))
         for key in ("confidence", "proposalId", "requiresConfirmation"):
             assert key not in outcome.data
 
@@ -362,7 +380,7 @@ class TestWriteTools:
         """写工具的产出补全治理字段后，必须通过既有的提案校验（含账本上下文）。"""
         ctx = _ctx()
         outcome = await T.invoke_tool(
-            "transaction.add", ctx, {**_VALID_ADD, "accountName": "招行卡"},
+            "transaction_add", ctx, {**_VALID_ADD, "accountName": "招行卡"},
         )
         proposal = {
             **outcome.data,
@@ -381,7 +399,7 @@ class TestWriteTools:
         """工具的解析只认 ctx 里的名字集合——模型无论怎样构造参数都拿不到
         别人账本里的 id。"""
         ctx = _ctx()
-        outcome = await T.invoke_tool("transaction.add", ctx, dict(_VALID_ADD))
+        outcome = await T.invoke_tool("transaction_add", ctx, dict(_VALID_ADD))
         proposal = {
             **outcome.data,
             "proposalId": str(uuid.uuid4()),
@@ -539,9 +557,74 @@ class TestToolContextLoading:
             await T.load_tool_context(seeded["ctx"].db, seeded["user"].id, foreign)
         assert excinfo.value.status_code == 404
 
+    async def test_a_book_owned_by_another_user_is_rejected(self, seeded):
+        """归属校验的真正形态：账本**存在**、但属于别人。
+
+        上一条用例传的是不存在的 id，只证明了「账本不存在 → 404」；删掉
+        ``Book.owner_id == user_id`` 那一行它照样全绿。02e 若把客户端传来的
+        book_id 直接透传，这条校验就是唯一的防线。
+        """
+        from src.common.errors import AppException
+
+        stranger = User(id=uuid.uuid4(), nickname="someone-else")
+        their_book = Book(id=uuid.uuid4(), owner_id=stranger.id, name="别人的账本")
+        seeded["ctx"].db.add_all([stranger, their_book])
+        await seeded["ctx"].db.commit()
+
+        with pytest.raises(AppException) as excinfo:
+            await T.load_tool_context(
+                seeded["ctx"].db, seeded["user"].id, their_book.id,
+            )
+        assert excinfo.value.status_code == 404
+
+    async def test_a_duplicate_book_name_is_reported_as_ambiguous(self, seeded):
+        """账本重名时必须给出可行动的失败，而不是「名字不在账本清单中」。
+
+        ``book_list`` 会把两行同名都列出来——若写路径报「不存在」，模型面对
+        一份**明明列着该名字**的清单将无路可走（账户侧已有 ``ambiguous_account``
+        同款处理）。
+        """
+        dup = Book(id=uuid.uuid4(), owner_id=seeded["user"].id, name="日常")
+        seeded["ctx"].db.add(dup)
+        await seeded["ctx"].db.commit()
+        reloaded = await T.load_tool_context(
+            seeded["ctx"].db, seeded["user"].id, seeded["book"].id,
+        )
+
+        listed = await T.invoke_tool("book_list", reloaded, {})
+        assert len([b for b in listed.data["books"] if b["name"] == "日常"]) == 2, (
+            "清单里两个同名账本都在——这才让「不存在」的提示变成死路"
+        )
+
+        outcome = await T.invoke_tool("book_detail", reloaded, {"bookName": "日常"})
+        assert outcome.data["code"] == T.ERR_AMBIGUOUS_BOOK
+
+    async def test_name_index_is_complete_well_past_two_hundred_objects(self, seeded):
+        """名字索引必须**完整**，不能截断。
+
+        截断会让读路径的「名字匹配的都算」静默退化成空集，模型据此对用户断言
+        「这个账户没有支出」——事实错误。索引上限是失控保护而非分页，取值远高于
+        任何真实数据规模，本用例钉住这一点。
+        """
+        extra = [
+            Category(
+                id=uuid.uuid4(), owner_id=seeded["user"].id, book_id=seeded["book"].id,
+                kind=CategoryKind.EXPENSE, name=f"分类{i:03d}",
+            )
+            for i in range(205)
+        ]
+        seeded["ctx"].db.add_all(extra)
+        await seeded["ctx"].db.commit()
+        reloaded = await T.load_tool_context(
+            seeded["ctx"].db, seeded["user"].id, seeded["book"].id,
+        )
+
+        assert reloaded.resolve_category("expense", "分类204") == str(extra[-1].id)
+        assert reloaded.category_ids_named("分类204") == (str(extra[-1].id),)
+
     async def test_unknown_name_resolution_degrades(self, seeded):
         outcome = await T.invoke_tool(
-            "transaction.add", seeded["ctx"],
+            "transaction_add", seeded["ctx"],
             {**_VALID_ADD, "categoryName": "已归档"},
         )
         assert outcome.data["code"] == T.ERR_UNKNOWN_CATEGORY
@@ -553,13 +636,13 @@ class TestToolContextLoading:
         assert ctx.resolve_category("expense", "其他") == str(seeded["misc_expense"].id)
         assert ctx.resolve_category("income", "其他") == str(seeded["misc_income"].id)
 
-        expense = await T.invoke_tool("transaction.add", ctx, {
+        expense = await T.invoke_tool("transaction_add", ctx, {
             "type": "expense", "amountCents": 100,
             "categoryName": "其他", "bizDate": "2026-09-18",
         })
         assert expense.data["transactions"][0]["categoryId"] == str(seeded["misc_expense"].id)
 
-        income = await T.invoke_tool("transaction.add", ctx, {
+        income = await T.invoke_tool("transaction_add", ctx, {
             "type": "income", "amountCents": 100,
             "categoryName": "其他", "bizDate": "2026-09-18",
         })
@@ -580,7 +663,7 @@ class TestToolContextLoading:
         assert "招行卡" not in reloaded.account_names
 
         outcome = await T.invoke_tool(
-            "transaction.add", reloaded, {**_VALID_ADD, "accountName": "招行卡"},
+            "transaction_add", reloaded, {**_VALID_ADD, "accountName": "招行卡"},
         )
         assert outcome.data["code"] == T.ERR_AMBIGUOUS_ACCOUNT
         assert "同名" in outcome.data["message"], "错误必须可行动"
@@ -604,15 +687,15 @@ class TestToolContextLoading:
             seeded["ctx"].db, seeded["user"].id, seeded["book"].id,
         )
 
-        listed = await T.invoke_tool("transaction.list", reloaded, {"accountName": "现金"})
+        listed = await T.invoke_tool("transaction_list", reloaded, {"accountName": "现金"})
         assert listed.data["total"] == 2, "两个同名账户的流水都要出现"
 
-        summary = await T.invoke_tool("transaction.summary", reloaded, {
+        summary = await T.invoke_tool("transaction_summary", reloaded, {
             "dateFrom": "2026-09-01", "dateTo": "2026-09-30", "accountName": "现金",
         })
         assert summary.data["totalExpenseCents"] == 3500, "3000（原现金）+ 500（重名现金）"
 
-        balances = await T.invoke_tool("account.balances", reloaded, {})
+        balances = await T.invoke_tool("account_balances", reloaded, {})
         cash_rows = [a for a in balances.data["accounts"] if a["name"] == "现金"]
         assert len(cash_rows) == 2, "同名账户必须分列，金额不能合并成一个数"
         assert {r["expenseCents"] for r in cash_rows} == {3000, 500}
@@ -621,7 +704,7 @@ class TestToolContextLoading:
 class TestTransactionReadTools:
     async def test_list_returns_all_within_range(self, seeded):
         outcome = await T.invoke_tool(
-            "transaction.list", seeded["ctx"],
+            "transaction_list", seeded["ctx"],
             {"dateFrom": "2026-09-01", "dateTo": "2026-09-30"},
         )
         assert outcome.kind == "result"
@@ -633,20 +716,20 @@ class TestTransactionReadTools:
     async def test_soft_deleted_transactions_are_invisible(self, seeded):
         """每条读查询都带 ``deleted_at IS NULL``——库里有一笔软删除的记录，
         去掉过滤这条就会失败。"""
-        outcome = await T.invoke_tool("transaction.list", seeded["ctx"], {})
+        outcome = await T.invoke_tool("transaction_list", seeded["ctx"], {})
         assert "已删除" not in {r["note"] for r in outcome.data["transactions"]}
         assert outcome.data["total"] == 4
 
     async def test_transactions_of_another_book_are_invisible(self, seeded):
         """每条读查询都用 ``ctx.book_id`` 过滤——库里另一个账本有一笔记录，
         去掉过滤这条就会失败。"""
-        outcome = await T.invoke_tool("transaction.list", seeded["ctx"], {})
+        outcome = await T.invoke_tool("transaction_list", seeded["ctx"], {})
         assert "旅行开销" not in {r["note"] for r in outcome.data["transactions"]}
         assert outcome.data["total"] == 4
 
     async def test_list_never_exposes_ids(self, seeded):
         """模型拿到 UUID 就会有把它写回参数的机会——铁律是模型永不输出 UUID。"""
-        outcome = await T.invoke_tool("transaction.list", seeded["ctx"], {})
+        outcome = await T.invoke_tool("transaction_list", seeded["ctx"], {})
         dumped = json.dumps(outcome.data, ensure_ascii=False)
         assert "id" not in outcome.data["transactions"][0]
         assert str(seeded["book"].id) not in dumped
@@ -655,59 +738,59 @@ class TestTransactionReadTools:
 
     async def test_list_filters_by_category(self, seeded):
         outcome = await T.invoke_tool(
-            "transaction.list", seeded["ctx"], {"categoryName": "餐饮"},
+            "transaction_list", seeded["ctx"], {"categoryName": "餐饮"},
         )
         assert outcome.data["total"] == 2
         assert {r["note"] for r in outcome.data["transactions"]} == {"午饭", "八月午饭"}
 
     async def test_list_filters_by_keyword_across_note_and_category(self, seeded):
         by_note = await T.invoke_tool(
-            "transaction.list", seeded["ctx"], {"keyword": "打车"},
+            "transaction_list", seeded["ctx"], {"keyword": "打车"},
         )
         assert by_note.data["total"] == 1
         by_category = await T.invoke_tool(
-            "transaction.list", seeded["ctx"], {"keyword": "交通"},
+            "transaction_list", seeded["ctx"], {"keyword": "交通"},
         )
         assert by_category.data["total"] == 1
 
     async def test_list_keyword_wildcards_are_literals(self, seeded):
         outcome = await T.invoke_tool(
-            "transaction.list", seeded["ctx"], {"keyword": "%"},
+            "transaction_list", seeded["ctx"], {"keyword": "%"},
         )
         assert outcome.data["total"] == 0
 
     async def test_list_filters_by_type_and_account(self, seeded):
         income = await T.invoke_tool(
-            "transaction.list", seeded["ctx"], {"type": "income"},
+            "transaction_list", seeded["ctx"], {"type": "income"},
         )
         assert income.data["total"] == 1
         by_account = await T.invoke_tool(
-            "transaction.list", seeded["ctx"], {"accountName": "现金"},
+            "transaction_list", seeded["ctx"], {"accountName": "现金"},
         )
         assert by_account.data["total"] == 1
         assert by_account.data["transactions"][0]["accountName"] == "现金"
 
     async def test_list_unknown_account_name_matches_nothing(self, seeded):
         outcome = await T.invoke_tool(
-            "transaction.list", seeded["ctx"], {"accountName": "不存在的卡"},
+            "transaction_list", seeded["ctx"], {"accountName": "不存在的卡"},
         )
         assert outcome.data["total"] == 0
 
     async def test_list_truncates_and_reports_it(self, seeded):
-        outcome = await T.invoke_tool("transaction.list", seeded["ctx"], {"limit": 2})
+        outcome = await T.invoke_tool("transaction_list", seeded["ctx"], {"limit": 2})
         assert outcome.data["total"] == 4
         assert len(outcome.data["transactions"]) == 2
         assert outcome.data["truncated"] is True
 
     async def test_recent_returns_newest_first(self, seeded):
-        outcome = await T.invoke_tool("transaction.recent", seeded["ctx"], {"limit": 2})
+        outcome = await T.invoke_tool("transaction_recent", seeded["ctx"], {"limit": 2})
         assert [r["bizDate"] for r in outcome.data["transactions"]] == [
             "2026-09-05", "2026-09-02",
         ]
 
     async def test_summary_totals(self, seeded):
         outcome = await T.invoke_tool(
-            "transaction.summary", seeded["ctx"],
+            "transaction_summary", seeded["ctx"],
             {"dateFrom": "2026-09-01", "dateTo": "2026-09-30"},
         )
         assert outcome.data["totalIncomeCents"] == 500000
@@ -718,7 +801,7 @@ class TestTransactionReadTools:
 
     async def test_summary_groups_by_category_keep_income_and_expense_apart(self, seeded):
         outcome = await T.invoke_tool(
-            "transaction.summary", seeded["ctx"],
+            "transaction_summary", seeded["ctx"],
             {"dateFrom": "2026-09-01", "dateTo": "2026-09-30", "groupBy": "category"},
         )
         groups = {(g["key"], g["type"]): g["totalCents"] for g in outcome.data["groups"]}
@@ -727,7 +810,7 @@ class TestTransactionReadTools:
 
     async def test_summary_groups_by_month(self, seeded):
         outcome = await T.invoke_tool(
-            "transaction.summary", seeded["ctx"],
+            "transaction_summary", seeded["ctx"],
             {"dateFrom": "2026-08-01", "dateTo": "2026-09-30", "groupBy": "month"},
         )
         # 断言金额而非仅断言 key —— 月度口径靠 cast+substr 推导，只看 key 存在
@@ -741,7 +824,7 @@ class TestTransactionReadTools:
 
     async def test_summary_missing_dates_degrades(self, seeded):
         outcome = await T.invoke_tool(
-            "transaction.summary", seeded["ctx"], {"dateFrom": "2026-09-01"},
+            "transaction_summary", seeded["ctx"], {"dateFrom": "2026-09-01"},
         )
         assert outcome.kind == "error"
         assert outcome.data["code"] == T.ERR_INVALID_ARGUMENTS
@@ -749,7 +832,7 @@ class TestTransactionReadTools:
 
 class TestBudgetReadTools:
     async def test_list_returns_both_budgets(self, seeded):
-        outcome = await T.invoke_tool("budget.list", seeded["ctx"], {"period": "2026-09"})
+        outcome = await T.invoke_tool("budget_list", seeded["ctx"], {"period": "2026-09"})
         items = {i["categoryName"]: i for i in outcome.data["items"]}
         assert set(items) == {"餐饮", "交通"}
         assert items["餐饮"]["budgetCents"] == 1000
@@ -758,13 +841,13 @@ class TestBudgetReadTools:
         assert items["餐饮"]["isOverall"] is False
 
     async def test_list_rejects_bad_period(self, seeded):
-        outcome = await T.invoke_tool("budget.list", seeded["ctx"], {"period": "2026-13"})
+        outcome = await T.invoke_tool("budget_list", seeded["ctx"], {"period": "2026-13"})
         assert outcome.data["code"] == T.ERR_INVALID_PERIOD
 
     async def test_archived_category_budget_is_not_listed(self, seeded):
-        """归档分类的预算不列：``budget.status`` 对归档分类返回 unknown_category，
+        """归档分类的预算不列：``budget_status`` 对归档分类返回 unknown_category，
         列表若还显示它，模型就会「看得见却查不到」。库里正有这样一条。"""
-        outcome = await T.invoke_tool("budget.list", seeded["ctx"], {"period": "2026-09"})
+        outcome = await T.invoke_tool("budget_list", seeded["ctx"], {"period": "2026-09"})
         assert len(outcome.data["items"]) == 2
         assert all(i["categoryName"] != "已归档" for i in outcome.data["items"])
 
@@ -774,7 +857,7 @@ class TestBudgetReadTools:
         ``bookId=null``），用户再给某个账本建一套同名分类很自然。
 
         解析取**本账本**那个。若改成拒绝解析，模型会看到合法分类名却永远写不
-        进去：``category.list`` 显示两行同名、写操作恒失败，无路可走。
+        进去：``category_list`` 显示两行同名、写操作恒失败，无路可走。
         """
         from src.models.ledger import Category
 
@@ -793,21 +876,21 @@ class TestBudgetReadTools:
         assert reloaded.category_name_of(seeded["traffic"].id) == "交通"
         assert reloaded.category_name_of(global_id) == "交通", "反查不受重名影响"
 
-        outcome = await T.invoke_tool("transaction.add", reloaded, {
+        outcome = await T.invoke_tool("transaction_add", reloaded, {
             "type": "expense", "amountCents": 100,
             "categoryName": "交通", "bizDate": "2026-09-18",
         })
         assert outcome.data["transactions"][0]["categoryId"] == str(seeded["traffic"].id)
 
         # 预算与读过滤都不受影响
-        listed = await T.invoke_tool("budget.list", reloaded, {"period": "2026-09"})
+        listed = await T.invoke_tool("budget_list", reloaded, {"period": "2026-09"})
         assert "交通" in [i["categoryName"] for i in listed.data["items"]]
-        txs = await T.invoke_tool("transaction.list", reloaded, {"categoryName": "交通"})
+        txs = await T.invoke_tool("transaction_list", reloaded, {"categoryName": "交通"})
         assert txs.data["total"] == 1, "本账本的交通交易应仍然查得到"
 
     async def test_status_for_a_category_with_budget(self, seeded):
         outcome = await T.invoke_tool(
-            "budget.status", seeded["ctx"],
+            "budget_status", seeded["ctx"],
             {"categoryName": "交通", "period": "2026-09"},
         )
         assert outcome.data["hasBudget"] is True
@@ -819,7 +902,7 @@ class TestBudgetReadTools:
     async def test_status_reports_overrun_as_a_negative_remainder(self, seeded):
         """remaining 允许为负——`exceeded` 给出判断，负数给出超了多少。"""
         outcome = await T.invoke_tool(
-            "budget.status", seeded["ctx"],
+            "budget_status", seeded["ctx"],
             {"categoryName": "餐饮", "period": "2026-09"},
         )
         assert outcome.data["remainingCents"] == -250
@@ -827,7 +910,7 @@ class TestBudgetReadTools:
 
     async def test_status_without_budget_says_so(self, seeded):
         outcome = await T.invoke_tool(
-            "budget.status", seeded["ctx"],
+            "budget_status", seeded["ctx"],
             {"categoryName": "工资", "period": "2026-09"},
         )
         assert outcome.data["hasBudget"] is False
@@ -835,28 +918,28 @@ class TestBudgetReadTools:
 
     async def test_status_unknown_category_degrades(self, seeded):
         outcome = await T.invoke_tool(
-            "budget.status", seeded["ctx"],
+            "budget_status", seeded["ctx"],
             {"categoryName": "夜宵", "period": "2026-09"},
         )
         assert outcome.data["code"] == T.ERR_UNKNOWN_CATEGORY
 
     async def test_check_flags_an_exceeding_amount(self, seeded):
         outcome = await T.invoke_tool(
-            "budget.check", seeded["ctx"],
+            "budget_check", seeded["ctx"],
             {"categoryName": "交通", "amountCents": 1000, "period": "2026-09"},
         )
         assert outcome.data["afterCents"] == 4000
         assert outcome.data["willExceed"] is False
 
         over = await T.invoke_tool(
-            "budget.check", seeded["ctx"],
+            "budget_check", seeded["ctx"],
             {"categoryName": "交通", "amountCents": 2500, "period": "2026-09"},
         )
         assert over.data["afterCents"] == 5500
         assert over.data["willExceed"] is True
 
     async def test_summary_aggregates_category_budgets(self, seeded):
-        outcome = await T.invoke_tool("budget.summary", seeded["ctx"], {"period": "2026-09"})
+        outcome = await T.invoke_tool("budget_summary", seeded["ctx"], {"period": "2026-09"})
         assert outcome.data["overall"] is None
         categories = outcome.data["categories"]
         assert categories["count"] == 2
@@ -895,7 +978,7 @@ class TestBudgetReadTools:
             seeded["ctx"].db, seeded["user"].id, seeded["book"].id,
         )
 
-        outcome = await T.invoke_tool("budget.summary", reloaded, {"period": "2026-09"})
+        outcome = await T.invoke_tool("budget_summary", reloaded, {"period": "2026-09"})
         overall = outcome.data["overall"]
         assert overall["budgetCents"] == 100000
         assert overall["spentCents"] == 4250 + no_budget_expense, "总预算的已用是全账本支出"
@@ -904,24 +987,24 @@ class TestBudgetReadTools:
         assert categories["spentCents"] == 4250, "分类层只算分类预算覆盖的支出，不与总预算相加"
 
     async def test_overspent_lists_only_the_overrun(self, seeded):
-        outcome = await T.invoke_tool("budget.overspent", seeded["ctx"], {"period": "2026-09"})
+        outcome = await T.invoke_tool("budget_overspent", seeded["ctx"], {"period": "2026-09"})
         assert outcome.data["overspentCount"] == 1
         assert outcome.data["overspent"][0]["categoryName"] == "餐饮"
 
     async def test_empty_period_is_not_an_error(self, seeded):
-        outcome = await T.invoke_tool("budget.list", seeded["ctx"], {"period": "2026-01"})
+        outcome = await T.invoke_tool("budget_list", seeded["ctx"], {"period": "2026-01"})
         assert outcome.kind == "result"
         assert outcome.data["items"] == []
 
 
 class TestLedgerReadTools:
     async def test_account_list(self, seeded):
-        outcome = await T.invoke_tool("account.list", seeded["ctx"], {})
+        outcome = await T.invoke_tool("account_list", seeded["ctx"], {})
         assert {a["name"] for a in outcome.data["accounts"]} == {"招行卡", "现金"}
         assert outcome.data["total"] == 2
 
     async def test_account_balances_spans_history_by_default(self, seeded):
-        outcome = await T.invoke_tool("account.balances", seeded["ctx"], {})
+        outcome = await T.invoke_tool("account_balances", seeded["ctx"], {})
         balances = {a["name"]: a for a in outcome.data["accounts"]}
         assert balances["招行卡"]["expenseCents"] == 3250
         assert balances["招行卡"]["netCents"] == -3250
@@ -929,20 +1012,55 @@ class TestLedgerReadTools:
 
     async def test_account_balances_honours_date_range(self, seeded):
         outcome = await T.invoke_tool(
-            "account.balances", seeded["ctx"],
+            "account_balances", seeded["ctx"],
             {"dateFrom": "2026-09-01", "dateTo": "2026-09-30"},
         )
         balances = {a["name"]: a for a in outcome.data["accounts"]}
         assert balances["招行卡"]["expenseCents"] == 1250
 
+    async def test_archived_account_is_absent_from_balances(self, seeded):
+        """归档账户必须与 ``account_list`` / 名字映射**同口径**剔除。
+
+        否则模型会看到一个有历史流水的账户名，用户却记不进去（``transaction_add``
+        报 ``unknown_account``）——「看得见却记不了」的死路，与分类/预算侧已修过
+        的同一类问题。
+        """
+        from src.models.ledger import Account, Transaction, TxSource
+
+        retired = Account(
+            id=uuid.uuid4(), owner_id=seeded["user"].id, name="已注销卡",
+            archived_at=datetime.now(UTC),
+        )
+        seeded["ctx"].db.add(retired)
+        seeded["ctx"].db.add(Transaction(
+            id=uuid.uuid4(), book_id=seeded["book"].id, type=TxType.EXPENSE,
+            amount_cents=4200, category_id=seeded["food"].id, account_id=retired.id,
+            note="归档前最后一笔", biz_date=date(2026, 9, 7),
+            occurred_at=datetime.now(UTC), source=TxSource.MANUAL,
+        ))
+        await seeded["ctx"].db.commit()
+
+        listed = await T.invoke_tool("account_list", seeded["ctx"], {})
+        assert "已注销卡" not in {a["name"] for a in listed.data["accounts"]}
+
+        balances = await T.invoke_tool("account_balances", seeded["ctx"], {})
+        assert "已注销卡" not in {a["name"] for a in balances.data["accounts"]}
+
+        written = await T.invoke_tool("transaction_add", seeded["ctx"], {
+            **_VALID_ADD, "accountName": "已注销卡",
+        })
+        assert written.data["code"] == T.ERR_UNKNOWN_ACCOUNT, (
+            "清单里没有、也记不进去——这正是要避免的死路"
+        )
+
     async def test_book_list_marks_the_current_book(self, seeded):
-        outcome = await T.invoke_tool("book.list", seeded["ctx"], {})
+        outcome = await T.invoke_tool("book_list", seeded["ctx"], {})
         books = {b["name"]: b for b in outcome.data["books"]}
         assert books["日常"]["current"] is True
         assert books["旅行"]["current"] is False
 
     async def test_book_detail_defaults_to_the_current_book(self, seeded):
-        outcome = await T.invoke_tool("book.detail", seeded["ctx"], {})
+        outcome = await T.invoke_tool("book_detail", seeded["ctx"], {})
         assert outcome.data["name"] == "日常"
         assert outcome.data["current"] is True
         assert outcome.data["categoryCount"] == 5  # 已归档的那个不算
@@ -953,7 +1071,7 @@ class TestLedgerReadTools:
 
     async def test_book_detail_by_name(self, seeded):
         outcome = await T.invoke_tool(
-            "book.detail", seeded["ctx"], {"bookName": "旅行"},
+            "book_detail", seeded["ctx"], {"bookName": "旅行"},
         )
         assert outcome.data["name"] == "旅行"
         assert outcome.data["current"] is False
@@ -962,12 +1080,12 @@ class TestLedgerReadTools:
 
     async def test_book_detail_unknown_name_degrades(self, seeded):
         outcome = await T.invoke_tool(
-            "book.detail", seeded["ctx"], {"bookName": "不存在的账本"},
+            "book_detail", seeded["ctx"], {"bookName": "不存在的账本"},
         )
         assert outcome.data["code"] == T.ERR_UNKNOWN_BOOK
 
     async def test_category_list(self, seeded):
-        outcome = await T.invoke_tool("category.list", seeded["ctx"], {})
+        outcome = await T.invoke_tool("category_list", seeded["ctx"], {})
         assert {c["name"] for c in outcome.data["categories"]} == {
             "餐饮", "交通", "工资", "其他",
         }
@@ -976,6 +1094,6 @@ class TestLedgerReadTools:
 
     async def test_other_book_has_no_categories_of_its_own(self, seeded):
         outcome = await T.invoke_tool(
-            "category.list", seeded["ctx"], {"bookName": "旅行"},
+            "category_list", seeded["ctx"], {"bookName": "旅行"},
         )
         assert outcome.data["categories"] == []
