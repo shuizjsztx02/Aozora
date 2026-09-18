@@ -6,16 +6,26 @@ import uuid
 from typing import Annotated
 
 from fastapi import APIRouter, Depends, Request
+from fastapi.responses import StreamingResponse
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from src.common.database import get_db_session
+from src.common.config import get_config
+from src.common.database import get_db_session, get_session_factory
+from src.common.errors import AppException
 from src.models.user import User
 from src.modules.auth.dependencies import get_current_user
 from src.modules.auth.frozen import require_active as _require_active
 
 from .context import load_validation_context
-from .provider import LLMProvider, get_llm_provider
+from .conversation import ConversationService
+from .provider import (
+    LLMProvider,
+    ToolCallingProvider,
+    get_agent_provider,
+    get_llm_provider,
+)
 from .schemas import (
+    AIAgentRequest,
     AIExecuteProposalRequest,
     AIExecuteProposalResponse,
     AIInterpretRequest,
@@ -28,9 +38,22 @@ from .schemas import (
     AIValidateProposalResponse,
     AIValidationError,
 )
-from .service import AIService
+from .service import AIService, check_daily_quota, local_today
+from .stream import agent_event_stream
 
 router = APIRouter(prefix="/ai", tags=["ai"])
+
+#: SSE 响应头（T-M7-02g / R-PROD-22）。
+#:
+#: ``X-Accel-Buffering: no`` —— nginx 默认 ``proxy_buffering on``，会把事件攒批
+#: 下发、把步骤可见性抹平。nginx 从 1.5.6 起尊重上游这个头，**服务器配置因此
+#: 不用动**（部署实况见 ``infra/deploy/prod/nginx/DEPLOYED.md``：``/aozora-api/``
+#: 既无 ``proxy_ignore_headers`` 也无 ``proxy_cache``，该头不会被忽略）。
+#: ``Cache-Control: no-cache`` —— 事件流不该被任何中间层缓存。
+_SSE_HEADERS = {
+    "X-Accel-Buffering": "no",
+    "Cache-Control": "no-cache",
+}
 
 
 @router.post("/interpret", response_model=AIInterpretResponse)
@@ -182,4 +205,81 @@ async def parse_image(
         request_id=request.state.request_id,
         attachment_id=body.attachment_id,
         book_id=book_uuid,
+    )
+
+
+@router.post("/agent", response_class=StreamingResponse)
+async def agent(
+    body: AIAgentRequest,
+    request: Request,
+    current_user: Annotated[User, Depends(get_current_user)] = ...,
+    db: Annotated[AsyncSession, Depends(get_db_session)] = ...,
+    provider: Annotated[ToolCallingProvider | None, Depends(get_agent_provider)] = ...,
+):
+    """T-M7-02g: run one agent turn and stream it back as SSE.
+
+    Events are the eight in architecture §8.1 (see ``stream.py`` for what P1
+    actually produces); the stream carries its own heartbeat and ends with
+    ``done`` or ``error``. **Pre-flight failures are HTTP errors**, not
+    events: the status code has to be chosen before the response starts, so
+    the flag, the book/conversation ownership and both quota checks run here
+    and surface as ordinary 4xx/5xx (the client's existing degradation
+    chain understands ``ai_quota_exceeded`` / ``ai_unavailable``).
+
+    ``db`` is only used for authentication and pre-flight: the streaming
+    generator runs after the response has been returned, by which time a
+    request-scoped session is already closed (architecture §8.4). The turn
+    itself gets its own session, owned by ``stream.agent_event_stream``.
+
+    When ``ai_agent_enabled`` is false the endpoint is unavailable (503
+    ``agent_disabled``, same shape as the other config-disabled feature:
+    ``image_parsing_disabled``). Clients that were never upgraded never call
+    it, so nothing changes for them.
+    """
+    _require_active(current_user)
+    cfg = get_config()
+    if not cfg.ai_agent_enabled:
+        raise AppException(
+            503, "agent_disabled",
+            "The AI agent endpoint is disabled (ai_agent_enabled=false)",
+        )
+    if provider is None:
+        raise AppException(
+            503, "ai_unavailable", "AI service is temporarily unavailable",
+        )
+    try:
+        book_uuid = uuid.UUID(body.book_id)
+    except ValueError:
+        raise AppException(422, "invalid_book_id", "Invalid book ID")
+
+    # 前置检查用端点自己的短命 session：流式生成器在响应返回后才开始跑，
+    # 请求作用域的 session 那时已关闭（架构 §8.4 第 3 项）。会话行在这里提交，
+    # 客户端拿到的 conversation_id 因此从第一轮起就有效。
+    async with get_session_factory()() as session:
+        conversations = ConversationService(session, cfg)
+        conversation = await conversations.resolve(
+            current_user, book_uuid, body.conversation_id,
+        )
+        # 配额两道都在跑 loop 之前（02f 的交接）：日配额按用户/按天，
+        # 会话配额按会话/按整个会话生命周期。
+        await check_daily_quota(session, current_user, cfg)
+        await conversations.check_quota(conversation)
+        await session.commit()
+        conversation_id = conversation.id
+
+    return StreamingResponse(
+        agent_event_stream(
+            provider=provider,
+            cfg=cfg,
+            user=current_user,
+            book_id=book_uuid,
+            conversation_id=conversation_id,
+            request_id=request.state.request_id,
+            user_input=body.input,
+            # 「今天」按**用户本地时区**算，与配额日界同一套解析（模型换算
+            # 「今天 / 昨天」全靠它，服务端不猜用户在哪个时区）。
+            today=local_today(current_user.timezone),
+        ),
+        media_type="text/event-stream",
+        headers=_SSE_HEADERS,
     )

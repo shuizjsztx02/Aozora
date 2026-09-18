@@ -274,6 +274,39 @@ class Settings(BaseSettings):
         ),
     )
 
+    # --- AI agent SSE 端点 (T-M7-02g) ---
+    # 灰度开关（架构 §11.3 的双层开关：本项是服务端层，客户端层在 02i 的
+    # ``submitInput`` 上）。**默认关闭**——关闭时 ``POST /ai/agent`` 按 404 处理，
+    # 未升级的客户端与快路径完全不受影响。
+    ai_agent_enabled: bool = Field(
+        default=False,
+        validation_alias=AliasChoices("AI_AGENT_ENABLED", "ai_agent_enabled"),
+    )
+    # SSE 空闲心跳（架构 §8.4，R-PROD-22 第 2 项）：服务器未设
+    # ``proxy_read_timeout``，用 nginx 默认 60 s——静默 60 s 即被断开。心跳是注释
+    # 帧（``: ping``），不占事件语义。**必须显著小于 60 s**，故上限钉在 60。
+    ai_agent_heartbeat_seconds: float = Field(
+        default=15.0,
+        gt=0,
+        le=60.0,
+        validation_alias=AliasChoices(
+            "AI_AGENT_HEARTBEAT_SECONDS", "ai_agent_heartbeat_seconds",
+        ),
+    )
+    # agent 路径的**单步** provider 超时（架构 §8.3：计时单位由「整个请求」改为
+    # 「单步」）。不复用 ``ai_timeout_seconds``——那一项的上限 12 s 来自快路径的
+    # 「2 × timeout + 开销 < 客户端 25 s 取消」契约，而 agent 路径的客户端取消是
+    # **按步**计的（02h 为该长连接单独配置超时）。取 20 s：低于客户端单步 25 s
+    # 取消（服务端先失败，才能把 ``error`` 帧发出去），高于 02d 实测的深档单步
+    # 5–7 s。
+    ai_agent_step_timeout_seconds: float = Field(
+        default=20.0,
+        gt=0,
+        validation_alias=AliasChoices(
+            "AI_AGENT_STEP_TIMEOUT_SECONDS", "ai_agent_step_timeout_seconds",
+        ),
+    )
+
     @property
     def is_production(self) -> bool:
         return self.env == "production"

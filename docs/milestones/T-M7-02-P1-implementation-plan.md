@@ -17,7 +17,7 @@
 | **02d** | Agent Loop 核心与推理分级 | ✅ 完成 | 2026-09-18 | `d923d4e` | 批次 2；非流式 loop + 四条不变式 + 四条硬边界 + 三档分级，详见 §五 |
 | **02e** | 写工具安全路径 | ✅ 完成 | 2026-09-18 | `1fdffd1` | 批次 3；组装 / 校验 / 审批四值 / 执行接线 + 26 用例，9/9 回退实验变红，详见 §五 |
 | **02f** | 会话状态与配额双限 | ✅ 完成 | 2026-09-18 | `17e7cac` | 批次 3；事件表 + 会话索引 + 429 双限 + 登出/删号清理；37 用例，独立复审 0 P1/1 P2（已修）详见 §五 |
-| **02g** | SSE 端点与部署配置 | ⏳ 未开始 | | | 批次 4（**整链最需留缓冲的一环**） |
+| **02g** | SSE 端点与部署配置 | ✅ 完成 | 2026-09-18 | `—`（见 §五） | 批次 4；48 用例 + 直连 ASGI 流式样板，15/15 回退实验变红，详见 §五 |
 | **02h** | 客户端桥通道 | ⏳ 未开始 | | | 批次 5 |
 | **02i** | 客户端消费（最小形态） | ⏳ 未开始 | | | 批次 5 |
 | **收口** | P1 四板 + T-M7-01 真机复认 | ⏳ 未开始 | | | 批次 6 |
@@ -941,6 +941,176 @@ cd server && … alembic upgrade 0017:0018 --sql          # ADD COLUMN turn BIGI
    `MissingGreenlet`（`auth/service.py:update_profile` 踩过同一个坑，那里用
    `await self._db.refresh(user)` 解决）。要在响应里回显会话行就照此办理。
 
+---
+
+### 02g · SSE 端点与部署配置（✅ 2026-09-18）
+
+**任务编号：** T-M7-02g
+
+**完成范围 / 明确未做：**
+
+- **完成：**
+  - **`server/src/modules/ai/stream.py`（新建）**——SSE 传输层：`EventType`（架构
+    §8.1 八类）/ `Phase` / `StreamErrorCode`、`format_frame`（手写帧格式化，约 10 行）、
+    `TOOL_PROGRESS`（15 个工具的人类可读文案）、`summarize_outcome`（`tool_result`
+    摘要，不含原始数据）、`QueueObserver`（把 loop 的进度回调翻成帧）、
+    `agent_event_stream`（帧泵生成器）与 `_run_turn` / `_execute_turn`（工作协程）。
+  - **`routes.py` 新增 `POST /ai/agent`** 返回 `StreamingResponse`（`text/event-stream`），
+    带 **`X-Accel-Buffering: no`** + `Cache-Control: no-cache`；前置检查（开关 → provider
+    → 入参 → 会话/账本归属 → **日配额 + 会话配额**）全在响应头之前完成，失败按普通
+    HTTP 错误返回（4xx/5xx + 既有错误码），响应头之后的一切失败走 `error` 帧。
+  - **`agent.py` 增 `AgentObserver` 旁路**（4 个同步钩子：`step_started` /
+    `step_finished` / `tool_started` / `tool_finished`）+ `AgentLoop(observer=…)`。
+    缺省 `None` = 与 02d 逐字等价；回调异常由 `_notify` 吞掉并告警（旁观者不许影响回合）。
+  - **`service.py` 抽出模块级 `check_daily_quota` 与 `local_today`**（后者与
+    `local_day_start_utc` 共用新的 `user_timezone`）。`AIService._check_daily_quota`
+    改为薄委托——**行为等价**，快路径 101 条 gateway 用例全绿。
+  - **`config.py` 三个开关项**：`ai_agent_enabled`（默认 false）、
+    `ai_agent_heartbeat_seconds`（15，上限钉 60）、`ai_agent_step_timeout_seconds`
+    （20）；`.env.example` 同步模板。
+  - **`tests/test_agent_stream.py`（新建，48 用例）**——仓库首个流式测试样板，含两条
+    通道（httpx ASGITransport + 直连 ASGI 驱动器），见 §「测试样板」。
+- **明确未做（逐条对应卡片的职责边界）：**
+  1. **零新依赖**——Starlette 原生 `StreamingResponse` + 手写帧格式化，**未引
+     `sse-starlette`**。
+  2. **不改服务器 nginx**——SSE 缓冲走应用层响应头（见下「缓冲的实测与残余」）。
+  3. **不做 token 级流式**——loop 仍是非流式的（02d 的边界）；`delta` 在助手文本
+     产出的那一刻整段送出，一轮通常一帧。P1 的实时性由**步骤可见性**承担。
+  4. **不接审批通道**（见决策 2）、**不做设备通道**（`device_request` 在 P1 无生产者）。
+  5. **不做客户端层开关**（见决策 6）、不碰 02h/02i 的文件。
+
+**关键设计决策（02h / 02i 必读）：**
+
+| # | 决策 | 理由 |
+|---|---|---|
+| 1 | **「工作协程 + 帧泵」两层**：`_run_turn` 是普通 `asyncio.Task`，**自建自关** session；生成器只做帧泵（排空队列 / 发心跳 / 格式化），收尾**全同步** | 流式生成器在响应头之后才跑，请求作用域的 `Depends(get_db_session)` 那时已关闭（架构 §8.4 第 3 项）。而生成器**不是**持有 session 的地方：客户端断连时 Starlette 取消的是外层请求任务（anyio 取消是**作用域级**的），生成器 `finally` 里的任何 `await` 会立刻再抛 `CancelledError`——session 永远关不掉、连接不归还连接池（池满即全线挂）。普通 asyncio 任务只被取消一次，`finally` 的 await 照常执行 |
+| 2 | **不接 `approver` 通道**：挂起的提案以 `confirm` 帧 + `done.proposals` 交回，客户端走既有 v2 卡链路（`/ai/validate` → `/ai/execute`） | 02h 的桥命令只有 `ai.agent` / `ai.cancel`，**没有上行审批**——流内无从回答；架构 §8.2 也把确认归到普通 HTTP 上行。这与 02e 决策 2（「挂起 ≠ 视为拒绝」）和 02i 的「done 之后展开卡」完全一致 |
+| 3 | **`delta` 在 P1 一轮一帧**，如实写在模块 docstring 里 | loop 非流式（02d 边界）。帧格式对任意分片成立，后续卡换 token 级流式**不改协议** |
+| 4 | **失败一律「报错收尾」，不重发**；`error` 帧**不带 retryable 语义** | 02b 的交接约定（首个 delta 之后的失败 `retryable=False`）。更强的一条：一轮 loop 可能**已经执行过写操作**，原地重跑会重复落库——客户端的正确动作是回退快路径（单发），不是重试 agent 路径 |
+| 5 | **失败轮不写事件、不写正文，但仍记用量行**（有计费过就记） | 02f 的一轮原子写入（流式路径不能在轮中途落库）。用量行必须记：已发生的 provider 调用是计费的，不记就成了「靠让请求失败绕过配额」。**首次调用即失败 = 零计费 → 不写行**，与快路径 `_record_failure_usage` 的 no-op 口径逐字一致 |
+| 6 | **服务端层开关本次落地，客户端层开关归 02h/02i** | 卡面要「双层开关」，但 P1 的客户端**还没有任何调用点**（`ai.agent` 桥命令在 02h 才建）——此刻写一个无人读的客户端常量是死代码，且要动 02i 的产出文件（`use-assistant.ts`）。**验收「开关关闭时端点不可用且旧客户端行为不变」由服务端层完全满足**（503 `agent_disabled`，且已实测快路径照常 200） |
+| 7 | 端点自建**短命** session 做前置检查（`async with factory()`），turn 用另一个 session | 生成器有可能**一次都没被迭代**（响应头发送就失败时 Starlette 不开始取帧），把连接交给它 = 一个永不归还的连接 |
+| 8 | 时间口径：`today` 按**用户本地时区**算（与配额日界共用 `user_timezone`）；单步 provider 超时**新增 20 s**，不复用 `ai_timeout_seconds` | 模型换算「今天/昨天」全靠它。`ai_timeout_seconds` 的上限 12 s 来自快路径「2 × timeout + 开销 < 客户端 25 s 取消」契约，而 agent 路径的客户端取消是**按步**计的（架构 §8.3）；20 s 低于客户端单步 25 s、高于实测深档单步 5–7 s |
+
+**测试样板（本卡最需要留缓冲的一环）：**
+
+仓库此前**零流式测试先例**（全部同步 `TestClient`）。本卡建了两条通道：
+
+1. **`httpx.AsyncClient(ASGITransport(app))`**（卡面建议）——绝大多数用例走它。
+   实测记录一条**必须知道的限制**：httpx 0.28 的 `ASGITransport` 会 `await self.app(...)`
+   **跑完才返回**，所以它拿到的是一次性收全的响应体，**证明不了「逐条下发」、也模拟不了断连**。
+2. **直连 ASGI 驱动器**（`open_direct_stream`，自实现 `receive` / `send`）——每块落进
+   `chunks`，`spec_version` 取 **2.3** 与 uvicorn 0.52 实况一致。只有它能测「帧在生成时
+   就已发出」与「断连即取消」。断连用例还断言 `pool.checkedout() == 0`（连接真的还回去了）。
+
+**缓冲的实测与残余（R-PROD-22 第 1 项）：**
+
+- **服务器侧只读核对（2026-09-18，`ssh aozora-a` 读 `/usr/local/nginx/conf.d/api.conf`）**：
+  `location /aozora-api/` **无 `proxy_buffering`、无 `proxy_cache`、无
+  `proxy_ignore_headers`**，且已有 `proxy_http_version 1.1` + `Connection ""`（SSE 所需的
+  上游分块前提）；nginx 版本 **1.16.1**（≥ 1.5.6，支持 `X-Accel-Buffering`）。**结论：
+  该头不会被忽略，无需改 nginx**——与 R-PROD-22 的决策一致。顺带核实：`proxy_read_timeout`
+  只在 `location /` 里设了 300 s，**`/aozora-api/` 用默认 60 s** → 心跳必须显著小于 60 s（取 15）。
+- **仓内可达的最强证据**：`test_frames_are_sent_while_the_turn_is_still_running`——模型请求
+  还阻塞着，前两个 `phase` 帧已经到客户端了。这证明**应用层不攒批**。
+- **残余（未完成的那一格）**：**经真实 nginx 的端到端确认**需要先把本卡的构建部到服务器
+  （部署动作按既定方式由用户执行），本地无 docker 守护进程、无 nginx 可用。**责任人：M7 收口
+  / 部署执行者**；R-PROD-22 的这一项保持开放。
+- **附带发现（不属本卡，未处置）**：服务器磁盘上 `proxy_pass http://aozora-api-ups/;`
+  **仍带尾斜杠**（R-PROD-24 已登记的漂移，仓库副本已修正、服务器未 reload）。对 `/ai/agent`
+  这条路由**两种写法都能通**（带尾斜杠时 nginx 把前缀换成 `/`，应用层中间件见到 `/ai/agent`
+  直接放行；不带时应用层中间件剥离前缀）——但该漂移本身仍须在下次 reload 前修正。
+
+**修改的文档、契约与代码：**
+
+- 代码：`server/src/modules/ai/stream.py`（新建）、`server/src/modules/ai/routes.py`、
+  `server/src/modules/ai/schemas.py`（`AIAgentRequest`）、`server/src/modules/ai/agent.py`、
+  `server/src/modules/ai/service.py`、`server/src/common/config.py`、`server/.env.example`
+- 测试：`server/tests/test_agent_stream.py`（新建，48 用例）
+- 文档：本文件 §一 / §五、`production-execution-plan.md` 的 T-M7-02g 行、`risk-register.md` R-PROD-22
+- **契约零改动**：`contracts/` 一行未动；`provider.py` / `tools.py` / `conversation.py` /
+  `validator.py` / 客户端一行未动
+- **注意：** `docs/architecture/ai-agent-architecture.md` §8.4 仍写着「须在服务器 api.conf 增
+  `proxy_buffering off`」，与卡面（不改 nginx）相反。**该文件此刻被并发会话在途编辑**，按 §四
+  纪律本卡不介入；以卡面与本记录为准，待该会话提交后建议在 §8.4 补一句指向本节。
+
+**验证命令与结果：**
+
+```
+cd server && python -m pytest tests/test_agent_stream.py -q   # 48 passed（连跑 3 次确定性）
+cd server && python -m pytest tests/ -q                       # 1016 passed, 37 skipped
+                                                              # （同树基线 968 = 02f 复审后的实测值；本卡 +48）
+cd server && python -m ruff check src/ tests/                 # All checks passed
+```
+
+**回退实验（15/15 全红，脚本在系统临时目录、不入库；逐处按 sha256 逐字节还原）：**
+
+| # | 变异 | 变红的用例 |
+|---|---|---|
+| M1 | 帧分隔符少一个换行 | heartbeat（注释帧吞掉后续块） |
+| M2 | 挂起提案不发 `confirm` | 多步写入出确认卡 |
+| M3 | `tool_result` 回吐原始数据 | tool_result 是摘要 |
+| M4 | 工具批次不发 `tool_calling` | 两 Step 事件顺序 |
+| M5 | 心跳注释帧不再是一帧 | heartbeat 序列 |
+| M6 | 去掉 `X-Accel-Buffering` | 响应头 |
+| M7 | 灰度开关失效 | 开关关闭 → 503 |
+| M8 | 不查 guest 日配额 | 日配额 429 |
+| M9 | 不落会话事件 | 落库与多轮上下文 |
+| M10 | 不记用量行 | 同上 |
+| M11 | 不接执行通道 | 单 Step 写入自动执行 |
+| M12 | 观察者回调整体失效 | 全部事件帧用例 |
+| M13 | 不通知每步用量 | 失败轮仍记第 1 步 token |
+| M14 | 断连后不取消工作协程 | 断连即取消且不落库 |
+| M15 | 失败帧回显异常正文 | `agent_failed` 不泄正文 |
+
+**数据 / 同步 / AI / 安全影响：**
+
+- **数据：零影响**——无模型改动、无迁移、不进 sync 协议。agent 轮次写的是 02f 建的两张表
+  （`ai_conversations` / `ai_conversation_events` + 一条 `ai_usage`）。
+- **AI：本卡是全链的接线点**——agent 路径至此**首次有了生产调用点**。默认关闭
+  （`ai_agent_enabled=false`）时端点 503、provider 一次都不调。开启后：guest **同时**受
+  日配额与会话双限（两道都在跑 loop 之前）。
+- **安全：** 新增攻击面是「一条 HTTP 长连接 + 模型可控的内容出现在客户端帧里」。已落地：
+  ①`error` 帧只给安全枚举码与固定文案，**异常正文一律不回显**（用例钉住）；②`tool_result`
+  只给「成了没有」+ 固定错误文案，**不含 `argument` 等模型可控字段、不含原始账本数据**；
+  ③`confirm` / `done` 里的提案含服务端解析的 id，但那是**本用户自己账本**的 id，且回喂模型的
+  历史里已由 02c/02e 剥净（用例同时断言「提案里确有 id」与「历史里没有」）；④断连即取消 +
+  未提交即回滚，不产生半截写入；⑤配额两道前置，长连接不能绕。
+- **隐私：** 新增日志只有异常**类型名**与结果枚举，不含用户原话、不含提案正文。
+
+**兼容与回退方式：**
+
+- **向前兼容**：默认关闭 + 不接线即零影响——`ai_agent_enabled=false` 时旧客户端与快路径
+  行为逐字不变（有专门用例实跑快路径 `/ai/interpret` 断言 200）。`agent.py` 的 observer
+  缺省 `None`，02d 的 79 条用例与 02e 的 26 条**一行未改、全绿**。
+- **回退** = 删 `stream.py` + `test_agent_stream.py` + `routes.py` 的 `/ai/agent` 端点 +
+  `schemas.py` 的 `AIAgentRequest` + config 三项，并撤掉 `agent.py` 的 observer（约 60 行）
+  与 `service.py` 的两处抽取（`check_daily_quota` 的委托可原样保留，行为等价）。
+
+**开放风险与责任人：**
+
+- **R-PROD-22 第 1 项（真实 nginx 端到端）**——见上「缓冲的实测与残余」。**责任人：收口 / 部署执行者。**
+- **客户端层开关未落地**（决策 6）——**责任人：02i**（落点在 `submitInput` 的降级分支）。
+- **`delta` 一轮一帧**（决策 3）——客户端**不能**期待打字机效果；步骤可见性才是 P1 的实时性来源。
+  **责任人：02h/02i 的实现者须照此写 UI。**
+- **失败轮不落库**（决策 5）——断连或 provider 中途失败时本轮消息不进历史，下一轮没有这段上下文；
+  断连恢复要等 P3 的完整事件日志。**责任人：P3（T-M7-04）。**
+- **02b 的 `stream_options.include_usage` 未验证项在 P1 不适用**——P1 的 loop 走**非流式**
+  `complete_with_tools`，usage 来自常规响应体（用例断言 `done.usage` 与落库 token 一致），
+  因此「agent 每轮计费恒为 0」这一残余**在 P1 不存在**。**token 级流式一旦启用（后续卡），
+  该项须重新实测。**
+- **`ai_agent_step_timeout_seconds=20` 是初值**——02d 实测深档单步 5–7 s；真实分布要等
+  02h/02i 接通后统计。**责任人：收口。**
+- **`StopReason.CANCELLED` 在 P1 不可达**——断连走的是连接取消（不发帧），审批通道也未接。
+  这不是缺陷（取消的用户已经离开），但 02h/02i 不应期待该值。**责任人：02h/02i 知情即可。**
+- **单 worker 前提未变**——`ApprovalGate` 的内存态一次性、限流字典都是单实例假设（架构 §8.4
+  已登记）；本卡未新增跨实例状态。
+
+**下一项未阻塞任务：** **02h（客户端桥通道）** —— 依赖 02g，已完成。02h 需要本卡的三件事：
+①**桥命令 `ai.agent`** 上行 `{input, book_id, conversation_id?}`，**`ai.cancel` = 关掉 SSE 长连接**
+（服务端把断连当取消，没有单独的取消端点）；②事件名与载荷照 `stream.py` 的「各事件的载荷」表
+（`phase` / `tool_call` / `tool_result` / `confirm` / `delta` / `done` / `error`，`device_request`
+P1 不会出现）；③`done.conversation_id` 必须留存并在下一轮带上，否则会一直开新会话。
 ---
 
 ## 六、参考

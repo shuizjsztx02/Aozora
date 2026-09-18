@@ -17,7 +17,7 @@ import re
 import time
 import uuid
 from collections import defaultdict
-from datetime import UTC, datetime
+from datetime import UTC, date, datetime
 from typing import TYPE_CHECKING
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
@@ -145,12 +145,53 @@ def local_day_start_utc(tz_name: str) -> datetime:
     Quota days reset at local midnight (product decision 2026-09-06).
     Unknown/invalid timezones fall back to UTC.
     """
-    try:
-        tz = ZoneInfo(tz_name)
-    except (ZoneInfoNotFoundError, ValueError):
-        tz = ZoneInfo("UTC")
+    tz = user_timezone(tz_name)
     day_start = datetime.now(tz).replace(hour=0, minute=0, second=0, microsecond=0)
     return day_start.astimezone(UTC)
+
+
+def user_timezone(tz_name: str) -> ZoneInfo:
+    """The user's timezone; unknown/invalid names fall back to UTC.
+
+    Single resolution point for the two places that need it: the quota day
+    boundary (``local_day_start_utc``) and the agent loop's "today"
+    (``local_today``). Keeping one implementation means the two can never
+    disagree about what day it is for the same user.
+    """
+    try:
+        return ZoneInfo(tz_name)
+    except (ZoneInfoNotFoundError, ValueError):
+        return ZoneInfo("UTC")
+
+
+def local_today(tz_name: str) -> date:
+    """Today in the user's timezone — ``AgentLoop`` 的 ``today``（T-M7-02g）。
+
+    模型换算「今天 / 昨天 / 上周」全靠这一个日期（架构 §4.6 的系统提示），服务端
+    不猜用户在东八区还是别处，与配额日界共用同一套时区解析。
+    """
+    return datetime.now(user_timezone(tz_name)).date()
+
+
+async def check_daily_quota(db: AsyncSession, user: User, cfg: Settings) -> None:
+    """GUEST 用户的日配额（ACTIVE 用户不设上限）。
+
+    **模块级函数而不是 ``AIService`` 的方法**：agent 路径（02g 的端点）同样要吃
+    这道限，但它不需要构造 ``AIService``（那要一个 provider）。两条路径共用同一
+    份实现，端点因此不必手抄 SQL——抄一份的结果只会是两边慢慢漂开。
+    """
+    if user.status != UserStatus.GUEST:
+        return
+    day_start = local_day_start_utc(user.timezone)
+    count = await db.scalar(
+        select(func.count())
+        .select_from(AIUsage)
+        .where(AIUsage.user_id == user.id, AIUsage.created_at >= day_start)
+    )
+    if count is not None and count >= cfg.ai_daily_quota_guest:
+        raise AppException(
+            429, "ai_quota_exceeded", "Daily AI quota used up, please try again tomorrow",
+        )
 
 
 def build_usage_row(
@@ -330,19 +371,12 @@ class AIService:
         _ai_rate_limits[user_id] = bucket
 
     async def _check_daily_quota(self, user: User) -> None:
-        """Daily quota for GUEST users only; ACTIVE users are uncapped."""
-        if user.status != UserStatus.GUEST:
-            return
-        day_start = local_day_start_utc(user.timezone)
-        count = await self._db.scalar(
-            select(func.count())
-            .select_from(AIUsage)
-            .where(AIUsage.user_id == user.id, AIUsage.created_at >= day_start)
-        )
-        if count is not None and count >= self._cfg.ai_daily_quota_guest:
-            raise AppException(
-                429, "ai_quota_exceeded", "Daily AI quota used up, please try again tomorrow",
-            )
+        """Daily quota for GUEST users only; ACTIVE users are uncapped.
+
+        Delegates to the module-level :func:`check_daily_quota` so the agent
+        path checks the same number with the same query (T-M7-02g).
+        """
+        await check_daily_quota(self._db, user, self._cfg)
 
     # -- output parsing --------------------------------------------------------
 

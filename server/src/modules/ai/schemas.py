@@ -208,3 +208,23 @@ class AIParseImageResponse(BaseModel):
     attachment_id: str
     confidence: float
     usage: AIUsageInfo
+
+
+# ─── T-M7-02g: Agent 流式端点 ───────────────────────────────────────────
+
+class AIAgentRequest(BaseModel):
+    """Request for the streaming agent endpoint (``POST /ai/agent``).
+
+    The response is ``text/event-stream``, not JSON — so this model is the
+    only pydantic shape on the agent path: everything coming back is SSE
+    frames, defined in ``stream.py``.
+
+    ``conversation_id`` is optional: omit it on the first turn and the
+    server creates a conversation, returning its id in the ``done`` frame
+    for the client to reuse. ``book_id`` scopes the whole turn (tool
+    context, system prompt, writes) and must belong to the caller.
+    """
+
+    input: str = Field(min_length=1, max_length=MAX_INPUT_CHARS)
+    book_id: str = Field(min_length=1)
+    conversation_id: str | None = None

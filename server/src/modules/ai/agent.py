@@ -17,7 +17,9 @@
     while await loop.step():   # 即架构伪代码的 while (await turn())
         pass
 
-不做流式（02g）、不做 HTTP 传输（02g）。写操作走 §7.3/§7.4 的安全路径（02e）：
+不做流式（02g）、不做 HTTP 传输（02g）；进度只经 ``observer`` 回调外送（02g 的
+SSE 层据此发 ``phase`` / ``tool_call`` / ``tool_result``）。写操作走 §7.3/§7.4
+的安全路径（02e）：
 写工具只产出提案**草案**，由本模块组装（补 ``proposalId`` / ``confidence`` /
 ``requiresConfirmation``）、校验（复用 ``AIService.validate_proposal``）、按策略
 放行或挂起，执行一律经 ``AIService.execute_proposal``（含 TOCTOU 重校验）——
@@ -633,6 +635,42 @@ class ApprovalGate:
 
 
 # ---------------------------------------------------------------------------
+# 进度观察者（02g 的 SSE 层实现）
+# ---------------------------------------------------------------------------
+
+class AgentObserver(Protocol):
+    """Loop 的进度回调：让调用方**在回合进行中**看到发生了什么。
+
+    架构 §8.1 的 ``phase`` / ``tool_call`` / ``tool_result`` 三类事件需要「这一步
+    开始了」「这个工具要跑了」「它回来了」这些时刻——它们只在 loop 内部可见，
+    事后从 ``AgentResult.messages`` 反推只能拿到全貌、拿不到顺序与时机（而步骤
+    可见性正是 P1 流式的全部价值，见 02d 的实测：深档单步 5–7 s）。
+
+    **方法全是同步的**，且**缺省不接**（``observer=None``）：回调点在 loop 的
+    关键路径上，同步签名保证观察者不引入 await 点、不改变时序、不成为取消点；
+    02g 的实现只做 ``queue.put_nowait``。回调抛出的任何异常都由
+    :meth:`AgentLoop._notify` 吞掉并告警——观察者是旁路，**不允许**影响回合。
+
+    ``step`` 是 1 起的 Step 序号（与 ``confirm_reason`` 的判定量同一个数）。
+    """
+
+    def step_started(self, *, step: int, level: ReasoningLevel) -> None: ...
+
+    def step_finished(
+        self, *, step: int, prompt_tokens: int, completion_tokens: int,
+    ) -> None:
+        """本次模型请求的用量。
+
+        **失败路径的用量靠它**：loop 抛 ``ProviderError`` 时 ``AgentResult`` 不存在，
+        但已经发生的调用是计费的（快路径的 ``_record_failure_usage`` 同口径）。
+        """
+
+    def tool_started(self, *, step: int, name: str) -> None: ...
+
+    def tool_finished(self, *, step: int, name: str, outcome: ToolOutcome) -> None: ...
+
+
+# ---------------------------------------------------------------------------
 # Loop
 # ---------------------------------------------------------------------------
 
@@ -656,6 +694,7 @@ class AgentLoop:
         limits: AgentLimits | None = None,
         approver: Approver | None = None,
         executor: ProposalExecutor | None = None,
+        observer: AgentObserver | None = None,
     ) -> None:
         """
         ``today`` 由调用方按**用户本地时区**给出（服务端不猜用户在东八区还是
@@ -671,6 +710,9 @@ class AgentLoop:
           由调用方在带外拿用户的批准。
 
         两个通道都没接时，写工具的行为与 02d 完全一致（只产出提案、零副作用）。
+
+        ``observer`` 是进度旁路（02g 的 SSE 层）：不接时行为与 02d 逐字相同，
+        接了也只多几次同步调用——它拿不到控制权，抛异常也不会影响回合。
         """
         self._provider = provider
         self._ctx = ctx
@@ -686,6 +728,7 @@ class AgentLoop:
         self._limits = limits or AgentLimits()
         self._approver = approver
         self._executor = executor
+        self._observer = observer
 
         self._cancelled = False
         self._messages: list[dict[str, Any]] = []
@@ -772,6 +815,7 @@ class AgentLoop:
         # 复杂（架构 §4.6），后续步骤一律「深」档，入口误判不再致命。
         level = ReasoningLevel.DEEP if self._steps >= 1 else self._entry_level
         self._steps += 1
+        self._notify("step_started", step=self._steps, level=level)
 
         result = await self._provider.complete_with_tools(
             list(self._messages),
@@ -783,6 +827,12 @@ class AgentLoop:
         )
         self._prompt_tokens += result.prompt_tokens
         self._completion_tokens += result.completion_tokens
+        self._notify(
+            "step_finished",
+            step=self._steps,
+            prompt_tokens=result.prompt_tokens,
+            completion_tokens=result.completion_tokens,
+        )
         self._last_content = result.content
 
         calls = self._assistant_tool_calls(result)
@@ -843,6 +893,23 @@ class AgentLoop:
         for text in self._queued:
             self._append({"role": "user", "content": text})
         self._queued.clear()
+
+    def _notify(self, hook: str, **kwargs: Any) -> None:
+        """调用观察者的一个钩子，**异常一律吞掉**（见 ``AgentObserver``）。
+
+        观察者是旁路：它的作用是让调用方看见进度，不是参与决策。一次进度回调
+        失败不该让用户的回合失败，因此这里只告警、只记钩子名与异常类型名。
+        """
+        observer = self._observer
+        if observer is None:
+            return
+        try:
+            getattr(observer, hook)(**kwargs)
+        except Exception as exc:  # noqa: BLE001 — 旁路回调，见 docstring
+            logger.warning(
+                "agent observer hook failed",
+                extra={"hook": hook, "error": type(exc).__name__},
+            )
 
     def _assistant_tool_calls(self, result: ProviderResult) -> list[tuple[str, ToolCall]]:
         """给每个调用定格一个**唯一且非空**的 id。
@@ -914,7 +981,11 @@ class AgentLoop:
         """
         outcomes: list[ToolOutcome] = []
         for call_id, call in calls:
+            self._notify("tool_started", step=self._steps, name=call.name)
             outcome = await self._invoke(call)
+            self._notify(
+                "tool_finished", step=self._steps, name=call.name, outcome=outcome,
+            )
             outcomes.append(outcome)
             self._append({
                 "role": "tool",
