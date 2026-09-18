@@ -237,7 +237,6 @@ class DirectStream:
         self.headers: dict[str, str] = {}
         self.chunks: list[str] = []
         self._disconnect = asyncio.Event()
-        self._finished = asyncio.Event()
 
     @property
     def body(self) -> str:
@@ -268,12 +267,8 @@ def open_direct_stream(
     path: str,
     payload: dict[str, Any],
     token: str,
-    heartbeat: float,
 ) -> DirectStream:
-    """启动一次直连 ASGI 请求并立刻返回（不等待应用跑完）。
-
-    ``heartbeat`` 只用于把超时放宽到心跳周期的若干倍，避免慢机器上的假红。
-    """
+    """启动一次直连 ASGI 请求并立刻返回（不等待应用跑完）。"""
     raw = json.dumps(payload).encode()
     holder: dict[str, Any] = {}
 
@@ -318,14 +313,9 @@ def open_direct_stream(
             body = message.get("body", b"")
             if body:
                 stream.chunks.append(body.decode())
-            if not message.get("more_body"):
-                stream._finished.set()
 
     async def run() -> None:
-        try:
-            await app(scope, receive, send)
-        finally:
-            holder["stream"]._finished.set()
+        await app(scope, receive, send)
 
     task = asyncio.create_task(run())
     stream = DirectStream(task)
@@ -719,7 +709,6 @@ class TestIncrementalDelivery:
             path="/ai/agent",
             payload={"input": "看看预算", "book_id": stream_env.book_id},
             token=stream_env.auth_headers["Authorization"].removeprefix("Bearer "),
-            heartbeat=stream_env.cfg.ai_agent_heartbeat_seconds,
         )
         try:
             # 第一个 phase 帧在模型请求**之前**发出——此时模型还没返回
@@ -732,6 +721,7 @@ class TestIncrementalDelivery:
             release.set()
 
         assert stream.status == 200
+        assert stream.headers["x-accel-buffering"] == "no"
         assert event_names(stream.body)[-1] == "done"
 
     async def test_disconnect_cancels_the_turn_and_persists_nothing(
@@ -745,7 +735,6 @@ class TestIncrementalDelivery:
             path="/ai/agent",
             payload={"input": "你好", "book_id": stream_env.book_id},
             token=stream_env.auth_headers["Authorization"].removeprefix("Bearer "),
-            heartbeat=stream_env.cfg.ai_agent_heartbeat_seconds,
         )
         await stream.wait_for("event: phase")
         conversation_id = await _only_conversation_id(stream_env)
