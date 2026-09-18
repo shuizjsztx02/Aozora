@@ -118,7 +118,7 @@ token、原始票据、账本明细三项禁令**保持绝对**。
 
 - ⚠️ **新增一个外部依赖与密钥**——`D-EXEC-04` 的密钥管理范围扩展；需登记新的配额与轮换责任人
 - ✅ **provider 行为差异已实测（2026-09-18，T-M7-02a 九项全过）**——DeepSeek 的 tool call 参数编码（单层 JSON）、流式 tool_calls 分片（name/id 不丢失）、`reasoning_content` 回传要求、thinking 与 tools 组合、四档耗时均已验证，见 `docs/risk-register.md` R-PROD-23
-- ⚠️ **`reasoning_content` 回传约束**——官方文档明确：请求含 `tools` 时，多轮必须回传前序轮次的 `reasoning_content`，否则返回 **400**。loop 实现必须保存并在下一轮带回，这是 P1 的硬性实现要求。**2026-09-18 实测修正（02a）：** 不回传亦返回 200，与官方文档**不符**；实现上仍选择回传以保持推理连续性（`messages` 原样透传，见 `provider.py` 的 `DeepSeekProvider` docstring）
+- ⚠️ **`reasoning_content` 回传约束**——官方文档明确：请求含 `tools` 时，多轮必须回传前序轮次的 `reasoning_content`，否则返回 **400**。loop 实现必须保存并在下一轮带回，这是 P1 的硬性实现要求。**2026-09-18 真实探针校准：** 该规则的确切形态是「**thinking 模式的请求里，历史中每条 assistant 消息都必须带 `reasoning_content` 这个键**——空串可通过，缺键才 400」；thinking `disabled` 的请求不要求该键。02a 初测的「不回传亦返回 200」覆盖的是更窄的形态，两者不矛盾。实现上 `messages` 原样透传，loop 的 assistant 消息**始终**带该键（见 `provider.py` 的 `DeepSeekProvider` 与 `agent.py`；完整矩阵见 P1 实施推进计划 §五）
 - ⚠️ **Chat Completion API 的一项限制（2026-09-18 已实测澄清）**——官方文档称该 API「不支持在对话中途插入 tool calls」。**02a 实测：不影响标准多步 loop**——回传 assistant 的 `tool_calls` + `role:"tool"` 结果后可正常续跑，无需改用 Responses 或 Anthropic 格式接口
 - ⚠️ **双 provider 并存期的配置面**——测试需覆盖两套 provider 的降级路径；`.env` 与生产 Secrets 增加一组变量
 - ⚠️ **离线收窄**——已确认接受，但产品原则 PR-3 的表述需相应更新
