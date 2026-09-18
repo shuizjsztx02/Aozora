@@ -26,6 +26,7 @@ from src.modules.ai.provider import (
     ProviderPurpose,
     ProviderResult,
     ReasoningLevel,
+    StreamChunk,
     ToolCall,
     build_provider,
     close_llm_provider,
@@ -845,6 +846,35 @@ class TestStreaming:
             ):
                 pass
         assert exc_info.value.reason == "bad_response"
+        assert exc_info.value.retryable is True, "增量之前失败仍可重试"
+
+    async def test_malformed_fragment_after_a_delta_is_not_retryable(
+        self, provider_factory,
+    ):
+        """增量已交出之后，任何后续失败都必须 ``retryable=False``。
+
+        ``_StreamAccumulator`` 自己抛 ``ProviderError``（畸形 ``tool_calls`` 分片），
+        而它**不在**该层 ``except`` 的改写元组里，于是绕过了 ``retryable=not
+        emitted``——重试会给用户重发半句话。02b 的流式 docstring 明写这条，但
+        「增量之前失败」时 ``retryable=True`` 恰好正确，所以只测那一侧看不出差别。
+        """
+        def handler(request: httpx.Request) -> httpx.Response:
+            return httpx.Response(200, text=_sse(
+                _delta(content="a"),
+                json.dumps({"choices": [{"delta": {"tool_calls": ["not-an-object"]}}]}),
+                done=False,
+            ))
+
+        chunks: list[StreamChunk] = []
+        with pytest.raises(ProviderError) as exc_info:
+            async for chunk in provider_factory(handler).complete_with_tools_stream(
+                [{"role": "user", "content": "hi"}],
+                model=MODEL, max_tokens=64, timeout=5.0, tools=TOOLS,
+            ):
+                chunks.append(chunk)
+        assert [c.delta for c in chunks] == ["a"], "第一帧已交给调用方"
+        assert exc_info.value.reason == "bad_response"
+        assert exc_info.value.retryable is False
 
     async def test_stream_http_error_classification(self, provider_factory):
         def handler(request: httpx.Request) -> httpx.Response:
@@ -944,6 +974,33 @@ class TestErrorContract:
             )
         assert exc_info.value.retryable is True
         assert exc_info.value.reason == "bad_response"
+
+    async def test_infinite_usage_counter_is_bad_response(self, provider_factory):
+        """``1e400`` in ``usage`` decodes to ``float('inf')``; ``int(inf)`` raises
+        ``OverflowError``, which is an ``ArithmeticError`` — **not** a
+        ``ValueError`` — so it escaped the non-streaming path's except tuple and
+        surfaced as a bare 500 (T-M7-02d review, F4). The streaming path already
+        covered it; this pins the non-streaming one to the same contract.
+        """
+        def handler(request: httpx.Request) -> httpx.Response:
+            # Raw bytes on purpose: httpx's ``json=`` refuses to serialise inf.
+            return httpx.Response(
+                200,
+                content=(
+                    b'{"choices":[{"message":{"role":"assistant",'
+                    b'"content":"ok"}}],'
+                    b'"usage":{"prompt_tokens":1e400,"completion_tokens":1}}'
+                ),
+                headers={"content-type": "application/json"},
+            )
+
+        with pytest.raises(ProviderError) as exc_info:
+            await provider_factory(handler).complete_with_tools(
+                [{"role": "user", "content": "hi"}],
+                model=MODEL, max_tokens=64, timeout=5.0, tools=TOOLS,
+            )
+        assert exc_info.value.reason == "bad_response"
+        assert exc_info.value.retryable is True
 
     async def test_key_never_reaches_error_message_or_logs(
         self, provider_factory, caplog,

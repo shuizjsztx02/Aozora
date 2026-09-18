@@ -687,6 +687,19 @@ class DeepSeekProvider:
                         break
                     try:
                         delta = accumulator.feed(json.loads(data))
+                    except ProviderError as exc:
+                        # The accumulator classifies its own shape errors (a
+                        # ``tool_calls`` entry that is not an object) and raises
+                        # ``ProviderError`` itself — which the tuple below would
+                        # not catch. The retry verdict still belongs to this
+                        # layer: once a delta has gone out, a later failure must
+                        # be reported as not retryable (see the docstring), or a
+                        # retrying caller re-sends half an answer.
+                        raise ProviderError(
+                            status=exc.status,
+                            retryable=not emitted,
+                            reason=exc.reason,
+                        )
                     except (ValueError, TypeError, KeyError, IndexError, ArithmeticError):
                         # An undecodable frame, a payload whose fields have the
                         # wrong type, and the shape errors those types raise
@@ -783,8 +796,12 @@ class DeepSeekProvider:
         try:
             body = resp.json()
             return _parse_message(body["choices"][0]["message"], body.get("usage"))
-        except (ValueError, KeyError, IndexError, TypeError):
+        except (ValueError, KeyError, IndexError, TypeError, ArithmeticError):
             # Malformed 200 body — treat as retryable provider fault.
+            # ArithmeticError（T-M7-02d 复审）：usage 计数若是 JSON 里的 ``1e400``，
+            # json 会解成 ``float('inf')``，``int(inf)`` 抛 OverflowError——它不是
+            # ValueError 的子类，会绕过这里直接 500。流式路径的同一处理已含该项
+            # （02b 收口），非流式路径当时漏了，此处对齐。
             raise ProviderError(status=200, retryable=True, reason="bad_response")
 
 
