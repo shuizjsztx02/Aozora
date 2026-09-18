@@ -466,7 +466,11 @@ class SyncEngineTest {
             books, categories, accounts, transactions, budgets, cursor
         )
         return BootstrapResponse(
-            books, categories, accounts, transactions, budgets, cursor,
+            books, categories, accounts, transactions, budgets,
+            // 命名传参：T-M7-01 在 cursor 之前插入了三实体字段（savingsGoals /
+            // scheduledRules / chatPersonas），位置传参会把 cursor: Long 落到
+            // List 类型的槽上，导致 androidTest 源码集编译失败。
+            cursor = cursor,
             checksum = checksum, computedChecksum = checksum
         )
     }
