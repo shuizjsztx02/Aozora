@@ -544,7 +544,9 @@ cd app && npx tsc --noEmit                       # 0 错
 **修复（`b2694d7`）：** 方案 = **把 DB 底座从 `:memory:` + StaticPool 换成临时文件库**（`tempfile.mkdtemp` + teardown `rmtree`，与 `test_attachments` / `test_image_parse` / `test_stats_exports` 既有约定一致）——文件库走默认连接池，每个 loop 各用各的连接，`dispose` 随之合法。**注意不能用 pytest 的 `tmp_path`**：本机 basetemp `pytest-of-admin` 权限已坏（连 ACL 都读不了），`tmp_path` 会直接 PermissionError。
 **改前先做了两点实测，避免照抄无效修法：** (1) 线程计数——现状 `0 → 1 → 1`（永不释放，即泄漏成立）；文件库 + dispose `1 → 1 → 0`（干净归零）；(2)「从新 loop 调 `dispose()` 会不会自己抛 `Event loop is closed`」——不会，故 teardown 释放可行。
 **实际影响面比原登记更大：** 除三处 AI fixture 外，`test_fact_pack.py` / `test_ledger_api.py` 同款，`test_image_parse.py` 走应用全局引擎（把 `Settings.database_url` 指向临时文件，绕开 `database.py` 的「`:memory:` → StaticPool」分支，**生产代码未动**），**共 6 个文件**。
-**验证：** 6 个文件 216 用例全绿；全量 961/962 passed + 37 skipped **连跑两轮无 error**；ruff 通过；进程内线程对比「新增且残留的 aiosqlite 线程：**无**」。
+**验证：** 6 个文件 216 用例全绿；全量 961/962 passed + 37 skipped **连跑四轮无 error**；ruff 通过；进程内线程对比「新增且残留的 aiosqlite 线程：**无**」。
+**独立复核（并发会话 `aozora-c1`）：** 6 个受影响文件**连跑 5 轮**（每轮 216 passed、零 error）、全量 962/37/0/0、ruff 全绿，结论通过。它还专门查了 `test_image_parse.py` 是否会漏线程（怀疑点：teardown 里没有 `reset_engine()`，而 `database.py` 的同步 dispose 对文件库的默认池取不到 `_pool`）——**实测不漏**：`src/main.py` 的 lifespan shutdown 会 `await engine.dispose()`，TestClient 退出时走这条路。
+**CI 侧的判读（别误用）：** 含本修复的提交 `4688a32` 上 `Server Lint & Test` = success，但**这不构成对间歇性问题的证明**——修复前的 `865fd7d` 同样是 success（flaky 本来就大概率过）。有说服力的是本地重复跑：连跑四轮全量 + 六个文件连跑五轮，均零 error。
 推后本地 HEAD 全量为 **902 passed / 37 skipped**（本卡 81 + 并发会话补的快路径 2 条）。
 
 **tip（`7206c0c`）远端 CI：** Client Lint & Test ✅ / **Server Lint & Test ❌** / Android Compile & JVM Test ❌。两条红**均非本轮代码回归**，如实记录如下：

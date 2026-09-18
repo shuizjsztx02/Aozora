@@ -10,7 +10,10 @@ Acceptance mapping (docs/APP-CONTEXT.md T-M4-02):
 from __future__ import annotations
 
 import asyncio
+import shutil
+import tempfile
 import uuid
+from pathlib import Path
 
 import pytest
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
@@ -36,10 +39,6 @@ def val_env():
     # `RuntimeError: Event loop is closed`，被 filterwarnings=["error"] 提升成 error，
     # 且**记在哪个用例上纯看时机**（2026-09-18 定位，服务端作业偶发 1 error 的真因）。
     # 文件库让每个 loop 各用各的连接，teardown 里也就能干净释放（实测线程归零）。
-    import shutil
-    import tempfile
-    from pathlib import Path
-
     # 临时目录用 mkdtemp 而不是 pytest 的 tmp_path：与本仓库其它测试
     # （test_attachments / test_image_parse / test_stats_exports）一致。
     db_dir = Path(tempfile.mkdtemp(prefix="aozora_test_db_"))
