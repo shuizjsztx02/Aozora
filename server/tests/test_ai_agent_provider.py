@@ -421,7 +421,10 @@ class TestToolCallParsing:
         assert exc_info.value.reason == "bad_response"
         assert exc_info.value.retryable is True
 
-    async def test_tool_call_without_name_is_bad_response(self, provider_factory):
+    async def test_tool_call_without_name_passes_through_empty(self, provider_factory):
+        """A nameless tool call is a model-output problem the loop can answer
+        with a tool-result error, so it must reach the loop rather than fail
+        the step — the same contract the streaming path implements."""
         def handler(request: httpx.Request) -> httpx.Response:
             return httpx.Response(200, json=_body({
                 "role": "assistant",
@@ -429,12 +432,30 @@ class TestToolCallParsing:
                 "tool_calls": [{"id": "call_a", "function": {"arguments": "{}"}}],
             }))
 
-        with pytest.raises(ProviderError) as exc_info:
-            await provider_factory(handler).complete_with_tools(
-                [{"role": "user", "content": "hi"}],
-                model=MODEL, max_tokens=64, timeout=5.0, tools=TOOLS,
-            )
-        assert exc_info.value.reason == "bad_response"
+        result = await provider_factory(handler).complete_with_tools(
+            [{"role": "user", "content": "hi"}],
+            model=MODEL, max_tokens=64, timeout=5.0, tools=TOOLS,
+        )
+        assert result.tool_calls == (ToolCall(id="call_a", name="", arguments="{}"),)
+
+    async def test_tool_call_without_id_passes_through_empty(self, provider_factory):
+        """缺 id 不是传输故障：配对只发生在 loop 自己的消息列表内，loop 会补一个
+        稳定 id 并同时写回 assistant 消息（``agent.AgentLoop._assistant_tool_calls``）。
+        本层在此拒绝，只会把一个调用方处理得了的情况变成一个失败的回合。"""
+        def handler(request: httpx.Request) -> httpx.Response:
+            return httpx.Response(200, json=_body({
+                "role": "assistant",
+                "content": None,
+                "tool_calls": [{"function": {"name": "budget_get", "arguments": "{}"}}],
+            }))
+
+        result = await provider_factory(handler).complete_with_tools(
+            [{"role": "user", "content": "hi"}],
+            model=MODEL, max_tokens=64, timeout=5.0, tools=TOOLS,
+        )
+        assert result.tool_calls == (
+            ToolCall(id="", name="budget_get", arguments="{}"),
+        )
 
     async def test_missing_usage_defaults_to_zero(self, provider_factory):
         def handler(request: httpx.Request) -> httpx.Response:
@@ -671,9 +692,11 @@ class TestStreaming:
             ):
                 received.append(chunk.delta)
         # Deltas already forwarded are not retracted; the error marks the turn
-        # as incomplete so it cannot be mistaken for a finished answer.
+        # as incomplete so it cannot be mistaken for a finished answer — and it
+        # is not retryable, since a retry would resend the same half.
         assert received == ["半"]
         assert exc_info.value.reason == "bad_response"
+        assert exc_info.value.retryable is False
 
     async def test_connection_drop_mid_stream_is_transport(self, provider_factory):
         def handler(request: httpx.Request) -> httpx.Response:
@@ -690,7 +713,96 @@ class TestStreaming:
         # would pass vacuously.
         assert received == ["a"]
         assert exc_info.value.reason == "transport"
+        # Retryability flips at the first forwarded delta: a retry would replay
+        # text the caller has already seen.
+        assert exc_info.value.retryable is False
+
+    async def test_drop_before_any_delta_is_retryable(self, provider_factory):
+        """Nothing was forwarded yet, so a retry is safe and still on offer."""
+
+        class _DropsImmediately(httpx.AsyncByteStream):
+            async def __aiter__(self):
+                raise httpx.RemoteProtocolError("peer closed the stream")
+                yield b""  # keeps this an async generator (never reached)
+
+            async def aclose(self) -> None:
+                pass
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            return httpx.Response(200, stream=_DropsImmediately())
+
+        with pytest.raises(ProviderError) as exc_info:
+            async for _ in provider_factory(handler).complete_with_tools_stream(
+                [{"role": "user", "content": "hi"}],
+                model=MODEL, max_tokens=64, timeout=5.0, tools=TOOLS,
+            ):
+                pass
+        assert exc_info.value.reason == "transport"
         assert exc_info.value.retryable is True
+
+    async def test_empty_data_frames_are_keepalives(self, provider_factory):
+        """``data:`` with no payload is legal SSE and used as keep-alive; it
+        must not be decoded as a malformed frame."""
+        def handler(request: httpx.Request) -> httpx.Response:
+            return httpx.Response(
+                200, text="data:\n\ndata:   \n\n" + _sse(_delta(content="ok")),
+            )
+
+        chunks = await self._collect(provider_factory(handler))
+        assert chunks[-1].result.content == "ok"
+
+    async def test_index_less_continuation_stays_one_call(self, provider_factory):
+        """A fragment without ``index`` continues the open call. Indexing it by
+        ``len()`` would open a new slot and split the arguments."""
+        def handler(request: httpx.Request) -> httpx.Response:
+            return httpx.Response(200, text=_sse(
+                json.dumps({"choices": [{"delta": {"tool_calls": [{
+                    "index": 0, "id": "call_a",
+                    "function": {"name": "budget.get", "arguments": ""},
+                }]}}]}),
+                json.dumps({"choices": [{"delta": {"tool_calls": [{
+                    "function": {"arguments": '{"month":'},
+                }]}}]}),
+                json.dumps({"choices": [{"delta": {"tool_calls": [{
+                    "function": {"arguments": ' "2026-08"}'},
+                }]}}]}),
+            ))
+
+        chunks = await self._collect(provider_factory(handler))
+        assert chunks[-1].result.tool_calls == (
+            ToolCall(id="call_a", name="budget.get", arguments='{"month": "2026-08"}'),
+        )
+
+    async def test_choices_as_mapping_is_bad_response(self, provider_factory):
+        """A shape error inside a frame is a malformed frame — it must not
+        escape the generator as a bare KeyError."""
+        def handler(request: httpx.Request) -> httpx.Response:
+            return httpx.Response(200, text=_sse(
+                json.dumps({"choices": {"0": {"delta": {"content": "x"}}}}),
+                _delta(content="ok"),
+            ))
+
+        with pytest.raises(ProviderError) as exc_info:
+            async for _ in provider_factory(handler).complete_with_tools_stream(
+                [{"role": "user", "content": "hi"}],
+                model=MODEL, max_tokens=64, timeout=5.0, tools=TOOLS,
+            ):
+                pass
+        assert exc_info.value.reason == "bad_response"
+
+    async def test_tool_call_streamed_without_id_passes_through_empty(self, provider_factory):
+        """与一次性路径同口径：流式组装的调用缺 id 时如实给出 ``""``。"""
+        def handler(request: httpx.Request) -> httpx.Response:
+            return httpx.Response(200, text=_sse(
+                json.dumps({"choices": [{"delta": {"tool_calls": [{
+                    "index": 0, "function": {"name": "budget_get", "arguments": "{}"},
+                }]}}]}),
+            ))
+
+        chunks = await self._collect(provider_factory(handler))
+        assert chunks[-1].result.tool_calls == (
+            ToolCall(id="", name="budget_get", arguments="{}"),
+        )
 
     async def test_malformed_frame_is_bad_response(self, provider_factory):
         def handler(request: httpx.Request) -> httpx.Response:
@@ -873,7 +985,12 @@ class TestErrorContract:
         assert API_KEY not in caplog.text
 
     async def test_provider_repr_hides_the_key(self, provider_factory):
+        """The default object repr would hide the key too — which is exactly
+        why the test asserts the *redacting* repr is the one in place: delete
+        it (or make the class a dataclass, whose repr prints every field) and
+        the key is one ``%r`` log line away from leaking."""
         provider = provider_factory(
             lambda request: httpx.Response(200, json=_body({"role": "assistant", "content": "ok"})),
         )
         assert API_KEY not in repr(provider)
+        assert repr(provider).startswith("<DeepSeekProvider url=")

@@ -369,9 +369,18 @@ def _parse_tool_calls(raw: Any) -> tuple[ToolCall, ...]:
     """Decode the ``tool_calls`` array, keeping ``arguments`` as raw text.
 
     The tool *name* is deliberately not validated against any registry —
-    this layer does not own the tool list. An unknown or empty name is
-    passed through so the loop can answer it with a tool-result error, which
-    is a recoverable step rather than a failed request.
+    this layer does not own the tool list. An unknown, missing or empty name
+    becomes ``""`` so the loop can answer it with a tool-result error, which
+    is a recoverable step rather than a failed request. The streaming path
+    has always behaved this way; this path now matches it instead of failing
+    the whole step.
+
+    A missing ``id`` is passed through as ``""`` for the same reason: the id
+    only has to pair a call with its result *within the loop's own message
+    list*, and the loop synthesizes a stable one for that (see
+    ``agent.AgentLoop._assistant_tool_calls``, which writes the same id back
+    into the assistant message). Refusing here would turn a condition the
+    caller handles into a failed turn.
     """
     if not raw:
         return ()
@@ -380,8 +389,12 @@ def _parse_tool_calls(raw: Any) -> tuple[ToolCall, ...]:
     calls: list[ToolCall] = []
     for item in raw:
         function = item.get("function") if isinstance(item, dict) else None
-        name = function.get("name") if isinstance(function, dict) else None
-        if not isinstance(name, str) or not name:
+        if not isinstance(function, dict):
+            raise ProviderError(status=200, retryable=True, reason="bad_response")
+        name = function.get("name")
+        if name is None:
+            name = ""
+        if not isinstance(name, str):
             raise ProviderError(status=200, retryable=True, reason="bad_response")
         arguments = function.get("arguments")
         if arguments is None:
@@ -476,9 +489,12 @@ class _StreamAccumulator:
             raise ProviderError(status=200, retryable=True, reason="bad_response")
         index = fragment.get("index")
         if not isinstance(index, int):
-            # Fragments without an index (some servers omit it for the first
-            # call) append in arrival order.
-            index = len(self._tool_calls)
+            # Fragments without an index continue the call that is currently
+            # open — not a new one. ``len()`` looks right only for the very
+            # first fragment and would open a fresh slot for every later
+            # continuation, splitting one call's arguments across several
+            # nameless ToolCalls.
+            index = max(self._tool_calls) if self._tool_calls else 0
         slot = self._tool_calls.setdefault(
             index, {"id": "", "name": "", "arguments": ""},
         )
@@ -503,7 +519,7 @@ class _StreamAccumulator:
             content="".join(self._text),
             prompt_tokens=self._prompt_tokens,
             completion_tokens=self._completion_tokens,
-            tool_calls=calls,
+            tool_calls=tuple(calls),
             reasoning_content="".join(self._reasoning),
         )
 
@@ -545,6 +561,16 @@ class DeepSeekProvider:
     async def aclose(self) -> None:
         """Close the pooled HTTP client (called on app shutdown)."""
         await self._client.aclose()
+
+    def __repr__(self) -> str:
+        """Never let the key ride along in a log line.
+
+        Logs routinely format objects with ``%r``. Without an explicit repr a
+        future field — or a conversion to a dataclass, whose generated repr
+        prints every attribute — would put the key into structured logs
+        (``docs/architecture/security.md``).
+        """
+        return f"<DeepSeekProvider url={self._url!r}>"
 
     # --- LLMProvider surface -------------------------------------------
 
@@ -614,10 +640,15 @@ class DeepSeekProvider:
         """Stream a tool-calling completion.
 
         Yields text increments as they arrive, then exactly one final chunk
-        carrying the assembled result. A stream that ends before ``[DONE]``
-        raises ``bad_response``: the answer is incomplete and must not be
-        mistaken for a finished turn. A caller that already forwarded deltas
-        should not retry on that error — the text would be duplicated.
+        carrying the assembled result.
+
+        **Retryability rule.** A stream that fails *before* the first delta is
+        retryable like any other provider fault. Once a delta has been handed
+        to the caller, every later failure — a connection drop, a malformed
+        frame, a stream that ends without ``[DONE]`` — is reported as **not**
+        retryable: the retry contract keys on ``retryable`` (``service.py``),
+        and replaying the request would send the caller text it has already
+        forwarded.
         """
         payload = self._payload(
             messages,
@@ -630,6 +661,7 @@ class DeepSeekProvider:
         )
         accumulator = _StreamAccumulator()
         ended = False
+        emitted = False
         try:
             async with self._client.stream(
                 "POST",
@@ -644,29 +676,42 @@ class DeepSeekProvider:
                         # Blank separators, comments and heartbeat frames.
                         continue
                     data = line[len("data:"):].strip()
+                    if not data:
+                        # SSE allows an empty ``data:`` field; proxies use it
+                        # as keep-alive. It carries no payload — skipping beats
+                        # feeding it to the JSON decoder, which would classify
+                        # a keep-alive as a malformed frame and kill the stream.
+                        continue
                     if data == "[DONE]":
                         ended = True
                         break
                     try:
                         delta = accumulator.feed(json.loads(data))
-                    except (ValueError, TypeError):
-                        # Covers both an undecodable frame and a payload whose
-                        # fields have the wrong type — same classification the
+                    except (ValueError, TypeError, KeyError, IndexError, ArithmeticError):
+                        # An undecodable frame, a payload whose fields have the
+                        # wrong type, and the shape errors those types raise
+                        # downstream (``choices`` as a mapping, a non-finite
+                        # token count) — the same classification the
                         # non-streaming path applies to a malformed 200 body.
                         raise ProviderError(
-                            status=200, retryable=True, reason="bad_response",
+                            status=200, retryable=not emitted, reason="bad_response",
                         )
                     if delta:
+                        emitted = True
                         yield StreamChunk(delta=delta)
         except httpx.TimeoutException:
             # Not retryable, same as the non-streaming path: the client's own
             # cancel line is the real budget, not the provider's speed.
             raise ProviderError(status=None, retryable=False, reason="timeout")
         except httpx.HTTPError:
-            raise ProviderError(status=None, retryable=True, reason="transport")
+            raise ProviderError(
+                status=None, retryable=not emitted, reason="transport",
+            )
 
         if not ended:
-            raise ProviderError(status=200, retryable=True, reason="bad_response")
+            raise ProviderError(
+                status=200, retryable=not emitted, reason="bad_response",
+            )
         yield StreamChunk(result=accumulator.result())
 
     # --- internals -----------------------------------------------------
