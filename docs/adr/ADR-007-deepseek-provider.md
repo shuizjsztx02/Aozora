@@ -14,7 +14,7 @@ ADR-006 决策 5 保持 DashScope（`qwen3.7-flash`）。P1 需要 **tool callin
 
 | 问题 | 证据 |
 |---|---|
-| **推理不可控** | `provider.py:109-119` 记录 T12-11 实测：该模型为混合推理模型、**默认开启 thinking**，edit/delete/query 多字段输出耗时 **20–24 s**，超出 `ai_timeout_seconds`（默认 10 s、约束 `le=12.0`）预算并静默降级。现有代码为结构化输出硬传 `enable_thinking: False` |
+| **推理不可控** | `provider.py` 的 `DashScopeProvider.complete()` 记录 T12-11 实测：该模型为混合推理模型、**默认开启 thinking**，edit/delete/query 多字段输出耗时 **20–24 s**，超出 `ai_timeout_seconds`（默认 10 s、约束 `le=12.0`）预算并静默降级。现有代码为结构化输出硬传 `enable_thinking: False` |
 | **开关是二值的** | `enable_thinking` 只有开/关，无中间档位——无法「为效果多花一点时间」地折中 |
 | **tool calling 未经实测** | 平台侧确认支持，但该模型的具体行为未验证 |
 
@@ -52,7 +52,7 @@ agent 路径（/ai/agent，多步 loop）→ DeepSeek `deepseek-flash`
 
 **不替换、不清退 DashScope。** 快路径的 prompt（`prompts.py` 的 `LEDGER_PARSE` 等）是针对 qwen 逐轮调优的，换模型需重新调优 prompt 并重跑全部 AI 回归用例——那是独立于 P1 的工作，不在本期范围。两套 provider 并存，由 `LLMProvider` Protocol（已存在）承载，互不干扰。
 
-**Provider 抽象已就绪：** `provider.py:53-63` 的 `LLMProvider` Protocol 与 `build_provider()` 工厂即为此设计，新增 `DeepSeekProvider` 是增量实现，不改现有调用方。
+**Provider 抽象已就绪：** `provider.py` 的 `LLMProvider` Protocol 与 `build_provider()` 工厂即为此设计，新增 `DeepSeekProvider` 是增量实现，不改现有调用方。
 
 ### 决策 2：推理按任务复杂度分级（三档）
 
