@@ -537,6 +537,13 @@ cd app && npx tsc --noEmit                       # 0 错
 远端 CI（`3bf613b`）：**Client Lint & Test ✅ / Server Lint & Test ✅ / Android Compile & JVM Test ❌**——Android 作业失败在 `android-actions/setup-android@v3`（`sdkmanager` exit 1，**编译与测试步骤根本没执行**），与 `docs` 已登记的自 2026-09-17 起的长期环境红一致，**非代码回归**（本卡未动客户端代码；JVM 本地 394 tests / 0 failures）。
 推后本地 HEAD 全量为 **902 passed / 37 skipped**（本卡 81 + 并发会话补的快路径 2 条）。
 
+**tip（`7206c0c`）远端 CI：** Client Lint & Test ✅ / **Server Lint & Test ❌** / Android Compile & JVM Test ❌。两条红**均非本轮代码回归**，如实记录如下：
+
+- **Server ❌ 是已知 flaky。** 作业日志为 `902 passed, 36 skipped, 1 error`——通过数与本地一致，唯一 error 是 `tests/test_main.py::TestOpenAPI::test_redoc_available` 的 **setup**：`pytest.PytestUnhandledThreadExceptionWarning: Exception in thread Thread-720 (_connection_worker_thread)`，即 lifespan 启动期的工作抛异常后被 `filterwarnings = ["error", …]` 提升为 error。该失败模式**此前已登记**（`docs/review/T-M4-01-review-round4.md:139`）。判为 flaky 的证据：`7206c0c` 是**纯文档提交**，服务端代码与 `3bf613b` 逐字节相同，而 `3bf613b` 的服务端作业是 ✅。
+- **Android ❌** 同上一条：`android-actions/setup-android@v3` 环境红，编译与测试步骤未执行。
+
+> **给后续卡的提醒：** 服务端作业存在这条 flaky 路径，看到 `1 error` 而 `N passed` 与本地一致时，先按 flaky 判、别当回归——但它同时说明 `filterwarnings = ["error", …]` 会把**后台线程**的异常算到**恰好此时运行的那个用例**头上（此处是 `test_redoc_available`），报错位置与真实故障点无关。
+
 **验证命令与结果：**
 
 ```
