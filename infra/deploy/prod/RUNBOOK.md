@@ -9,7 +9,7 @@
 ```
 公网用户 ──HTTPS:443──┐                       ┌── 内网 TCP 5432 ──▶ B机 Docker pg-prod / aozora_prod
                       ▼                       ▼
-测试人员 ──IP:8081──▶ A机 Nginx ──▶ api-test/api-prod（api-test 绑 0.0.0.0:18080；api-prod 只绑 127.0.0.1:8080）
+测试人员 ──IP:80/aozora-api/──▶ A机 Nginx ──▶ api-test/api-prod（api-test 绑 0.0.0.0:18080；api-prod 只绑 127.0.0.1:8080）
                        (192.168.44.13)              │
                                                     └── 内网 TCP 15432 ──▶ B机 Docker pg-test / aozora_test
                                                     (47.96.181.37 / 192.168.44.12)
@@ -17,16 +17,24 @@
 
 | 机器 | 角色 | 规格 | 跑什么 |
 |---|---|---|---|
-| A `116.62.196.255` / 内网 `192.168.44.13` | 业务 | 2C4G，Nginx 1.16.1 已装 | Docker：`api-test`（:18080）、`api-prod`（:8080，本轮不启动） |
+| A `116.62.196.255` / 内网 `192.168.44.13` | 业务 | 2C4G，Nginx 1.16.1 **源码编译**于 `/usr/local/nginx`，已配置运行 | Docker：`api-test`（:18080）、`api-prod`（:8080，本轮不启动） |
 | B `47.96.181.37` / 内网 `192.168.44.12` | 数据库 | 2C4G，Docker PG 18.6 双容器已装 | `pg-prod`：5432 / `aozora_prod`；`pg-test`：15432 / `aozora_test`；仅接受 A 机内网访问 |
 
-**本轮范围 = 测试链路**（截图规划：测试人员 → `http://116.62.196.255:8081`）。
-选择理由：① 8081 非标端口按 IP 访问，与 ICP 备案管控（域名+80/443）无关，现在就能跑通；
+**本轮范围 = 测试链路**（测试人员 → `http://116.62.196.255/aozora-api/`）。
+选择理由：① 复用 A 机**已有的共享 Nginx**（源码编译于 `/usr/local/nginx`，监听 80，
+与其它业务共用），按 IP + 路径前缀 `/aozora-api/` 访问，无需域名与证书，现在就能跑通；
 ② 生产实例 `ENV=production` 被服务端校验器硬性要求 CORS 为 `https://*.aozora.app` 格式
 （`server/src/common/config.py::_check_production_safety`）——没域名就没法合规启动，
 第 7 节作为待办挂起。
 ③ 测试实例跑 `ENV=staging + DEV_AUTH_CODE=000000`，短信供应商（D-EXEC-03）未接入前
 **只有 staging 能测手机验证码登录**，这正是测试环境存在的意义。
+
+> **Nginx 实际形态（2026-09-18 实地核对）**：A 机 nginx 是**源码编译**安装
+> （`/usr/local/nginx`，非 `/etc/nginx`），站点配置在 `/usr/local/nginx/conf.d/`
+> （`api.conf` + `ups.conf`），监听 **80**、路径前缀 **`/aozora-api/`**——该前缀由
+> **应用层**剥离（`server/src/main.py::SharedProxyPrefixMiddleware`），nginx 原样透传。
+> 仓库副本与完整说明见 `infra/deploy/prod/nginx/DEPLOYED.md`；本文件原先按
+> `/etc/nginx` + 8081 描述的方案从未落地，已按实地核对结果修正。
 
 **数据策略**：业务库与运维自建的初始化库分离。B 机两个实例各自新建业务库
 `aozora_prod`（pg-prod 实例）/ `aozora_test`（pg-test 实例），owner 为不可登录的
@@ -47,14 +55,16 @@ observability 栈（Prometheus/Grafana/Loki/Tempo/OTel/Alertmanager 六件套体
 
 | 机器 | 方向 | 协议/端口 | 来源 | 用途 |
 |---|---|---|---|---|
-| A | 公网入网 | TCP `8081` | `0.0.0.0/0` | 测试入口（本轮唯一公网端口） |
+| A | 公网入网 | TCP `80` | `0.0.0.0/0` | 测试入口（复用 A 机已有 nginx，路径前缀 `/aozora-api/`） |
 | A | 公网入网 | TCP `22` | 你的办公 IP/32 | SSH |
 | B | **仅内网**入网 | TCP `15432` | `192.168.44.13/32` | A→B 测试库 |
 | B | **仅内网**入网 | TCP `5432` | `192.168.44.13/32` | A→B 生产库（本轮先放行，生产实例后续启用） |
 
 - **绝对不要**给 B 的 5432/15432 开 `0.0.0.0/0`（公网侧）。整机快照兜底 ≠ 不怕泄露。
 - A 的 api-test 为兼容现有 Nginx 上游而监听 `0.0.0.0:18080`，但安全组**不得**放行
-  TCP `18080` 的公网入方向；测试人员只访问 Nginx 入口 `8081`。
+  TCP `18080` 的公网入方向；测试人员只访问 Nginx 入口 `http://116.62.196.255/aozora-api/`。
+- A 机的 **80 端口是多业务共享**的（`api.conf` 的 `location /` 也在其上），本项目的
+  公网暴露面只有 `/aozora-api/` 这一个前缀；放行 80 时请知悉其同时承载其它业务。
 - 阿里云同 VPC 内网互访走内网安全组规则；若两台机器在同一安全组，也可用
   "安全组内互通"替代上面两条，但端口仍建议在组方向上最小化。
 
@@ -232,10 +242,31 @@ nc -zvw3 192.168.44.12 5432
 
 ## 5. 服务器 A：Nginx 测试入口
 
+> **本节已于 2026-09-18 按实地核对重写。** A 机的 nginx 是**源码编译**安装
+> （`/usr/local/nginx`，非发行版包），`/etc/nginx` 不存在；服务由
+> `/etc/init.d/nginx` 托管。原先按 `/etc/nginx/conf.d/` + 8081 的步骤从未成功落地。
+> 实际形态与风险清单见 `infra/deploy/prod/nginx/DEPLOYED.md`。
+
+配置**已部署**，落点：
+
 ```bash
-sudo cp infra/deploy/prod/nginx/aozora-test.conf /etc/nginx/conf.d/
-sudo nginx -t && sudo systemctl reload nginx
+ls -l /usr/local/nginx/conf.d/          # api.conf（server 块）+ ups.conf（upstream）
 ```
+
+如需从仓库重新投放（两份必须成对——`ups.conf` 缺失会让 reload 报
+`host not found in upstream "aozora-api-ups"`）：
+
+```bash
+sudo cp infra/deploy/prod/nginx/api.conf /usr/local/nginx/conf.d/api.conf
+sudo cp infra/deploy/prod/nginx/ups.conf /usr/local/nginx/conf.d/ups.conf
+sudo /usr/local/nginx/sbin/nginx -t && sudo nginx -s reload
+```
+
+> ⚠️ **reload 前先做一件事**：服务器磁盘上 `api.conf` 的 `proxy_pass` 当前多一个尾斜杠
+> （`http://aozora-api-ups/`），会让 nginx 自行剥离 `/aozora-api/` 前缀，与应用层
+> `SharedProxyPrefixMiddleware` 的设计相反。该写法**尚未生效**（写入于 09-11 15:50，
+> 晚于最后一次 reload 的 15:41），但一 reload 就会生效——先改回不带尾斜杠的形态。
+> 详见 `DEPLOYED.md`「磁盘配置与运行态不一致」。
 
 两个常见拦路虎（RHEL/Alibaba Cloud Linux 系）：
 
@@ -244,8 +275,8 @@ sudo nginx -t && sudo systemctl reload nginx
 getenforce                          # Enforcing 才需要
 sudo setsebool -P httpd_can_network_connect 1
 
-# ② 系统自带 firewalld 挡 8081（安全组之外的第二道门）：
-sudo firewall-cmd --state && sudo firewall-cmd --permanent --add-port=8081/tcp && sudo firewall-cmd --reload
+# ② 系统自带 firewalld 挡 80（安全组之外的第二道门）：
+sudo firewall-cmd --state && sudo firewall-cmd --permanent --add-port=80/tcp && sudo firewall-cmd --reload
 ```
 
 ## 6. 端到端验收
@@ -253,9 +284,9 @@ sudo firewall-cmd --state && sudo firewall-cmd --permanent --add-port=8081/tcp &
 ### 6.1 公网冒烟（Windows PowerShell）
 
 ```powershell
-curl.exe http://116.62.196.255:8081/api/v1/health
-curl.exe http://116.62.196.255:8081/api/v1/health/ready
-curl.exe -X POST http://116.62.196.255:8081/api/v1/auth/guest `
+curl.exe http://116.62.196.255/aozora-api/api/v1/health
+curl.exe http://116.62.196.255/aozora-api/api/v1/health/ready
+curl.exe -X POST http://116.62.196.255/aozora-api/api/v1/auth/guest `
   -H "Content-Type: application/json" -d '{\"device_id\":\"smoke-win\",\"timezone\":\"Asia/Shanghai\"}'
 # 期望：两个 200 JSON；guest 返回 access_token/refresh_token/user_id
 ```
@@ -266,7 +297,7 @@ NSC debug 覆盖层已加入 `116.62.196.255` 明文白名单（本轮仓库改�
 构建不受影响。出包并分发：
 
 ```powershell
-.\gradlew :app:assembleDebug "-PAOZORA_DEBUG_API_BASE=http://116.62.196.255:8081/api/v1"
+.\gradlew :app:assembleDebug "-PAOZORA_DEBUG_API_BASE=http://116.62.196.255/aozora-api/api/v1"
 # 产物 app\build\outputs\apk\debug\app-debug.apk —— adb install 或发给测试人员
 ```
 
@@ -304,7 +335,8 @@ bash infra/deploy/prod/b-setup-postgres.sh
    自动续期 `systemctl list-timers | grep certbot` 确认。
 3. **Nginx 生产入口**：取消
    `infra/deploy/prod/nginx/aozora-prod.conf.template` 内注释、填证书路径 →
-   拷入 `conf.d/` → `nginx -t && reload`；安全组放行 A 机 80/443。
+   拷入 `/usr/local/nginx/conf.d/`（A 机是源码编译安装，不是 `/etc/nginx`）→
+   `nginx -t && reload`；安全组放行 A 机 443（80 已在用，且是多业务共享端口）。
 4. **`.env` 生产段**：`PROD_DATABASE_URL`（§4 已打印）、`PROD_SECRET_KEY`
    （独立随机）、`PROD_CORS_ORIGINS=https://api.aozora.app`。
    注意 CORS 校验器只认 `https://[子域.]aozora.app` 格式——若前端 WebView 之外无
@@ -336,7 +368,8 @@ bash infra/deploy/prod/b-setup-postgres.sh
 docker compose -f docker-compose.prod.yml --profile test down
 # 连数据卷清除（测试库上传件）：加 -v；数据库本身在 B 机，不受影响
 # 版本回滚：cd ~/Aozora && git checkout <上个可用 tag/commit> && ./infra/deploy/prod/a-deploy.sh test
-# nginx：sudo rm /etc/nginx/conf.d/aozora-test.conf && sudo nginx -t && sudo systemctl reload nginx
+# nginx：sudo rm /usr/local/nginx/conf.d/{api.conf,ups.conf} && sudo /usr/local/nginx/sbin/nginx -t && sudo nginx -s reload
+#        （两份必须同时移除：只删 ups.conf 会让 reload 报 host not found in upstream）
 ```
 
 ## 9. 故障排查速查
@@ -346,8 +379,8 @@ docker compose -f docker-compose.prod.yml --profile test down
 | a-deploy.sh 报"A→B 内网不通" | 安全组没放行 / listen_addresses=localhost / B 机防火墙 | §1、§4 脚本报告、§4 firewalld 提示 |
 | health/ready 503、日志 asyncpg 拒绝 | pg_hba 没有 A 的行 / 密码不符（以 `/root/aozora-app-db-passwords.txt` 为准） | B 机重跑 §4 脚本（幂等）后 `docker compose ... restart api-test` |
 | alembic 报 `No 'script_location'` | 镜像是旧版（未含 alembic.ini 的 Dockerfile 改动） | 确认 §3.2 拿到的提交包含本轮改动，`up -d --build` 重建 |
-| 公网 curl 8081 不通、A 机本机 curl 18080 通 | 安全组 / nginx 未 reload / SELinux | §5 两条、`sudo ss -lntp \| grep 8081` |
-| 8081 返回 502 | SELinux `httpd_can_network_connect`（RHEL 系默认拦） | §5-① |
+| 公网 curl `/aozora-api/` 不通、A 机本机 curl 18080 通 | 安全组 / nginx 未 reload / SELinux | §5 两条、`sudo ss -lntp \| grep -E ':(80\|18080)'` |
+| 入口返回 502 | SELinux `httpd_can_network_connect`（RHEL 系默认拦） | §5-① |
 | 测试 APK 报 CLEARTEXT not permitted | 装的是旧包（NSC 未含服务器 IP）或 release 包 | 重新 `assembleDebug` 出包安装 |
 | AI 全 503 | `.env` 未填 `AI_PROVIDER_API_KEY` | 补 key 后重跑 a-deploy.sh test；或接受本地 NLU 降级 |
 | 游客连测第 21 句 429 | 生产配额语义（测试已设 100000，若见 20 说明 .env 覆盖没生效） | 检查 `.env` `TEST_AI_QUOTA` 与容器内 `docker compose exec api-test printenv AI_DAILY_QUOTA_GUEST` |

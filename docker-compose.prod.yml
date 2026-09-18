@@ -12,7 +12,9 @@
 #   启用生产：docker compose -f docker-compose.prod.yml --profile prod up -d --build
 #
 # api-test 为兼容现有 Nginx 的 A 机内网地址上游而绑 0.0.0.0:18080；安全组不得
-# 放行 TCP 18080 的公网入方向。公网流量仍必须经 Nginx 转发（8081→18080 / 443→8080）。
+# 放行 TCP 18080 的公网入方向。公网流量仍必须经 Nginx 转发
+# （测试：80 端口 + `/aozora-api/` 前缀 → 18080；生产：443 → 8080）。
+# Nginx 实际形态见 infra/deploy/prod/nginx/DEPLOYED.md。
 # 所有变量取自仓库根 .env（服务器本机文件，不进 git）：
 # 模板见 infra/deploy/prod/deploy.env.example，操作步骤见 infra/deploy/prod/RUNBOOK.md。
 

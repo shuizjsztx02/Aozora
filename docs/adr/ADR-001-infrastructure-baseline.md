@@ -42,7 +42,7 @@ T-M0-07 要求输出：无密码基础设施清单、staging 可用性结论、�
 |---|---|---|
 | 服务器 A（业务） | 公网 `116.62.196.255` / 内网 `192.168.44.13`，2C4G，Nginx 1.16.1 已装（当前未监听端口） | ✅ 确认 |
 | 服务器 B（数据库） | 公网 `47.96.181.37` / 内网 `192.168.44.12`，2C4G，Docker PostgreSQL 18.6 双容器：`pg-prod`（5432 / `aozora_prod`）和 `pg-test`（15432 / `aozora_test`），数据目录分别为 `/data/postgresql/prod`、`/data/postgresql/test`；运维自建的 `prod_db` / `test_db` 原地保留不动 | ✅ 确认 |
-| 部署形态 | A：Docker Compose 双实例（`docker-compose.prod.yml`，api-test 绑 `0.0.0.0:18080` 以兼容现有 Nginx 的 A 机内网地址上游、api-prod 绑 `127.0.0.1:8080`，经 Nginx 分流 8081/443）；B：现有 Docker PostgreSQL 双容器，仅接受 A 内网访问（精确 `pg_hba` + 安全组双限） | ✅ 落地文件已入库 |
+| 部署形态 | A：Docker Compose 双实例（`docker-compose.prod.yml`，api-test 绑 `0.0.0.0:18080` 以兼容现有 Nginx 的 A 机内网地址上游、api-prod 绑 `127.0.0.1:8080`，经 Nginx 分流：测试 `80` + `/aozora-api/` 前缀、生产 `443`）；B：现有 Docker PostgreSQL 双容器，仅接受 A 内网访问（精确 `pg_hba` + 安全组双限） | ✅ 落地文件已入库 |
 | 网络 | 同 VPC 内网 `192.168.44.0/24` 互通；云安全组由账户所有者配置（规则清单见 `infra/deploy/prod/RUNBOOK.md` §1） | ✅ 可放行（已确认） |
 | 域名 / 证书 / 备案 | **仅有 IP，无域名**（阿里云大陆节点，80/443 域名访问需备案） | ⏳ 生产 HTTPS 挂起，T-M6-01a 待办 |
 | 数据迁移 | 本地联调库不迁移；B 机新建业务库 `aozora_prod` / `aozora_test`（owner 为不可登录的归属角色 `aozora`），由 API 账号执行 `alembic upgrade head` 建表；原 `test_db` 中的测试数据按 `RUNBOOK.md` §4.1 以 pg_dump/pg_restore 迁入 | ✅ 确认 |
@@ -65,3 +65,14 @@ T-M0-07 要求输出：无密码基础设施清单、staging 可用性结论、�
 > 数据经 pg_dump/pg_restore 迁入 `aozora_test`，旧库全程不改动，可随时回退。
 > 建库、建角色、授权与 pg_hba 规则均由 `infra/deploy/prod/b-setup-postgres.sh`
 > 幂等完成。
+
+> 2026-09-18 Nginx 实地核对：A 机 nginx 为**源码编译**安装于 `/usr/local/nginx`
+> （非 `/etc/nginx`），站点配置在 `/usr/local/nginx/conf.d/`（`api.conf` + `ups.conf`），
+> 监听 **80**、路径前缀 **`/aozora-api/`**——该前缀由应用层
+> `SharedProxyPrefixMiddleware`（`server/src/main.py`，提交 `dc05b1c`）剥离，
+> nginx 原样透传。仓库原先设计的 8081 + `/etc/nginx/conf.d/` 方案**从未落地**
+> （`/etc/nginx` 不存在），已按实况修正 `infra/deploy/prod/nginx/`（`api.conf` +
+> `ups.conf` 副本）、`RUNBOOK.md`（§1/§5/§6/§8/§9）、`docker-compose.prod.yml` 注释
+> 与客户端的 NSC 注释。实际形态、已知风险（`location /` 无 IP 限制、upstream 走
+> DHCP 内网 IP、全站无访问日志）及一处磁盘/运行态漂移（`api.conf` 尾斜杠未 reload）
+> 见 `infra/deploy/prod/nginx/DEPLOYED.md`。

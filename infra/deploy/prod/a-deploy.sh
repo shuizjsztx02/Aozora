@@ -79,5 +79,5 @@ cat <<EOF
   查看日志: docker compose -f docker-compose.prod.yml --profile ${PROFILE} logs -f ${SERVICE}
 EOF
 if [ "$PROFILE" = "test" ]; then
-  log "下一步：安装 nginx 测试入口并做公网验证（RUNBOOK 第 4、6 节）"
+  log "下一步：确认 nginx 测试入口就绪并做公网验证（RUNBOOK 第 5、6 节）"
 fi

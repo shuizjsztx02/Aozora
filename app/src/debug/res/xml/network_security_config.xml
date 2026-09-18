@@ -10,7 +10,7 @@
         <domain includeSubdomains="false">localhost</domain>
         <domain includeSubdomains="false">127.0.0.1</domain>
         <domain includeSubdomains="false">10.0.2.2</domain>
-        <!-- Aozora 测试服务器 A（阿里云公网 IP，8081 → nginx → api-test）。
+        <!-- Aozora 测试服务器 A（阿里云公网 IP，:80 + 路径前缀 /aozora-api/ → nginx → api-test）。
              仅 debug 构建生效；release 覆盖层仍是 HTTPS-only，不受影响。 -->
         <domain includeSubdomains="false">116.62.196.255</domain>
     </domain-config>

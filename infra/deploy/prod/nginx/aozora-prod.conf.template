@@ -1,18 +1,31 @@
-# aozora-prod.conf.template — A 机 Nginx 生产入口（截图规划：公网用户 → HTTPS:443）
+# aozora-prod.conf.template — A 机 Nginx 生产入口（规划：公网用户 → HTTPS:443）
 #
-# ⚠ 待启用模板：当前只有 IP、无域名、无备案、无证书，本文件【不要】放进
-#   /etc/nginx/conf.d/（放下去 nginx -t 会因证书文件不存在而失败）。
-#   整个 server 块先注释，落地条件（RUNBOOK 第 7 节）：
-#     1. 域名解析到 116.62.196.255 并完成 ICP 备案（大陆节点硬前提）
-#     2. 签发证书（certbot --nginx -d api.aozora.app，或阿里云免费 DV 证书）
-#     3. 替换下方 server_name / 证书路径，去掉注释，nginx -t && reload
-#     4. 安全组放行 A 机 443（及 80，供 certbot HTTP-01 验证）
+# ⚠ 【2026-09-18 实地核对】本模板**尚未落地**。A 机实际使用的是源码编译的
+#   /usr/local/nginx（1.16.1，非 /etc/nginx），站点配置在
+#   /usr/local/nginx/conf.d/，当前只有 api.conf（监听 80、前缀 /aozora-api/）
+#   与 ups.conf。启用生产入口前必读同目录 DEPLOYED.md 与 api.conf。
+#
+# 落地条件（RUNBOOK 第 7 节）：
+#   1. 域名解析到 116.62.196.255 并完成 ICP 备案（大陆节点硬前提）
+#   2. 签发证书（certbot --nginx -d api.aozora.app，或阿里云免费 DV 证书）
+#   3. 替换下方 server_name / 证书路径，去掉注释
+#   4. 部署：sudo cp <本文件去掉 .template 后缀> \
+#              /usr/local/nginx/conf.d/aozora-prod.conf
+#            sudo /usr/local/nginx/sbin/nginx -t && sudo nginx -s reload
+#   5. 安全组放行 A 机 443（及 80，供 certbot HTTP-01 验证）
 #
 # 说明：
 #   • nginx 1.16.1 支持 TLS 1.3（需编译/链接 OpenSSL 1.1.1+，若 ssl_protocols
 #     配置报错就只留 TLSv1.2）。
 #   • 应用层安全头已由服务端中间件下发（T-M5-02b security.py），nginx 只做
 #     TLS 终结 + 透传，不重复叠加。
+#   • **路径前缀**：测试链路（80，api.conf）走 `/aozora-api/` 前缀，因为该 80
+#     端口与其它业务共享；生产入口独占 api.aozora.app 与 443，用**根路径**直连
+#     即可，客户端 release 基址相应为 `https://api.aozora.app/api/v1`。
+#     两种形态应用层都支持：带前缀的请求由 SharedProxyPrefixMiddleware 剥离，
+#     不带前缀的（此处）原样透传。见 server/src/main.py。
+#   • 生产实例 api-prod 只绑 127.0.0.1:8080（docker-compose.prod.yml），不经
+#     内网 IP 暴露，故此处直接写回环地址，不复用 ups.conf 的共享上游。
 
 # server {
 #     listen 443 ssl;
@@ -26,8 +39,9 @@
 #
 #     client_max_body_size 12m;
 #
-#     access_log /var/log/nginx/aozora-prod.access.log;
-#     error_log  /var/log/nginx/aozora-prod.error.log;
+#     # 注意 http 块为 access_log off（api.conf 亦是），此处显式写日志路径才有个体日志
+#     access_log /usr/local/nginx/logs/aozora-prod.access.log;
+#     error_log  /usr/local/nginx/logs/aozora-prod.error.log;
 #
 #     location / {
 #         proxy_pass http://127.0.0.1:8080;   # api-prod（docker-compose.prod.yml）
@@ -38,10 +52,13 @@
 #         proxy_connect_timeout 5s;
 #         proxy_send_timeout    60s;
 #         proxy_read_timeout    60s;
+#         # M7 SSE 上线前须补（R-PROD-22）：proxy_buffering off / proxy_cache off
+#         # 并允许 X-Accel-Buffering: no 透传，否则事件被攒批下发
 #     }
 # }
 #
-# # 80 仅用于 certbot 签发/续期与跳转
+# # 80 仅用于 certbot 签发/续期与跳转。注意 80 上已有共享的 api.conf server 块
+# # （server_name _），此处按 server_name 精确匹配分流，二者不冲突。
 # server {
 #     listen 80;
 #     server_name api.aozora.app;
