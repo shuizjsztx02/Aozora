@@ -21,6 +21,7 @@
 
 from __future__ import annotations
 
+import inspect
 import json
 import uuid
 from copy import deepcopy
@@ -692,6 +693,18 @@ class TestServiceProposalExecutor:
         assert captured["confirmation_token"] == "allowed-once:p"
         assert captured["proposal"] == proposal
         assert receipt["undo_window_seconds"] == 5
+
+    def test_positional_order_matches_the_real_executor(self):
+        """钉住真实签名：适配器是**按位置**调用的，stub 用同名形参接不住错位。
+
+        执行器的签名一旦变动（或顺序被调换），位置调用会把 ``book_id`` 当
+        ``request_id`` 送进去——stub 全绿，生产上写进错的账本。这条断言让签名
+        漂移在 CI 里就红，而不是等到真机联调。
+        """
+        params = list(inspect.signature(AIService.execute_proposal).parameters)
+        assert params[1:6] == [
+            "user", "request_id", "proposal", "book_id", "confirmation_token",
+        ]
 
     async def test_execution_failure_degrades_instead_of_raising(self):
         """执行失败的两种来源（TOCTOU 否决 / DB 故障）都降级成配对的错误结果。"""
