@@ -524,9 +524,11 @@ cd app && npx tsc --noEmit                       # 0 错
 | F4 | `provider.py`（02b） | 非流式 `_chat` 的 except 元组缺 `ArithmeticError`：usage 里的 `1e400` 解成 `float('inf')`，`int(inf)` 抛 `OverflowError` → 以 500 逃逸而非降级。流式路径 02b 收口已含该项，**非流式漏了** | 一行对齐 + 回归用例 `TestErrorContract::test_infinite_usage_counter_is_bad_response` |
 | F12 | `provider.py`（02b） | **由并发会话 aozora-c1 报出**：`_StreamAccumulator.feed/_merge_tool_call` 自抛的 `ProviderError` 不在该层改写元组里 → **增量已交出后仍报 `retryable=True`**，重试会给用户重发半句话 | 增 `except ProviderError` 分支按 `retryable=not emitted` 改写并保留 status/reason；新用例断言「首帧已发出 → `retryable is False`」，并给旧用例补「增量之前 → True」的对照断言 |
 
-**未修、登记转交：** `DashScopeProvider.complete()`（`provider.py:287`）与 `complete_with_images()`（`:345`）存在与 F4 同款的 `ArithmeticError` 缺失——属**快路径**，本卡按「不越界改快路径」只登记不修，建议批次 1 收口方或下一次触碰 provider 的卡一并补（一行一处）。
+**F4 的兄弟项（快路径）——已由并发会话补修：** `DashScopeProvider.complete()`（`provider.py:287`）与 `complete_with_images()`（`:345`）存在与 F4 同款的 `ArithmeticError` 缺失。本卡按「不越界改快路径」只登记不修；并发会话 `aozora-c1` 随后补齐，并加参数化快路径用例 `TestDashScopeProvider::test_infinite_usage_counter_is_bad_response`（`0c3e46b`）。修复前实测两条路径各以 `OverflowError` 裸逃逸，修复后变异「去掉 `ArithmeticError` → 两条用例变红」。
 
 **回退实验：** 本轮 11 处新修/新测逐项做「改回旧写法 → 对应用例是否变红」，**11/11 全红**（含 F1a/F1b/F2/F3/F4/F5/F6/F7/F11/F12）。
+
+**独立复核（并发会话 `aozora-c1`，本卡提交后）：** 对本卡与 02b 收口的修复逐处做变异，**7/7 变红**——02b 收口 6 处（分片 `index` 兜底、增量后不可重试、流式 except 元组、空 `data:` keep-alive、空工具名透传、脱敏 `__repr__`）各 1 条用例；F12 的 `except ProviderError` 分支 1 条。复核在隔离副本中进行，未触碰本卡文件。
 
 **复审显式列出的未测项：** (1) 规则矩阵里「`disabled` + 空串 `reasoning_content` → 200」一格离线不可复现（本卡真实探针已覆盖）；(2) 真实模型是否会产生重复 `tool_call.id`（推断概率极低）；(3) 收尾指令收紧（字面标签）只做只读复核——本卡已用真实 API 复测，两句标签齐全。
 
@@ -570,7 +572,7 @@ cd app && npx tsc --noEmit                           # 0 错
   3. `budget_list` 不区分收支类型 → 影响模型对同名预算的表述，**归 02e 卡内一并处理**（02e 会真正消费预算工具的结果）。
   > 理由：三项都在 `tools.py`（02c 已收口），按 §四「不替其他卡修问题」原则本卡不修。**02c 记录的 4 项测试缺口残余同理**（`category_ids_named` 全集语义 / `groupBy="day"` / `_period_range` 跨年 / `created_at` 兜底排序），建议 02e 或 P4 补。
 - **`transaction_recent` 是否该按录入序**（02c 留给 02d/产品的口径问题）：本卡**不做产品口径决定**，维持现状（`biz_date DESC`，description 已如实声明）。转产品 / P4。
-- **快路径 provider 的两处同类残留（复审 F4 的兄弟项）** —— `DashScopeProvider.complete()`（`provider.py:287`）与 `complete_with_images()`（`:345`）的 except 元组同样缺 `ArithmeticError`，畸形 usage 会以 500 逃逸。**本卡不修**（属快路径），登记转交：批次 1 收口方或下一次触碰 provider 的卡，一行一处。**责任人：待定（已在 §五 登记）。**
+- **快路径 provider 的两处同类残留（复审 F4 的兄弟项）—— 已闭环** —— `DashScopeProvider.complete()`（`provider.py:287`）与 `complete_with_images()`（`:345`）的 except 元组同样缺 `ArithmeticError`，畸形 usage 会以 500 逃逸。本卡不修、只登记转交；**已由并发会话 `aozora-c1` 补修并加参数化用例**（`0c3e46b`，变异已验证）。**责任人：aozora-c1（已闭环）。**
 
 **下一项未阻塞任务：** **02e（写工具安全路径）与 02f（会话状态与配额双限）**——同属批次 3、互不依赖、可并行，两者都只依赖本卡。02e 会真正执行提案，**本卡带出的 `AgentResult.proposals` 与「提案回喂已剔 id」是它的直接输入**；02f 的持久化形状须遵守上面的 `reasoning_content` 硬约束。
 
