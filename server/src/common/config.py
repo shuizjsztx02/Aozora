@@ -207,6 +207,33 @@ class Settings(BaseSettings):
         validation_alias=AliasChoices("AI_PRICE_PER_1M_TOKENS", "ai_price_per_1m_tokens"),
     )
 
+    # --- AI agent 路径 provider (T-M7-02b, ADR-007) ---
+    # The agent path (multi-step loop) runs on DeepSeek; the ``ai_provider_*``
+    # block above keeps serving the fast path (DashScope). Both coexist and
+    # neither displaces the other. Keys come from deployment secret storage
+    # (D-EXEC-04) — never from the repository.
+    # Unlike ``ai_provider_api_key``, a missing key does NOT block production
+    # startup: the agent path ships behind a default-off rollout switch, so an
+    # unconfigured deployment simply keeps serving the fast path.
+    ai_agent_provider_api_key: str | None = Field(
+        default=None,
+        validation_alias=AliasChoices(
+            "AI_AGENT_PROVIDER_API_KEY", "ai_agent_provider_api_key",
+        ),
+    )
+    ai_agent_provider_model: str = Field(
+        default="deepseek-flash",
+        validation_alias=AliasChoices(
+            "AI_AGENT_PROVIDER_MODEL", "ai_agent_provider_model",
+        ),
+    )
+    ai_agent_provider_base_url: str = Field(
+        default="https://api.deepseek.com",
+        validation_alias=AliasChoices(
+            "AI_AGENT_PROVIDER_BASE_URL", "ai_agent_provider_base_url",
+        ),
+    )
+
     @property
     def is_production(self) -> bool:
         return self.env == "production"
