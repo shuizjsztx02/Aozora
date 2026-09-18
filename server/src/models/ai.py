@@ -37,8 +37,12 @@ class AIConversation(Base, AuditMixin):
     ``summary`` 字段保留给 P3 的 ``replace`` 压缩（把超窗轮次替换为摘要，
     原文仍留在日志里）。**P1 不生成摘要，该列保持空串**。
 
-    ``book_id`` 是会话绑定的账本——系统提示里的「现有对象」名单由它决定，
-    换账本后同一段历史不能复用（见 ``agent.AgentLoop`` 的系统提示一节）。
+    ``book_id`` 是会话绑定的账本——系统提示里的「现有对象」名单由它决定。
+    ``ConversationService.resolve`` 在请求带的账本与索引不一致时**更新索引**
+    （会话跟随当前账本）。**P1 不会因此失效已有历史**：换账本后窗口里仍是被
+    换掉那个账本的名字对话，而系统提示已经换成新账本的名单——两者不一致。
+    P1 客户端没有「会话进行中换账本」的入口，影响有限，故不做失效（复审 P3-3
+    记下的残余）；P2 引入多会话/账本切换时要一并处理。
     """
 
     __tablename__ = "ai_conversations"
@@ -70,14 +74,20 @@ class AIConversationEvent(Base):
     固定语义（不要在这些点上顺手扩展）：
 
     - ``seq`` 是**会话内**单调递增的序号，从 1 开始，唯一索引钉死。
+    - ``turn`` 是**会话内的轮号**，同样从 1 开始，一次 ``append_turn`` 写下的
+      整批事件共用同一个值。**它是窗口截断的唯一依据**：一轮里可以有**多条**
+      ``user`` 消息（``AgentLoop.submit()`` 的中途输入在下一个 Step 入口落进消息
+      流），所以「按 user 消息切轮」会把一轮切成两半——窗口起点落在轮中间时，
+      用户最初的提问会被丢掉、只留下后补的那一句，而「追问指代」正是本卡要解决
+      的问题。``turn`` 由写入方一次性分配，读取方只按它分组，不猜。
     - ``data`` 是消息字典（含 ``reasoning_content``；assistant 消息**必须**带该
       键，空串可——真实 API 探针实测缺键会让整轮 400，见 §五 02d 记录）。
     - ``type`` P1 取值只有 ``user`` / ``assistant`` / ``tool``；**不存 system**
       ——系统提示由 loop 每轮按 ToolContext 现算（含当天日期与本账本对象名单），
       存下来会在换账本后变成过期数据，且会出现两条 system。
-    - 事件**按轮原子写入**（一轮 = 一次用户输入跑完 loop），因此按轮边界截断
-      历史永远不会切断「带 tool_calls 的 assistant 消息」与其 ``role:"tool"``
-      结果之间——孤立结果会被 API 以 400 拒绝。
+    - 事件**按轮原子写入**（一轮 = 一次用户输入跑完 loop，含中途输入），因此按
+      ``turn`` 整取永远不会切断「带 tool_calls 的 assistant 消息」与其
+      ``role:"tool"`` 结果之间——孤立结果会被 API 以 400 拒绝。
     """
 
     __tablename__ = "ai_conversation_events"
@@ -99,6 +109,8 @@ class AIConversationEvent(Base):
         nullable=False,
     )
     seq: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    # T-M7-02f 复审 P2-1：窗口截断的唯一依据，见类 docstring。
+    turn: Mapped[int] = mapped_column(BigInteger, nullable=False)
     type: Mapped[str] = mapped_column(String(16), nullable=False)
     data: Mapped[dict[str, Any]] = mapped_column(JSON, nullable=False)
     created_at: Mapped[datetime] = mapped_column(

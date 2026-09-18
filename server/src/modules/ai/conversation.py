@@ -11,8 +11,13 @@ T-M7-04 完整事件日志）。
 ============  ==================================================================
 Turn          一次用户输入跑完整个 loop。**配额与窗口都以它为单位**——不是
               「一次模型请求」：工具任务的第 2 步起恒为深档（02d 实测），
-              按请求数算会让「轮数」随工具调用次数漂移。
-Event         会话日志里的一行，即 loop 消息流里的一条消息（``type`` 就是角色）。
+              按请求数算会让「轮数」随工具调用次数漂移。也**不是「一条 user
+              消息」**：中途输入（``AgentLoop.submit()``）在下一个 Step 入口落
+              进消息流，所以一轮里可以有多条 user 消息——按 user 消息切会把一
+              轮切成两半，窗口起点落在轮中间时用户最初的提问就丢了（复审 P2-1，
+              见 ``models/ai.py`` 的 ``turn`` 列）。
+Event         会话日志里的一行，即 loop 消息流里的一条消息（``type`` 就是角色），
+              带轮号 ``turn``。
 窗口          最近 N 轮原文 + 字符双限（架构 §6.4）。超窗轮次**直接丢**——
               P1 不生成摘要，原文仍在日志里（P3 才做 ``replace`` 压缩）。
 ============  ==================================================================
@@ -25,9 +30,9 @@ Event         会话日志里的一行，即 loop 消息流里的一条消息（
 2. **assistant 消息必须带 ``reasoning_content`` 键**（空串可）。真实 API 探针
    实测缺键会让整轮 400，而「入口判快 → 第 2 步升深」这条最常见的路径，第 1 步
    本来就产不出推理内容。写入时补齐，不依赖调用方记得这条（§五 02d 记录）。
-3. **只按轮边界截断。** 一轮事件是原子写入的，因此轮边界永远不会落在「带
-   ``tool_calls`` 的 assistant 消息」与其 ``role:"tool"`` 结果之间——孤立结果
-   会被 API 以 400 拒绝。
+3. **只按 ``turn`` 整轮截断。** 一轮事件是原子写入的，同一个 ``turn`` 的事件
+   因此永远同进同出，不会落在「带 ``tool_calls`` 的 assistant 消息」与其
+   ``role:"tool"`` 结果之间——孤立结果会被 API 以 400 拒绝。
 
 配额（R-PROD-15）
 ----------------
@@ -46,7 +51,8 @@ import uuid
 from collections.abc import Mapping, Sequence
 from typing import Any
 
-from sqlalchemy import delete, func, select
+from sqlalchemy import delete, func, insert, select
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from src.common.config import Settings, get_config
@@ -149,7 +155,11 @@ class ConversationService:
         """投影出模型上下文窗口（最近 N 轮原文，另受字符上限约束）。
 
         返回值可直接作为 ``AgentLoop.run(history=…)`` 的输入：不含 system，
-        按 seq 有序，轮边界完整。
+        按 seq 有序，轮边界完整（整轮同进同出）。
+
+        **按 ``turn`` 分组整取**——不是按 ``user`` 消息切：一轮里可以有多条 user
+        消息（中途输入），按后者切会把一轮切成两半，窗口起点落在轮中间时用户
+        最初的提问就丢了（复审 P2-1 实测：N=1 时只剩「补一句 + 回答」两句）。
 
         **字符超限时丢最早轮次**（架构 §6.4），但**至少保留最近一轮**——窗口
         空掉会让「追问」失去指代对象，那正是本卡要解决的痛点；宁可超一点预算
@@ -164,9 +174,11 @@ class ConversationService:
             return []
 
         turns: list[list[dict[str, Any]]] = []
+        current_turn: int | None = None
         for row in rows:
-            if row.type == EVENT_USER or not turns:
+            if row.turn != current_turn:
                 turns.append([])
+                current_turn = row.turn
             turns[-1].append(dict(row.data))
 
         window = turns[-self._cfg.ai_agent_history_turns:]
@@ -190,9 +202,12 @@ class ConversationService:
     ) -> int:
         """把一轮的消息追加进日志（一轮 = 一次 ``AgentResult.messages``）。
 
-        ``messages`` 是 loop 给出的**本轮增量**（含本轮用户输入）。校验在写入前
-        一次性做完——半截写入会让下一轮的历史出现孤立 ``tool`` 消息，而那要到
-        模型请求时才以 400 暴露，归因困难。
+        ``messages`` 是 loop 给出的**本轮增量**（含本轮用户输入）——**只接受
+        ``AgentResult.messages``**：把 ``history + delta`` 一起传进来会把历史
+        重复写一遍；传一轮的中间片段则触发下面两条校验。校验在写入**前**一次性
+        做完——半截写入会让下一轮的历史出现孤立 ``tool`` 消息，而那要到模型请求
+        时才以 400 暴露，归因困难。校验失败抛的是 ``ValueError``（调用方编程
+        错误，不是可降级的业务错误；loop 自身产出的 delta 结构上不可能触发）。
 
         返回写入的事件条数。
         """
@@ -200,20 +215,53 @@ class ConversationService:
         if not prepared:
             return 0
 
-        next_seq = (await self._db.scalar(
-            select(func.coalesce(func.max(AIConversationEvent.seq), 0)).where(
-                AIConversationEvent.conversation_id == conversation.id,
-            )
-        )) or 0
-        for offset, (event_type, data) in enumerate(prepared, start=1):
-            self._db.add(AIConversationEvent(
-                conversation_id=conversation.id,
-                seq=next_seq + offset,
-                type=event_type,
-                data=data,
-            ))
-        await self._db.flush()
-        return len(prepared)
+        # 轮号与序号都在写之前算好；两个并发请求可能算出同一组值，唯一索引会拒绝
+        # 其中一个。用 **SAVEPOINT** 包住写入：撞车时只回滚这一次尝试（而不是调用方
+        # 在这个 session 上的整个事务，那里还可能有别的未提交写入），重算后重试一次。
+        # 用 Core insert 而不是 ``session.add()``——撞车后没有 ORM 对象需要从
+        # 身份映射里摘除，重试路径因此是干净的。
+        for attempt in (1, 2):
+            next_seq, next_turn = await self._next_position(conversation)
+            try:
+                async with self._db.begin_nested():
+                    await self._db.execute(
+                        insert(AIConversationEvent),
+                        [
+                            {
+                                "conversation_id": conversation.id,
+                                # ``next_seq`` 已是本轮第一条的序号，故 offset 从 0 起。
+                                "seq": next_seq + offset,
+                                "turn": next_turn,
+                                "type": event_type,
+                                "data": data,
+                            }
+                            for offset, (event_type, data) in enumerate(prepared)
+                        ],
+                    )
+            except IntegrityError:
+                if attempt == 2:
+                    raise
+                logger.warning(
+                    "conversation event seq race, retrying once",
+                    extra={
+                        "conversation_id": str(conversation.id),
+                        "outcome": "seq_race_retry",
+                    },
+                )
+                continue
+            return len(prepared)
+
+        raise AssertionError("unreachable: retry loop always returns or raises")
+
+    async def _next_position(self, conversation: AIConversation) -> tuple[int, int]:
+        """下一个 ``(seq, turn)``——都在会话内单调递增，从 1 开始。"""
+        row = (await self._db.execute(
+            select(
+                func.coalesce(func.max(AIConversationEvent.seq), 0),
+                func.coalesce(func.max(AIConversationEvent.turn), 0),
+            ).where(AIConversationEvent.conversation_id == conversation.id)
+        )).one()
+        return int(row[0]) + 1, int(row[1]) + 1
 
     async def record_turn(
         self,

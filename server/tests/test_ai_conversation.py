@@ -237,6 +237,30 @@ class TestConversationResolve:
             await service.resolve(user, book.id)
         assert exc.value.status_code == 404
 
+    async def test_given_id_branch_also_checks_book_ownership(self, db_session, sample_data):
+        """**给了 conversation_id 的那条分支**同样要校验账本归属。
+
+        会话归属校验本身会把「别人的会话」挡在门外，所以那条路径天然看不出账本
+        校验有没有做（复审覆盖缺口 M8：原用例只走 `conversation_id=None` 分支，
+        把校验挪进那条分支里改坏，全部用例照样全绿）。这里的构造是「自己的会话
+        + 别人的账本」——会话查得到，唯一能拦下它的就是账本校验。
+        """
+        db, user, book = db_session, sample_data["user"], sample_data["book"]
+        other = User(id=uuid.uuid4(), nickname="other")
+        db.add(other)
+        await db.flush()
+        other_book = Book(id=uuid.uuid4(), owner_id=other.id, name="别人的账本")
+        db.add(other_book)
+        await db.flush()
+
+        service = ConversationService(db)
+        conversation = await service.resolve(user, book.id)
+
+        with pytest.raises(AppException) as exc:
+            await service.resolve(user, other_book.id, str(conversation.id))
+        assert exc.value.status_code == 404
+        assert exc.value.code == "not_found"
+
 
 # ── 事件日志 ───────────────────────────────────────────────────────────────
 
@@ -268,12 +292,42 @@ class TestEventLog:
         await service.append_turn(conversation, [_msg("user", "一")])
 
         db.add(AIConversationEvent(
-            conversation_id=conversation.id, seq=1, type=EVENT_USER,
+            conversation_id=conversation.id, seq=1, turn=1, type=EVENT_USER,
             data=_msg("user", "撞车"),
         ))
         with pytest.raises(IntegrityError):
             await db.flush()
         await db.rollback()
+
+    async def test_seq_race_is_retried_once(self, db_session, sample_data, monkeypatch):
+        """并发写同一会话 → 唯一索引拒绝其中一个：**只回滚这一次尝试**并重算重试，
+        而不是把调用方在这个 session 上的整个事务掀掉（复审 P3-1）。"""
+        db, user, book = db_session, sample_data["user"], sample_data["book"]
+        service = ConversationService(db)
+        conversation = await service.resolve(user, book.id)
+        await service.append_turn(conversation, [_msg("user", "第一轮")])
+
+        real_position = service._next_position
+        calls = {"count": 0}
+
+        async def stale_once(conv):
+            calls["count"] += 1
+            if calls["count"] == 1:
+                return (1, 1)  # 陈旧位置：与已有事件撞车
+            return await real_position(conv)
+
+        monkeypatch.setattr(service, "_next_position", stale_once)
+
+        assert await service.append_turn(conversation, [_msg("user", "第二轮")]) == 1
+
+        assert calls["count"] == 2, "撞车后必须重算一次"
+        rows = (await db.execute(
+            select(AIConversationEvent.seq, AIConversationEvent.turn)
+            .where(AIConversationEvent.conversation_id == conversation.id)
+            .order_by(AIConversationEvent.seq)
+        )).all()
+        # 失败的那次尝试一行都不能留下，且序号不跳号。
+        assert list(rows) == [(1, 1), (2, 2)]
 
     async def test_system_message_is_never_persisted(self, db_session, sample_data):
         db, user, book = db_session, sample_data["user"], sample_data["book"]
@@ -399,6 +453,60 @@ class TestHistoryWindow:
         history = await service.history(conversation)
 
         assert [m["content"] for m in history] == ["乙" * 100]
+
+    async def test_char_budget_is_measured_over_the_whole_window(
+        self, db_session, sample_data,
+    ):
+        """预算量的是**整个窗口**，不是最后一轮。
+
+        3 轮 × 20 字（每条序列化 51 字符）、预算 90：整窗口 153 > 90 → 只留 1 轮。
+        若实现只量最后一轮（51 ≤ 90），三轮会全留下——这正是复审报告的覆盖缺口
+        M15（原用例只有 2 轮，两种口径下结果相同，分不出来）。
+        """
+        db, user, book = db_session, sample_data["user"], sample_data["book"]
+        service = ConversationService(
+            db, _cfg(ai_agent_history_turns=8, ai_agent_history_chars=90),
+        )
+        conversation = await service.resolve(user, book.id)
+        for text in ("甲" * 20, "乙" * 20, "丙" * 20):
+            await service.append_turn(conversation, [_msg("user", text)])
+
+        history = await service.history(conversation)
+
+        assert [m["content"] for m in history] == ["丙" * 20]
+
+    async def test_mid_turn_user_input_stays_in_one_turn(self, db_session, sample_data):
+        """一轮里的多条 user 消息（中途输入）必须整轮同进同出。
+
+        复审 P2-1：窗口原按「每条 user 消息起始」切轮，而 ``AgentLoop.submit()``
+        的中途输入在下一个 Step 入口落进消息流，一次 ``run`` 的批次里因此可以有
+        多条 user 消息。按 user 切会把一轮切成两半——N=1 时窗口只剩「补一句 +
+        回答」，用户最初的提问与整批工具结果全丢，而那正是本卡要解决的追问指代
+        场景。
+        """
+        db, user, book = db_session, sample_data["user"], sample_data["book"]
+        service = ConversationService(db, _cfg(ai_agent_history_turns=1))
+        conversation = await service.resolve(user, book.id)
+        await service.append_turn(conversation, [
+            _msg("user", "帮我记一笔"),
+            {
+                "role": "assistant", "content": "", "reasoning_content": "",
+                "tool_calls": [{
+                    "id": "call_1", "type": "function",
+                    "function": {"name": "transaction_add", "arguments": "{}"},
+                }],
+            },
+            _msg("tool", "{}", tool_call_id="call_1"),
+            _msg("user", "补充说明：12块"),
+            _msg("assistant", "好了", reasoning_content=""),
+        ])
+
+        history = await service.history(conversation)
+
+        assert [m.get("content") for m in history] == [
+            "帮我记一笔", "", "{}", "补充说明：12块", "好了",
+        ]
+        _assert_pairs(history)
 
     async def test_window_contains_no_uuid(self, db_session, sample_data):
         """历史窗口只含自然语言——出现任何一个 UUID 都是内部 ID 泄漏。
@@ -676,3 +784,33 @@ class TestCleanup:
         await service.resolve(user, book.id)
 
         assert await service.purge_user(user.id) == 2
+
+    async def test_purge_user_leaves_other_users_rows_alone(self, db_session, sample_data):
+        """清理按 ``user_id`` 过滤——**别的用户的会话与事件一行都不能动**。
+
+        复审覆盖缺口 M4/M5：把 `purge_user` 里的用户过滤去掉（删全表）当时**全部
+        用例照样全绿**，也就是说「登出把整个库的会话清空」这种事故没有任何用例
+        拦得住。这里用两个用户的真实数据把它钉住。
+        """
+        db, user, book = db_session, sample_data["user"], sample_data["book"]
+        other = User(id=uuid.uuid4(), nickname="other")
+        db.add(other)
+        await db.flush()
+        other_book = Book(id=uuid.uuid4(), owner_id=other.id, name="别人的账本")
+        db.add(other_book)
+        await db.flush()
+
+        service = ConversationService(db)
+        mine = await service.resolve(user, book.id)
+        await service.append_turn(mine, [_msg("user", "我的")])
+        theirs = await service.resolve(other, other_book.id)
+        await service.append_turn(theirs, [_msg("user", "他的")])
+
+        assert await service.purge_user(user.id) == 1
+
+        assert (await db.scalar(
+            select(func.count()).select_from(AIConversation)
+        )) == 1
+        remaining = (await db.scalars(select(AIConversationEvent.data))).all()
+        assert len(remaining) == 1
+        assert remaining[0]["content"] == "他的"

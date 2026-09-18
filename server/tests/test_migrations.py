@@ -32,6 +32,7 @@ class TestMigrationConsistency:
             "0012_account_deletion", "0013_crash_reports",
             "0014_deletion_token_unique", "0015_feedback",
             "0016_cloud_entities", "0017_conversation_events",
+            "0018_conversation_event_turns",
         ):
             try:
                 m = importlib.import_module(f"src.migrations.versions.{rev}")
@@ -72,6 +73,7 @@ class TestMigrationConsistency:
             "0012_account_deletion", "0013_crash_reports",
             "0014_deletion_token_unique", "0015_feedback",
             "0016_cloud_entities", "0017_conversation_events",
+            "0018_conversation_event_turns",
         ):
             try:
                 m = importlib.import_module(f"src.migrations.versions.{rev}")
@@ -219,3 +221,10 @@ class TestMigrationConsistency:
         m17 = importlib.import_module("src.migrations.versions.0017_conversation_events")
         assert m17.down_revision == m16.revision
         assert m17.revision == "0017_conversation_events"
+
+    def test_conversation_event_turns_migration_chains_onto_0017(self):
+        """T-M7-02f 复审 P2-1: 0018 must extend the chain (窗口按 turn 整取)."""
+        m17 = importlib.import_module("src.migrations.versions.0017_conversation_events")
+        m18 = importlib.import_module("src.migrations.versions.0018_conversation_event_turns")
+        assert m18.down_revision == m17.revision
+        assert m18.revision == "0018_conversation_event_turns"

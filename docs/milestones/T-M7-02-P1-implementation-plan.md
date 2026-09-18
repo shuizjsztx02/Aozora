@@ -16,7 +16,7 @@
 | **02c** | 工具注册表与域分组 | ✅ 完成 | 2026-09-18 | `2f09c30` | 批次 1；15 个工具 / 3 域，详见 §五 |
 | **02d** | Agent Loop 核心与推理分级 | ✅ 完成 | 2026-09-18 | `d923d4e` | 批次 2；非流式 loop + 四条不变式 + 四条硬边界 + 三档分级，详见 §五 |
 | **02e** | 写工具安全路径 | ✅ 完成 | 2026-09-18 | `1fdffd1` | 批次 3；组装 / 校验 / 审批四值 / 执行接线 + 26 用例，9/9 回退实验变红，详见 §五 |
-| **02f** | 会话状态与配额双限 | ✅ 完成 | 2026-09-18 | `17e7cac` | 批次 3；事件表 + 会话索引 + 429 双限 + 登出/删号清理；32 用例，17/17 回退实验变红，详见 §五 |
+| **02f** | 会话状态与配额双限 | ✅ 完成 | 2026-09-18 | `17e7cac` | 批次 3；事件表 + 会话索引 + 429 双限 + 登出/删号清理；37 用例，独立复审 0 P1/1 P2（已修）详见 §五 |
 | **02g** | SSE 端点与部署配置 | ⏳ 未开始 | | | 批次 4（**整链最需留缓冲的一环**） |
 | **02h** | 客户端桥通道 | ⏳ 未开始 | | | 批次 5 |
 | **02i** | 客户端消费（最小形态） | ⏳ 未开始 | | | 批次 5 |
@@ -775,7 +775,7 @@ cd app && npx vitest run                                           # 1107 passed
   `server/src/modules/ai/conversation.py`（新建）、`server/src/modules/ai/service.py`、
   `server/src/common/config.py`、`server/src/modules/auth/service.py`、
   `infra/cleanup/account-deletion.py`、`server/.env.example`
-- 测试：`server/tests/test_ai_conversation.py`（新建，32 用例）、
+- 测试：`server/tests/test_ai_conversation.py`（新建，37 用例）、
   `server/tests/test_migrations.py`（表数 22 → 23 + 链式断言）
 - 文档：本文件 §一 / §四 / §五、`production-execution-plan.md` 的 T-M7-02f 行
 - **契约零改动**：`contracts/` 一行未动；`provider.py` / `tools.py` / `agent.py` /
@@ -784,8 +784,8 @@ cd app && npx vitest run                                           # 1107 passed
 **验证命令与结果：**
 
 ```
-cd server && python -m pytest tests/ -q                     # 962 passed, 37 skipped（同树基线 930；本卡 +32）
-cd server && python -m pytest tests/test_ai_conversation.py -q   # 32 passed
+cd server && python -m pytest tests/ -q                     # 968 passed, 37 skipped（同树基线 930；本卡 +37，含复审修复）
+cd server && python -m pytest tests/test_ai_conversation.py -q   # 37 passed
 cd server && python -m ruff check src/ tests/               # All checks passed
 cd app && npx tsc --noEmit                                  # 0 错
 cd app && npx vitest run                                    # 1107 passed
@@ -870,6 +870,47 @@ sha256 逐字节还原并校验。
 - **一轮原子写入意味着流式路径（02g）不能在轮中途落库**——断连恢复要等 P3 的完整事件
   日志。P1 的 02g 若在流中被取消，本轮事件不会入库（调用方需要自行决定是否补写）。
   **责任人：02g。**
+
+**独立复审（fresh-eyes，独立会话，2026-09-18）与同轮修复：**
+
+复审在**隔离副本**里完成（拷贝 `src` / `tests` / `pyproject.toml` 到临时目录，不碰仓库），
+自带变异 harness 独立跑 **31 处变异** + 13 条探针用例；仓库内文件一字未改。
+
+**结论：0 个 P1、1 个 P2、4 处测试覆盖缺口、3 个 P3。** 实现者自述的「17/17 全红」**未被证伪**；
+`build_usage_row` 抽取经逐字比对**行为等价**；四条验收的落地方式与文档自述**属实**。
+
+| # | 问题 | 处理 |
+|---|---|---|
+| **P2-1** | **`history()` 的「轮」边界是每条 ``user`` 消息，而一次 ``AgentLoop.run`` 的批次里可以有多条** —— `submit()` 的中途输入在下一个 Step 入口落进消息流。于是窗口会被切在轮中间：复审实测 N=1 时只剩 `['补充说明：12块', '好了']`，**用户最初的提问与整批工具结果全丢**（配对仍成立，故不是 400；是上下文容量的静默缩水，恰好打掉本卡要解决的追问指代） | **加 ``turn`` 列**（迁移 **0018**，只追加不改 0017）：`append_turn` 一次调用分配一个轮号，`history()` 按它整取。用例 `test_mid_turn_user_input_stays_in_one_turn` 钉住；变异「按 user 切」立即变红 |
+| **P3-1** | 同一会话并发 `append_turn` 各算各的 `max(seq)` → 唯一索引拒绝其一 → `IntegrityError` 裸冒到端点（500）。文档写的「由数据库兜底」名不副实——数据库只拒绝，没有兜 | **SAVEPOINT + 重算重试一次**：撞车只回滚这一次尝试（不掀掉调用方在同一 session 上的其他未提交写入）。用 Core ``insert()`` 而非 ``session.add()``，重试路径因此没有 ORM 对象要摘。用例 `test_seq_race_is_retried_once`（注入陈旧位置制造确定性撞车） |
+| **P3-2** | `_prepare_events` 抛裸 `ValueError`，02g 接线后调用方笔误就是 500 | 复审已核实 **loop 自身产出的 delta 结构上不可能触发**（本轮不可达）。不改行为，把「只接受 `AgentResult.messages`」写成 `append_turn` docstring 里的硬契约 |
+| **P3-3** | `AIConversation` docstring 说「换账本后同一段历史不能复用」，而 `resolve` 只更新索引、`history()` 照旧复用——文档与实现对不上 | 以对不上为准改文档：P1 不禁用、只记残余 |
+| **覆盖缺口 M4/M5** | `purge_user` 的**用户过滤**没有任何用例钉住——去掉过滤（登出清全库）当时**全部用例照样全绿** | 新增 `test_purge_user_leaves_other_users_rows_alone`（两个用户的真实数据） |
+| **覆盖缺口 M8** | `resolve` 的账本归属校验只走 `conversation_id=None` 分支也能全绿（会话归属校验天然挡住了另一条路径，看不出账本校验有没有做） | 新增 `test_given_id_branch_also_checks_book_ownership`（自己的会话 + 别人的账本） |
+| **覆盖缺口 M15** | 字符双限「只量最后一轮」当时全绿（原用例 2 轮在两种口径下结果相同） | 新增 `test_char_budget_is_measured_over_the_whole_window`（3 轮，整窗口 153 > 预算 90 → 只留 1 轮） |
+
+**修复过程里的一个自伤（记下来，因为它反证了既有用例有效）：** 改 `append_turn` 时把序号写成
+`next_seq + offset`（而 `_next_position` 返回的已是首个可用序号），整体偏移 1 ——
+**被既有的 `test_turn_is_appended_with_monotonic_seq` 当场抓住**（实测 `[2,3,5] != [1,2,3]`），
+若沿用旧写法（该用例显式插入 `seq=1` 的撞车行）这条路不会被执行到，正好是它挡住的。
+
+**复审修复的变异核查：7/7 有意义处全红**（P2-1 轮分组、seq 偏移、重试移除、轮号未写、
+字符预算口径、purge 用户过滤、账本校验位置）。第 8 处（把 `turn` 列改 `nullable`）**是退化变异**——
+不改写入值故无信号，如实记下、不计入。
+
+**修复后的验证：**
+
+```
+cd server && python -m pytest tests/ -q                # 968 passed, 37 skipped（本卡 32 → 37）
+cd server && python -m ruff check src/ tests/          # 本卡文件全绿（仓库另有 1 处告警在 02g 在途文件 stream.py）
+cd app && npx tsc --noEmit / npx vitest run            # 0 错 / 1107 passed
+./gradlew :app:testDebugUnitTest --rerun-tasks         # 394 tests / 0 failures / 1 skipped
+cd server && … alembic upgrade 0017:0018 --sql          # ADD COLUMN turn BIGINT DEFAULT '1' NOT NULL + DROP DEFAULT；downgrade 可逆
+```
+
+**复审明确列出的未覆盖面（如实登记）：** 真实 PostgreSQL 行为（`ON DELETE SET NULL` 的实际
+生效、并发唯一索引的真实竞争窗口）；HTTP/SSE 端到端（本卡未接线）；真实模型与真实客户端路径；
+多 worker 语义（架构已定单 worker）。
 
 **下一项未阻塞任务：** **02g（SSE 端点与部署配置）** —— 依赖 02d + 02e，两者均已完成，
 02f 亦已完成。02g 消费本卡的接口：`resolve(user, book_id, conversation_id)` →
