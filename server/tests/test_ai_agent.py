@@ -1039,16 +1039,23 @@ class TestProposalHandoff:
         assert draft["transactions"][0]["categoryId"] == category_id
         assert draft["message"]
 
-    async def test_governance_fields_are_left_to_the_assembler(self):
+    async def test_governance_fields_are_filled_by_the_assembler(self):
+        """治理字段由组装器补齐（02d 时它们还不存在，02e 才接线）。
+
+        ``proposalId`` 必须服务端生成——它同时是执行的幂等键；``confidence`` 必须
+        确定性推导、不采信模型自报；``requiresConfirmation`` 为 True（交回调用方
+        的提案一律要确认）。逐一取值的覆盖见 ``test_ai_agent_approval.py``。
+        """
         provider = ScriptedProvider([
             _tool_turn(_call("transaction_add", _ADD_OK, id="w1")),
             _text("记好了。"),
         ])
         result = await _loop(provider).run("记一笔午饭 12 块")
 
-        draft = result.proposals[0]
-        for field in ("proposalId", "confidence", "requiresConfirmation"):
-            assert field not in draft
+        proposal = result.proposals[0]
+        assert proposal["proposalId"].startswith("agent-")
+        assert 0 <= proposal["confidence"] <= 1
+        assert proposal["requiresConfirmation"] is True
 
     async def test_tool_result_tells_the_model_the_write_is_pending(self):
         """不执行写入，也不能让模型以为写完了（架构 §7.3 的确认门在 02e）。"""

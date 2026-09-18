@@ -17,9 +17,11 @@
     while await loop.step():   # 即架构伪代码的 while (await turn())
         pass
 
-不做流式（02g）、不做 HTTP 传输（02g）、不执行写操作（02e）——写工具只产出
-提案草案，本模块负责把它**原样带出**（``AgentResult.proposals``）并把去掉 id
-的摘要回喂模型。
+不做流式（02g）、不做 HTTP 传输（02g）。写操作走 §7.3/§7.4 的安全路径（02e）：
+写工具只产出提案**草案**，由本模块组装（补 ``proposalId`` / ``confidence`` /
+``requiresConfirmation``）、校验（复用 ``AIService.validate_proposal``）、按策略
+放行或挂起，执行一律经 ``AIService.execute_proposal``（含 TOCTOU 重校验）——
+详见「写路径」一节。
 
 四条跨请求不变式（架构 §4.4，逐条在本文件有落点）
 ------------------------------------------------
@@ -57,9 +59,28 @@
 向用户说明「已完成 / 未完成」两部分（收尾请求不带工具；收尾请求自身失败或返回
 空文本时退回确定性兜底文案，保证优雅终止不依赖模型可用性）。
 
-本模块**不记录配额、不落库、不生成 proposalId/confidence/requiresApproval**
-（分别是 02f / 02e 的工作）。provider 抛 ``ProviderError`` 时不在本层吞掉——
-降级链（架构 §11.1）由调用方（02g 的 SSE 端点）决定。
+本模块**不记录配额、不落库**（02f 的工作）。provider 抛 ``ProviderError`` 时不在
+本层吞掉——降级链（架构 §11.1）由调用方（02g 的 SSE 端点）决定。
+
+写路径（架构 §7.3 / §7.4，02e）
+------------------------------
+::
+
+    模型 tool_call → 工具产出草案（02c，名→id 已由服务端解析）
+      → 组装（本模块补 proposalId / confidence / requiresConfirmation）
+      → 校验（AIService.validate_proposal：schema → 幻觉 → 低置信）
+      → 审批门（单 Step 高置信自动执行；多步强制确认；四值只有 allowed-once 放行）
+      → 执行（AIService.execute_proposal，内部再校验一次 = TOCTOU）
+      → 结果回喂模型（**不含任何 id**，模型据此才能对用户说「记好了」）
+
+三条铁律的落点：**模型永不输出 UUID**——工具参数只收对象名、读结果不含 id、
+回喂前递归剔除 id 键；**金额与统计由确定性代码算**——治理字段（``confidence``
+在内）由本模块生成，草案/模型自带的一律丢弃；**写库必经校验与审批门**——没有
+执行通道就只挂起，没有授权就一次也不执行。
+
+审批四值只有 ``allowed-once`` 放行；``rejected`` / ``unavailable`` / ``cancelled``
+**一次都不执行**，且授权不落到任何持久位置——一次授权只对它自己那份提案有效
+（见 :class:`ApprovalGate`）。
 """
 
 from __future__ import annotations
@@ -68,12 +89,14 @@ import copy
 import json
 import logging
 import re
+import uuid
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from datetime import date
 from enum import StrEnum
-from typing import Any
+from typing import TYPE_CHECKING, Any, Protocol
 
+from .context import ProposalValidationContext
 from .provider import (
     ProviderError,
     ProviderResult,
@@ -81,6 +104,7 @@ from .provider import (
     ToolCall,
     ToolCallingProvider,
 )
+from .service import AIService
 from .tools import (
     DOMAINS,
     ERR_INVALID_ARGUMENTS,
@@ -93,6 +117,9 @@ from .tools import (
     to_openai_tools,
     tools_for_domains,
 )
+
+if TYPE_CHECKING:
+    from src.models.user import User
 
 logger = logging.getLogger(__name__)
 
@@ -112,11 +139,26 @@ ERR_TOOL_BUDGET = "tool_budget_exhausted"
 ERR_WRITE_BUDGET = "write_budget_exhausted"
 ERR_TOOL_FAILED = "tool_failed"
 
+#: 写路径（02e）的错误码。全部**不抛异常**——回一条可纠正的结果给模型，
+#: 与 02c 的降级契约同口径：一次工具调用失败不整体降级（架构 §11.1）。
+ERR_PROPOSAL_REJECTED = "proposal_rejected"
+ERR_APPROVAL_REJECTED = "approval_rejected"
+ERR_APPROVAL_UNAVAILABLE = "approval_unavailable"
+ERR_APPROVAL_CANCELLED = "approval_cancelled"
+ERR_EXECUTION_FAILED = "execution_failed"
+
 _LOOP_ERROR_MESSAGES: dict[str, str] = {
     ERR_TOOL_UNAVAILABLE: "这个工具本轮不可用，请改用工具清单里的工具。",
     ERR_TOOL_BUDGET: "本轮工具调用次数已达上限，本次调用未执行。请直接回答用户并说明未完成的部分。",
     ERR_WRITE_BUDGET: "本轮写操作已达上限，本次写入未执行。请直接回答用户并说明未完成的部分。",
     ERR_TOOL_FAILED: "这个工具执行失败，本次调用没有结果。请换一种做法或直接回答用户。",
+    ERR_PROPOSAL_REJECTED: "这个提案没有通过服务端校验，本次没有写入。请按提示修正参数后重试。",
+    ERR_APPROVAL_REJECTED: "用户拒绝了这次写入，本次没有执行。请问清用户想怎么改，不要原样重提。",
+    ERR_APPROVAL_UNAVAILABLE: (
+        "没有取得用户授权（确认超时或不可用），按拒绝处理，本次没有执行。不要重试，先向用户说明。"
+    ),
+    ERR_APPROVAL_CANCELLED: "用户中止了本次任务，后续步骤不再执行。",
+    ERR_EXECUTION_FAILED: "写入执行失败，本次没有写入。不要重复提交同一提案，先向用户说明。",
 }
 
 _WEEKDAYS = ("周一", "周二", "周三", "周四", "周五", "周六", "周日")
@@ -177,8 +219,13 @@ class AgentResult:
 
     ``messages`` 是**本轮新增**的消息（含本轮用户输入），按顺序接在调用方传入
     的 history 之后即可持久化——这是不变式 4（可恢复可分叉）的接口。
-    ``proposals`` 是写工具的 ActionProposal 草案（尚未执行、尚未补齐
-    proposalId/confidence）：归 02e 的组装器。
+    ``proposals`` 是**已组装、已通过校验、仍待用户确认**的完整 ActionProposal
+    （``requiresConfirmation`` 恒为 True）。**已经执行的不在此列**——它们在
+    ``executions`` 里，调用方据此渲染「已记录 + 撤销窗」。两者互斥，客户端因此
+    不会为一件已经做完的事再弹一张确认卡。
+    ``executions`` 是 ``AIService.execute_proposal`` 的**原始回执**（``transaction_ids``
+    / ``proposal_id`` / ``undo_window_seconds``）：含事务 UUID，**只给调用方用**
+    （撤销、对账、客户端展示），绝不回喂模型。
     ``pending_input`` 是**本轮没轮上处理**的中途输入：正常路径下中途输入总能在
     下一个 Step 得到处理，但若它恰好在「最后一步」或「撞边界的那一步」的模型
     请求期间到达，本轮已经没有下一步可以承载它——这种情况下必须交回调用方
@@ -189,6 +236,7 @@ class AgentResult:
     stop_reason: StopReason
     messages: tuple[dict[str, Any], ...]
     proposals: tuple[dict[str, Any], ...]
+    executions: tuple[dict[str, Any], ...]
     pending_input: tuple[str, ...]
     steps: int
     tool_calls: int
@@ -248,8 +296,10 @@ _AGENT_SYSTEM_PROMPT = """\
 - 名称必须来自下方「现有对象」；名单里没有的，先调用查询工具确认，不要猜、
   不要自己编一个近似的名字。
 - 金额与统计由工具计算。不要自己心算后把结果当成事实告诉用户。
-- 写操作的工具只会产出**待用户确认**的提案，在用户确认之前不要对用户说
-  「已经记好了」。
+- 写操作的工具可能直接完成，也可能产出**待用户确认**的提案：以工具结果里的
+  ``status`` 为准——``executed`` 才是真的记好了；``proposal_pending`` 说明还在
+  等用户确认，``approval_rejected`` / ``approval_unavailable`` 说明用户没同意
+  （不要原样重提），此时都不要对用户说「已经记好了」。
 
 回复要求：
 - 用中文，简短、口语化，直接回答用户的问题。
@@ -365,6 +415,224 @@ def _normalize_history(message: Mapping[str, Any]) -> dict[str, Any]:
 
 
 # ---------------------------------------------------------------------------
+# 写路径：组装 / 校验 / 审批门 / 执行（架构 §7.3、§7.4）
+# ---------------------------------------------------------------------------
+
+#: 「高置信自动执行」的门槛。**与 ``AIService.validate_proposal`` 同值**——快路径
+#: 与 agent 路径必须共用同一道门，两处一旦漂移，同一份提案在两条路径上就会得到
+#: 不同待遇。
+CONFIDENCE_THRESHOLD = 0.9
+
+#: 草案自带 ``warnings`` 时的置信度：工具自己都在提示风险，不按 1.0 自动执行。
+_WARNED_CONFIDENCE = 0.8
+
+
+class ApprovalDecision(StrEnum):
+    """审批四值（架构 §7.4）。**只有 ``allowed-once`` 放行**。"""
+
+    ALLOWED_ONCE = "allowed-once"
+    REJECTED = "rejected"
+    CANCELLED = "cancelled"
+    UNAVAILABLE = "unavailable"
+
+    @property
+    def grants(self) -> bool:
+        """是否为放行值。不确定时倾向拒绝——非 ``allowed-once`` 一律不放行。"""
+        return self is ApprovalDecision.ALLOWED_ONCE
+
+    @classmethod
+    def from_raw(cls, value: object) -> ApprovalDecision:
+        """归一化外部输入；**无法识别 / 缺失 / 非字符串一律落到 ``unavailable``**。
+
+        审批结论可能来自客户端上行，也可能是超时定时器给的，形状不受本层控制。
+        宁可判成「没拿到授权」（= 拒绝），也不能让一个拼错的值意外放行。
+        """
+        if isinstance(value, ApprovalDecision):
+            return value
+        if not isinstance(value, str):
+            return cls.UNAVAILABLE
+        try:
+            return cls(value)
+        except ValueError:
+            return cls.UNAVAILABLE
+
+
+@dataclass(frozen=True, slots=True)
+class ApprovalRequest:
+    """一次待决的审批：提案本身 + 为什么必须问。"""
+
+    proposal: Mapping[str, Any]
+    #: 提案产出时所在的 Step 序号（1 起）——审批策略的判定量，见 :func:`confirm_reason`
+    step: int
+    #: 强制确认的理由（``multi_step`` / ``low_confidence``）
+    reason: str
+
+
+class Approver(Protocol):
+    """审批通道（02g 在流式端点上实现：发 ``confirm`` 事件、等客户端回答）。
+
+    返回 :class:`ApprovalDecision` 或它的字符串值；返回其它任何东西（含
+    ``None``）一律按 ``unavailable`` 处理。
+    """
+
+    async def __call__(self, request: ApprovalRequest) -> ApprovalDecision | str | None: ...
+
+
+class ProposalExecutor(Protocol):
+    """执行通道。实现必须是 ``AIService.execute_proposal`` 的接线
+    （见 :class:`ServiceProposalExecutor`）——它自带 TOCTOU 重校验与幂等。"""
+
+    async def __call__(
+        self, proposal: Mapping[str, Any], *, confirmation_token: str,
+    ) -> Mapping[str, Any]: ...
+
+
+class ServiceProposalExecutor:
+    """把 ``AIService.execute_proposal`` 接到 loop 上的最小适配器。
+
+    loop 只认「提案 + 确认口令」，而 ``execute_proposal`` 还需要 HTTP 作用域的
+    ``User`` / ``request_id`` / ``book_id``——由调用方（02g）构造本对象时注入，
+    loop 因此不必知道请求对象，也不必自己持有 DB session。
+
+    **不复制执行器内部的任何判定**：verdict、确认口令、TOCTOU 重校验、幂等
+    ``proposalId`` 全在 ``execute_proposal`` 里，这里只做透传。
+    """
+
+    def __init__(
+        self,
+        service: AIService,
+        *,
+        user: User,
+        request_id: str,
+        book_id: uuid.UUID,
+    ) -> None:
+        self._service = service
+        self._user = user
+        self._request_id = request_id
+        self._book_id = book_id
+
+    async def __call__(
+        self, proposal: Mapping[str, Any], *, confirmation_token: str,
+    ) -> Mapping[str, Any]:
+        return await self._service.execute_proposal(
+            self._user,
+            self._request_id,
+            dict(proposal),
+            self._book_id,
+            confirmation_token,
+        )
+
+
+def assemble_proposal(draft: Mapping[str, Any]) -> dict[str, Any]:
+    """草案 → 完整 ActionProposal（补齐 02c 留给本层的三个治理字段）。
+
+    三个字段**无条件覆写**，不是「缺省才填」——草案（乃至模型）自带的一律作废：
+
+    - ``proposalId``：服务端生成。它同时是 ``execute_proposal`` 的幂等键，
+      因此**绝不允许**由草案指定。
+    - ``confidence``：确定性推导——工具已把名字解析成服务端权威 id，正常算
+      ``1.0``；草案带 ``warnings`` 时降档（工具自己都在提示风险）。
+      **不采信模型自报的置信度**（铁律 2：金额与统计由确定性代码算，判定同理）。
+    - ``requiresConfirmation``：恒为 ``True``。凡是组装完还要交回调用方的提案，
+      都必须经用户确认——自动执行掉的那条路径不会把它交回调用方。
+
+    草案里的其它未知字段不在这里清洗：契约的 ``additionalProperties: false``
+    会在下一步的校验里直接判 ``proposal_rejected``，那是更靠得住的一道门。
+    """
+    proposal = dict(draft)
+    warnings = proposal.get("warnings") or []
+    proposal["proposalId"] = f"agent-{uuid.uuid4().hex}"
+    proposal["confidence"] = _WARNED_CONFIDENCE if warnings else 1.0
+    proposal["requiresConfirmation"] = True
+    return proposal
+
+
+def confirm_reason(*, step: int, confidence: float) -> str | None:
+    """是否需要用户确认；``None`` = 可自动执行（沿用快路径策略）。
+
+    判定口径（架构 §7.4「审批触发策略」；实施口径见 P1 计划 §三 02e）：
+
+    - ``step >= 2`` → 强制确认。取**提案产出时**的步号而非回合总步数：总步数在
+      产出那一刻还不可知，而「第 2 步才写出提案」恰恰说明模型先查了别的东西
+      （多步形态，连续写库的累积风险高）；第 1 步就写出提案的是单发形态，
+      与快路径同待遇，PR-2 的高置信快速通道因此不被击穿。
+    - ``confidence < CONFIDENCE_THRESHOLD`` → 强制确认（架构 §7.4 的「低置信出
+      确认卡」）。P1 的置信度只有两档（``1.0`` / 带 ``warnings`` 的 ``0.8``），
+      该表的「高风险」一类尚无信号源，等有分类器时再作为第三个理由加在这里。
+    """
+    if step >= 2:
+        return "multi_step"
+    if confidence < CONFIDENCE_THRESHOLD:
+        return "low_confidence"
+    return None
+
+
+def validation_context_for(ctx: ToolContext) -> ProposalValidationContext:
+    """从 :class:`ToolContext` 派生校验上下文（**零额外查询**）。
+
+    ``ToolContext`` 的名字→id 映射就是服务端权威集合——由 ``load_tool_context``
+    按 owner + 本账本从库载入，且只含未归档对象。因此这里不必再查一次库；
+    ``context.load_validation_context`` 的同一份判定在
+    ``AIService.execute_proposal`` 内部还会再跑一次（那才是 TOCTOU 防线），
+    执行路径上的复用没有缺席。
+
+    派生集合比 DB 版**更严**：归档对象不在其中——写进一个已归档的分类，等于把
+    数据写进用户再也看不见的地方。
+
+    名字→id 与 id→名字两套映射**取并集**：``load_tool_context`` 会同时填好两套，
+    但 ``ToolContext`` 的反向映射有默认值（空），手搓的上下文（测试、将来更轻的
+    调用方）可能只填其中一套——只认一套会让派生集合变空，于是**每一条写入都被
+    判成幻觉**（fail-closed，却把功能整个关掉）。并集就是「这个上下文认识的全部
+    id」，也正是校验要问的问题。
+    """
+    category_ids = set(ctx.category_names_by_id)
+    for by_name in ctx.categories_by_kind.values():
+        category_ids.update(by_name.values())
+    account_ids = set(ctx.account_names_by_id)
+    account_ids.update(ctx.account_names.values())
+    return ProposalValidationContext(
+        category_ids=frozenset(category_ids),
+        account_ids=frozenset(account_ids),
+    )
+
+
+class ApprovalGate:
+    """一轮 Turn 内的审批门（架构 §7.4 的四值审批）。
+
+    - **一次性**：每份提案只问一次。重复提交同一次批准不会再放行一次——
+      这是「``allowed-once`` 执行后即失效」的落点。
+    - **无长期授权**：授权不写进任何持久位置，只在本对象内存里活一轮；本类也
+      不提供「默认同意」「记住选择」这类入口。
+    - **不确定时倾向拒绝**：通道缺失、通道抛异常、返回值无法识别，一律
+      ``unavailable``（视为拒绝）。
+    """
+
+    def __init__(self, approver: Approver | None = None) -> None:
+        self._approver = approver
+        self._asked: set[str] = set()
+
+    @property
+    def has_approver(self) -> bool:
+        return self._approver is not None
+
+    async def ask(self, request: ApprovalRequest) -> ApprovalDecision:
+        proposal_id = str(request.proposal.get("proposalId") or "")
+        # 没有提案号（未经组装）的提案直接不放行——门只认组装器发过号的提案。
+        if not proposal_id or proposal_id in self._asked or self._approver is None:
+            return ApprovalDecision.UNAVAILABLE
+        self._asked.add(proposal_id)
+        try:
+            raw = await self._approver(request)
+        except Exception as exc:  # noqa: BLE001 — 审批通道故障 = 没拿到授权 = 不放行
+            logger.warning(
+                "agent approval channel failed",
+                extra={"proposal_id": proposal_id, "error": type(exc).__name__},
+            )
+            return ApprovalDecision.UNAVAILABLE
+        return ApprovalDecision.from_raw(raw)
+
+
+# ---------------------------------------------------------------------------
 # Loop
 # ---------------------------------------------------------------------------
 
@@ -386,11 +654,23 @@ class AgentLoop:
         max_tokens: int = DEFAULT_MAX_TOKENS,
         tools: Sequence[Tool] | None = None,
         limits: AgentLimits | None = None,
+        approver: Approver | None = None,
+        executor: ProposalExecutor | None = None,
     ) -> None:
         """
         ``today`` 由调用方按**用户本地时区**给出（服务端不猜用户在东八区还是
         别处）——模型的 ``bizDate`` 全靠它换算「今天 / 昨天」。
         ``tools`` 默认注入 P1 全部三个域；P4 的域路由只需改这一个参数。
+
+        ``approver`` / ``executor`` 是写路径的两个通道（02e），缺省均为 ``None``：
+
+        - **executor** —— ``AIService.execute_proposal`` 的接线。没有它，**一次写库
+          都不会发生**：提案只能挂起，随 ``AgentResult.proposals`` 交回调用方。
+        - **approver** —— 审批通道（02g 的 ``confirm`` 事件 + 客户端回答）。只有
+          需要确认的提案会用到它；没有它时提案同样只是**挂起**（不是拒绝），
+          由调用方在带外拿用户的批准。
+
+        两个通道都没接时，写工具的行为与 02d 完全一致（只产出提案、零副作用）。
         """
         self._provider = provider
         self._ctx = ctx
@@ -404,6 +684,8 @@ class AgentLoop:
         self._advertised = {tool.name for tool in self._tools}
         self._openai_tools = to_openai_tools(self._tools)
         self._limits = limits or AgentLimits()
+        self._approver = approver
+        self._executor = executor
 
         self._cancelled = False
         self._messages: list[dict[str, Any]] = []
@@ -416,6 +698,8 @@ class AgentLoop:
         self._writes = 0
         self._no_progress = 0
         self._proposals: list[dict[str, Any]] = []
+        self._executions: list[dict[str, Any]] = []
+        self._gate = ApprovalGate(approver)
         self._last_content = ""
         self._prompt_tokens = 0
         self._completion_tokens = 0
@@ -467,6 +751,7 @@ class AgentLoop:
             stop_reason=stop,
             messages=tuple(copy.deepcopy(self._messages[self._delta_start:])),
             proposals=tuple(copy.deepcopy(self._proposals)),
+            executions=tuple(copy.deepcopy(self._executions)),
             pending_input=tuple(self._queued),
             steps=self._steps,
             tool_calls=self._tool_calls,
@@ -535,6 +820,9 @@ class AgentLoop:
         self._writes = 0
         self._no_progress = 0
         self._proposals = []
+        self._executions = []
+        # 审批门**每轮重建**：一次性授权只活一轮，上一轮的「已问过」不跨轮复用。
+        self._gate = ApprovalGate(self._approver)
         self._last_content = ""
         self._prompt_tokens = 0
         self._completion_tokens = 0
@@ -658,8 +946,10 @@ class AgentLoop:
 
         outcome = await self._call_handler(call, params)
         if outcome.kind == "proposal":
+            # 一个提案 = 一次写操作（02d 决策 2）：草案一产出就计数，与它最终被
+            # 自动执行、被拒还是挂起无关——写预算防的是「模型反复试图写库」。
             self._writes += 1
-            self._proposals.append(outcome.data)
+            return await self._handle_proposal(outcome.data)
         return outcome
 
     async def _call_handler(
@@ -688,6 +978,120 @@ class AgentLoop:
                 },
             )
             return _failure_outcome(ERR_TOOL_FAILED, argument=call.name)
+
+    # -- 内部：写路径（02e）----------------------------------------------
+
+    async def _handle_proposal(self, draft: dict[str, Any]) -> ToolOutcome:
+        """组装 → 校验 → 按策略放行 / 挂起（架构 §7.3、§7.4）。
+
+        返回值是**回喂模型**的结果。三条铁律在这里合流：治理字段由本层生成、
+        提案必须过 ``AIService.validate_proposal``（与会话内权威集合对拍）、
+        执行只走 ``self._executor``（其内部还自带一次 TOCTOU 重校验）。
+        """
+        if self._cancelled:
+            # 本回合已被取消（用户按了取消，或审批里回了 cancelled）。同一步里
+            # 剩下的写调用只配对、不再征询、更不执行——「中止整个任务」之后又
+            # 落地一笔写入，是取消语义最糟的破法。批次仍然配对完整（不变式 1）。
+            return _failure_outcome(ERR_APPROVAL_CANCELLED)
+
+        proposal = assemble_proposal(draft)
+        verdict = AIService.validate_proposal(proposal, validation_context_for(self._ctx))
+        if not verdict["valid"]:
+            # 02c 已保证 id 出自服务端上下文，走到这里说明工具层出了新问题，或有人
+            # 塞了不属于本账本的 id → **既不执行也不挂起**，回错误让模型纠正。
+            # 只回字段路径：schema 路径不含取值，不会回显用户原话（脱敏口径）。
+            paths = [str(e.get("path")) for e in verdict["errors"]][:4]
+            logger.warning(
+                "agent proposal rejected",
+                extra={
+                    "verdict": verdict.get("verdict"),
+                    "paths": paths,
+                    "outcome": ERR_PROPOSAL_REJECTED,
+                },
+            )
+            return _failure_outcome(ERR_PROPOSAL_REJECTED, paths=paths)
+
+        reason = confirm_reason(step=self._steps, confidence=proposal["confidence"])
+
+        # 1) 单 Step + 高置信 + 有执行通道 → 沿用快路径策略：直接执行（撤销窗在
+        #    客户端，回执里的 undo_window_seconds 即 PR-2 的那扇窗）。
+        if reason is None and self._executor is not None:
+            return await self._execute(proposal, confirmation_token="")
+
+        # 2) 无人可问（没执行通道，或没审批通道）→ **挂起**，交回调用方走确认卡。
+        #    这不是「视为拒绝」：把「没接通道」判成拒绝会让 P1 的确认卡路径自我
+        #    堵死。「视为拒绝」只留给审批通道真的给了 unavailable。
+        if self._executor is None or not self._gate.has_approver:
+            self._proposals.append(proposal)
+            return ToolOutcome.proposal(proposal)
+
+        # 3) 必须确认：问一次，只有 allowed-once 会落到执行。
+        #    （前两个分支已覆盖「reason is None」的全部去向，故此处必有理由。）
+        assert reason is not None
+        decision = await self._gate.ask(
+            ApprovalRequest(proposal=proposal, step=self._steps, reason=reason),
+        )
+        return await self._apply_decision(proposal, decision)
+
+    async def _apply_decision(
+        self, proposal: dict[str, Any], decision: ApprovalDecision,
+    ) -> ToolOutcome:
+        """把审批结论落到消息流上（四值语义，架构 §7.4）。
+
+        ``cancelled`` 只**置位**取消标志、不当场中断：检查点在 Step 入口，因此
+        本次工具批次仍会配对完整（不变式 1），只是回合到此为止——与
+        :meth:`cancel` 完全同语义（02d 决策 8：取消不回一次收尾请求）。
+        """
+        if decision.grants:
+            return await self._execute(
+                proposal,
+                confirmation_token=f"allowed-once:{proposal.get('proposalId', '')}",
+            )
+        if decision is ApprovalDecision.CANCELLED:
+            self._cancelled = True
+            return _failure_outcome(ERR_APPROVAL_CANCELLED)
+        code = (
+            ERR_APPROVAL_REJECTED
+            if decision is ApprovalDecision.REJECTED
+            else ERR_APPROVAL_UNAVAILABLE
+        )
+        return _failure_outcome(code)
+
+    async def _execute(
+        self, proposal: dict[str, Any], *, confirmation_token: str,
+    ) -> ToolOutcome:
+        """执行一次已放行的提案，回执收进 ``AgentResult.executions``。
+
+        ``confirmation_token`` 只在「用户批准」时有值——``execute_proposal`` 对
+        低置信提案要求它非空（执行器既有语义，本层不改），高置信自动执行路径照旧
+        传空串。
+
+        回执含事务 UUID：**只进 ``executions``**，回喂模型的内容另行构造且不含 id。
+        """
+        executor = self._executor
+        assert executor is not None  # 调用点都在执行通道存在时才走到这里
+        try:
+            receipt = await executor(proposal, confirmation_token=confirmation_token)
+        except Exception as exc:  # noqa: BLE001 — 执行通道兜底，同 _call_handler
+            # 失败可能来自执行器内部的重校验否决（TOCTOU）、DB 故障或幂等冲突。
+            # 一律降级成一条配对的错误结果：不掀掉整轮，也不让模型以为写成功了。
+            logger.warning(
+                "agent proposal execution failed",
+                extra={
+                    "proposal_id": proposal.get("proposalId"),
+                    "error": type(exc).__name__,
+                    "outcome": ERR_EXECUTION_FAILED,
+                },
+            )
+            return _failure_outcome(ERR_EXECUTION_FAILED, action=proposal.get("action"))
+
+        self._executions.append(dict(receipt))
+        return ToolOutcome.result({
+            "status": "executed",
+            "action": proposal.get("action"),
+            "count": len(proposal.get("transactions") or []),
+            "undoWindowSeconds": receipt.get("undo_window_seconds"),
+        })
 
     # -- 内部：优雅终止 -------------------------------------------------
 
