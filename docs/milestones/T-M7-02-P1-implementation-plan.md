@@ -790,6 +790,24 @@ cd app && npx vitest run                                    # 1107 passed
 ./gradlew :app:testDebugUnitTest --rerun-tasks              # 394 tests / 0 failures / 1 skipped
 ```
 
+**迁移 0017 的 PG DDL 核验（测试面覆盖不到，单列一条）：** 本仓库的测试用
+`Base.metadata.create_all` 建表，**从不执行迁移**，而 0017 是 PG-only。用 Alembic
+离线模式按 **PostgreSQL 方言**生成 DDL 做了核验（不需要活的库）：
+
+```
+cd server && DATABASE_URL="postgresql://u:p@localhost:5432/scratch" SECRET_KEY="offline-check" \
+  python -m alembic upgrade 0016_cloud_entities:0017_conversation_events --sql
+# → CREATE TABLE ai_conversation_events（… FK ON DELETE CASCADE）+ CREATE UNIQUE INDEX
+#   ix_ai_conversation_events_conv_seq + ALTER TABLE ai_usage ADD COLUMN conversation_id UUID
+#   + ALTER TABLE ai_usage ADD FOREIGN KEY(…) ON DELETE SET NULL + CREATE INDEX
+cd server && … alembic downgrade 0017_conversation_events:0016_cloud_entities --sql   # 四步逆序，可回退
+cd server && … alembic upgrade head --sql                                            # 全链 0→head 生成 63 条 DDL，无错
+```
+
+**残余：本机 docker 守护进程未运行、5432 无 PG，因此没有在真实 PostgreSQL 上实跑过
+该迁移**（离线生成只证明 DDL 合法且链路可解析，不证明它在一个已有数据的库上能落）。
+首次上生产/测试库执行 0016→0017 时请留意。**责任人：M7 收口 / 部署执行者。**
+
 > **环境噪声（如实记录，非本卡回归）：** 本机 `C:\Users\admin\AppData\Local\Temp\pytest-of-admin`
 > 出现 `WinError 5 拒绝访问`，导致**使用 `tmp_path` 的用例在 setUp 阶段报错**（单独跑
 > `test_ai_gateway.py` 会看到 62 个 error、`--ignore` 跑法会看到 161 个）。用
