@@ -15,7 +15,7 @@
 | **02b** | Provider 接入与扩展（DeepSeek） | ✅ 完成 | 2026-09-18 | `953d664` | 批次 1；54 用例，快路径零改动，详见 §五 |
 | **02c** | 工具注册表与域分组 | ✅ 完成 | 2026-09-18 | `2f09c30` | 批次 1；15 个工具 / 3 域，详见 §五 |
 | **02d** | Agent Loop 核心与推理分级 | ✅ 完成 | 2026-09-18 | `d923d4e` | 批次 2；非流式 loop + 四条不变式 + 四条硬边界 + 三档分级，详见 §五 |
-| **02e** | 写工具安全路径 | ⏳ 未开始 | | | 批次 3，可与 02f 并行 |
+| **02e** | 写工具安全路径 | ✅ 完成 | 2026-09-18 | `1fdffd1` | 批次 3；组装 / 校验 / 审批四值 / 执行接线 + 26 用例，9/9 回退实验变红，详见 §五 |
 | **02f** | 会话状态与配额双限 | ⏳ 未开始 | | | 批次 3，可与 02e 并行 |
 | **02g** | SSE 端点与部署配置 | ⏳ 未开始 | | | 批次 4（**整链最需留缓冲的一环**） |
 | **02h** | 客户端桥通道 | ⏳ 未开始 | | | 批次 5 |
@@ -133,16 +133,16 @@
 ### 验证基线（每卡完成后必跑）
 
 ```
-cd server && python -m pytest tests/ -q          # 基线 900 passed + 37 skipped（2026-09-18 02d 交付后实测：819 为批次 1 收口基线，02d 增量 +81）
-cd app && ./gradlew :app:testDebugUnitTest       # 基线 394 tests / 0 failures（2026-09-18 实测）。**gradlew 在仓库根目录**，须从根目录运行（`cd app && ./gradlew` 会报 No such file）
+cd server && python -m pytest tests/ -q          # 基线 926 passed + 37 skipped（2026-09-18 02e 交付后：900 为 02d 基线，02e 增量 +26）
+./gradlew :app:testDebugUnitTest --rerun-tasks   # 基线 394 tests / 0 failures / 1 skipped（2026-09-18 实测）。**gradlew 在仓库根目录**，须从仓库根运行（`cd app && ./gradlew` 会报 No such file）；不带 `--rerun-tasks` 时若源码未变会直接 UP-TO-DATE、拿不到真实数字
 cd app && npx vitest run                         # 基线 1107 passed（2026-09-18 实测）
 cd app && npx tsc --noEmit                       # 0 错
 ```
 
 > 原记录为 658 / 392 / 1104，与实测不符（2026-09-18 由 02c 复核修正）。数字以实测为准。
 >
-> **服务端基线推导（2026-09-18 复核）：** 659（02b 前既有）+ 54（02b）+ 95（02c）= 808（批次 1 交付时）；收口核查再各补用例（02b +6、02c +5）后为 **819**（= 659 + 60 + 100）；02d 再 +81（79 个 loop 用例 + 2 个 provider 用例，含 5 个 `reasoning_content` 回归）→ **900**。
-> ⚠️ **多会话陷阱：** 02b 提交信息里的「782 passed」**不是**本卡基线——当时 02c 的 `test_ai_tools.py` 正被并发会话在途写入（已 69 例），全量计数把它一并算进去了（713 + 69 = 782）。**在并发会话下跑全量套件，数字不可作为本卡基线**，须以 `pytest <本卡测试文件>` 的增量与 `--collect-only` 为准。
+> **服务端基线推导（2026-09-18 复核）：** 659（02b 前既有）+ 54（02b）+ 95（02c）= 808（批次 1 交付时）；收口核查再各补用例（02b +6、02c +5）后为 **819**（= 659 + 60 + 100）；02d 再 +81（79 个 loop 用例 + 2 个 provider 用例，含 5 个 `reasoning_content` 回归）→ **900**；02e 再 +26（`test_ai_agent_approval.py`，另一条 02d 用例改名改写、数量不变）→ **926**。
+> ⚠️ **多会话陷阱：** 02b 提交信息里的「782 passed」**不是**本卡基线——当时 02c 的 `test_ai_tools.py` 正被并发会话在途写入（已 69 例），全量计数把它一并算进去了（713 + 69 = 782）。**在并发会话下跑全量套件，数字不可作为本卡基线**，须以 `pytest <本卡测试文件>` 的增量与 `--collect-only` 为准。02e 交付时全量为 **957**（= 926 + 并发会话 02f 在途的 31），同为此理。
 
 每卡只允许在基线上**增加**，不得减少。基线随卡推进更新，更新时须在本文件 §一 状态看板与 `production-execution-plan.md` 同步。
 
@@ -591,6 +591,111 @@ cd app && npx tsc --noEmit                           # 0 错
 - **快路径 provider 的两处同类残留（复审 F4 的兄弟项）—— 已闭环** —— `DashScopeProvider.complete()`（`provider.py:287`）与 `complete_with_images()`（`:345`）的 except 元组同样缺 `ArithmeticError`，畸形 usage 会以 500 逃逸。本卡不修、只登记转交；**已由并发会话 `aozora-c1` 补修并加参数化用例**（`0c3e46b`，变异已验证）。**责任人：aozora-c1（已闭环）。**
 
 **下一项未阻塞任务：** **02e（写工具安全路径）与 02f（会话状态与配额双限）**——同属批次 3、互不依赖、可并行，两者都只依赖本卡。02e 会真正执行提案，**本卡带出的 `AgentResult.proposals` 与「提案回喂已剔 id」是它的直接输入**；02f 的持久化形状须遵守上面的 `reasoning_content` 硬约束。
+
+---
+
+### 02e · 写工具安全路径（ActionProposal + 审批四值）（✅ 2026-09-18）
+
+**任务编号：** T-M7-02e　**提交：** `1fdffd1`
+
+**完成范围 / 明确未做：**
+
+- **完成：** `server/src/modules/ai/agent.py`（扩展，+约 430 行）——写路径全链：
+  - **组装**：`assemble_proposal` 补 02c 留给本层的三个治理字段（`proposalId` / `confidence` / `requiresConfirmation`）。三个字段**无条件覆写**，不是「缺省才填」——草案自带对抗性取值（自选提案号、把置信度压到门槛下、直接声明不需要确认）一律作废。
+  - **校验**：复用 `AIService.validate_proposal`（`service.py` 的 `@staticmethod`，loop 内直调、不经 FastAPI），一条链路走完 schema → 幻觉 → 低置信三种 verdict；上下文由 `validation_context_for(ctx)` 派生，**零额外查询**。
+  - **审批策略**：`confirm_reason(step, confidence)` —— 提案产出时在第 1 个 Step 且 `confidence ≥ 0.9` → 自动执行（沿用快路径策略）；`step ≥ 2` 或低置信 → 一律强制确认。
+  - **审批四值**：`ApprovalDecision`（`allowed-once` / `rejected` / `cancelled` / `unavailable`）+ `ApprovalGate`——一次性、无长期授权、fail-closed（通道缺失 / 抛异常 / 返回值无法识别一律 `unavailable`，即视为拒绝）。
+  - **执行**：`ServiceProposalExecutor` 透传 `AIService.execute_proposal`（TOCTOU 重校验与幂等 `proposalId` 都在执行器里，本层不复制）；`AgentResult.executions` 收原始回执。
+  - **消息流**：`_apply_decision` 把四值落到配对的 tool 结果上；中止（含审批 `cancelled`）后同一步里剩余的写调用不再征询、不再执行（批次仍配对完整）。
+- **明确未做（逐条对应职责边界）：**
+  1. **不流式、不做 HTTP 传输**（02g）——loop 仍同步返回；`Approver` 是留给 02g 的回调协议，流式端点上「发 `confirm` 事件 → 等客户端回答」由它实现。
+  2. **不改校验器与执行器语义**——`validator.py` / `service.py` / `tools.py` / `provider.py` / 契约 **一行未改**（本卡 diff 只落在 `agent.py` 与两个测试文件）。
+  3. **不做高风险分类**——架构 §7.4 的「高风险出确认卡」在 P1 无信号源（`confirm_reason` 的 docstring 已如实登记），等有分类器时作为第三个理由加入。
+  4. 不落库、不记配额（02f）。
+
+**口径（实施时定型，已写入 §三 02e）——两处此前有歧义，本卡定死：**
+
+1. **「单 Step 完成」= 提案产出时处于本回合第 1 个 Step。** 复核发现：架构 §7.4 该表若按「回合总步数 ≥2 就强制确认」读，会与它自己给的理由（「若所有写操作都强制确认，会击穿 PR-2 的快速通道体验」）自相矛盾——写入在 Step 1 产出后，模型必然要再走一步才能开口回话，即**任何 agent 路径的写入都是 ≥2 步**，那条「单 Step 自动执行」的行将永远不可达。按产出时的步号判定则两说自洽：Step 1 写出提案 = 模型无需先查任何东西的单发形态。
+2. **「挂起」≠「视为拒绝」。** 调用方没接审批通道 / 没接执行通道时，提案**挂起**（随 `AgentResult.proposals` 交回，由客户端渲染确认卡）；只有审批通道真的给出 `unavailable` 才「视为拒绝」。若把「没接通道」也判成拒绝，P1 的确认卡路径（02i 走既有 v2 卡链路）会被自己堵死。
+
+> **一处口径没能落到架构文档：** 上面第 1 条本应同时写进 `docs/architecture/ai-agent-architecture.md` §7.4（该表就长在那里），但**该文件此刻正被并发会话在途编辑**（未提交改动覆盖 §4.6 / §7.3 / §7.4 等约 107 行），按 §四「不得顺手改其他卡的文件、不得夹带其他卡的改动」的纪律，本卡不介入该文件。口径暂由本文件 §三 02e 承载，**待该会话提交后建议在 §7.4 该表下补一句指向本节**（否则 02g 读到「单 Step 完成」时仍会撞上同一个歧义）。
+
+**修改的文档、契约与代码：**
+
+- 代码：`server/src/modules/ai/agent.py`（扩展）、`server/tests/test_ai_agent_approval.py`（新建，26 用例）、`server/tests/test_ai_agent.py`（**1 条边界用例随之更新**：02d 时断言治理字段「留给组装器」，组装器如今就是本层，改为断言字段已补齐且取值正确）
+- 文档：本文件 §三 02e（口径）、§一、§五；`production-execution-plan.md` 的 T-M7-02e 行
+- **契约零改动**：`contracts/action-proposal/schema.json` 与客户端一行未动
+
+**验证命令与结果：**
+
+```
+cd server && python -m pytest tests/test_ai_agent_approval.py -q   # 26 passed
+cd server && python -m pytest tests/test_ai_agent.py -q            # 79 passed（原 79，一条用例改名改写）
+cd server && python -m pytest tests/ -q                            # 957 passed, 37 skipped
+cd server && python -m ruff check src/modules/ai/agent.py tests/test_ai_agent*.py  # All checks passed
+cd app && npx tsc --noEmit                                         # 0 错
+cd app && npx vitest run                                           # 1107 passed
+./gradlew :app:testDebugUnitTest --rerun-tasks                     # 394 tests / 0 failures / 1 skipped
+```
+
+> **957 = 02d 基线 900 + 本卡 26 + 并发会话 02f 在途的 31**（`test_ai_conversation.py` 等）。ruff 全量另有 4 处告警，**全部在 02f 的在途文件**（`conversation.py` / `0017_conversation_events.py` / `test_ai_conversation.py` 的缺尾换行与未用导入），不属本卡。JVM 的 1 skipped 为既有。
+
+**回退实验（9/9 变红，脚本在系统临时目录、不入库）：**
+
+| # | 变异 | 对应用例 |
+|---|---|---|
+| M1 | `confirm_reason` 多步门槛 `step>=2` → `step>=3` | 多步必出确认卡 |
+| M2 | `grants` 改成恒真 | 「只有 allowed-once 放行」 |
+| M3 | `from_raw` 的兜底从 `unavailable` 改成 `allowed-once` | 无法识别的值不放行 |
+| M4 | 去掉审批门的「同一提案只问一次」 | 一次性（执行后即失效） |
+| M5 | 治理字段从「覆写」改成 `setdefault` | 草案治理字段不可信 |
+| M6 | 校验上下文只认一套映射（回到最初写法） | 单 Step 高置信自动执行 |
+| M7 | 去掉「取消后同批次不再征询」 | 中止后剩余写调用不执行 |
+| M8 | 执行通道异常不再兜底 | 执行失败降级而非穿透 |
+| M9 | 无通道时「视为拒绝」而非挂起 | 无执行通道 → 零写库 + 提案挂起 |
+
+**同卡内自查修掉的三处（都是本轮引入或发现的）：**
+
+| # | 问题 | 触发 | 处理 |
+|---|---|---|---|
+| 1 | **校验上下文只认一套映射 → 全部写入被判幻觉** | 最初按「id→名字」单一映射派生，而 `ToolContext` 的反向映射有默认值（空）——手搓的上下文（测试、将来更轻的调用方）只填名字→id 时，派生集合为空、每条写入都是 `rejected_hallucination`。fail-closed 方向没错，但把功能整个关掉了 | 改为**两套映射取并集**（并集 = 「这个上下文认识的全部 id」，正是校验要问的问题），并用 M6 变异钉住 |
+| 2 | **`_GOVERNANCE_FIELDS` 过滤是空转** | 最初写成「先剔除草案里的治理字段、再补上」，可三个字段随后都被**无条件赋值**——剔除对结果毫无影响。**回退实验（M5 原形）实测：去掉该过滤，用例照样全绿**，即这条「防御」是假的 | 删掉过滤，把语义如实写成「无条件覆写」；用例改用对抗性取值（`confidence: 0` / `requiresConfirmation: false`），M5 变异随即变红 |
+| 3 | **中止后同一步里剩下的写调用仍会被征询/执行** | 用户回 `cancelled`（或外部 `cancel()`）后，本次工具批次里余下的写调用照旧走审批——「中止整个任务」之后又落地一笔写入，是取消语义最糟的破法 | `_handle_proposal` 入口判 `self._cancelled`：只配对、不再征询、不再执行（批次仍配对完整，不变式 1 不破） |
+
+**关键设计决策（02g / 02i 必读）：**
+
+| # | 决策 | 理由 |
+|---|---|---|
+| 1 | 写路径是**两个通道**：`executor`（必须有它才可能写库）与 `approver`（只有需要确认时才用到）。两者缺省 `None` | 不接线即零副作用——02d 的行为完整保留；02g 构造 `ServiceProposalExecutor(service, user=..., request_id=..., book_id=...)` 并传一个 approver 即接通 |
+| 2 | **`proposals` 与 `executions` 互斥**：`proposals` = 仍待确认（`requiresConfirmation` 恒为 True），`executions` = 已执行的原始回执 | 客户端不会为一件已经做完的事再弹确认卡；02i 的既有 v2 卡链路吃 `proposals` 即可 |
+| 3 | **审批只在「提案产出时的步号 ≥2」或「低置信」时发生** | Step 1 的高置信写入直接自动执行（快路径策略 + 撤销窗）；把写入放在第 2 步之后说明模型先查了别的东西，累积风险高 |
+| 4 | `confirmation_token` 只在用户批准时有值：`allowed-once:<proposalId>`；自动执行传空串 | 执行器对低置信提案要求该口令非空（既有语义）；空串走 `accepted` 那条路，两处都不改执行器 |
+| 5 | 审批门**每轮重建**，授权不落任何持久位置 | 「一次性」与「无长期授权」的落点；重复提交同一次批准不会再放行一次 |
+| 6 | 执行回执**含事务 UUID**，只进 `executions`；回喂模型的内容另行构造（`status` / `action` / `count` / `undoWindowSeconds`） | 客户端要 id 做撤销窗，模型一个 id 都不能看见（铁律 1） |
+| 7 | 系统提示同步改口径：以工具结果的 `status` 为准（`executed` 才是真的记好了） | 原先写的是「写操作只会产出待确认的提案」，自动执行路径一旦开启，这句话会让模型拒绝向用户确认成功 |
+
+**数据 / 同步 / AI / 安全影响：**
+
+- **数据与同步：零影响**——无模型改动、无迁移、无同步协议改动。写库仍走既有的 `TransactionService.create_transaction_batch` + `sync_changes` 登记（在 `execute_proposal` 内部，本卡未触碰）。
+- **AI：** 本卡是写路径的收口，**仍未接线**（02g 才暴露端点）。**默认形态下写库一次都不会发生**：没有 executor，提案只能挂起——这与 02d 的行为等价（02d 的 79 个用例只有 1 条边界用例随之更新）。
+- **安全：** 新增的攻击面是「模型能否让不该落库的东西落库」。已落地的防线：治理字段由服务端覆写（模型无法自选幂等键或抬高置信度）；提案必须过 schema + 会话权威集合校验才可能挂起或执行；执行只经 `execute_proposal`（其内部 TOCTOU 重校验 + 幂等）；审批四值只有 `allowed-once` 放行且一次性；**通道任何异常/畸形输入一律 fail-closed**。回喂模型的所有路径均已验证不含任何 id（含执行回执里的 `transaction_ids`）。
+- **隐私：** 新增日志只有 `proposal_id`（服务端生成的 `agent-<hex>`）与异常**类型名**，不含提案正文、不含用户原话（脱敏口径）。本卡不落库、无新增数据留存面。
+
+**兼容与回退方式：**
+
+- **向前兼容**：纯增量 + 两个通道缺省 `None`——不传通道时行为与 02d 一致（写工具只产出提案、零副作用）。02d 的既有用例只改了 1 条断言语义。
+- **回退** = 删除 `agent.py` 的写路径一节 + `AgentResult.executions` + 两个构造参数（约 220 行），并把 `test_ai_agent.py` 那条用例改回；`validator.py` / `service.py` / `tools.py` / 契约未被触碰，回退面干净。
+
+**开放风险与责任人：**
+
+- **低置信降档目前没有生产者** —— `_WARNED_CONFIDENCE`（0.8）的触发条件是草案带 `warnings`，而 P1 的两个写工具恒返回 `warnings: []`。策略分支有用例（直接驱动写路径）、执行器侧的对拍也有用例，但**真实链路不会走到这一档**。**责任人：02g/收口**（若 02g 接真实模型后想让它自报不确定，那是新的信号源，属产品决策）。
+- **「高风险出确认卡」未实现** —— 无分类器，已在 `confirm_reason` 的 docstring 与本节登记。**责任人：P4。**
+- **工具层名索引的 `_OBJECT_NAME_LIMIT = 2000` 截断后，派生校验集合也会跟着截断** —— 超限时被截断掉的分类名无法解析（工具层已先失败），因此写入侧不会误放行；但**读**侧 02c 已记录过同类风险。P1 数据规模远低于该值。**责任人：P4（随分页一起处理）。**
+- **`budget_list` 不区分收支类型（02c 转交）—— 判定为「不在本卡范围」，转回 02g 收口 / P4** —— 修它需要给 `ToolContext` 增一个「分类 id→收支类型」映射（现有 `category_names_by_id` 只有名字）或按行回查，属 `tools.py` 的实现改动，超出本卡「只做接线、产出 agent.py」的边界；且 P1 的写工具只在记账域（02c 决策 2），**它只影响模型对预算的表述，不会造成错误写入**。建议做法：`load_tool_context` 增映射 + `budget_list` 行带 `kind`，随 02c 的同类口径一并处理。
+- **02c 记录的 4 项测试缺口残余（`category_ids_named` 全集语义 / `groupBy="day"` / `_period_range` 跨年 / `created_at` 兜底排序）** —— 同为 `tools.py` 的测试补充，**同样不在本卡范围**（本卡基线只统计自身测试文件的增量）。`transaction_summary` 分组数组无上限一项，02d 已判「实际严重度低」。**责任人：02g 收口 / P4。**
+- **`ApprovalGate` 的「一次性」是内存态的、且只在单进程内成立** —— 生产为单 worker 部署（架构 §8.4 已记录该前提），跨进程/重启后同一 `proposalId` 会被视为新提案。真正的兜底是 `execute_proposal` 的幂等（`proposal_id` 唯一约束），**不会重复落库**。**责任人：02g/收口**（若多 worker 化，须随会话状态一起改）。
+
+**下一项未阻塞任务：** **02g（SSE 端点与部署配置）** —— 依赖 02d + 02e，两者均已完成。02g 需要本卡的两个协议：`Approver`（`confirm` 事件 + 客户端回答 → `ApprovalDecision`，含超时映射到 `unavailable`）与 `ServiceProposalExecutor`（构造时注入 `User` / `request_id` / `book_id`）；`AgentResult.proposals` 渲染确认卡、`executions` 渲染「已记录 + 撤销窗」。**02f 与本卡同批次、仍在途**（其状态以其自身记录为准）。
 
 ---
 
