@@ -16,7 +16,7 @@
 | **02c** | 工具注册表与域分组 | ✅ 完成 | 2026-09-18 | `2f09c30` | 批次 1；15 个工具 / 3 域，详见 §五 |
 | **02d** | Agent Loop 核心与推理分级 | ✅ 完成 | 2026-09-18 | `d923d4e` | 批次 2；非流式 loop + 四条不变式 + 四条硬边界 + 三档分级，详见 §五 |
 | **02e** | 写工具安全路径 | ✅ 完成 | 2026-09-18 | `1fdffd1` | 批次 3；组装 / 校验 / 审批四值 / 执行接线 + 26 用例，9/9 回退实验变红，详见 §五 |
-| **02f** | 会话状态与配额双限 | ⏳ 未开始 | | | 批次 3，可与 02e 并行 |
+| **02f** | 会话状态与配额双限 | ✅ 完成 | 2026-09-18 | `—`（回填中） | 批次 3；事件表 + 会话索引 + 429 双限 + 登出/删号清理；31 用例，17/17 回退实验变红，详见 §五 |
 | **02g** | SSE 端点与部署配置 | ⏳ 未开始 | | | 批次 4（**整链最需留缓冲的一环**） |
 | **02h** | 客户端桥通道 | ⏳ 未开始 | | | 批次 5 |
 | **02i** | 客户端消费（最小形态） | ⏳ 未开始 | | | 批次 5 |
@@ -133,7 +133,7 @@
 ### 验证基线（每卡完成后必跑）
 
 ```
-cd server && python -m pytest tests/ -q          # 基线 926 passed + 37 skipped（2026-09-18 02e 交付后：900 为 02d 基线，02e 增量 +26）
+cd server && python -m pytest tests/ -q          # 基线 930 passed + 37 skipped（2026-09-18 02f 交付后：02e 记录 926/927，02f 增量 +31 → 961；同树基线以「全量 − 本卡文件」复核为 930）
 ./gradlew :app:testDebugUnitTest --rerun-tasks   # 基线 394 tests / 0 failures / 1 skipped（2026-09-18 实测）。**gradlew 在仓库根目录**，须从仓库根运行（`cd app && ./gradlew` 会报 No such file）；不带 `--rerun-tasks` 时若源码未变会直接 UP-TO-DATE、拿不到真实数字
 cd app && npx vitest run                         # 基线 1107 passed（2026-09-18 实测）
 cd app && npx tsc --noEmit                       # 0 错
@@ -141,7 +141,7 @@ cd app && npx tsc --noEmit                       # 0 错
 
 > 原记录为 658 / 392 / 1104，与实测不符（2026-09-18 由 02c 复核修正）。数字以实测为准。
 >
-> **服务端基线推导（2026-09-18 复核）：** 659（02b 前既有）+ 54（02b）+ 95（02c）= 808（批次 1 交付时）；收口核查再各补用例（02b +6、02c +5）后为 **819**（= 659 + 60 + 100）；02d 再 +81（79 个 loop 用例 + 2 个 provider 用例，含 5 个 `reasoning_content` 回归）→ **900**；02e 再 +26（`test_ai_agent_approval.py`，另一条 02d 用例改名改写、数量不变）→ **926**。
+> **服务端基线推导（2026-09-18 复核）：** 659（02b 前既有）+ 54（02b）+ 95（02c）= 808（批次 1 交付时）；收口核查再各补用例（02b +6、02c +5）后为 **819**（= 659 + 60 + 100）；02d 再 +81（79 个 loop 用例 + 2 个 provider 用例，含 5 个 `reasoning_content` 回归）→ **900**；02e 再 +26（`test_ai_agent_approval.py`，另一条 02d 用例改名改写、数量不变）→ **926**，其后 02e 的收尾提交再 +1 → **927**；02f 再 +31（`test_ai_conversation.py`）→ **961**（该卡记录的同树基线为 930，与 927 的 3 例差额出自并发会话的在途改动，按下面的「多会话陷阱」以 `--collect-only` 为准）。
 > ⚠️ **多会话陷阱：** 02b 提交信息里的「782 passed」**不是**本卡基线——当时 02c 的 `test_ai_tools.py` 正被并发会话在途写入（已 69 例），全量计数把它一并算进去了（713 + 69 = 782）。**在并发会话下跑全量套件，数字不可作为本卡基线**，须以 `pytest <本卡测试文件>` 的增量与 `--collect-only` 为准。02e 交付时全量为 **957**（= 926 + 并发会话 02f 在途的 31），同为此理。
 
 每卡只允许在基线上**增加**，不得减少。基线随卡推进更新，更新时须在本文件 §一 状态看板与 `production-execution-plan.md` 同步。
@@ -540,7 +540,11 @@ cd app && npx tsc --noEmit                       # 0 错
 **Android 红的根因与修复（2026-09-18 定位，纠正此前「环境不可用」的记法）：** 该 action 未显式传 `packages`，于是用它自己的默认值 `tools platform-tools`，而 Google 已把旧的 `tools` 包从 SDK 仓库下架——日志实锤 `sdkmanager tools` → `Warning: Failed to find package 'tools'` → `exit code 1`，action 当场抛错，**后面的 `npm ci` / gradle / 模拟器步骤一次都没跑过**。因此「长期红」不是跑挂，而是**从没跑到**——已交叉核对更早两次 run（`953d664`、`12c7409`）的 Android 作业，失败点同样是 `Run android-actions/setup-android@v3`，说明这是长期状态而非单次偶发。修复：`.github/workflows/ci.yml` 显式 `with: packages: platform-tools`（平台与 build-tools 由下一行按需装）；**待一次真实 CI run 确认 Android 作业已进入编译/测试阶段**——若那时还有别的失败，才是新暴露的问题。
 **修复后的验证 run（`a647c59`，2026-09-18）：** Client Lint & Test ✅ / Server Lint & Test ✅ / Android Compile & JVM Test ❌——但**失败点已从 `setup-android` 前移到 `:app:compileDebugAndroidTestKotlin`**，即「从未跑到 → 真在跑」这一步已完成。
 **新暴露的真问题（不在本卡范围，已有人在做）：** androidTest 源集 `app/src/androidTest/java/com/aozora/app/sync/SyncEngineTest.kt:469` 对 `BootstrapResponse` 构造器**位置传参**，而 T-M7-01 在 `cursor` 之前插入了三个实体字段（savingsGoals / scheduledRules / chatPersonas）→ `Long` 落进 `List` 槽、且 `cursor` 未传。**该 androidTest 源码集自 `705ecd2`（T-M7-01 三实体上云）起就编不过**——本地的 `:app:testDebugUnitTest` 走另一套源码集、CI 又每次死在 setup-android，两边把它一起盖住了。**并发会话已修复并提交 `4b4ce9a`**（该构造点改具名传参），其回退实验与 CI 报错逐字一致；本卡另用其工作区版本在本地实跑 `:app:compileDebugAndroidTestKotlin` → **BUILD SUCCESSFUL**。**下一步从未被检验过的是 `:app:dependencyCheckAnalyze`**（OWASP NVD 库下载，历史上常见失败点），以及带 `continue-on-error` 的模拟器作业。
-**服务端 flaky（非本卡引入，未修）：** `7206c0c`（纯文档提交）上 Server 作业出现 `RuntimeError: Event loop is closed`（`aiosqlite/core.py` 工作线程回投结果），被 `filterwarnings = ["error"]` 提升为 error、记在恰好在跑的那个用例头上（报错位置与被测点无关）。根因：`test_ai_gateway.py` / `test_ai_proposal_execution.py` / `test_ai_proposal_validation.py` 的 fixture 建了 StaticPool 引擎却在 `asyncio.run(...)` 建起的 loop 关闭后仍持有连接（同仓库 `fixtures_db.py:32` / `fixtures_reconciliation.py:332` 都有 `await engine.dispose()`）。**不是一行能补的**——内存库依附那一条连接，中途 dispose 会把库删掉，「在哪个 loop 里释放 / 是否改用文件库」是需要设计选择的一步，故本卡只登记不修（三处 fixture 属 T-M4 文件）。
+**服务端 flaky（非本卡引入；2026-09-18 已修，提交 `b2694d7`）：** `7206c0c`（纯文档提交）上 Server 作业出现 `RuntimeError: Event loop is closed`（`aiosqlite/core.py` 工作线程回投结果），被 `filterwarnings = ["error"]` 提升为 error、记在恰好在跑的那个用例头上（报错位置与被测点无关）。根因：`test_ai_gateway.py` / `test_ai_proposal_execution.py` / `test_ai_proposal_validation.py` 的 fixture 建了 StaticPool 引擎却在 `asyncio.run(...)` 建起的 loop 关闭后仍持有连接（同仓库 `fixtures_db.py:32` / `fixtures_reconciliation.py:332` 都有 `await engine.dispose()`）。**不是一行能补的**——内存库依附那一条连接，中途 dispose 会把库删掉，「在哪个 loop 里释放 / 是否改用文件库」是需要设计选择的一步，故当时只登记不修（三处 fixture 属 T-M4 文件）。
+**修复（`b2694d7`）：** 方案 = **把 DB 底座从 `:memory:` + StaticPool 换成临时文件库**（`tempfile.mkdtemp` + teardown `rmtree`，与 `test_attachments` / `test_image_parse` / `test_stats_exports` 既有约定一致）——文件库走默认连接池，每个 loop 各用各的连接，`dispose` 随之合法。**注意不能用 pytest 的 `tmp_path`**：本机 basetemp `pytest-of-admin` 权限已坏（连 ACL 都读不了），`tmp_path` 会直接 PermissionError。
+**改前先做了两点实测，避免照抄无效修法：** (1) 线程计数——现状 `0 → 1 → 1`（永不释放，即泄漏成立）；文件库 + dispose `1 → 1 → 0`（干净归零）；(2)「从新 loop 调 `dispose()` 会不会自己抛 `Event loop is closed`」——不会，故 teardown 释放可行。
+**实际影响面比原登记更大：** 除三处 AI fixture 外，`test_fact_pack.py` / `test_ledger_api.py` 同款，`test_image_parse.py` 走应用全局引擎（把 `Settings.database_url` 指向临时文件，绕开 `database.py` 的「`:memory:` → StaticPool」分支，**生产代码未动**），**共 6 个文件**。
+**验证：** 6 个文件 216 用例全绿；全量 961/962 passed + 37 skipped **连跑两轮无 error**；ruff 通过；进程内线程对比「新增且残留的 aiosqlite 线程：**无**」。
 推后本地 HEAD 全量为 **902 passed / 37 skipped**（本卡 81 + 并发会话补的快路径 2 条）。
 
 **tip（`7206c0c`）远端 CI：** Client Lint & Test ✅ / **Server Lint & Test ❌** / Android Compile & JVM Test ❌。两条红**均非本轮代码回归**，如实记录如下：
@@ -549,7 +553,7 @@ cd app && npx tsc --noEmit                       # 0 错
   > **勘误：** 同一 symptom 此前登记于 `docs/review/T-M4-01-review-round4.md:139`，但那里归因于 lifespan 的 `cleanup_expired_files`。本条以作业日志的**真实栈**为准（aiosqlite 工作线程）；两处归因不同，后续排查别直接沿用旧那条。
 - **Android ❌** 是上方「Android 红的根因与修复」那条——`sdkmanager tools` 找不到已被 Google 下架的包而 exit 1，**编译与测试步骤一次都没跑过**，**不是「环境不可用」**；修复为 `.github/workflows/ci.yml` 显式 `with: packages: platform-tools`（`81184ba`）。
 
-> **给后续卡的提醒：** 服务端作业存在这条 flaky 路径，看到 `1 error` 而 `N passed` 与本地一致时，先按 flaky 判、别当回归——但它同时说明 `filterwarnings = ["error", …]` 会把**后台线程**的异常算到**恰好此时运行的那个用例**头上（此处是 `test_redoc_available`），报错位置与真实故障点无关。
+> **给后续卡的提醒：** 服务端作业存在这条 flaky 路径，看到 `1 error` 而 `N passed` 与本地一致时，先按 flaky 判、别当回归（**该 flaky 已于 `b2694d7` 修掉**）——但它同时说明 `filterwarnings = ["error", …]` 会把**后台线程**的异常算到**恰好此时运行的那个用例**头上（此处是 `test_redoc_available`），报错位置与真实故障点无关。
 
 **验证命令与结果：**
 
@@ -696,6 +700,163 @@ cd app && npx vitest run                                           # 1107 passed
 - **`ApprovalGate` 的「一次性」是内存态的、且只在单进程内成立** —— 生产为单 worker 部署（架构 §8.4 已记录该前提），跨进程/重启后同一 `proposalId` 会被视为新提案。真正的兜底是 `execute_proposal` 的幂等（`proposal_id` 唯一约束），**不会重复落库**。**责任人：02g/收口**（若多 worker 化，须随会话状态一起改）。
 
 **下一项未阻塞任务：** **02g（SSE 端点与部署配置）** —— 依赖 02d + 02e，两者均已完成。02g 需要本卡的两个协议：`Approver`（`confirm` 事件 + 客户端回答 → `ApprovalDecision`，含超时映射到 `unavailable`）与 `ServiceProposalExecutor`（构造时注入 `User` / `request_id` / `book_id`）；`AgentResult.proposals` 渲染确认卡、`executions` 渲染「已记录 + 撤销窗」。**02f 与本卡同批次、仍在途**（其状态以其自身记录为准）。
+
+---
+
+### 02f · 会话状态与配额双限（✅ 2026-09-18）
+
+**任务编号：** T-M7-02f
+
+**前置动作未执行（用户明确指示）：** 卡面要求把 `config.py` 的 `ai_daily_quota_guest`
+从联测临时的 `100000` 恢复为 `20`。**领取时用户要求保持 100000 不变**（该值仍在用于
+人工联测，改回会打断测试），故本卡**未改动该默认值**，只在原注释下补记了这一决定与
+待恢复的挂账。**测试面不受影响**——conftest 把 `ai_daily_quota_guest` 钉死在 20，
+配额类断言用的是测试配置而非生产默认值。**残余：配额实测与 R-PROD-15 成本评估若要
+用真实数值，须在 M7 收口时恢复为 20。责任人：收口。**
+
+**完成范围 / 明确未做：**
+
+- **完成：**
+  - **模型**（`server/src/models/ai.py`）——新建 `AIConversationEvent`（`conversation_id` /
+    `seq` / `type` / `data` / `created_at`，(conversation_id, seq) 唯一索引）；
+    `AIUsage` 增 `conversation_id`（**`ON DELETE SET NULL`**，见下方决策 1）；
+    `AIConversation` 由 schema 占位改为**会话索引**（列不变，重写 docstring 说明
+    `summary` 留待 P3 压缩）。
+  - **迁移** `server/src/migrations/versions/0017_conversation_events.py`（紧接 0016）。
+  - **服务** `server/src/modules/ai/conversation.py`（新建）——`ConversationService`
+    的 `resolve`（归属校验 + 建会话）/ `history`（上下文窗口投影）/ `append_turn`
+    （一轮原子写入 + 事件校验）/ `record_turn`（一轮一条 `ai_usage`）/ `check_quota`
+    （轮数 + token 双限）/ `purge_user`（清理）。
+  - **配置** `config.py` 增 `ai_agent_history_turns=8` / `ai_agent_history_chars=8000` /
+    `ai_agent_conversation_max_turns=50` / `ai_agent_conversation_max_tokens=500000`；
+    `.env.example` 同步。
+  - **清理接线**：`AuthService.logout` 删该用户的会话行（R-PROD-20 的「登出联动清理」）；
+    `infra/cleanup/account-deletion.py` 的清理清单增 `ai_conversation_events`（排在
+    `ai_conversations` 之前）并补该表的归属回溯分支。
+  - **重构（服务于本卡，行为等价）**：`service.py` 抽出模块级 `build_usage_row()`——
+    成本换算与 `request_id` 截断从「一处实现」变成「唯一实现处」，快路径两处改调它，
+    新增的 agent 轮次用量行也调它。
+- **明确未做（逐条对应卡片的职责边界）：**
+  1. **不做压缩、不做分叉、不做回放**——`AIConversation.summary` 保持空串，超窗轮次
+     直接丢（原文仍在日志里）。摘要生成与 `replace` 归 P3（T-M7-04）。
+  2. **不做完整事件日志**——没有 `ignorable`，没有 Surface 子集定义；P1 的事件就是
+     loop 的消息流本身，全部进模型上下文。
+  3. **不接 HTTP**——`routes.py` / SSE 端点一行未动（02g）。本卡交付的是可直接被
+     端点消费的服务层。
+  4. **不做多会话**——没有会话列表 / 重命名 / 删除接口，也没有设备维度（P2）。
+  5. **不改 `agent.py`**——loop 的 history 入口与 `AgentResult` 语义一行未改。
+
+**关键设计决策（02g 必读）：**
+
+| # | 决策 | 理由 |
+|---|---|---|
+| 1 | **`ai_usage.conversation_id` 用 `ON DELETE SET NULL`，不用 CASCADE** | 会话行会被登出清理删掉，而 `ai_usage` 是 guest **日配额**的计数基座。若随会话级联删除，用户**登出再登入就能把当天配额刷回满额**——配额绕过。审计行必须活得比会话长。事件表相反，用 CASCADE：正文没了就该没了。两处策略各有一条元数据断言钉住（SQLite 测试环境不强制外键，行为面测不出来） |
+| 2 | **配额单位是 Turn，不是模型请求** | 一个 Turn 一条 `ai_usage` 行（`tokens` = 该轮全部 provider 调用之和），于是「轮数 + token」是同一张表的 COUNT / SUM。按请求计会让「轮数」随工具调用次数漂移（02d 实测：任何用到工具的任务都 ≥2 步） |
+| 3 | **轮数取自 `ai_usage` 行数，不取事件条数** | 一轮可能没有 assistant 事件（provider 失败），但一定有用量行——两边口径会漂 |
+| 4 | **窗口按 Turn 边界切，且至少保留最近一轮** | 轮边界永远不会落在「带 tool_calls 的 assistant 消息」与其 tool 结果之间（02d 的硬约束，本轮原子写入保证）。字符超限时丢最早轮次，但**不丢到空**——窗口空掉会让「追问」失去指代对象，那正是本卡要解决的痛点 |
+| 5 | **`system` 消息丢弃并告警；未知角色与「以 tool 开头的一轮」抛 `ValueError`** | 前两者是调用方编程错误，静默写入会把问题推迟到下一轮的 400；system 则必须丢（loop 现算，存了会有两条且换账本后过期） |
+| 6 | **assistant 消息写入时补齐 `reasoning_content` 键** | 02d 的硬约束在**存储边界**再落一次，不依赖调用方记得；缺键的 assistant 消息会让下一条 thinking 请求整轮 400 |
+| 7 | **登出删该用户的全部会话（不按设备区分）** | `ai_conversations` 没有设备维度，P1 客户端也只有单会话。**残余：** 多设备时登出 A 机会让 B 机的会话消失（其下一轮会拿到 404，需开新会话）；P2 引入会话归属维度时须重新审视。未命中设备会话时**一行都不删**（幂等登出不该清库） |
+| 8 | **会话跟随当前账本** | 请求带的 `book_id` 与索引不一致时更新索引。P1 客户端没有「换账本就开新会话」的概念，留着旧账本只会让索引变成假话，且系统提示的「现有对象」名单必须跟着换 |
+| 9 | **会话索引也校验账本归属**（与 `load_tool_context` 同口径的 404） | 会话索引是新的一层读面：写进一个别人的 `book_id` 等于给「指认他人账本」开口子，P2 的会话列表一旦回显账本名就是泄漏 |
+
+**「历史窗口无 UUID」是怎么保证的（不是靠断言，是靠结构）：** 工具结果的 id 在
+`agent._tool_result_content` 就被 `_without_ids` 剥掉（02c 的硬约束），写工具的执行回执
+只含 `status` / `action` / `count` / `undoWindowSeconds`；本卡只**照原样**存 loop 给出的
+消息，不做二次加工。用例的构造方式是「提案里**确实**有服务端解析出的 `categoryId`，
+历史里**必须没有**」——两个断言一起把「剥 id」这一步钉住，去掉那次剔除用例立即变红。
+
+**修改的文档、契约与代码：**
+
+- 代码：`server/src/models/ai.py`、`server/src/models/__init__.py`、
+  `server/src/migrations/versions/0017_conversation_events.py`（新建）、
+  `server/src/modules/ai/conversation.py`（新建）、`server/src/modules/ai/service.py`、
+  `server/src/common/config.py`、`server/src/modules/auth/service.py`、
+  `infra/cleanup/account-deletion.py`、`server/.env.example`
+- 测试：`server/tests/test_ai_conversation.py`（新建，31 用例）、
+  `server/tests/test_migrations.py`（表数 22 → 23 + 链式断言）
+- 文档：本文件 §一 / §四 / §五、`production-execution-plan.md` 的 T-M7-02f 行
+- **契约零改动**：`contracts/` 一行未动；`provider.py` / `tools.py` / `agent.py` /
+  `routes.py` / 客户端一行未动
+
+**验证命令与结果：**
+
+```
+cd server && python -m pytest tests/ -q                     # 961 passed, 37 skipped（同树基线 930；本卡 +31）
+cd server && python -m pytest tests/test_ai_conversation.py -q   # 31 passed
+cd server && python -m ruff check src/ tests/               # All checks passed
+cd app && npx tsc --noEmit                                  # 0 错
+cd app && npx vitest run                                    # 1107 passed
+./gradlew :app:testDebugUnitTest --rerun-tasks              # 394 tests / 0 failures / 1 skipped
+```
+
+> **环境噪声（如实记录，非本卡回归）：** 本机 `C:\Users\admin\AppData\Local\Temp\pytest-of-admin`
+> 出现 `WinError 5 拒绝访问`，导致**使用 `tmp_path` 的用例在 setUp 阶段报错**（单独跑
+> `test_ai_gateway.py` 会看到 62 个 error、`--ignore` 跑法会看到 161 个）。用
+> `--basetemp=<可写目录>` 复跑同一批用例：101 passed。该现象与并发会话同时跑 pytest
+> 有关，**与代码无关**——全量默认跑法下四板全绿。
+
+**验收映射（逐条固化为测试而非人工核对）：**
+
+| 卡面验收 | 落点 |
+|---|---|
+| 多轮澄清（问 → 追问 → 简答「500」→ 正确解析） | `TestMultiTurnClarification`——第一轮只反问不调工具、落库；第二轮载入窗口后回「500」；断言**第二轮请求的载荷里有第一轮的问句**（「500」本身不含信息，模型只能靠这句接上）+ 提案金额为 500 |
+| 会话级轮数 / token 超限返回 429（`ai_quota_exceeded`） | `TestConversationQuota`——轮数与 token 各一条；另钉「快路径 `conversation_id=NULL` 的行不占会话配额」 |
+| 历史窗口无 UUID | `TestHistoryWindow::test_window_contains_no_uuid`（提案含 id、窗口不含），并在多轮用例里对两轮窗口重跑一次 |
+| 登出 / 删号清理会话行 | `TestCleanup`——登出后会话与事件均 0、**用量行必须留下**；未命中设备会话时一行不删；删号脚本清事件表；另两条元数据断言钉 FK 策略 |
+
+**回退实验（「改回旧写法 → 用例是否变红」实测）：17/17 全红**——窗口 N 截断、字符双限、
+至少保留一轮、system 丢弃、reasoning_content 补齐、孤立 tool 拒绝、未知角色拒绝、会话
+归属校验、账本归属校验、轮数上限、token 上限、快路径行不计数、登出清理、purge 删事件、
+删号清单含事件表、(conversation_id, seq) 唯一索引、`ai_usage` 的 SET NULL。每次变异后按
+sha256 逐字节还原并校验。
+
+**数据 / 同步 / AI / 安全影响：**
+
+- **数据：** 新增一张表 + `ai_usage` 一列，迁移 `0017`（PG only，测试面走
+  `Base.metadata.create_all`）。**不迁数据、不回填**——两张表此前都是空的。
+- **同步：零影响**——不进 sync 协议，无 `sync_changes` 写入，客户端一行未动。
+- **AI：** agent 路径**仍未接线**（02g 才暴露端点）；本卡交付的是它要用的服务层。
+  快路径的 `/ai/interpret` 等行为不变（`_record_usage_from_tokens` 改调 `build_usage_row`，
+  行为等价，既有 101 条 gateway 用例全绿）。
+- **安全：** 会话日志是**新的敏感数据面**（R-PROD-20 / `D-PROD-13` 的有条件例外），本卡
+  落实了其中两条硬约束——**登出 / 删号联动清理**、**读取面带归属校验（跨用户 404，会话与
+  账本两层）**；保留期具体值仍归 P3。另：会话索引新增一次账本归属校验，与工具层同口径。
+  日志脱敏口径不变（`conversation_id` 是内部 UUID，只出现在结构化日志的字段里，
+  不进模型可见范围）。
+
+**兼容与回退方式：**
+
+- 纯增量、**不接线即零影响**：`routes.py` 一行未动，现有端点与客户端行为完全不变。
+  新表与新列对既有代码透明（`ai_usage` 的既有写入路径不传 `conversation_id`）。
+- 回退 = 删除 `conversation.py` + `test_ai_conversation.py` + 迁移 `0017`，并把
+  `AuthService.logout` 的清理调用与 `account-deletion.py` 的事件表条目撤掉；
+  **`build_usage_row` 的抽取可原样保留**（行为等价、无新语义）。
+
+**开放风险与责任人：**
+
+- **`ai_daily_quota_guest` 仍是 100000**（前置动作按用户指示未执行）——配额实测与
+  R-PROD-15 成本评估要用真实数值时必须恢复为 20。**责任人：M7 收口。**
+- **会话级配额的具体数值是初始值**（50 轮 / 500k token，由 02d 实测的「单轮多步 ≈ 8.2k
+  prompt tokens」推得），架构 §12.2 未决 #8 明说「由 P1 实测确定」。**责任人：02g 接通后
+  按真实使用分布校准。**
+- **历史窗口 N=8 与字符 8000 同为初始值**（§12.2 未决 #2）——02a/02d 的实测只覆盖了
+  单轮成本，多轮窗口的实际收益与超窗频率要等 02g/02i 接通后统计。**责任人：收口。**
+- **登出按用户粒度清会话**（决策 7）——多设备场景下会误伤另一台设备的会话。P1 客户端
+  单会话、无跨设备正文同步（§12.2 未决 #6），影响面有限；**P2 引入会话归属维度时必须
+  重新审视**（同时也会影响 `purge_user` 的粒度）。**责任人：P2（T-M7-03）。**
+- **无保留期机制**——会话日志目前只靠登出 / 删号清理，**长期不登出的用户其日志会一直
+  留存**。`security.md` 要求「保留期对齐 `D-PROD-08`」，具体值归 P3。**责任人：P3（T-M7-04）。**
+- **一轮原子写入意味着流式路径（02g）不能在轮中途落库**——断连恢复要等 P3 的完整事件
+  日志。P1 的 02g 若在流中被取消，本轮事件不会入库（调用方需要自行决定是否补写）。
+  **责任人：02g。**
+
+**下一项未阻塞任务：** **02g（SSE 端点与部署配置）** —— 依赖 02d + 02e，两者均已完成，
+02f 亦已完成。02g 消费本卡的接口：`resolve(user, book_id, conversation_id)` →
+`history(conversation)` → `check_quota(conversation)` → 跑 loop → `append_turn` +
+`record_turn`。注意三点：**配额检查要在跑 loop 之前**；`history()` 的返回值直接喂
+`AgentLoop.run(history=…)`（不必再过一遍清洗）；本轮结束后**必须落库**，否则下一轮没有
+上下文。02e 的 `AgentResult.proposals` / `executions` 与 `pending_input` 按 02e 记录消费。
 
 ---
 
