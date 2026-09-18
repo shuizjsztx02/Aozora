@@ -80,6 +80,8 @@
 ### 02e 写工具安全路径（ActionProposal + 审批四值）
 
 - **内容：** 写工具不直接执行，产出 ActionProposal 后按策略挂起或放行；复用 `validator.validate_proposal` + `context.load_validation_context`（**均为纯函数、无 FastAPI 耦合，loop 内可直调**）；执行复用 `AIService.execute_proposal`（含 TOCTOU 重校验）；实现审批四值 `allowed-once` / `rejected` / `cancelled` / `unavailable`（视为拒绝）。**审批策略：** 单 Step 完成的任务沿用现有策略（confidence ≥0.9 自动执行 + 撤销窗，阈值见 `service.py:563`）；**多步 loop（≥2 Step）的写操作一律强制确认**。
+- **口径（2026-09-18 实施时定型，架构 §7.4 该表按此执行）：** 「单 Step 完成」= **提案产出时处于本回合第 1 个 Step**。回合总步数在提案产出那一刻尚不可知；步号是复杂度的直接证据，也正是架构该表的本意——Step 1 就写出提案 = 模型无需先查任何东西的单发形态（与快路径同待遇，保住 PR-2 的高置信快速通道）；Step ≥2 就说明「先查后写」，一律出确认卡。
+- **口径（同轮定型）——「挂起」与「视为拒绝」不是一回事：** 调用方**未接入审批通道或未接入执行通道**时，提案**挂起**（随 `AgentResult.proposals` 交回，由客户端渲染确认卡）；只有**审批通道给出了 `unavailable`**（超时 / 离线 / 界面不可用）才「视为拒绝」。若把「没接通道」也判成拒绝，P1 的确认卡路径（02i 走既有 v2 卡链路）会被自己堵死。
 - **职责边界：** **不改现有校验器与执行器的语义**，只做接线。三条铁律不放松——模型永不输出 UUID、金额由确定性代码算、写库必经校验与审批门。
 - **产出：** `server/src/modules/ai/agent.py`（扩展）
 - **验证：** 模型输出 UUID 被拒；三条铁律各有用例；`unavailable` 视为拒绝；`allowed-once` 执行后即失效、不产生长期授权；多步场景下写操作必出确认卡。
@@ -534,7 +536,9 @@ cd app && npx tsc --noEmit                       # 0 错
 
 **提交：** `d923d4e`（代码 + 测试 + 本文件与执行计划的状态行）；`e1c2b65`（回填哈希）。
 **推送与远端 CI（2026-09-18）：** 首次 `git push` 因本机 `github.com:443` 不可达而失败（curl 返回 `000`），网络恢复后已补推成功：`91308ae..3bf613b`（含并发会话的 `018ac4c` / `0c3e46b` / `3bf613b`，快进无分叉）。
-远端 CI（`3bf613b`）：**Client Lint & Test ✅ / Server Lint & Test ✅ / Android Compile & JVM Test ❌**——Android 作业失败在 `android-actions/setup-android@v3`（`sdkmanager` exit 1，**编译与测试步骤根本没执行**），与 `docs` 已登记的自 2026-09-17 起的长期环境红一致，**非代码回归**（本卡未动客户端代码；JVM 本地 394 tests / 0 failures）。
+远端 CI（`3bf613b`）：**Client Lint & Test ✅ / Server Lint & Test ✅ / Android Compile & JVM Test ❌**——Android 作业失败在 `android-actions/setup-android@v3`（`sdkmanager` exit 1，**编译与测试步骤根本没执行**），**非代码回归**（本卡未动客户端代码；JVM 本地 394 tests / 0 failures）。
+**Android 红的根因与修复（2026-09-18 定位，纠正此前「环境不可用」的记法）：** 该 action 未显式传 `packages`，于是用它自己的默认值 `tools platform-tools`，而 Google 已把旧的 `tools` 包从 SDK 仓库下架——日志实锤 `sdkmanager tools` → `Warning: Failed to find package 'tools'` → `exit code 1`，action 当场抛错，**后面的 `npm ci` / gradle / 模拟器步骤一次都没跑过**。因此「长期红」不是跑挂，而是**从没跑到**。修复：`.github/workflows/ci.yml` 显式 `with: packages: platform-tools`（平台与 build-tools 由下一行按需装）；**待一次真实 CI run 确认 Android 作业已进入编译/测试阶段**——若那时还有别的失败，才是新暴露的问题。
+**服务端 flaky（非本卡引入，未修）：** `7206c0c`（纯文档提交）上 Server 作业出现 `RuntimeError: Event loop is closed`（`aiosqlite/core.py` 工作线程回投结果），被 `filterwarnings = ["error"]` 提升为 error、记在恰好在跑的那个用例头上（报错位置与被测点无关）。根因：`test_ai_gateway.py` / `test_ai_proposal_execution.py` / `test_ai_proposal_validation.py` 的 fixture 建了 StaticPool 引擎却在 `asyncio.run(...)` 建起的 loop 关闭后仍持有连接（同仓库 `fixtures_db.py:32` / `fixtures_reconciliation.py:332` 都有 `await engine.dispose()`）。**不是一行能补的**——内存库依附那一条连接，中途 dispose 会把库删掉，「在哪个 loop 里释放 / 是否改用文件库」是需要设计选择的一步，故本卡只登记不修（三处 fixture 属 T-M4 文件）。
 推后本地 HEAD 全量为 **902 passed / 37 skipped**（本卡 81 + 并发会话补的快路径 2 条）。
 
 **tip（`7206c0c`）远端 CI：** Client Lint & Test ✅ / **Server Lint & Test ❌** / Android Compile & JVM Test ❌。两条红**均非本轮代码回归**，如实记录如下：

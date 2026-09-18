@@ -48,7 +48,15 @@ jobs:
           distribution: temurin
           java-version: 17
           cache: gradle
+      # 必须显式给 packages：action 的默认值是 `tools platform-tools`，而 Google 已
+      # 把旧的 `tools` 包从 SDK 仓库下架 → `sdkmanager tools` 报
+      # `Warning: Failed to find package 'tools'` 并 exit 1，action 当场中断，**后面
+      # 的 npm ci / gradle / 模拟器步骤一步都没执行**（2026-09-18 由作业日志定位：
+      # 该作业「长期红」的真因是这个，不是环境不可用）。只装 platform-tools 即可，
+      # 平台与 build-tools 由下一行按需安装。
       - uses: android-actions/setup-android@v3
+        with:
+          packages: platform-tools
       - run: sdkmanager "platforms;android-36" "build-tools;36.1.0"
       - run: npm ci
         working-directory: app
