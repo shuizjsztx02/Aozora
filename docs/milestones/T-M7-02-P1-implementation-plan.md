@@ -133,7 +133,7 @@
 ### 验证基线（每卡完成后必跑）
 
 ```
-cd server && python -m pytest tests/ -q          # 基线 930 passed + 37 skipped（2026-09-18 02f 交付后：02e 记录 926/927，02f 增量 +31 → 961；同树基线以「全量 − 本卡文件」复核为 930）
+cd server && python -m pytest tests/ -q          # 基线 930 passed + 37 skipped（2026-09-18 02f 交付后：02e 记录 926/927，02f 增量 +32 → 962；同树基线以「全量 − 本卡文件」复核为 930）
 ./gradlew :app:testDebugUnitTest --rerun-tasks   # 基线 394 tests / 0 failures / 1 skipped（2026-09-18 实测）。**gradlew 在仓库根目录**，须从仓库根运行（`cd app && ./gradlew` 会报 No such file）；不带 `--rerun-tasks` 时若源码未变会直接 UP-TO-DATE、拿不到真实数字
 cd app && npx vitest run                         # 基线 1107 passed（2026-09-18 实测）
 cd app && npx tsc --noEmit                       # 0 错
@@ -141,7 +141,7 @@ cd app && npx tsc --noEmit                       # 0 错
 
 > 原记录为 658 / 392 / 1104，与实测不符（2026-09-18 由 02c 复核修正）。数字以实测为准。
 >
-> **服务端基线推导（2026-09-18 复核）：** 659（02b 前既有）+ 54（02b）+ 95（02c）= 808（批次 1 交付时）；收口核查再各补用例（02b +6、02c +5）后为 **819**（= 659 + 60 + 100）；02d 再 +81（79 个 loop 用例 + 2 个 provider 用例，含 5 个 `reasoning_content` 回归）→ **900**；02e 再 +26（`test_ai_agent_approval.py`，另一条 02d 用例改名改写、数量不变）→ **926**，其后 02e 的收尾提交再 +1 → **927**；02f 再 +31（`test_ai_conversation.py`）→ **961**（该卡记录的同树基线为 930，与 927 的 3 例差额出自并发会话的在途改动，按下面的「多会话陷阱」以 `--collect-only` 为准）。
+> **服务端基线推导（2026-09-18 复核）：** 659（02b 前既有）+ 54（02b）+ 95（02c）= 808（批次 1 交付时）；收口核查再各补用例（02b +6、02c +5）后为 **819**（= 659 + 60 + 100）；02d 再 +81（79 个 loop 用例 + 2 个 provider 用例，含 5 个 `reasoning_content` 回归）→ **900**；02e 再 +26（`test_ai_agent_approval.py`，另一条 02d 用例改名改写、数量不变）→ **926**，其后 02e 的收尾提交再 +1 → **927**；02f 再 +32（`test_ai_conversation.py`）→ **962**（该卡记录的同树基线为 930，与 927 的 3 例差额出自并发会话的在途改动，按下面的「多会话陷阱」以 `--collect-only` 为准）。
 > ⚠️ **多会话陷阱：** 02b 提交信息里的「782 passed」**不是**本卡基线——当时 02c 的 `test_ai_tools.py` 正被并发会话在途写入（已 69 例），全量计数把它一并算进去了（713 + 69 = 782）。**在并发会话下跑全量套件，数字不可作为本卡基线**，须以 `pytest <本卡测试文件>` 的增量与 `--collect-only` 为准。02e 交付时全量为 **957**（= 926 + 并发会话 02f 在途的 31），同为此理。
 
 每卡只允许在基线上**增加**，不得减少。基线随卡推进更新，更新时须在本文件 §一 状态看板与 `production-execution-plan.md` 同步。
@@ -773,7 +773,7 @@ cd app && npx vitest run                                           # 1107 passed
   `server/src/modules/ai/conversation.py`（新建）、`server/src/modules/ai/service.py`、
   `server/src/common/config.py`、`server/src/modules/auth/service.py`、
   `infra/cleanup/account-deletion.py`、`server/.env.example`
-- 测试：`server/tests/test_ai_conversation.py`（新建，31 用例）、
+- 测试：`server/tests/test_ai_conversation.py`（新建，32 用例）、
   `server/tests/test_migrations.py`（表数 22 → 23 + 链式断言）
 - 文档：本文件 §一 / §四 / §五、`production-execution-plan.md` 的 T-M7-02f 行
 - **契约零改动**：`contracts/` 一行未动；`provider.py` / `tools.py` / `agent.py` /
@@ -782,8 +782,8 @@ cd app && npx vitest run                                           # 1107 passed
 **验证命令与结果：**
 
 ```
-cd server && python -m pytest tests/ -q                     # 961 passed, 37 skipped（同树基线 930；本卡 +31）
-cd server && python -m pytest tests/test_ai_conversation.py -q   # 31 passed
+cd server && python -m pytest tests/ -q                     # 962 passed, 37 skipped（同树基线 930；本卡 +32）
+cd server && python -m pytest tests/test_ai_conversation.py -q   # 32 passed
 cd server && python -m ruff check src/ tests/               # All checks passed
 cd app && npx tsc --noEmit                                  # 0 错
 cd app && npx vitest run                                    # 1107 passed
@@ -805,7 +805,7 @@ cd app && npx vitest run                                    # 1107 passed
 | 历史窗口无 UUID | `TestHistoryWindow::test_window_contains_no_uuid`（提案含 id、窗口不含），并在多轮用例里对两轮窗口重跑一次 |
 | 登出 / 删号清理会话行 | `TestCleanup`——登出后会话与事件均 0、**用量行必须留下**；未命中设备会话时一行不删；删号脚本清事件表；另两条元数据断言钉 FK 策略 |
 
-**回退实验（「改回旧写法 → 用例是否变红」实测）：17/17 全红**——窗口 N 截断、字符双限、
+**回退实验（「改回旧写法 → 用例是否变红」实测）：17/17 全红**（脚本一次跑完并逐处按 sha256 还原）——窗口 N 截断、字符双限、
 至少保留一轮、system 丢弃、reasoning_content 补齐、孤立 tool 拒绝、未知角色拒绝、会话
 归属校验、账本归属校验、轮数上限、token 上限、快路径行不计数、登出清理、purge 删事件、
 删号清单含事件表、(conversation_id, seq) 唯一索引、`ai_usage` 的 SET NULL。每次变异后按
