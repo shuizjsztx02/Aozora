@@ -28,7 +28,7 @@
 - **消息流里放的是最终结果**，不是增量：``ProviderResult`` 由 provider 的累加器
   拼出，与流式之前逐字相同，因此四条不变式与写路径一行未改。
 
-progress 之外不做 HTTP 传输（02g 的职责）；写操作走 §7.3/§7.4 的安全路径（02e）：
+不做 HTTP 传输（02g 的职责）；写操作走 §7.3/§7.4 的安全路径（02e）：
 写工具只产出提案**草案**，由本模块组装（补 ``proposalId`` / ``confidence`` /
 ``requiresConfirmation``）、校验（复用 ``AIService.validate_proposal``）、按策略
 放行或挂起，执行一律经 ``AIService.execute_proposal``（含 TOCTOU 重校验）——
