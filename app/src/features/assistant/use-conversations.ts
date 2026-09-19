@@ -32,7 +32,7 @@ import type { AssistantMessage } from './use-assistant'
  * 会话索引的窄接口 + 运行时能力探测（同 02h / 03b 的 `AgentStreamBridge`）：
  * 旧 APK 的命令表里没有这三条，探测为假时**整块降级**，不炸页面。
  */
-export interface ConversationBridge {
+interface ConversationBridge {
   listConversations(): Promise<AiConversationListResponse>
   renameConversation(id: string, title: string): Promise<AiConversationSummary>
   deleteConversation(id: string): Promise<{ success: boolean }>
@@ -57,7 +57,7 @@ export const DEGRADED_HINT: Record<DegradedReason, string> = {
 }
 
 /** 标题派生：服务端按首轮输入派生标题；本机缓存只能就地取第一条用户消息。 */
-export function titleFromMessages(messages: AssistantMessage[] | undefined): string {
+function titleFromMessages(messages: AssistantMessage[] | undefined): string {
   const first = messages?.find(m => m.role === 'user' && m.text.trim())
   if (!first) return '本机会话'
   const t = first.text.trim().replace(/\s+/g, ' ')
@@ -91,7 +91,6 @@ export interface UseConversationsResult {
   /** 当前活动会话 id（null = 本地会话桶）。消息区据此区分「新会话」与
    *  「这条服务端会话的消息不在本机」（正文跨设备同步归 P3 的 04e） */
   activeConversationId: string | null
-  refresh: () => void
   createConversation: () => void
   selectConversation: (id: string | null) => void
   renameConversation: (id: string, title: string) => Promise<void>
@@ -236,7 +235,6 @@ export function useConversations({
 
   return {
     rows, loading, degraded, error, busy: streaming, activeConversationId,
-    refresh: load,
     createConversation,
     selectConversation,
     renameConversation,
