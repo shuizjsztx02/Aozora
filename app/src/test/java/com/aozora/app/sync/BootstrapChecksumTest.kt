@@ -336,6 +336,31 @@ class BootstrapChecksumTest {
     }
 
     /**
+     * T-M7-01 收口（H1）跨语言钉死：实体名是"内容形如数字的字符串"时，两侧哈希
+     * 仍必须逐字节相同。输入与 [computeV2_matchesServerReferenceImplementation]
+     * 完全同形，只把 cloudGoal.name 换成 "2026" —— 这正是此前会分叉、且真实用户
+     * 极易撞上的形态（存钱目标就叫「2026」）。
+     *
+     * 同一个值也钉在服务端
+     * `server/tests/test_sync_cloud_entities.py::test_checksum_v2_numeric_looking_name_matches_client_reference`，
+     * 两端任一漂移都会红。
+     */
+    @Test
+    fun computeV2_numericLookingName_matchesServerReference() {
+        val hash = BootstrapChecksum.computeV2(
+            books = emptyList(), categories = emptyList(), accounts = emptyList(),
+            transactions = emptyList(), budgets = emptyList(),
+            savingsGoals = listOf(cloudGoal + ("name" to "2026")),
+            scheduledRules = listOf(cloudRule),
+            chatPersonas = listOf(cloudPersona), cursor = 42,
+        )
+        assertEquals(
+            "9ad2afa8d843d25892a4ac2284394f3b2f46c9414a1a4ef6f9a1c86e9ccb3042",
+            hash,
+        )
+    }
+
+    /**
      * 三实体为空时 v2 必须与 legacy 完全相等 —— 这是"旧客户端不受影响"的充分条件：
      * 未上云数据的账号，服务端两个 checksum 值相同，客户端用哪个都一样。
      */

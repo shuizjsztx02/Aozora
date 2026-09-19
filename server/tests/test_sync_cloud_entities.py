@@ -788,6 +788,67 @@ class TestCloudEntityBootstrap:
             books=[], categories=[], accounts=[], transactions=[], budgets=[], cursor=5,
         )
 
+    def test_checksum_v2_numeric_looking_name_matches_client_reference(self):
+        """T-M7-01 收口（H1）跨语言钉死：实体名是"内容形如数字的字符串"时两侧哈希
+        必须逐字节相同。
+
+        客户端 `json.dumps` 等价实现此前**靠内容猜类型**（"2026" 出裸数字），于是
+        「存钱目标叫 2026」这类再普通不过的数据会让 bootstrap checksum 恒不等 →
+        客户端判 RETRYABLE 死循环。本用例把服务端对同一输入的值钉死；同一个值也钉在
+        `app/src/test/java/com/aozora/app/sync/BootstrapChecksumTest.kt::
+        computeV2_numericLookingName_matchesServerReference`，两端任一漂移都会红。
+        """
+        goal = {
+            "id": "11111111-1111-4111-8111-111111111111",
+            "name": "2026",
+            "target_cents": 500_000,
+            "current_cents": 120_000,
+            "icon": None,
+            "period_value": 6,
+            "period_unit": "month",
+            "version": 2,
+            "created_at": "2026-09-04T12:00:00+00:00",
+            "updated_at": "2026-09-04T12:00:00+00:00",
+            "archived_at": None,
+        }
+        rule = {
+            "id": "22222222-2222-4222-8222-111111111111",
+            "type": "expense",
+            "name": "房租",
+            "amount_cents": 350_000,
+            "book_id": "b1",
+            "category_id": "c1",
+            "account_id": None,
+            "include_in_budget": True,
+            "note": "",
+            "repeat": "monthly",
+            "start_date": "2026-01-01",
+            "end_date": None,
+            "enabled": True,
+            "last_run_date": "2026-09-01",
+            "run_hour": 9,
+            "run_minute": 30,
+            "version": 5,
+            "created_at": "2026-09-04T12:00:00+00:00",
+            "updated_at": "2026-09-04T12:00:00+00:00",
+            "archived_at": None,
+        }
+        persona = {
+            "id": "33333333-3333-4333-8333-111111111111",
+            "name": "小贝",
+            "avatar": None,
+            "persona": "hello",
+            "version": 1,
+            "created_at": "2026-09-04T12:00:00+00:00",
+            "updated_at": "2026-09-04T12:00:00+00:00",
+            "archived_at": None,
+        }
+        assert compute_bootstrap_checksum_v2(
+            books=[], categories=[], accounts=[], transactions=[], budgets=[],
+            savings_goals=[goal], scheduled_rules=[rule], chat_personas=[persona],
+            cursor=42,
+        ) == "9ad2afa8d843d25892a4ac2284394f3b2f46c9414a1a4ef6f9a1c86e9ccb3042"
+
 
 # ---------------------------------------------------------------------------
 # End-to-end: device migration round trip
