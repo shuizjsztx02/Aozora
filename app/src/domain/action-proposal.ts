@@ -4,6 +4,13 @@
  * 依据 APP-CONTEXT.md §6.3 ActionProposal 最小契约。
  * 与 contracts/action-proposal/schema.json 一一对应。
  *
+ * T-M7-05a 起本文件承载**两条车道**：
+ * - v1（本文件上半部，`validateProposal`）：固定 action 集，行为一字未改；
+ * - v2（本文件下半部，`validateProposalV2`）：op 注册表 + 通用 payload，
+ *   对应 `contracts/action-proposal/schema-v2.json`。
+ * 车道判定本身是「`contractVersion` 字段在场与否」——v1 关闭 additionalProperties
+ * 且没有该字段，所以 v2 提案不可能被误读成 v1。`validateProposalAny` 是双读入口。
+ *
  * 约束：
  * - 校验器为纯函数，不写任何存储
  * - 校验器不构造 MoneyCents branded type
@@ -14,6 +21,7 @@ import { isValid as isValidMoney } from './money'
 import { parseBizDate } from './date'
 import type { TransactionType } from './types'
 import schema from '../../../contracts/action-proposal/schema.json'
+import schemaV2 from '../../../contracts/action-proposal/schema-v2.json'
 
 // ─── 类型定义 ───
 
@@ -225,4 +233,114 @@ function validateTransactionItem(
       errors.push(err(`${prefix}.accountId`, 'account is not authorized'))
     }
   }
+}
+
+// ─── v2 车道（T-M7-05a） ───
+
+/** v1 提案没有该字段；v2 提案必须有且等于 2。 */
+export const PROPOSAL_CONTRACT_VERSION_V2 = 2
+
+/** v2 op 注册表。**唯一来源是 `schema-v2.json` 的 action 枚举**，此处不另抄一份。 */
+export const V2_OPS: ReadonlySet<string> = new Set<string>(schemaV2.properties.action.enum)
+
+export interface ActionProposalV2 {
+  contractVersion: typeof PROPOSAL_CONTRACT_VERSION_V2
+  proposalId: string
+  /** op 注册表成员（全量 CRUD 的规范 id）。v1 动作名不是成员。 */
+  action: string
+  confidence: number
+  requiresConfirmation: boolean
+  message: string
+  warnings: string[]
+  /** op 的参数（含服务端确定性解析出的 id）。字段形状由 op 的工具注册表拥有。 */
+  payload: Record<string, unknown>
+}
+
+/**
+ * 校验 v2 提案——**信封级**：车道字段、op 成员资格、通用字段形状。
+ *
+ * **不看 `payload` 内部**：payload 的字段形状由 op 自己的工具注册表
+ * （`server/src/modules/ai/tools.py` 的 `parameters`）拥有，契约不复制第二份
+ * 定义（复制出来的那份必然与工具漂移）。因此**结构通过不是执行许可**——
+ * payload 级的授权（分类 / 账户 / 目标是否属于当前用户与账本）由服务端在
+ * 组装与执行时施加，客户端无权也不该解释 payload。
+ */
+export function validateProposalV2(input: unknown): ValidationResult {
+  const errors: ValidationError[] = []
+
+  if (input === null || input === undefined || typeof input !== 'object' || Array.isArray(input)) {
+    return { valid: false, errors: [err('$', 'proposal must be a non-null object')] }
+  }
+
+  const obj = input as Record<string, unknown>
+  for (const key of Object.keys(obj)) {
+    if (!Object.hasOwn(schemaV2.properties, key)) errors.push(err(key, 'unknown field'))
+  }
+
+  // contractVersion —— 车道字段本身也要校验：显式写成 1 的「v2 提案」不是 v2 提案
+  if (obj.contractVersion !== PROPOSAL_CONTRACT_VERSION_V2) {
+    errors.push(err('contractVersion', 'must be 2'))
+  }
+
+  // proposalId — 与 v1 同规则（上限 64 与 DB 列对齐）
+  if (typeof obj.proposalId !== 'string' || obj.proposalId.length === 0) {
+    errors.push(err('proposalId', 'required non-empty string'))
+  } else if (obj.proposalId.length > 64) {
+    errors.push(err('proposalId', 'must be at most 64 characters'))
+  }
+
+  // action — op 注册表成员资格
+  if (typeof obj.action !== 'string' || !V2_OPS.has(obj.action)) {
+    errors.push(err('action', 'must be a v2 op (see contracts/action-proposal/schema-v2.json)'))
+  }
+
+  // confidence — 与 v1 同规则
+  if (typeof obj.confidence !== 'number' || Number.isNaN(obj.confidence) ||
+      obj.confidence < 0 || obj.confidence > 1) {
+    errors.push(err('confidence', 'must be a number in [0, 1]'))
+  }
+
+  // requiresConfirmation / message / warnings — 与 v1 同规则
+  if (typeof obj.requiresConfirmation !== 'boolean') {
+    errors.push(err('requiresConfirmation', 'required boolean'))
+  }
+  if (typeof obj.message !== 'string') {
+    errors.push(err('message', 'required string'))
+  }
+  if (!Array.isArray(obj.warnings) || !obj.warnings.every((w) => typeof w === 'string')) {
+    errors.push(err('warnings', 'required array of strings'))
+  }
+
+  // payload — 一律必填；无参数 op 写 {}（不设「可省略」特例，规则才不必按 op 分支）
+  if (obj.payload === null || obj.payload === undefined ||
+      typeof obj.payload !== 'object' || Array.isArray(obj.payload)) {
+    errors.push(err('payload', 'required object (use {} for ops without arguments)'))
+  }
+
+  return { valid: errors.length === 0, errors }
+}
+
+export type ProposalContractVersion = 1 | 2
+
+export interface DualReadResult extends ValidationResult {
+  /** 实际走到的车道；输入不是对象时为 null。 */
+  contractVersion: ProposalContractVersion | null
+}
+
+/**
+ * 双读入口：按 `contractVersion` 在场与否选车道。
+ *
+ * 客户端只会用这一个入口——它可能收到 v1（服务端为一个不认识 v2 的旧客户端
+ * 降级产出）也可能收到 v2，两种都必须能判定。`context` 只对 v1 车道有意义
+ * （v2 的 payload 授权在服务端，见 `validateProposalV2`）。
+ */
+export function validateProposalAny(input: unknown, context?: ProposalValidationContext): DualReadResult {
+  if (input === null || input === undefined || typeof input !== 'object' || Array.isArray(input)) {
+    return { ...validateProposal(input, context), contractVersion: null }
+  }
+
+  if (!Object.hasOwn(input as Record<string, unknown>, 'contractVersion')) {
+    return { ...validateProposal(input, context), contractVersion: 1 }
+  }
+  return { ...validateProposalV2(input), contractVersion: 2 }
 }

@@ -1,0 +1,19 @@
+{
+  "contractVersion": 2,
+  "proposalId": "prop-v2-bad-07",
+  "action": "transaction_add",
+  "confidence": 0.95,
+  "requiresConfirmation": false,
+  "transactions": [
+    {
+      "type": "expense",
+      "amountCents": 3500,
+      "categoryId": "cat-food",
+      "bizDate": "2026-09-03",
+      "note": "午餐"
+    }
+  ],
+  "message": "已解析午餐支出 ¥35.00",
+  "warnings": [],
+  "payload": {}
+}

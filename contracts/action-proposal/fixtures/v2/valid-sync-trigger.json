@@ -1,0 +1,10 @@
+{
+  "contractVersion": 2,
+  "proposalId": "prop-v2-006",
+  "action": "sync_trigger",
+  "confidence": 1,
+  "requiresConfirmation": false,
+  "message": "正在同步…",
+  "warnings": [],
+  "payload": {}
+}

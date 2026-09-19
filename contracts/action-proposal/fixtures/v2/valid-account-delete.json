@@ -1,0 +1,12 @@
+{
+  "contractVersion": 2,
+  "proposalId": "prop-v2-007",
+  "action": "account_delete",
+  "confidence": 0.99,
+  "requiresConfirmation": true,
+  "message": "这会永久删除账号与全部数据，需要二次确认",
+  "warnings": ["不可撤销", "进行中的导出任务会被一并取消"],
+  "payload": {
+    "deletionToken": "tok-1"
+  }
+}

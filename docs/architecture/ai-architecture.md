@@ -6,9 +6,11 @@ AI 只返回通过 JSON Schema 校验的 ActionProposal。金额、日期、权�
 
 ## ActionProposal 契约
 
-- **JSON Schema：** `contracts/action-proposal/schema.json`（Draft-07，版本化 URL `$id`）
-- **TypeScript 类型 + 校验器：** `app/src/domain/action-proposal.ts`
-- **Fixtures：** `contracts/action-proposal/fixtures/`（valid + invalid 正反例）
+- **JSON Schema：** `contracts/action-proposal/schema.json`（v1，Draft-07，版本化 URL `$id`）与 `contracts/action-proposal/schema-v2.json`（v2，T-M7-05a 新增；v1 文件一字未改，见下文「ActionProposal v2 契约」）
+- **TypeScript 类型 + 校验器：** `app/src/domain/action-proposal.ts`（`validateProposal` = v1，`validateProposalV2` = v2，`validateProposalAny` = 双读入口）
+- **Python 校验器：** `server/src/modules/ai/validator.py`（`validate_proposal` / `validate_proposal_v2` / `validate_proposal_any`）
+- **v1 ↔ v2 动作名映射：** `contracts/action-proposal/v1-action-aliases.json`
+- **Fixtures：** `contracts/action-proposal/fixtures/`（v1 正反例）+ `fixtures/v2/`（v2 正反例）
 - **变更规则：** 协议修改必须先更新本文件和 `contracts/action-proposal/schema.json`，并新增 ADR 或协议版本号
 
 ## interpret → validate → execute 流水线（R-M4-03 契约澄清）
@@ -28,6 +30,142 @@ AI 只返回通过 JSON Schema 校验的 ActionProposal。金额、日期、权�
 - 未知字段必须拒绝；金额上限为 9007199254740991 分；出现 transactions 时必须非空。
 - bizDate 的 `format: date` 必须以断言模式验证完整公历日期，不能只检查正则或把 format 当注释。此为既有 v1 约束修复，不新增动作或改变合法提案字段。
 - `validateProposal(input)` 仅作结构校验；执行前传入 `ProposalValidationContext`（当前账本允许的 categoryIds/accountIds），拒绝未解析分类和未授权 ID。上下文来自可信 repository/API，不能取自模型输出。M2/M4 接线前不能把结构通过当作执行许可。
+
+## ActionProposal v2 契约（T-M7-05a）
+
+**v1 一字未改。** `contracts/action-proposal/schema.json` 保持原样，v2 是**新增文件** `contracts/action-proposal/schema-v2.json`——旧 APK 里内嵌的是 v1 schema，新增文件对它们不可见，所以「旧客户端行为不变」是文件布局本身保证的，不靠运行时判断。
+
+### 为什么要有 v2
+
+v1 是**固定 action 集**（`add_tx` / `add_tx_batch` / `query` / `report` / `create_category` / `config` / `chat`），字段（`transactions`）在根上。P4 要把 §3.2 的全量 CRUD 映射成工具，这套形状立刻不够用：
+
+| v1 的问题 | v2 的解法 |
+|---|---|
+| 每加一个能力＝改一次契约（枚举 + 字段 + 三方校验器 + fixtures） | **op 注册表 + 通用 `payload`**：新能力＝注册表加一行，信封不变 |
+| `config` 一个 action 里塞了 6 个子操作（`book.create` / `account.create` / `budget.create` / `savings.create` / `default.book_set` / `default.account_set`），子操作只在 prompt 里定义、无跨语言校验 | 6 个子操作升为 6 个**一等 op**，各自可校验、可归属 |
+| 字段形状写死在契约里，与工具注册表的 `parameters` 是两份 | payload 形状**由工具注册表拥有**，契约不复制第二份 |
+
+### 两条车道与车道判定
+
+```jsonc
+// v1（旧客户端、旧提案）：没有 contractVersion 字段
+{ "proposalId": "...", "action": "add_tx", "transactions": [ ... ], ... }
+
+// v2：必须有 contractVersion，动作名必须是注册表成员，参数全在 payload 里
+{ "contractVersion": 2, "proposalId": "...", "action": "transaction_add",
+  "payload": { "transactions": [ ... ] }, ... }
+```
+
+**判定＝`contractVersion` 在场与否，不需要猜。** v1 关闭 `additionalProperties` 且没有这个字段，所以：v1 提案**带上**它就是无效 v1，v2 提案**没有**它就是无效 v2。两条车道因此互斥且可判定。TS 侧 `validateProposalAny` / Python 侧 `validate_proposal_any` 是双读入口，返回 `contractVersion`（`1` / `2` / 非对象时 `null`）。
+
+### v2 信封字段（`schema-v2.json`）
+
+| 字段 | 必填 | 规则 |
+|---|---|---|
+| `contractVersion` | ✓ | 常量 `2` |
+| `proposalId` | ✓ | 非空字符串，≤ 64（与 DB 列宽对齐，同 v1） |
+| `action` | ✓ | **op 注册表成员**（下表）。v1 动作名不是成员——别名关系见「v1 ↔ v2 动作名」 |
+| `confidence` | ✓ | `[0, 1]`，同 v1 |
+| `requiresConfirmation` | ✓ | 布尔。**这是策略旋钮**：注册表成员身份不代表必须出确认卡（`sync_trigger` 可自动放行），但高风险 op（`account_delete`）必须为 `true` |
+| `message` | ✓ | 面向用户的自然语言回复 |
+| `warnings` | ✓ | 字符串数组 |
+| `payload` | ✓ | 对象。**无参数 op 写 `{}`**——不设「可省略」特例，规则才不必按 op 分支 |
+
+根上**不新增**任何其它字段；`payload` 之外一律 `additionalProperties: false`（未知字段拒绝，同 v1 的严格口径）。
+
+### op 注册表（全量 CRUD）
+
+命名＝ `域_动词`（下划线，与工具名同构；工具名带点号会让 provider 直接 400，见 02c 收口）。**出处**列是该 op 背后的真实能力面（服务端路由或桥命令），**归属卡**是 P4 里实现它的卡。
+
+| op | 域 | 出处 | 归属卡 |
+|---|---|---|---|
+| `transaction_add` | 记账 | `POST /transactions`（单条与批量是同一个 op，差别只在 `payload.transactions` 条数） | 05b |
+| `transaction_update` | 记账 | `PATCH /transactions/{id}` | 05b |
+| `transaction_delete` | 记账 | `DELETE /transactions/{id}`（软删） | 05b |
+| `category_create` | 记账 | `POST /categories` | 05b |
+| `category_update` | 记账 | `PATCH /categories/{id}` | 05b |
+| `category_archive` | 记账 | `DELETE /categories/{id}`（`archive_category`） | 05b |
+| `account_create` | 账户账本 | `POST /accounts` | 05b |
+| `account_update` | 账户账本 | `PATCH /accounts/{id}` | 05b |
+| `account_archive` | 账户账本 | `DELETE /accounts/{id}`（`archive_account`） | 05b |
+| `book_create` | 账户账本 | `POST /books` | 05b |
+| `book_update` | 账户账本 | `PATCH /books/{id}` | 05b |
+| `book_delete` | 账户账本 | `DELETE /books/{id}` | 05b |
+| `meta_set` | 账户账本 / 角色 / 用户设定 | `meta.set`（按 payload 的 key 分默认账本 / 默认账户 / 当前角色 / 小组件配置 / 用户画像五个域） | 05b / 05c / 05d |
+| `budget_set` | 预算存钱 | `PUT /budgets/{period}`（UPSERT） | 05c |
+| `budget_set_category` | 预算存钱 | `PUT /budgets/{period}/category/{id}`（UPSERT） | 05c |
+| `budget_delete` | 预算存钱 | 桥 `budget.delete` | 05c |
+| `savings_create` | 预算存钱 | 桥 `savings.insert`（实体已上云，T-M7-01） | 05c |
+| `savings_update` | 预算存钱 | 桥 `savings.update` | 05c |
+| `savings_archive` | 预算存钱 | 桥 `savings.archive` | 05c |
+| `scheduled_create` | 定时 | 桥 `scheduled.insert`（已上云） | 05c |
+| `scheduled_update` | 定时 | 桥 `scheduled.update` | 05c |
+| `scheduled_archive` | 定时 | 桥 `scheduled.archive` | 05c |
+| `persona_create` | 角色 | 桥 `persona.insert`（已上云） | 05c |
+| `persona_update` | 角色 | 桥 `persona.update` | 05c |
+| `persona_archive` | 角色 | 桥 `persona.archive` | 05c |
+| `persona_switch` | 角色 | 桥 `persona.*` 的当前角色切换（写入侧即 `meta.set(当前角色)`） | 05c |
+| `reminder_set` | 提醒 | 桥 `reminder.set`（**执行位置＝设备**，05f 接线） | 05f |
+| `export_create` | 导出 | `POST /exports` | 05d |
+| `feedback_submit` | 反馈 | `POST /telemetry/feedback` | 05d |
+| `consent_record` | 隐私 | `POST /consent` | 05d |
+| `auth_update_profile` | 安全账号 | 桥 `auth.updateProfile` | 05d |
+| `account_deletion_request` | 安全账号 | `POST /deletion/*`（申请删除令牌） | 05d |
+| `account_delete` | 安全账号 | `DELETE /deletion/me`（**最高危：`requiresConfirmation` 必须为 true，且不得绕过既有删号流程**） | 05d |
+| `sync_trigger` | 同步 | 桥 `sync.trigger` | 05d |
+
+**不在注册表里的，是**读操作（`transaction_list`、`budget_status`、`/stats/*`…：读工具的结果直接回喂模型，**不是提案**）、纯对话（v1 的 `chat`）与**设备指令**（见下）。
+
+### v1 ↔ v2 动作名（`v1-action-aliases.json`）
+
+别名表是唯一映射来源，`server/src/modules/ai/validator.py` 的 `canonical_op()` 是它的可调用形态——**每加一个 v1 名字就要在这里表态**（有规范 op 或显式 `null`）。
+
+| v1 action | v2 规范 op | 说明 |
+|---|---|---|
+| `add_tx` | `transaction_add` | |
+| `add_tx_batch` | `transaction_add` | 批量与单条合并成一个 op |
+| `create_category` | `category_create` | |
+| `config` | 无单一对应 | 6 个子操作各归各：`book.create` → `book_create`、`account.create` → `account_create`、`budget.create` → `budget_set_category`、`savings.create` → `savings_create`、`default.book_set` / `default.account_set` → `meta_set` |
+| `query` / `report` | 无 | 读操作，v2 里不是提案 |
+| `chat` | 无 | 纯对话 |
+
+**两套名字不重叠**（v1 枚举 ∩ v2 枚举 = ∅），所以同一串字符不会在两条车道上含义不同；这条由用例钉住。
+
+### 版本协商与降级
+
+**由客户端声明驱动，服务端无全局开关。**
+
+| 环节 | 规则 |
+|---|---|
+| 声明 | 新客户端在 `POST /ai/agent` 上带 `proposal_contract_version: 2`。**字段缺省＝1**（旧 APK 什么都不带） |
+| 产出 | 按声明选车道：v1 → 只产出 v1 可承载的 op（三个有别名者 + `config` 那条本地链路）；v2 → 产出 v2 信封与规范 op |
+| **v1 车道产不出 v2-only op** | 这是**实现约束，不是建议**：loop 不得把 v2 提案塞给 v1 客户端（旧校验器会整条判无效，卡片不出、写入静默失败）。05b 起新增的工具在 v1 车道上要么不可用、要么降级为一句说明 |
+| 回退 | 不产 v2 就是回退——服务端按声明降级即可，**无数据迁移、无契约文件替换**；旧 APK 内嵌 v1 schema，不受影响 |
+| 灰度 | 声明字段天然按客户端版本灰度：新 APK 走 v2，未升级的走 v1，服务端不需要第二套开关 |
+
+> **接线状态（2026-09-19，诚实记录）：** 05a 交付的是契约三件套（schema / TS 校验器 / Python 校验器）、fixtures 与判定逻辑本身。`/ai/validate` 与 `/ai/execute` 目前仍只走 v1 车道（`execute_proposal` 只认 `add_tx` / `add_tx_batch`），**`proposal_contract_version` 字段也还没有读取方**——服务端接线随首个产出 v2 提案的卡（**05b**）落地。在此之前不产出任何 v2 提案，因此这段空档不会造成旧客户端行为变化。
+
+### payload 的所有权（本契约最重要的一处取舍）
+
+**v2 只校验信封，不校验 payload 内部。** 字段形状由 op 自己的工具注册表条目拥有（`tools.py` 的 `parameters`，已是 Draft-07）。
+
+理由：把 op 的字段再写进契约＝给同一件事造第二个事实源，两份必然漂移；而工具注册表本来就随工具走，是唯一会与实现同步的那一份。
+
+**代价（已知并接受）：** 客户端不做 payload 级授权。**结构通过不是执行许可**——payload 里的分类 / 账户 / 目标是否属于当前用户与账本，由服务端在**组装与执行时**施加（同 §7.4 的 TOCTOU 重校验）。这与 v1 的 `ProposalValidationContext` 并不冲突：v1 的上下文校验存在，是因为 v1 的提案由客户端组装（ADR-003）；v2 的提案由服务端 loop 组装。
+
+**fixtures 里的 payload 内容只是信封用法的示例，不是字段契约**——判据在工具注册表。
+
+### 设备能力通道不是 ActionProposal
+
+架构 §4.3 的设备能力通道（刷新小组件、触感、分享、权限申请、语音转写、图片选择、图标选择）走的是 `device_request` 事件与上行回传，**不产生提案**：它们是「任务里的设备动作」，不是「待审批的写库」。
+
+只有 **`reminder_set`** 两头都沾——它写的是用户的提醒配置（因此要过审批门，进注册表），执行体在设备上（因此 05f 接客户端执行器）。op 的执行位置由**客户端按 op 分派**（05f 的分派表），不写进信封。
+
+### 三条铁律在 v2 下的落点（不放松）
+
+1. **模型永不输出 UUID** —— payload 里出现的 id 是**服务端确定性解析的产物**，不是模型输出；回喂给模型前必须剥掉（02c 边界不变）。
+2. **金额与统计由确定性代码计算** —— payload 只接受原始参数，模型不给算术结论。
+3. **写库必经校验与审批门** —— 客户端确认门的四值（`allowed-once` / `rejected` / `cancelled` / `unavailable`）与 02e 的挂起——放行路径在 v2 下**逐字不变**；v2 改的是提案的形状，不是安全门。
 
 ## 会话管理端点（T-M7-03a）
 

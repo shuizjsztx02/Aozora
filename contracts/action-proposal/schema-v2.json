@@ -1,0 +1,93 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "https://aozora.app/contracts/action-proposal/v2.json",
+  "title": "ActionProposalV2",
+  "description": "Aozora 动作提案契约 v2（T-M7-05a）。v1（schema.json）一字未改，两条车道靠 contractVersion 在场与否区分：v1 提案没有该字段，v2 提案必须有且等于 2。v2 用「op 注册表 + 通用 payload」代替 v1 的固定 action 集，使全量 CRUD 不必每加一个能力就改契约。payload 的字段形状由 op 自己的工具注册表（server/src/modules/ai/tools.py 的 parameters）拥有，本契约只做信封级校验——不复制第二份字段定义，避免与工具注册表漂移。v1 兼容与 v1↔v2 动作名映射见 v1-action-aliases.json。",
+  "type": "object",
+  "required": [
+    "contractVersion",
+    "proposalId",
+    "action",
+    "confidence",
+    "requiresConfirmation",
+    "message",
+    "warnings",
+    "payload"
+  ],
+  "additionalProperties": false,
+  "properties": {
+    "contractVersion": {
+      "const": 2,
+      "description": "契约版本。v2 提案必须为 2；v1 提案没有本字段（v1 schema 关闭 additionalProperties，出现即被 v1 车道拒绝），因此在场与否就是车道判定本身。"
+    },
+    "proposalId": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 64,
+      "description": "提案唯一标识；上限 64 与 ai_proposals 的列宽对齐"
+    },
+    "action": {
+      "type": "string",
+      "enum": [
+        "transaction_add",
+        "transaction_update",
+        "transaction_delete",
+        "category_create",
+        "category_update",
+        "category_archive",
+        "account_create",
+        "account_update",
+        "account_archive",
+        "book_create",
+        "book_update",
+        "book_delete",
+        "budget_set",
+        "budget_set_category",
+        "budget_delete",
+        "savings_create",
+        "savings_update",
+        "savings_archive",
+        "scheduled_create",
+        "scheduled_update",
+        "scheduled_archive",
+        "persona_create",
+        "persona_update",
+        "persona_archive",
+        "persona_switch",
+        "meta_set",
+        "reminder_set",
+        "export_create",
+        "feedback_submit",
+        "consent_record",
+        "auth_update_profile",
+        "account_deletion_request",
+        "account_delete",
+        "sync_trigger"
+      ],
+      "description": "op 注册表成员（全量 CRUD 的规范 id，domain_verb 下划线命名，与工具名同构）。v1 的动作名（add_tx 等）不是本枚举成员——别名映射见 v1-action-aliases.json，v1 动作只能出现在 v1 车道。"
+    },
+    "confidence": {
+      "type": "number",
+      "minimum": 0,
+      "maximum": 1,
+      "description": "置信度 [0, 1]"
+    },
+    "requiresConfirmation": {
+      "type": "boolean",
+      "description": "是否需要用户确认。这是策略旋钮：注册表成员身份不代表必须出确认卡（如 sync_trigger 可自动放行），但高风险 op（account_delete）必须为 true。"
+    },
+    "message": {
+      "type": "string",
+      "description": "面向用户的自然语言回复"
+    },
+    "warnings": {
+      "type": "array",
+      "items": { "type": "string" },
+      "description": "警告列表"
+    },
+    "payload": {
+      "type": "object",
+      "description": "op 的参数（含服务端确定性解析出的 id）。无参数 op 写空对象 {}——payload 一律必填，不设「可省略」的特例。字段形状由 op 的工具注册表拥有，本契约不校验字段。"
+    }
+  }
+}

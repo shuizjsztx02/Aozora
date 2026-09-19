@@ -1,0 +1,14 @@
+{
+  "contractVersion": 2,
+  "proposalId": "prop-v2-005",
+  "action": "savings_create",
+  "confidence": 0.9,
+  "requiresConfirmation": true,
+  "message": "新建存钱目标「旅行基金」，目标 ¥8,000，截止 2026-12-31",
+  "warnings": [],
+  "payload": {
+    "name": "旅行基金",
+    "targetAmountCents": 800000,
+    "deadline": "2026-12-31"
+  }
+}

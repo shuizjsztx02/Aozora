@@ -1,0 +1,13 @@
+{
+  "contractVersion": 2,
+  "proposalId": "prop-v2-bad-03",
+  "action": "budget_frobnicate",
+  "confidence": 0.9,
+  "requiresConfirmation": true,
+  "message": "设置月度预算 ¥1,500",
+  "warnings": [],
+  "payload": {
+    "period": "2026-09",
+    "amountCents": 150000
+  }
+}

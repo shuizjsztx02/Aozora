@@ -1,0 +1,13 @@
+{
+  "contractVersion": 2,
+  "proposalId": "prop-v2-004",
+  "action": "meta_set",
+  "confidence": 0.92,
+  "requiresConfirmation": false,
+  "message": "已把默认账本切到「生活」",
+  "warnings": [],
+  "payload": {
+    "key": "default_book",
+    "bookId": "book-life"
+  }
+}

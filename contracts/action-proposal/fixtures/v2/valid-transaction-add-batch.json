@@ -1,0 +1,26 @@
+{
+  "contractVersion": 2,
+  "proposalId": "prop-v2-002",
+  "action": "transaction_add",
+  "confidence": 0.91,
+  "requiresConfirmation": true,
+  "message": "已解析 2 笔支出",
+  "warnings": [],
+  "payload": {
+    "transactions": [
+      {
+        "type": "expense",
+        "amountCents": 3500,
+        "categoryId": "cat-food",
+        "bizDate": "2026-09-03",
+        "note": "午餐"
+      },
+      {
+        "type": "expense",
+        "amountCents": 1200,
+        "bizDate": "2026-09-03",
+        "note": "地铁"
+      }
+    ]
+  }
+}

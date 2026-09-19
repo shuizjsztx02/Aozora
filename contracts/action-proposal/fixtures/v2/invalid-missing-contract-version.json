@@ -1,0 +1,12 @@
+{
+  "proposalId": "prop-v2-bad-01",
+  "action": "budget_set",
+  "confidence": 0.9,
+  "requiresConfirmation": true,
+  "message": "设置月度预算 ¥1,500",
+  "warnings": [],
+  "payload": {
+    "period": "2026-09",
+    "amountCents": 150000
+  }
+}

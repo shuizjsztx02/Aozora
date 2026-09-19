@@ -1,0 +1,12 @@
+{
+  "description": "v1 action → v2 规范 op 的别名表（ActionProposal 契约 v1 ↔ v2 的唯一映射来源）。值为 null 表示该 v1 action 在 v2 里没有对应提案：query / report 是读操作（v2 里由读工具结果承载，不是提案）、chat 是纯对话、config 是客户端本地配置链路（v1 的 6 个子操作分别对应 v2 的 book_create / account_create / budget_set_category / savings_create / meta_set，见 ai-architecture.md 的映射表）。v1 的 add_tx 与 add_tx_batch 映射到同一个 v2 op：单条与批量在 v2 里是同一个操作，差别只在 payload.transactions 的条数。",
+  "aliases": {
+    "add_tx": "transaction_add",
+    "add_tx_batch": "transaction_add",
+    "query": null,
+    "report": null,
+    "create_category": "category_create",
+    "config": null,
+    "chat": null
+  }
+}

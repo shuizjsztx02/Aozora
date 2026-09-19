@@ -947,6 +947,7 @@ app/src/
 | D-PROD-12 | 已确认（2026-09-16） | AI Agent 编排位置 | **服务端 Agent Loop + SSE 流式 + 客户端瘦渲染**，配合设备能力通道覆盖设备类能力；三实体（savings/scheduled/personas）上云为硬前提；写操作安全边界不变（ActionProposal + 审批四值） | M7 |
 | D-PROD-13 | 已确认（2026-09-18） | Agent 路径的 provider 与推理策略 | agent 路径引入 **DeepSeek `deepseek-flash`**（1M 上下文、tool calls、`reasoning_effort` 三档），现有快路径暂留 DashScope `qwen3.7-flash`；推理按任务复杂度分档（简单关闭、中等 `low`、复杂 `high`，loop 内按 Step 数自动升级）；**会话事件日志记录完整数据**（`security.md` 相应条款放宽，token/票据/账本明细禁令不变）；离线能力收窄为「仅记账可用」**已确认接受**。详见 `docs/adr/ADR-007-deepseek-provider.md` | M7 |
 | D-PROD-14 | 已确认（2026-09-19） | 会话正文的跨设备呈现方式 | **正文按需重建，不做双向同步实体**：切到本机无投影的服务端会话时从**服务端事件日志**（`GET /ai/conversations/{id}/events`）重建投影 B；有投影时按落盘的日志游标**增量补齐尾部**，游标未知则原样保留。客户端**从不把投影写回**服务端，因此**不存在冲突策略**。零新协议、零新端点、零服务端改动。「仅摘要同步」被否决（摘要无生产者，且只覆盖超窗轮次）。已知代价：重建结果不含历史只读记账卡（`approval_request` 生产者未接，未指派）。详见 `docs/adr/ADR-008-conversation-cross-device.md` | M7 |
+| D-PROD-15 | 已确认（2026-09-19） | ActionProposal v2 的契约版本策略 | **新增文件而非就地改写**：v1 的 `schema.json` 一字不改，v2 是新文件 `schema-v2.json`；**车道判定＝ `contractVersion` 字段在场与否**（v1 关闭 additionalProperties 且无此字段，两条车道互斥且可判定）；v2 用 **op 注册表 + 通用 payload**，**payload 的字段形状由 op 的工具注册表拥有、契约不复制第二份**（代价：客户端不做 payload 级授权，结构通过不是执行许可）；**版本协商由客户端声明驱动**（`/ai/agent` 的 `proposal_contract_version`，缺省 1），服务端无全局开关，回退＝不产 v2。服务端接线与「v1 车道产不出 v2-only op」的落地归 05b。详见 `docs/adr/ADR-009-action-proposal-v2-contract-versioning.md` | M7 |
 
 后续决策变更记录格式：
 

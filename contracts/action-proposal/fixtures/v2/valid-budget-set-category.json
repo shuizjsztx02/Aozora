@@ -1,0 +1,14 @@
+{
+  "contractVersion": 2,
+  "proposalId": "prop-v2-003",
+  "action": "budget_set_category",
+  "confidence": 0.88,
+  "requiresConfirmation": true,
+  "message": "把「餐饮」的月度预算设为 ¥1,500",
+  "warnings": ["覆盖 2026-09 已有的分类预算"],
+  "payload": {
+    "period": "2026-09",
+    "categoryId": "cat-food",
+    "amountCents": 150000
+  }
+}
