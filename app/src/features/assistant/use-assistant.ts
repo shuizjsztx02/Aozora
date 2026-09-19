@@ -44,10 +44,11 @@
  *     用户不可见）。
  *   - **职责边界：** 不做步骤卡片流、不做多会话、不做模式选择（归 P2 / T-M7-03）。
  *     三个互斥瞬时态（activeProposal / pendingOp / pendingConfig）的约束不变。
- *   - **桥命令由 T-M7-02h 提供，本卡只消费**：`bridge.runAgent` / `bridge.cancelAgent`
- *     与 `bridge.onAiStream`（事件类型 `AiStreamEvent` / `AiStreamDoneData`——契约源在
- *     `platform/bridge/bridge-types.ts`，本卡不重复定义，避免两处漂移）。
- *   - 开关关闭 → 整条回落既有 ai.interpret 单发链路，12 s / 25 s 体验不变。
+ *   - **桥命令由 T-M7-02h 提供，本卡只消费**：`bridge.runAgent` / `bridge.onAiStream`
+ *     （取消的 `bridge.cancelAgent` 协议已就绪但本卡未接线——P1 无 UI 触发点）。
+ *     本文件用**结构化窄接口 + 运行时能力探测**取用它们（见 `AgentStreamBridge`），
+ *     因此桥未落地或 APK 版本落后时自动回落，不需要与 02h 并行改同一批文件。
+ *   - 开关关闭**或桥不具备能力** → 整条回落既有 ai.interpret 单发链路，12 s / 25 s 体验不变。
  */
 
 import { useState, useCallback, useRef, useEffect } from 'react'
@@ -68,9 +69,7 @@ import { META_KEY_DEFAULT_ACCOUNT_ID, META_KEY_DEFAULT_BOOK_ID } from '../../dom
 import type {
   AccountData, BookData, BudgetData, CategoryData, SavingsGoalData, TransactionData,
 } from '../../platform/bridge/bridge-types'
-import type {
-  AiInterpretContext, AiValidateVerdict, AiStreamEvent, AiStreamDoneData,
-} from '../../platform/bridge/bridge-types'
+import type { AiInterpretContext, AiValidateVerdict } from '../../platform/bridge/bridge-types'
 import type { Category } from '../../domain/types'
 
 export interface AssistantMessage {
@@ -169,6 +168,43 @@ export interface PendingConfig {
  * `runAgent` 会以桥错误 reject，本轮直接按失败收尾（不会静默回落）。
  */
 export const AI_AGENT_CLIENT_ENABLED = false
+
+/**
+ * T-M7-02i：agent 流式通道的客户端桥契约（**由 T-M7-02h 实现**）。
+ *
+ * **为什么本文件自带一份、而不是 import `bridge-types.ts`**：本卡与 02h 并行推进，交付时
+ * 桥的实现**尚未提交**——若 import 它的类型，HEAD 就处于「引用了尚不存在的符号」的不自洽
+ * 状态（实测：远端 CI 的 typecheck 直接红）。所以这里用**结构化窄接口 + 运行时能力探测**：
+ * 桥未落地时探测为假（整条回落单发链路，也顺带兜住「旧 APK 无这两条命令」），桥落地后
+ * 自动接通。字段与 02h 的实现**逐一对齐**：`runAgent` 立即返回 `{pending, streamId}`
+ * （「命令返回 pending + 事件推送结果」，同 `requestPermission`），事件带 `streamId`。
+ *
+ * **待 02h 提交后，这两处定义应合并到 `bridge-types.ts`**（那里才是契约类型的唯一源）——
+ * 已登记为开放风险，别让它长期存在两份。
+ */
+export interface AgentStreamBridge {
+  runAgent(
+    input: string, bookId: string, conversationId?: string | null,
+  ): Promise<{ pending: boolean; streamId: string }>
+  onAiStream(listener: (event: AgentStreamEvent) => void): () => void
+}
+
+/** T-M7-02i：agent 流的下行事件（服务端 `stream.EventType` 的八类，02h 原样转发）。 */
+export interface AgentStreamEvent {
+  streamId: string
+  event: 'phase' | 'tool_call' | 'tool_result' | 'confirm' | 'device_request' | 'delta' | 'done' | 'error'
+  data: Record<string, unknown>
+}
+
+/** T-M7-02i：`done` 帧里本卡消费的字段（其余如 `usage` / `steps` / `pending_input` 不读）。
+ *  `proposals` 是**仍待确认**的提案、`executions` 是**已执行**的回执，两者互斥
+ *  （T-M7-02e 决策 2）。 */
+export interface AgentStreamDone {
+  conversation_id: string
+  stop_reason: string
+  proposals: Array<Record<string, unknown>>
+  executions: Array<Record<string, unknown>>
+}
 
 /** T-M7-02i：流式期间的内存态气泡（**不落 messages store**）。
  *
@@ -682,7 +718,7 @@ export function useAssistant({
    *   ③ 都没有 → 纯文本答复（chat / query），气泡定型成正式消息。
    * `proposals` 与 `executions` 互斥（T-M7-02e 决策 2），所以①②不会同时命中。
    */
-  const settleStream = useCallback(async (done: AiStreamDoneData | null) => {
+  const settleStream = useCallback(async (done: AgentStreamDone | null) => {
     const { text } = streamBufRef.current
     streamUnsubRef.current?.()
     streamUnsubRef.current = null
@@ -746,6 +782,9 @@ export function useAssistant({
    * （架构 §9.1：复杂度对用户不可见）。
    */
   const runAgentTurn = useCallback(async (text: string) => {
+    // 结构化窄接口 + 能力探测：桥（02h）未落地时本函数不会被调用（调用点已探过），
+    // 这里再取一次是为了让类型系统认得这两个方法。
+    const agentBridge = bridge as unknown as Partial<AgentStreamBridge>
     streamBufRef.current = { text: '', reasoning: '' }
     streamSettledRef.current = false
     setStreaming({ text: '', reasoning: '' })
@@ -754,7 +793,7 @@ export function useAssistant({
     // ack 到达之前到达的事件按单流处理——submitInput 的并发互斥保证了 P1 同时只有一条流。
     let streamId: string | null = null
 
-    const onEvent = (ev: AiStreamEvent) => {
+    const onEvent = (ev: AgentStreamEvent) => {
       if (streamSettledRef.current) return
       if (streamId && ev.streamId !== streamId) return
       if (ev.event === 'delta') {
@@ -768,7 +807,7 @@ export function useAssistant({
       }
       if (ev.event === 'done') {
         streamSettledRef.current = true
-        void settleStream(ev.data as unknown as AiStreamDoneData)
+        void settleStream(ev.data as unknown as AgentStreamDone)
         return
       }
       if (ev.event === 'error') {
@@ -784,10 +823,10 @@ export function useAssistant({
     }
 
     streamUnsubRef.current?.()
-    streamUnsubRef.current = bridge.onAiStream(onEvent)
+    streamUnsubRef.current = agentBridge.onAiStream!(onEvent)
 
     try {
-      const ack = await bridge.runAgent(text, bookId!, conversationIdRef.current)
+      const ack = await agentBridge.runAgent!(text, bookId!, conversationIdRef.current)
       streamId = ack.streamId
     } catch {
       // 桥层失败（旧 APK 无该命令 / 链路建不起来）：同样按本轮失败收尾
@@ -849,8 +888,13 @@ export function useAssistant({
     //    edit+delete 预览确认卡）。aiConsumed=意图已被非提案链路消化，直接收尾。
     if (needsAI && isOnline() && bridge.isAvailable()) {
       // T-M7-02i：agent 流式通道优先（架构 §11.3 的双层灰度：服务端开关 + 客户端开关）。
-      // 关闭时整条走下面的既有单发链路，行为与 02i 之前逐字相同。
-      if (agentStream ?? AI_AGENT_CLIENT_ENABLED) {
+      // **两道闸都要过**：开关开 **且** 桥具备流式能力（02h 未落地、或旧 APK 的命令表里
+      // 没有这两条时，能力探测为假）。任一不满足即整条走下面的既有单发链路，行为与
+      // 02i 之前逐字相同——这也顺带兜住「JS 与 APK 版本不同步」的部署形态。
+      const agentBridge = bridge as unknown as Partial<AgentStreamBridge>
+      const canStream = typeof agentBridge.runAgent === 'function' &&
+        typeof agentBridge.onAiStream === 'function'
+      if ((agentStream ?? AI_AGENT_CLIENT_ENABLED) && canStream) {
         // 收尾由 settleStream 负责（含 finishProcessing），这里直接交棒
         await runAgentTurn(text.trim())
         return

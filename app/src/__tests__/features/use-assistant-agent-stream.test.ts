@@ -12,11 +12,10 @@
  */
 import { describe, it, expect, vi, beforeEach } from 'vitest'
 import { renderHook, act, waitFor } from '@testing-library/react'
-import { useAssistant } from '../../features/assistant/use-assistant'
+import { useAssistant, type AgentStreamEvent } from '../../features/assistant/use-assistant'
 import { useAssistantChatStore } from '../../platform/store/assistant-chat-store'
 import { parseInput } from '../../domain/nlu/parser'
 import type { ActionProposal } from '../../domain/action-proposal'
-import type { AiStreamEvent } from '../../platform/bridge/bridge-types'
 import { todayBizDate } from '../../domain/date'
 
 const mockBridge = vi.hoisted(() => ({
@@ -45,10 +44,10 @@ const TZ = 'Asia/Shanghai'
 const STREAM_ID = 'stream-1'
 
 /** 订阅者集合——`onAiStream` 的 mock 把 listener 收在这里，测试用 emit 推送事件。 */
-let listeners: Array<(ev: AiStreamEvent) => void> = []
+let listeners: Array<(ev: AgentStreamEvent) => void> = []
 
 function emit(event: string, data: Record<string, unknown>, streamId = STREAM_ID) {
-  for (const l of [...listeners]) l({ streamId, event: event as AiStreamEvent['event'], data })
+  for (const l of [...listeners]) l({ streamId, event: event as AgentStreamEvent['event'], data })
 }
 
 /** 用**同一份订阅者快照**连推多个事件。
@@ -60,7 +59,7 @@ function emitAll(events: Array<[string, Record<string, unknown>]>) {
   const snapshot = [...listeners]
   for (const [event, data] of events) {
     for (const l of snapshot) {
-      l({ streamId: STREAM_ID, event: event as AiStreamEvent['event'], data })
+      l({ streamId: STREAM_ID, event: event as AgentStreamEvent['event'], data })
     }
   }
 }
@@ -108,7 +107,7 @@ describe('use-assistant — agent 流式消费（T-M7-02i）', () => {
   beforeEach(() => {
     vi.clearAllMocks()
     listeners = []
-    mockBridge.onAiStream.mockImplementation((l: (ev: AiStreamEvent) => void) => {
+    mockBridge.onAiStream.mockImplementation((l: (ev: AgentStreamEvent) => void) => {
       listeners.push(l)
       return () => { listeners = listeners.filter(x => x !== l) }
     })
