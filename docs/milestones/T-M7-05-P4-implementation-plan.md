@@ -12,7 +12,7 @@
 
 | 卡 | 内容 | 状态 | 完成日 | 提交 | 备注 |
 |---|---|---|---|---|---|
-| **05a** | ActionProposal v2 契约（文档/协议先行） | ⏳ 未开始 | | | 批次 1；**可跨期提前开工** |
+| **05a** | ActionProposal v2 契约（文档/协议先行） | ✅ 完成 | 2026-09-19 | `ab7b1c3` | 批次 1；v1 文件一字未改，双读车道判定＝`contractVersion` 在场与否；服务端接线归 05b（见 §六） |
 | **05b** | 全量工具：记账与账户账本域 | ⏳ 未开始 | | | 批次 2 |
 | **05c** | 全量工具：预算存钱、定时、角色域 | ⏳ 未开始 | | | 批次 3 |
 | **05d** | 全量工具：分析与其余服务端域 | ⏳ 未开始 | | | 批次 4 |
@@ -181,7 +181,58 @@ cd app && npx tsc --noEmit                       # 0 错
 
 ## 六、中间结果记录
 
-_（尚无。每卡完成后按交接模板在此追加。）_
+### 05a ActionProposal v2 契约（2026-09-19，`ab7b1c3`）
+
+```text
+任务编号：T-M7-05a（P4 批次 1）
+完成范围 / 明确未做：
+  完成——契约三件套（schema-v2 / TS 校验器 / Python 校验器）、v1↔v2 别名表、
+  17 个 v2 fixture、三方一致性用例（TS 56 例 / Python 30 例）、
+  ai-architecture.md 实质扩写、ADR-009、D-PROD-15。
+  未做（刻意，非遗漏）——① 服务端接线：/ai/validate 仍走 v1 校验器、
+  /ai/execute 只认 add_tx/add_tx_batch、proposal_contract_version 无读取方
+  （归 05b）；② 任何工具实现（05b/05c/05d）；③ 设备通道（05e/05f）；
+  ④ payload 字段形状不入契约（由 op 的工具注册表条目拥有）。
+修改的文档、契约与代码：
+  contracts/action-proposal/schema-v2.json（新）、
+  contracts/action-proposal/v1-action-aliases.json（新）、
+  contracts/action-proposal/fixtures/v2/（新，17 个）、
+  app/src/domain/action-proposal.ts（+v2 车道与双读入口，v1 一行未动）、
+  app/src/__tests__/domain/action-proposal-v2.test.ts（新）、
+  server/src/modules/ai/validator.py（+validate_proposal_v2 /
+  validate_proposal_any / canonical_op）、
+  server/tests/test_ai_proposal_v2_parity.py（新）、
+  docs/architecture/ai-architecture.md、docs/adr/ADR-009-*、docs/APP-CONTEXT.md
+验证命令与结果：
+  cd app && npx tsc --noEmit                       → 0 错
+  cd app && npx vitest run                         → 84 files / 1327 passed（+1 文件 +56 例）
+  cd server && python -m pytest tests/ -q           → 1242 passed / 37 skipped
+  ./gradlew :app:testDebugUnitTest --rerun-tasks    → BUILD SUCCESSFUL，424 tests / 0 失败
+  新增用例：server/tests/test_ai_proposal_v2_parity.py 30 例；
+  app/src/__tests__/domain/action-proposal-v2.test.ts 56 例
+数据/同步/AI/安全影响：
+  AI 协议面：新增 v2 契约与 34 个 op 的注册表（架构 §3.2 全量 CRUD 的契约形态）。
+  两侧校验器新增 v2 车道，v1 车道（含 /ai/validate 的实际路径）行为逐字不变。
+  **未产出任何 v2 提案**（无生产者），同步、数据模型、Kotlin 均零改动。
+  安全：三条铁律在 v2 下一字未放松；审批四值与 02e 挂起—放行路径不变。
+  **一处需要后续卡注意的代价**：v2 的结构校验不含 payload 级授权，
+  结构通过不是执行许可——payload 授权必须在服务端组装/执行时施加。
+兼容与回退方式：
+  v1 的 schema.json / 两侧 v1 校验器 / 16 个 v1 fixture 全部原样，
+  旧客户端行为不变由「v2 是新增文件」这一布局保证。
+  回退＝不产出 v2 提案即可，无数据迁移、无契约文件替换、无服务端开关。
+  协商按客户端声明（/ai/agent 的 proposal_contract_version，缺省 1）走灰度。
+开放风险与责任人：
+  ① 服务端接线归 05b（校验器分流 + execute 放行 + 读协商字段），
+     且必须一并设计 payload 级授权——不能只换校验器；
+  ② 「v1 车道产不出 v2-only op」是实现约束（旧校验器会整条判无效→卡片不出、
+     写入静默失败），05b 起新增的工具必须在 v1 车道上不可用或降级为说明；
+  ③ config 的 6 个子操作退场时机未定（05b / 05h）；
+  ④ 客户端渲染 v2 提案的路径不在任何单卡职责内——P4 收口按覆盖度清单裁决
+     （已记入 ADR-009「已知残余 3」）。
+下一项未阻塞任务：05b（记账与账户账本域）与 05e（设备通道服务端）——批次 2，
+  两卡不同文件面，可并行。
+```
 
 ---
 
