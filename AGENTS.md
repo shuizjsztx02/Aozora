@@ -31,7 +31,7 @@
  | `docs/adr/` | 架构决策记录 | 理解历史决策原因时 |
  | `docs/risk-register.md` | 已知风险/缺陷与状态 | 每次发版前对照检查 |
  
- **当前阶段：** **M7（AI Agent 能力升级）优先推进，M6（生产发布）滞后**至 M7 收口之后（2026-09-18 决策——M7 是对 App 功能的重大新增，须在正式发布前完成）。M1–M5 已完成。M7 内部：**T-M7-01**（三实体上云）、**T-M7-02**（P1 服务端 Agent Loop 与 SSE 流式通道）、**T-M7-03**（P2 客户端瘦渲染与多会话管理）**均已交付并收口**；**T-M7-04**（P3 会话事件日志与摘要压缩）**进行中**——04a（事件日志完整化与 Surface 子集）、04b（会话恢复与分叉，含轮中途落库）、04d（保留期与隐私边界）已完成，04c、04e 未开始；**T-M7-05**（P4 全功能覆盖）待启，其中 05a 与 05e 协议部分可提前开工。任务边界与验收以 `docs/APP-CONTEXT.md` 第 9 节和 `docs/milestones/production-execution-plan.md` 为准，逐期进度看板见 `docs/milestones/T-M7-0*-implementation-plan.md`。
+ **当前阶段：** **M7（AI Agent 能力升级）优先推进，M6（生产发布）滞后**至 M7 收口之后（2026-09-18 决策——M7 是对 App 功能的重大新增，须在正式发布前完成）。M1–M5 已完成。M7 内部：**T-M7-01**（三实体上云）、**T-M7-02**（P1 服务端 Agent Loop 与 SSE 流式通道）、**T-M7-03**（P2 客户端瘦渲染与多会话管理）、**T-M7-04**（P3 会话事件日志与摘要压缩——04a–04e 五张子卡 + 批次 4 收口，含真实断连恢复走查）**均已交付并收口**；**T-M7-05**（P4 全功能覆盖）待启，其中 05a 与 05e 协议部分可提前开工（05a 已在途）。任务边界与验收以 `docs/APP-CONTEXT.md` 第 9 节和 `docs/milestones/production-execution-plan.md` 为准，逐期进度看板见 `docs/milestones/T-M7-0*-implementation-plan.md`。
  
  **上下文加载指令：** 不要预加载所有项目文档。先读本文件和 `docs/APP-CONTEXT.md` 的相关章节，然后仅加载与当前任务相关的文档。修改涉及需求 → 读 `docs/product/`；涉及架构/数据 → 读 `docs/architecture/` 和 `docs/adr/`；涉及 UI → 读 `docs/design/`；涉及工程流程 → 读 `docs/engineering/`。
 
