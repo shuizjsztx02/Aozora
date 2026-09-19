@@ -12,7 +12,7 @@
 
 | 卡 | 内容 | 状态 | 完成日 | 提交 | 备注 |
 |---|---|---|---|---|---|
-| **04a** | 事件日志完整化与 Surface 子集 | ⏳ 未开始 | | | 批次 1；P3 基座 |
+| **04a** | 事件日志完整化与 Surface 子集 | ✅ 完成 | 2026-09-19 | `e9203b0` | 批次 1；P3 基座。Surface 子集已落为单一来源常量，`history()` 只投它 |
 | **04b** | 会话恢复与分叉（含轮中途落库） | ⏳ 未开始 | | | 批次 2 |
 | **04c** | 摘要压缩与预算（`replace`） | ⏳ 未开始 | | | 批次 3 |
 | **04d** | 保留期与隐私边界落地 | ⏳ 未开始 | | | 批次 2 |
@@ -146,7 +146,90 @@ cd app && npx tsc --noEmit                       # 0 错
 
 ## 六、中间结果记录
 
-_（尚无。每卡完成后按交接模板在此追加。）_
+### T-M7-04a 事件日志完整化与 Surface 子集（2026-09-19，`e9203b0`）
+
+```text
+任务编号：T-M7-04a（P3 批次 1，P3 全部能力的共同基座）
+
+完成范围 / 明确未做：
+  完成——事件表补 time / ignorable；type 扩为全集并加宽列；Surface 子集落为
+  单一来源常量；history() 只投 Surface 子集；配额事件入日志（投影 C）。
+  **明确未做**（守职责边界）：不做压缩（04c）、不做恢复与分叉（04b）、不做保留期
+  （04d）；不改下行 SSE 的八类事件（那是协议面，与日志 type 是两个枚举）；
+  **不改 API 响应契约**（`schemas.py` 一行未动——`AIConversationEventItem` 只声明
+  了 seq/turn/type/data/created_at，新列不会外溢，02h 冻结的客户端桥零影响）。
+  审批 / 设备 / 错误 / 安全四类**只定义类型与写入口，无生产者**——理由见下。
+
+修改的文档、契约与代码：
+  文档（先行）：`docs/architecture/ai-agent-architecture.md` §6.2——「事件类型」行
+    展开为「事件类型全集与 Surface 子集」表（语义 → type 值 → 是否进投影 A →
+    生产者），并写明「与 SSE 八类是两套独立枚举」「列宽 32 的实测依据」。
+  代码：`server/src/models/ai.py`（time / ignorable / type(32)）、新迁移
+    `0020_conversation_event_log`、`server/src/modules/ai/conversation.py`
+    （常量分档 + history 白名单下推 + append_events + record_turn 写 quota 事件）、
+    `server/src/modules/ai/stream.py`（成功路径 record_turn 传 same_turn=True，1 行）。
+  测试：新 `server/tests/test_ai_conversation_log.py`（38 例）；既有
+    `test_ai_conversation.py` / `test_agent_stream.py` / `test_ai_conversations_api.py`
+    共 3 处**事件计数断言的期望值**随 quota 事件更新（不是放宽断言）。
+
+验证命令与结果：
+  cd server && python -m pytest tests/ -q
+    → 1113 passed / 37 skipped（基线 1075 的收口值 + 本卡 38 例）
+  ./gradlew :app:testDebugUnitTest --rerun-tasks → BUILD SUCCESSFUL
+  cd app && npx vitest run → 1237 passed
+  cd app && npx tsc --noEmit → 0 错
+  python -m ruff check src/ tests/ → All checks passed
+  **实测「结构性事件不占 token」**（验收要求，不接受设计推论）：同一轮次在
+    「带 3 条结构性事件 / 不带」两种形态下，第二轮 loop **实际发出的请求载荷
+    逐字节相同**（token 是载荷的函数）；对照组（把结构性事件也拼进窗口，即 04a
+    之前的行为）载荷多 160 字符。用例：
+    `test_payload_is_byte_identical_with_and_without_structural_events` /
+    `test_control_structural_events_would_have_cost_this_much`。
+  **列宽实测**（PG 17.11）：varchar(16) 按字符数计，全集最长的
+    `approval_request` 恰为 16 字符——顶格、零余量；17 字符即被拒
+    （StringDataRightTruncationError）。故加宽到 32。
+  迁移校验：dev 库 `alembic upgrade head` 已在 0020，列定义实测
+    （type=varchar(32) / time=timestamptz NOT NULL DEFAULT now() /
+    ignorable=boolean NOT NULL DEFAULT false）；downgrade 的四条语句在真实 PG 的
+    **事务内**执行通过并完全回滚（42 行原样）——零副作用取证。
+
+数据/同步/AI/安全影响：
+  · **AI 成本**：R-PROD-15 的核心残余（P1 全部事件进上下文）**关闭**——结构性
+    事件连 history() 的返回值都进不去，白名单下推到 SQL，取都不取。
+  · **数据**：`ai_conversation_events` 加两列、加宽一列。downgrade 会丢
+    time/ignorable 两列的值（回退路径的已知代价）。
+  · **安全**：配额用量现在有会话内留痕（`quota` 事件，含 provider/model/token
+    数，不含用户原话、不含 request_id）。日志面因此仍是 security.md 有条件例外
+    的适用范围；保留期（04d）须把这批事件一并纳入。
+  · **同步**：无影响（事件日志不进客户端同步面；正文同步是 04e 的决策门）。
+
+兼容与回退方式：
+  加列 + 加宽列，**向后兼容**：旧代码读新表无感（多余列被忽略），API 响应契约
+  未变，客户端零改动。回退 = `alembic downgrade 0019_conversation_index`（丢
+  time/ignorable 的值，type 超过 16 字符的行会被左截断——迁回旧代码本来就认不出
+  那些类型）。
+  **一个必须知道的口径**：`time` 由写入方取（`datetime.now(UTC)`），`created_at`
+  是 PG 的 `now()` = **事务**时刻。一轮 loop 跑完才落库，dev 实测二者相差数秒。
+  要「这一轮何时开始」看 created_at，要「事件何时写下」看 time——04b 逐事件落库
+  后这层分工才完全展开。
+
+开放风险与责任人：
+  · **审批 / 设备 / 错误 / 安全四类暂无生产者**（类型与 `append_events` 写入口
+    已就位）。归属：审批两类随 **04b** 的逐事件落库接上（恢复需要它们重建卡片）；
+    `error` 随 **04b**；`replace` 是 **04c**；`device_request` 是 **P4**（架构
+    §8.1 的同名 SSE 事件至今也无生产者）。
+  · **`security` 事件无干净落点**——已核查：跨用户访问在 `load_owned` 抛 404 时
+    **没有可比挂载的会话**（别人的 id 不能挂，调用者自己可能一个会话都没有），
+    而配额拒绝路径的写入必然随业务事务回滚（路由层 429 后 session 回滚，写了也是
+    空转代码——02e「假防御」的教训）。**结论：它的生产者落点与「读取面访问审计是
+    否需要记录」是同一个问题，一并归 04d**（04d 任务卡已含该结论项）。
+  · 本卡**未**把 time / ignorable 加进 `GET /ai/conversations/{id}/events` 的响应
+    ——客户端此刻不需要它们，契约变更留给真正要用的卡。
+
+下一项未阻塞任务：**04b**（会话恢复与分叉，含轮中途落库）与 **04d**（保留期与
+隐私边界）可并行开工（批次 2）。04b 的直接输入：Surface 子集常量、事件表新列、
+以及本卡记录的「time 与 created_at 的分工」。
+```
 
 ---
 

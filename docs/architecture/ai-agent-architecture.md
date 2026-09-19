@@ -276,7 +276,7 @@ SessionEvent 日志（事实来源，append-only）
 | 项 | 设计 |
 |---|---|
 | 事件结构 | `type` / `seq`（单调递增）/ `time` / `data` / `ignorable` |
-| 事件类型 | 用户输入、模型回复、工具调用、工具结果、审批请求、审批结果、设备指令、错误、摘要替换 |
+| 事件类型 | 见下方「事件类型全集与 Surface 子集」——**单一来源常量在 `server/src/modules/ai/conversation.py`** |
 | **进入模型上下文** | 仅「Surface 事件」子集；结构性事件（如 UI 状态、设备指令回执）**不占 token** |
 | **压缩** | 用 `replace` 操作把长历史替换为摘要——**原文仍留在日志中**，不丢失 |
 | 恢复与分叉 | 同一事件流支持断连恢复、会话分叉、回放（支撑 §4.4 不变式 3、4） |
@@ -288,6 +288,25 @@ SessionEvent 日志（事实来源，append-only）
 - **可分叉**——用户「回到某轮重说」不需要复制消息数组
 - **省 token**——只有 Surface 事件进上下文，UI 状态与回执不占预算
 - **压缩无损**——摘要替换后原文仍可审计、可回溯
+
+**事件类型全集与 Surface 子集（T-M7-04a 定稿）。** 事件分两档：**Surface 事件**一一对应 loop 消息流里的一条消息（`data` 就是那条 API 消息字典），是唯一进投影 A 的一档；**结构性事件**是「发生过什么」的留档，只进投影 B（UI）与投影 C（审计）。读侧的白名单常量是 `SURFACE_EVENT_TYPES`（`conversation.py`），`history()` 只投它；写入时按**同一常量**派生 `ignorable` 列，两者的一致性由测试钉死。
+
+| 语义 | `type` 值 | 进投影 A | 生产者 |
+|---|---|---|---|
+| 用户输入 | `user` | ✅ | `append_turn`（loop 消息流） |
+| 模型回复 / 工具调用 | `assistant` | ✅ | 同上。**`tool_calls` 挂在同一条消息的 `data` 里，不另立事件**——一条事件＝一条消息，重组回 API 载荷零歧义；§4.4 不变式 1（调用与结果配对）也因此绑在同一条消息上 |
+| 工具结果 | `tool` | ✅ | 同上 |
+| 审批请求 | `approval_request` | ❌ | 待接（04a 只给写入口） |
+| 审批结果 | `approval_result` | ❌ | 待接 |
+| 设备指令 | `device_request` | ❌ | 无生产者（与 §8.1 同名 SSE 事件同状态，通道归 P4） |
+| 错误 | `error` | ❌ | 待接（04b 的逐事件落库） |
+| 摘要替换 | `replace` | ❌ | 04c |
+| 配额 | `quota` | ❌ | `record_turn`——每轮一条用量事件，**与消息同轮** |
+| 安全 | `security` | ❌ | 待接：配额拒绝 / 跨用户访问的留痕需要独立于业务事务的审计通道，**结论归 04d 的访问面审计** |
+
+**与 §8.1 的 SSE 八类是两套独立枚举。** 有同名值（`error` / `device_request`），但一个是下行协议帧、一个是日志行——**不得互相赋值或复用枚举类**；`confirm` 帧对应的日志类型是 `approval_request`，不是 `confirm`。
+
+**列宽：** `type` 为 `varchar(32)`。04a 实测（PG 17.11）：`varchar(16)` 按字符数计，全集里最长的 `approval_request` 恰为 16 字符——**顶格、零余量**，17 字符即被拒（`StringDataRightTruncationError`），故加倍留余量。
 
 **与现有代码的衔接：** `AIConversation` 表已存在（含 `summary` 字段）；需新增事件日志表（或 JSONL 列）。`assistant-chat-store` 降级为投影 B 的客户端缓存。
 
