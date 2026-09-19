@@ -1046,7 +1046,7 @@ cd app && npx vitest run                                   # 1104 passed
 | **T-M7-02g SSE 端点与部署配置** | 02d、02e | `routes.py` 新增 `POST /ai/agent` 返回 `StreamingResponse`（`text/event-stream`）；事件类型按架构 §8.1（`phase` / `tool_call` / `tool_result` / `confirm` / `device_request` / `delta` / `done` / `error`）；**零新依赖**——Starlette 原生 `StreamingResponse` + 手写帧格式化（约 30 行），不引 `sse-starlette`；heartbeat（空闲期发注释帧，防 nginx 60 s 读超时）；**`db: AsyncSession` 生命周期**——流式响应下不能沿用 `Depends(get_db_session)`（请求作用域 session 在响应返回后即关闭，而生成器仍在运行），改用 `get_session_factory()` 自行管理。**SSE 缓冲（2026-09-18 决策：不改 nginx）**——服务端在响应中发 `X-Accel-Buffering: no`（nginx 默认尊重该头并对此响应关闭 `proxy_buffering`），**无需改动服务器 nginx 配置**；须实测确认该头生效，若被忽略再评估改配置。**测试基建：** 仓库无流式测试先例（现全部为同步 `TestClient`）——新建 `httpx.AsyncClient(ASGITransport(app))` 流式样板。**灰度开关：** 服务端 env + 客户端开关双层，默认关闭 | 流式样板可跑（帧格式、事件顺序、heartbeat）；开关关闭时 `/ai/agent` 不可用且旧客户端行为不变；实测确认 `X-Accel-Buffering: no` 经实际链路（含 nginx）后事件逐条下发而非攒批。**2026-09-18 交付：** `stream.py`（新建：帧格式化 / 观察者 / 帧泵生成器）+ `routes.py` 新增 `POST /ai/agent`（`X-Accel-Buffering: no` + `Cache-Control: no-cache`）+ `agent.py` 新增 `AgentObserver` 旁路（默认 `None`，02d/02e 用例一行未改）+ `service.py` 抽出模块级 `check_daily_quota` / `local_today`（行为等价）+ `config.py` 三项（`ai_agent_enabled` 默认 false / heartbeat 15 / 单步超时 20）+ `test_agent_stream.py`（48 例，仓库首个流式样板：httpx ASGITransport + 直连 ASGI 驱动器）。服务端 **1016 passed / 37 skipped**（同树基线 968 + 本卡 48）；ruff 全绿；**回退实验 18/18 全红**。**缓冲实测：**服务器 nginx 只读核对确认 `/aozora-api/` 无 `proxy_buffering` / `proxy_cache` / `proxy_ignore_headers`（1.16.1 ≥ 1.5.6 支持该头）→ 该头不会被忽略；仓内最强证据 = 模型请求还阻塞着时前两个 `phase` 帧已到客户端（直连 ASGI 用例）。**残余：**经真实 nginx 的端到端确认需部署后进行（本机无 docker/nginx），责任人 = M7 收口 / 部署执行者，R-PROD-22 该项保持开放。**远端 CI（`79c5145`，run 35337146185）：** Client ✅ / Server ✅ / Android **代码步骤全绿**（含此前从未真正跑起来的模拟器 connected 测试），**仅第 12 步 `:app:dependencyCheckAnalyze` 被作业 `timeout-minutes: 40` 截断**（OWASP NVD 库下载吃光预算，非代码回归；连续两次 run 停在同一处）。建议把该步骤移出主 CI 或给作业加时，责任人 = M7 收口 / CI 维护者。 | ✅ 完成（2026-09-18） |
 | **T-M7-02g-2 token 级 delta（含推理增量）** | 02g | 把 `delta` 从「一轮一帧」升级为 **token 级增量**，并**同时送推理增量**（架构 §8.5）——`StreamChunk` 增 `reasoning_delta`（累加器已经在收推理内容，只是没往外给）；`agent.py` 的 `step()` 改走 `complete_with_tools_stream` 的 `async for`，`AgentObserver` 增 `delta` / `reasoning_delta` 两个钩子；`delta` 载荷增 `channel`（`content` / `reasoning`）与 `step`，推理通道供客户端渲染灰字折叠区；**帧泵加 100 ms 合并窗**（同通道 + 同 Step 并成一帧）；**收尾请求（`_wrap_up`）保持非流式**——它是机械交代，且中途失败会退回确定性兜底，流式会让客户端看到「半截 + 兜底」拼接。**时间口径同步改写**：单步超时由「总时长」改为「静默时长」（架构 §8.3），客户端侧表现为 OkHttp read timeout 而非 `callTimeout` | **真实探针闸门（已完成，2026-09-19）**：三档形态各一次真调用确认 (1) `stream_options.include_usage` 确实回 usage 尾块——02b 挂了一个多月的「未经真实链路验证，否则 agent 每轮计费恒为 0」到此闭环；(2) **推理增量先于正文增量且量大**（深档带工具那一步 0.45 s 起有推理、524 字符推理对 0 字符正文），只送正文的话最需要反馈的一步仍静默——这是本卡存在的理由；(3) 帧粒度约 4 字符/帧，一轮三四百帧，故必须合并。**用例面**：四个测试假 provider 全部实现流式方法（不实现即 `AttributeError`，新路径等于没测）；增量转发、`channel` 分支、合并窗（含「跨通道不合并」「无新数据按期冲刷」）、收尾文本只出现一次、**推理增量已交出后失败不可重试**各有用例。**职责边界：** 不改 §8.1 的八类事件（纯增量）、不改写路径、不做断连恢复 | ✅ 完成（2026-09-19） |
 | **T-M7-02h 客户端桥通道（okhttp-sse + 事件转发）** | 02g-2 | `app/build.gradle.kts` 加 `com.squareup.okhttp3:okhttp-sse:4.12.0`；`AiGatewayClient` 新增流式接收（**注意：SSE 长连接不能用现有 `callTimeout(25s)`**，需独立 OkHttpClient 配置；按架构 §8.3 的新口径，用 **read timeout** 表达「静默 25 s」而非整步总时长）；`delta` 帧带 `channel`（`content` / `reasoning`），**桥层逐帧原样转发、不合并也不丢弃**（服务端已做过 100 ms 合并）；新桥命令 `ai.agent` / `ai.cancel`——**桥命令 77 → 79，四处同步**（`BridgeProtocol.kt` 的 const + `ALL`、`AozoraBridge.dispatch`、`bridge-types.ts`、`native-bridge.ts`），且 `SecurityConfigTest.kt:30-57` 的硬编码 `77` 断言同步更新；事件推送复用 `webView.post { evaluateJavascript }` + `window.__aozoraAiStream__`（照 `onPermissionResult` 的链式包装写法）；`activeStreamJob` 仿 `activeParseJob` 支持取消 | 桥命令计数断言 79；TS 命令完整性契约测试；SSE 事件从服务端到 WebView 端到端送达；取消能终止 loop；Token 不出 Kotlin 层（ADR-003 不变） | ⏳ 未开始 |
-| **T-M7-02i 客户端消费（最小形态）** | 02h | `use-assistant.ts` 接入流式：`submitInput` 走 `ai.agent`。**v2 intent 在流式中无法预知**（chat/query/edit/delete/config 的 UI 形态互异），定型为：流式期间只渲染文本气泡，`done` 到达后按既有 v2 分发矩阵（`use-assistant.ts:669-691`）走原有卡路径，用户感知为「思考完毕展开卡」；`AssistantPhase` / `CardStatus` / 三个互斥瞬时态（`activeProposal` / `pendingOp` / `pendingConfig`）约束不变；**02g-2 追加三条（写渲染前先落，之后改就是返工）：** `delta` 按 `channel` 分流——`reasoning` 进**灰字折叠区**、绝不混进正文；`error` 帧到达时**保留气泡里的半截文本并标注失败、不清空**（架构 §8.5）；正文气泡会收到**多帧** `delta`，按追加渲染，不要假设「一轮一帧」。保留非流式 `ai.interpret` 作为开关关闭时的降级路径 | 多步任务端到端可完成；多轮澄清可用；非 chat intent 下流式气泡正确卸载并展开卡；开关关闭时回落现有单发链路且 12 s / 25 s 体验不变；既有 assistant 测试全绿 | ⏳ 未开始 |
+| **T-M7-02i 客户端消费（最小形态）** | 02h | `use-assistant.ts` 接入流式：`submitInput` 走 `ai.agent`。**v2 intent 在流式中无法预知**（chat/query/edit/delete/config 的 UI 形态互异），定型为：流式期间只渲染文本气泡，`done` 到达后按既有 v2 分发矩阵（`use-assistant.ts:669-691`）走原有卡路径，用户感知为「思考完毕展开卡」；`AssistantPhase` / `CardStatus` / 三个互斥瞬时态（`activeProposal` / `pendingOp` / `pendingConfig`）约束不变；**02g-2 追加三条（写渲染前先落，之后改就是返工）：** `delta` 按 `channel` 分流——`reasoning` 进**灰字折叠区**、绝不混进正文；`error` 帧到达时**保留气泡里的半截文本并标注失败、不清空**（架构 §8.5）；正文气泡会收到**多帧** `delta`，按追加渲染，不要假设「一轮一帧」。保留非流式 `ai.interpret` 作为开关关闭时的降级路径 | 多步任务端到端可完成；多轮澄清可用；非 chat intent 下流式气泡正确卸载并展开卡；开关关闭时回落现有单发链路且 12 s / 25 s 体验不变；既有 assistant 测试全绿 | ✅ 完成 |
 
 **执行顺序（串行闸门，不可跳）：**
 
@@ -1081,25 +1081,94 @@ cd app && npx tsc --noEmit                                 # 0 错
 
 ### T-M7-03 客户端瘦渲染与多会话管理（P2）
 
-**依赖：** T-M7-02。
+**依赖：** T-M7-02（客户端侧 02h 桥通道 / 02i 最小消费收口）。
+**实施推进计划：** `docs/milestones/T-M7-03-P2-implementation-plan.md`——逐卡职责边界、批次与并行切分点、验证基线、状态看板、中间结果记录，以及承接自 P1 的六项挂账。**领取任一张子卡前必读**；本节的验收列是权威标准，该文件只细化推进方式、不改验收。
 **范围（2026-09-18 定型）：** P1 已交付流式通道与最小消费（终态走既有 v2 intent 分发）；P2 做**观感与结构**——流式渲染打磨、步骤可见、多会话、统一智能模式。
 **交接产物：** `use-assistant.ts` 拆分重构（把编排逻辑与渲染态分离。**注意：P1 起客户端本就不含 loop / 工具选择逻辑**——v2 是服务端 Host 方案，此处不存在「移除 loop」动作；改述为「拆为流式事件消费 + 卡渲染 + 设备能力执行三段」）；步骤卡片流（`phase` / `tool_call` / `tool_result` 事件可见化，可折叠，含完成 / 失败态）；统一智能模式（无模式开关，路径对用户透明）；多会话列表（新建 / 切换 / 重命名 / 删除）——`assistant-chat-store` 由单 `messages[]` 扩为按 `conversationId` 分桶，并降级为 UI 投影缓存；确认卡对接审批四值；取消 / 打断交互收敛。
 **验证：** 步骤卡片流正确渲染（含完成/失败态）；简单任务无步骤展示（统一智能模式）；多会话互不串扰；取消收敛到一致状态；快路径 12 s / 25 s 体验回归不变。
-**状态：** ⏳ 未开始
+
+**为什么拆成子任务（2026-09-19 复核）：** 原卡含六项交付、跨**服务端会话索引 / 客户端消费重构 / 三块互不重叠的 UI** 三个面，其中 `use-assistant.ts` 单文件 **1272 行**（本地 NLU + AI 单发 + agent 流式三路混在一个 hook 里），任一项卡住则整卡不可交付、无法独立验收。按 `docs/engineering/需求变更规范.md` §五.1 拆分。**注意 03a 是服务端卡**——多会话的权威面在服务端（架构 §6.1「客户端本地 + 服务端 `AIConversation` 摘要」、§6.3「服务端持有会话状态」），且 P1 的 02f 决策 7 把「会话归属维度」的复核责任明确交给了 P2（见实施推进计划 §五 第 1 项）。
+
+**现状基线（2026-09-19 核对）：**
+- **已有（P1 交付）：** 八类 SSE 事件协议 + 服务端会话索引表 `AIConversation` + 事件表 `AIConversationEvent`；客户端桥 `ai.agent` / `ai.cancel`（桥命令 **79** 条，四处一致）、`window.__aozoraAiStream__` 推送通道、`AiGatewayClient` 的 SSE 专用 client（read timeout 45 s）；最小消费（流式气泡 + reasoning 灰字折叠区，`AssistantPage.tsx:601-634`）；客户端灰度开关 `AI_AGENT_CLIENT_ENABLED`（`use-assistant.ts:171`，默认 false）。
+- **空白（P2 从零建）：** 服务端**会话列表 / 重命名 / 删除 / 事件读取端点一个都没有**（`ConversationService` 只有 `resolve` / `history` / `append_turn` / `record_turn` / `check_quota` / `purge_user`）；`AIConversation` 只有 `id` / `user_id` / `book_id` / `summary` + 审计时间戳，**无可列表字段**；客户端**无任何多会话痕迹**（全仓无 `conversationList` / `sessionId` 类结构）——`assistant-chat-store` 仅 **70 行**、单条扁平 `messages[]`，`conversationId` 是 hook 内存 ref（`use-assistant.ts:357`，切页 remount 即丢）；**无步骤卡组件**；`ai.cancel` 在 TS 侧已封装但 hook 未调用。
+
+**子任务拆解（2026-09-19 拆定）：**
+
+| 子任务 | 硬依赖 | 交接产物 | 最低验证 | 状态 |
+|---|---|---|---|---|
+| **T-M7-03a 会话索引服务端化与事件读取 API** | 无 | `AIConversation` 扩为可列表索引（`title` / 活跃时间 / 软删）+ `ConversationService` 四个新方法 + `routes.py` 四个端点（`GET /ai/conversations`、`PATCH` / `DELETE /ai/conversations/{id}`、`GET /ai/conversations/{id}/events`）+ 迁移（紧接 `0018`）；**落地 P1 挂账「登出按用户粒度清会话」的结论** | 列表只返回本人且按活跃排序；重命名持久化、跨用户一律 404；删除幂等且事件行级联清理；`events(after_seq)` 增量读取；登出 / 删号行为与结论一致 | ⏳ 未开始 |
+| **T-M7-03b 客户端流事件消费重构与投影缓存** | 02h / 02i | `use-assistant.ts` 拆分（流式消费抽为独立 reducer/hook）；`assistant-chat-store` 按 `conversationId` 分桶 + **v1 持久化数据迁移**；`conversationId` 由内存 ref 提升到 store；`ai.cancel` 接线 | 八类事件 → 投影态逐条断言；`delta` 按 `channel` 分流；`error` 帧**保留半截文本**；**不假设「每条回复都从 `delta` 开始」**；会话切换互不串扰；取消后三态收敛且零写；既有 13 个 assistant 测试文件全绿 | ⏳ 未开始 |
+| **T-M7-03c 步骤卡片流与统一智能模式** | 03b | 可折叠步骤卡（进行中 / 完成 / 失败三态，`tool_result` 只显示摘要）；简单任务不展示步骤区；reasoning 折叠区打磨；`routing` 空态占位（生产者归 05g） | 三态渲染齐全（含失败态）；简单任务无步骤区；多帧 `delta` 追加渲染；空 / 加载 / 失败 / 离线四态回归 | ⏳ 未开始 |
+| **T-M7-03d 多会话列表与切换** | 03a、03b | 会话列表入口 + 新建 / 切换 / 重命名 / 删除，对接 03a 四端点；`book_id` 联动规则；离线 / 未登录降级；删除当前会话的回退目标 | 四个操作各有用例；两会话消息不串扰；删除后回退到确定性目标；离线降级不报错 | ⏳ 未开始 |
+| **T-M7-03e 确认卡四值与取消 / 打断收敛** | 03b | 确认卡对接审批四值（`unavailable` **视为拒绝**）；`confirm` 事件与卡链路改为**事件驱动**；取消按钮与打断交互收敛（架构 §4.4 不变式 3）；中断状态提示（R-PROD-19）；语音打断语义同取消 | 四值 UI 表现各有用例；`unavailable` 零写；取消后无悬挂确认卡；断连提示 + 重连入口；`confirmation-card.test.tsx`（544 行）全绿 | ⏳ 未开始 |
+| **收口** | 03c–03e | P2 四板 + 真机观感走查 + 快路径 12 s / 25 s 回归 | 出口标准逐条核对（本节验收列） | ⏳ 未开始 |
+
+**执行顺序：** 批次 1（03a ∥ 03b，服务端 / 客户端两面零文件重叠）→ 批次 2（03c，独占以免三卡同改 `AssistantPage.tsx` 同一段）→ 批次 3（03d ∥ 03e，UI 区域不同）→ 批次 4（收口）。
+
+**状态：** ⏳ 未开始（拆分已完成，2026-09-19；等 02h / 02i 收口）
 
 ### T-M7-04 会话事件日志与摘要压缩（P3）
 
 **依赖：** T-M7-03。
-**交接产物：** SessionEvent 日志（`type`/`seq`/`time`/`data`/`ignorable`）；Surface 事件子集定义（只有其进模型上下文）；`replace` 压缩操作（原文保留）；摘要生成与注入；会话恢复与分叉；日志保留期与隐私边界（对齐 `D-PROD-08`）。**前置阻塞（2026-09-18 登记）：** `docs/architecture/security.md` 第 6 行「禁止记录 token、完整对话、原始票据和账本明细」是绝对禁令，与本任务的日志形态直接冲突，**须先在该文档层面解决**（修订条款或调整日志形态）方可开工。P1 的 02f 只建最小会话表，不触碰此边界。
+**实施推进计划：** `docs/milestones/T-M7-04-P3-implementation-plan.md`——逐卡职责边界、批次与并行切分点、验证基线、状态看板、中间结果记录，以及承接自 P1 / P2 的十项挂账。**领取任一张子卡前必读**；本节的验收列是权威标准，该文件只细化推进方式、不改验收。
+**交接产物：** SessionEvent 日志（`type`/`seq`/`time`/`data`/`ignorable`）；Surface 事件子集定义（只有其进模型上下文）；`replace` 压缩操作（原文保留）；摘要生成与注入；会话恢复与分叉；日志保留期与隐私边界（对齐 `D-PROD-08`）。
 **验证：** 断连后可按 `conversation_id` 恢复续跑；压缩后原文仍可查（审计）；结构性事件不占 token（实测）；摘要不含 ID；隐私边界有明确结论。
-**状态：** ⏳ 未开始
+**前置阻塞：已解除（2026-09-19 修正）。** 原登记「`docs/architecture/security.md` 第 6 行绝对禁令须先解决方可开工」——该条款**已于 2026-09-18 修订**（`security.md:7` 与 `:9` 的修订记录：「完整对话」由绝对禁令改为**有条件例外**，三条约束为保留期对齐 `D-PROD-08`、登出 / 删号联动清理、读取面带归属校验；token / 原始票据 / 账本明细三项仍为绝对禁令）。其中两条已由 02f 落地，**残余的保留期机制即 04d 的交付内容**。
+
+**为什么拆成子任务（2026-09-19 复核）：** 原卡含六项交付、跨**数据层（事件结构）/ 写路径（落库粒度）/ 读路径（压缩与摘要）/ 生命周期（保留期）/ 决策（跨设备）**五个面，且每一项都改同一张事件表与 `conversation.py` ——不拆则任一项卡住整卡不可交付，也无法独立验收。按 `docs/engineering/需求变更规范.md` §五.1 拆分。
+
+**现状基线（2026-09-19 核对）：**
+- **已有（P1 交付）：** `AIConversationEvent`（`seq` / `turn` / `type` / `data` / `created_at`，唯一索引 `(conversation_id, seq)`）；`ConversationService` 的 `history` / `append_turn` / `record_turn` / `check_quota`（**一轮原子写入**）；`AIConversation.summary` 字段存在但**保持空串**（P1 预留）。
+- **空白（P3 从零建）：** `ignorable` 与显式 `time` **不存在**；`type` 只有 `user` / `assistant` / `tool` 三个值（全集需扩到九类）；**Surface 子集完全未定义**——P1 的事件就是 loop 的消息流，**全部**进上下文（R-PROD-15 的残余）；**无压缩、无摘要、无 `replace` 事件、无恢复、无分叉、无保留期**。
+
+**子任务拆解（2026-09-19 拆定）：**
+
+| 子任务 | 硬依赖 | 交接产物 | 最低验证 | 状态 |
+|---|---|---|---|---|
+| **T-M7-04a 事件日志完整化与 Surface 子集** | 无 | 事件表补 `time` / `ignorable`；`type` 扩全集（**先核对 `String(16)` 是否放得下 `approval_request`**）；Surface 子集定义落为单一来源常量；`history()` 改为只投 Surface 子集；配额与安全事件入日志 | **实测「结构性事件不占 token」**（不接受设计推论）；Surface 子集逐类用例；事件类型全集可写可读（含长度边界）；非 Surface 事件不进 `messages`；投影 B 读取仍返回全部事件 | ⏳ 未开始 |
+| **T-M7-04b 会话恢复与分叉（含轮中途落库）** | 04a | 写入粒度由「一轮原子」改为**逐事件**；按 `conversation_id` + `seq` 的恢复入口；客户端断连重连续跑；会话分叉（不复制消息数组、原会话不变）；`StopReason.CANCELLED` 可达性复审 | 断连后按 `seq` 续跑（服务端 + 客户端用例）；**轮中途落库后断连仍有完整历史**；分叉会话独立续跑；**不变式 1（工具调用与结果配对）不因半截落库被破坏** | ⏳ 未开始 |
+| **T-M7-04c 摘要压缩与预算（`replace`）** | 04a、04b | 压缩触发条件决策（轮数 vs token vs 时间）；摘要生成（**不含 ID**、≤800 字符）；`replace` 事件（**原文保留在日志**）；摘要注入 `AIConversation.summary`；Token 预算落地；**失败步 token 估算的最终结论** | 压缩后**原文仍可查**；摘要不含 ID；压缩前后「结构性事件不占 token」结论一致；摘要失败回落上一版且不阻塞本轮；多轮澄清用例在压缩后仍正确 | ⏳ 未开始 |
+| **T-M7-04d 保留期与隐私边界落地** | 04a | 保留期机制（对齐 `D-PROD-08`），复用 `telemetry/retention.py` 的既有范式；读取面访问审计的结论；四个新端点的归属校验复审 | 到期事件按策略删除且**不破坏 `AIUsage` 配额基座**（02f 的 `SET NULL` 口径）；长期不登出用户的日志不再无限留存；`security.md` 三条约束逐条有实现或结论 | ⏳ 未开始 |
+| **T-M7-04e 跨设备会话同步（决策门）** | 04a | **先出决策**（仅摘要 / 正文 / 不同步，落 ADR 或架构 §6.1 修订，经账户所有者确认）再按结论落地；结论为「不同步」时本卡退化为文档更新 + 行为说明 | 决策落文档并经确认；按结论给出对应验证；不同步结论下须写明「换设备后旧会话如何呈现」 | ⏳ 未开始 |
+| **收口** | 04b–04e | P3 四板 + **真实断连恢复走查**（流式中杀进程 / 切网 / 切后台后再进入） | 出口标准逐条核对（本节验收列） | ⏳ 未开始 |
+
+**执行顺序：** 批次 1（04a，独占——事件结构不定则恢复 / 压缩 / 保留期全部返工）→ 批次 2（04b ∥ 04d）→ 批次 3（04c ∥ 04e）→ 批次 4（收口）。
+
+**状态：** ⏳ 未开始（拆分已完成，2026-09-19；前置阻塞已解除）
 
 ### T-M7-05 全功能覆盖：域路由、Skill 与设备能力通道（P4）
 
 **依赖：** T-M7-04。
+**实施推进计划：** `docs/milestones/T-M7-05-P4-implementation-plan.md`——逐卡职责边界、批次与并行切分点、验证基线、状态看板、中间结果记录，以及**跨期提前开工的切分点**与承接自上游的九项挂账。**领取任一张子卡前必读**；本节的验收列是权威标准，该文件只细化推进方式、不改验收。
 **交接产物：** 预路由（域选择，方案对比后定）；Skill 封装（复用 `PromptTemplate` 机制，按需加载）；设备能力通道（单向指令 / 需结果两类，架构 §4.3）；`ActionProposal` v2 覆盖全量 CRUD（先改 `docs/architecture/ai-architecture.md` + `contracts/action-proposal/schema.json` + 前后端校验器 + fixtures）；帮助文档检索（可选）。
 **验证：** 功能覆盖清单（架构 §3.2）逐项可用；设备类能力（提醒/权限/分享/小组件/语音/图片/图标）对话内可达；"新增一个表单能力不改 prompt 主体"验证用例；ActionProposal v2 三方一致性（schema / TS 校验器 / Python 校验器）通过；v1 契约与旧客户端兼容；域路由准确率实测记录（R-PROD-17）。
-**状态：** ⏳ 未开始
+
+**为什么拆成子任务（2026-09-19 复核）：** 原卡跨**五个面**——契约（跨 schema / TS / Python 三方一致）、**服务端工具全集**（P1 只交付 15 个；全量对应当前 **79 条桥命令**的表单任务，余约 55–60 个）、**设备能力通道**（跨服务端 + Kotlin + TS 三层，且 `device_request` 至今**无生产者**）、域路由、Skill 封装。任一项卡住则整卡不可交付、无法独立验收。按 `docs/engineering/需求变更规范.md` §五.1 拆分。
+
+**现状基线（2026-09-19 核对）：**
+- **已有（P1 交付）：** 工具注册表（`Tool` dataclass：`name` / `domain` / `kind` / `description` / `parameters` / `handler` / `proposal_action`）+ **15 个工具 / 3 域**（记账 5 / 预算 5 / 账户账本 5，预算与账本域**只读**）+ `tools_for_domains(domains)` 的按域过滤注入；`PromptTemplate` 机制（`prompts.py`，428 行）；设备类桥命令**已全部就位**（权限 / 语音 / 图片 / 图标 / 主题背景 / 分享 / 触感 / 提醒 / 小组件，含 9 个 `window.__aozora*__` 推送通道）。
+- **空白（P4 从零建）：** **`device_request` 无生产者**（八类 SSE 事件里唯一没有发射路径的一类，`stream.py:34,72` 明写）；**`routing` 阶段无生产者**（`stream.py:30` 注「属域路由，P4 才有」）；**无域路由**；**无 Skill 封装**；ActionProposal 仍是 v1 最小 action 集（`ai-architecture.md` 仅 30 行的薄指针文档，schema 16 个 fixture）。
+
+**子任务拆解（2026-09-19 拆定）：**
+
+| 子任务 | 硬依赖 | 交接产物 | 最低验证 | 状态 |
+|---|---|---|---|---|
+| **T-M7-05a ActionProposal v2 契约（文档/协议先行）** | 无 | `ai-architecture.md` 实质扩写 + `contracts/action-proposal/schema.json` v2 + TS 校验器（`domain/action-proposal.ts`）+ Python 校验器（`validator.py`）+ v2 fixtures + parity 测试；**v1 兼容**（版本协商 / 双读） | **三方一致性**（同一 fixture 三处结论一致）；**v1 全部 fixture 仍通过**；v2 枚举与 `proposal_action` 无冲突；旧客户端行为不变 | ⏳ 未开始 |
+| **T-M7-05b 全量工具：记账与账户账本域** | 05a | 记账（`transaction.*` / `category.*`）与账户账本（`account.*` / `book.*` / `meta_set(默认项)`）扩到**全量 CRUD**，写工具产出 v2 提案 | 每域工具数 ≤8；工具名一律下划线（点号会让 provider 400）；写工具一律走审批门；读工具结果**不含 id**、草案含 id 但回喂前剔除；**真实调用抽样正确率记录** | ⏳ 未开始 |
+| **T-M7-05c 全量工具：预算存钱、定时、角色域** | 05b | `budget.*` / `savings.*` / `scheduled.*` / `persona.*` / `meta_set(当前角色)`（后两类依赖 T-M7-01 已上云的三实体） | 三域工具数各 ≤8；写操作经 v2 提案与审批门；离线语义有明确结论；真实调用抽样记录 | ⏳ 未开始 |
+| **T-M7-05d 全量工具：分析与其余服务端域** | 05c | 分析（`/stats/*` / `/ai/report` 封装）、导出 / 反馈 / 隐私同意、安全账号（`auth.*` / 删号）、同步（`sync.getStatus` / `trigger`） | 架构 §3.2 中本卡各行逐项可达；**删号类工具强制确认**且不绕过既有账号删除流程；**对账不变量全绿** | ⏳ 未开始 |
+| **T-M7-05e 设备能力通道：服务端协议与 loop 暂停/恢复** | 无（仅需 P1 的 SSE） | `device_request` 的**首个生产者**；单向指令（不回传）与需结果（HTTP 上行回传 + loop 继续）两类协议；暂停态存储与超时 / 取消；`AgentObserver` 扩展 | 单向指令发出即继续；需结果类可被回传唤醒；**回传超时收敛到一致状态**（不变式 3）；取消后无悬挂设备请求；**顺手修正 `stream.py:34,72` 把设备通道写成「归 P2」的笔误** | ⏳ 未开始 |
+| **T-M7-05f 设备能力通道：客户端执行器与设备工具接线** | 05e | 把已就位的设备类桥命令族接成设备工具执行器；新增 `device.execute` / `device.result` 类命令——**命令数 79 → N，四处 + `SecurityConfigTest.kt:47-57` 断言同步**；需结果类上行回传 | 命令计数四处一致；TS 命令完整性契约测试；设备类工具**端到端可达**；回传后 loop 继续；权限被拒 / 设备不可用的降级有结论 | ⏳ 未开始 |
+| **T-M7-05g 域路由与预路由** | 05d | 域选择方案对比后定 + 实现；`phase: routing` 生产者接通（对接 03c 的占位）；`tools_for_domains` 接线 | 误路由率 / 漏注入率**实测记录**（R-PROD-17）；路由失败兜底策略有用例；**不得与入口推理分级混为一谈**（架构 §12.2 易混淆点） | ⏳ 未开始 |
+| **T-M7-05h Skill 封装与按需加载** | 05b–05d | 复用 `PromptTemplate` 封装 Skill、按需加载；与工具域的配合；加载条件与预算 | **「新增一个表单能力不改 prompt 主体」验证用例**（P4 出口标准）；Skill 不常驻上下文；未命中时行为与 05b–05d 逐字一致 | ⏳ 未开始 |
+| **T-M7-05i 帮助文档检索（可选，可砍）** | 05d | 仅产品帮助 / 理财知识的最小检索 | 若 P4 出口不纳入则**直接关闭并在文档标注「不做」**，不得默默留着造成范围含糊 | ⏳ 未开始 |
+| **收口** | 05b–05i | P4 四板 + **功能覆盖清单（架构 §3.2）逐项走查** + v2 三方一致性与 v1 兼容复核 | 出口标准逐条核对（本节验收列） | ⏳ 未开始 |
+
+**执行顺序：** 批次 1（05a）→ 批次 2（05b ∥ 05e）→ 批次 3（05c ∥ 05f）→ 批次 4（05d ∥ 05h）→ 批次 5（05g ∥ 05i）→ 批次 6（收口）。
+**跨期提前开工（唯一的安全切分点）：** **05a 与 05e 的协议部分不依赖 P2 / P3**——契约是纯文档 / 协议工作、设备通道协议只依赖 P1 已交付的 SSE 事件，两者可在 P2 期间开工，且**越早越好**（契约晚改＝已实现的工具返工）。其余各卡必须等 P3 收口。
+
+**状态：** ⏳ 未开始（拆分已完成，2026-09-19）
 
 ## 实施参数确认清单
 
