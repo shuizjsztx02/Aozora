@@ -20,6 +20,7 @@ import { useBridge } from '../../platform/hooks/use-bridge'
 import { usePermissions } from '../../platform/hooks/use-permissions'
 import { useVoice } from '../../platform/hooks/use-voice'
 import { useAssistant, type AssistantMessage, type CardStatus } from './use-assistant'
+import { StepCardStream } from './StepCardStream'
 import { ConfirmationCard } from './ConfirmationCard'
 import { OpPreviewCard } from './OpPreviewCard'
 import { buildAiCategoryNames } from '../../domain/ai-proposal-builder'
@@ -249,6 +250,7 @@ export function AssistantPage() {
     pendingOp,
     pendingConfig,
     streaming,
+    streamProjection,
     submitInput,
     editProposal,
     undoExecution,
@@ -597,7 +599,10 @@ export function AssistantPage() {
         {/* T-M7-02i：agent 流式气泡——正文按**追加**渲染（一轮会收到多帧 delta，
             不假设「一轮一帧」）；推理走灰字折叠区（架构 §8.5），绝不混进正文。
             流式期间只出气泡：v2 intent 在流式中无法预知，卡与操作预览等 done 之后
-            由 hook 按产物分发（用户感知为「思考完毕展开卡」）。 */}
+            由 hook 按产物分发（用户感知为「思考完毕展开卡」）。
+            T-M7-03c：气泡内自上而下 = 步骤卡片流 → 深度思考 → 正文——
+            先让用户看见「在做什么」，再是思考细节，最后是答案；本回合无工具调用时
+            StepCardStream 自行不渲染（统一智能模式：简单任务无步骤展示）。 */}
         {streaming && (
           <div className="flex items-start gap-2 mb-3">
             <MessageAvatar
@@ -614,6 +619,7 @@ export function AssistantPage() {
               }}
               data-testid="streaming-bubble"
             >
+              {streamProjection && <StepCardStream steps={streamProjection.steps} />}
               {streaming.reasoning && (
                 <details className="mb-1">
                   <summary
@@ -621,9 +627,15 @@ export function AssistantPage() {
                     style={{ color: 'var(--ink3)' }}
                     data-testid="streaming-reasoning"
                   >
-                    深度思考
+                    {/* T-M7-03c 打磨：折叠区在场即「还在思考」——给一个进行中的说法，
+                        否则用户分不清它是「思考完了收起来」还是「正在想」 */}
+                    深度思考中…
                   </summary>
-                  <div className="text-xs mt-1 whitespace-pre-wrap" style={{ color: 'var(--ink3)' }}>
+                  {/* T-M7-03c 打磨：推理可能很长，限高内滚，不把气泡撑成一屏 */}
+                  <div
+                    className="text-xs mt-1 whitespace-pre-wrap max-h-40 overflow-y-auto"
+                    style={{ color: 'var(--ink3)' }}
+                  >
                     {streaming.reasoning}
                   </div>
                 </details>
