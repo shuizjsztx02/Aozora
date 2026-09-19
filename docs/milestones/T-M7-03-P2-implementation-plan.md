@@ -204,6 +204,17 @@ cd app && npx tsc --noEmit                       # 0 错
 | `bash ./gradlew :app:testDebugUnitTest --rerun-tasks` | **418 tests / 0 failures / 1 skipped**（与 03d 记录逐字一致；本卡未触碰 Kotlin） |
 | `cd server && python -m pytest tests/ -q` | **1075 passed / 37 skipped**（与 03a 基线逐字一致；本卡未触碰任何 Python 文件） |
 
+> **远端 CI（run `35423753383`，HEAD `6dab695`）：Client ✅ / Server ✅；Android 作业整体 `cancelled`。**
+> Android 的前 10 步**全绿**——含第 8 步（`gradlew :app:lintDebug :app:testDebugUnitTest
+> :app:assembleDebug :app:assembleDebugAndroidTest`，即 Linux 上的编译与 JVM 单测，**本卡真正相关的
+> 那一步**）与第 9-10 步（emulator connected Android tests 与结果上传）。卡住的是**第 12 步
+> `dependencyCheckAnalyze`**：它撞上作业的 `timeout-minutes: 40` 被取消（本卡未新增任何依赖，
+> 该步是已知的既有超时项，与本次改动无关）。
+> 按「**不得写成通过**」的口径如实记：**Android 作业没有绿色结论**，可判读的只有它前 10 步。
+> 另：本次推送的新 run 覆盖了 `998d495` / `7420a15`（03d 收口）与 `d8dc961`…`6dab695`（本卡）全部
+> 提交——那一轮 03d 的 CI run 曾被本卡的首次推送按 `concurrency.cancel-in-progress` 取消，
+> 故本 run 的 Client / Server 结论同时是 03d 收口的完整结论。
+
 **回退实验（6 处变异，逐条回退后实测）：6/6 变红** —— ①`done` 权威核对被拿掉（中途提案
 照旧可确认）→ 红；②去掉「动作只在收尾后启用」的第二道防线 → 红；③拒绝时只撤卡、不清队列
 → **3 条红**；④丢弃的提案不记进「已处置」集合 → 红；⑤失败/断连时不置中断态 → **3 条红**；
