@@ -1609,6 +1609,17 @@ cd app && npx vitest run                         # 1135 passed（本卡 +8；同
 cd app && npx tsc --noEmit                       # 0 错
 ```
 
+**远端 CI：** `Server Lint & Test` ✅ / `Client Lint & Test` ✅（后者正是此前被
+「HEAD 不自洽」打红的那一环，契约并入 `721f876` 后转绿）。**`Android Compile & JVM Test`
+的第 8 步（`lintDebug` + `testDebugUnitTest` + `assembleDebug` + `assembleDebugAndroidTest`）
+在 `c0f309b` 的 run 上实测 ✅**——即本卡 12 条 JVM 用例在 CI 上是通过的；本地也把这四项
+预演过一遍（`lintDebug` 37 s、`assembleDebugAndroidTest` 5 s，均 BUILD SUCCESSFUL）。
+两点须知的实况：①该作业**第 12 步** `dependencyCheckAnalyze` 仍会吃满 40 分钟预算被截断
+（02g 已登记，非本卡回归）；②本卡自己的两次推送 run **都是被并行会话的后续推送按
+`concurrency.cancel-in-progress` 取消的**（我推 `55923b0` 取消了 02i 的 run，02i 推
+`c0f309b` 又取消了我的 run）——**互推互消**，两卡记录里都记了这一现象，判读 CI 时先看
+第 8 步的结论而不是作业级状态。
+
 **数据 / 同步 / AI / 安全影响：**
 
 - **数据与同步：零影响**——无模型改动、无迁移、不进 sync 协议。
