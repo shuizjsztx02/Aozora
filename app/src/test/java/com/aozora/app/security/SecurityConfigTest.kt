@@ -43,10 +43,11 @@ class SecurityConfigTest {
         // T12-7（REQ-36，决策 #1）: +TX_UPDATE（transaction.update）→ 75。
         // T14-2（REQ-39，决策 #1）: +BOOK_UPDATE（book.update）→ 76。
         // T16-5（REQ-61，决策 #1/#7）: +THEME_PICK_BACKGROUND（theme.pickBackground）→ 77。
+        // T-M7-02h（决策 #1）: +AI_AGENT/AI_CANCEL（ai.agent / ai.cancel）→ 79。
         val kotlinCommands = BridgeCommands.ALL
         assertEquals(
-            "Bridge command count must be 77 (sync with bridge-types.ts)",
-            77,
+            "Bridge command count must be 79 (sync with bridge-types.ts)",
+            79,
             kotlinCommands.size
         )
         assertEquals(

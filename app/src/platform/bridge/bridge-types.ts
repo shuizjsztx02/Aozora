@@ -78,6 +78,12 @@ export const BridgeCommands = {
   AI_VALIDATE: 'ai.validate',
   AI_EXECUTE: 'ai.execute',
 
+  // T-M7-02h（桥计数 77→79）：agent 流式通道。ai.agent 立即应答
+  // {pending, streamId}，事件经 window.__aozoraAiStream__ 推送；
+  // ai.cancel 关掉 SSE 长连接（服务端把断连当取消）。
+  AI_AGENT: 'ai.agent',
+  AI_CANCEL: 'ai.cancel',
+
   // T-M4-04a: 权限管理
   PERMISSIONS_GET_STATUS: 'permissions.getStatus',
   PERMISSIONS_REQUEST: 'permissions.request',
@@ -532,6 +538,75 @@ export interface AiExecuteResponse {
   transaction_ids: string[]
   proposal_id: string
   undo_window_seconds: number
+}
+
+// ─── T-M7-02h: agent 流式通道 ───
+
+/**
+ * ai.agent 参数。`conversation_id` 缺省 = 服务端新建会话，其 id 随 `done` 帧
+ * 回传，**下一轮必须带上**（否则每轮都开新会话、多轮上下文断裂）。
+ */
+export interface AiAgentParams {
+  input: string
+  bookId: string
+  conversationId?: string | null
+}
+
+/** ai.agent 的即时应答——事件随后经 `__aozoraAiStream__` 推送。 */
+export interface AiAgentAck {
+  pending: true
+  /** = 本轮 ai.agent 的 requestId；事件里的 streamId 与之相等。 */
+  streamId: string
+}
+
+/**
+ * 流事件名：架构 §8.1 的八类。P1 实际产出六类（`device_request` 无生产者，
+ * `routing` 属域路由）；`error` 另有一路来自桥侧本地失败（链路断开 / 认证失效）。
+ */
+export type AiStreamEventName =
+  | 'phase'
+  | 'tool_call'
+  | 'tool_result'
+  | 'confirm'
+  | 'device_request'
+  | 'delta'
+  | 'done'
+  | 'error'
+
+/** `done` 帧载荷（权威字段表见 `server/src/modules/ai/stream.py`）。 */
+export interface AiStreamDoneData {
+  conversation_id: string
+  stop_reason: string
+  steps: number
+  tool_calls: number
+  writes: number
+  usage: { prompt_tokens: number; completion_tokens: number }
+  proposals: Array<Record<string, unknown>>
+  executions: Array<Record<string, unknown>>
+  /**
+   * 本轮**没轮上处理**的中途输入（02d 的约定：调用方必须消费——非空时客户端应把
+   * 这些话**另起一轮**重发，不能当作没说过）。P1 的端点不接收中途输入，故恒为空数组；
+   * 服务端载荷是 `list(result.pending_input)`，即**数组**（02i 交接的跨卡修正）。
+   */
+  pending_input: string[]
+}
+
+/**
+ * `error` 帧载荷。`code` 有两族：服务端安全枚举（`ai_unavailable` /
+ * `agent_failed`）与桥侧本地失败（`timeout` / `network` / `auth_lost` /
+ * `429` / `503` / `stream_ended`）。
+ */
+export interface AiStreamErrorData {
+  code: string
+  message: string
+  conversation_id?: string | null
+}
+
+/** 原生 → Web 的 agent 流事件（Android 通过 `window.__aozoraAiStream__` 推送）。 */
+export interface AiStreamEvent {
+  streamId: string
+  event: AiStreamEventName
+  data: Record<string, unknown>
 }
 
 export interface AiCategoryFact {

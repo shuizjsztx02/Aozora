@@ -133,7 +133,11 @@ dependencies {
 
     // T-M3-02: HTTP client (sync + auth)
     implementation("com.squareup.okhttp3:okhttp:4.12.0")
+    // T-M7-02h: SSE 长连接（agent 流式通道）。EventSource 不是 okhttp 核心的一部分。
+    implementation("com.squareup.okhttp3:okhttp-sse:4.12.0")
     androidTestImplementation("com.squareup.okhttp3:mockwebserver:4.12.0")
+    // T-M7-02h: JVM 单测直连 MockWebServer 验证 SSE 帧透传与取消（同版本）。
+    testImplementation("com.squareup.okhttp3:mockwebserver:4.12.0")
 
     // JSON
     testImplementation("org.json:json:20231013")

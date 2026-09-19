@@ -19,7 +19,7 @@
 | **02f** | 会话状态与配额双限 | ✅ 完成 | 2026-09-18 | `17e7cac` | 批次 3；事件表 + 会话索引 + 429 双限 + 登出/删号清理；37 用例，独立复审 0 P1/1 P2（已修）详见 §五 |
 | **02g** | SSE 端点与部署配置 | ✅ 完成 | 2026-09-18 | `d239dd7` | 批次 4；48 用例 + 直连 ASGI 流式样板，18/18 回退实验变红，详见 §五 |
 | **02g-2** | token 级 delta（含推理增量） | ✅ 完成 | 2026-09-19 | `afc91b3` | 批次 4.5；协议细化（不改 §8.1 的八类事件）；实测合并窗 24×，12/12 回退实验变红，详见 §五 |
-| **02h** | 客户端桥通道 | ⏳ 未开始 | | | 批次 5 |
+| **02h** | 客户端桥通道 | ✅ 完成 | 2026-09-19 | `<feat 提交，回填见本卡 docs 提交>` | 批次 5；okhttp-sse + `ai.agent`/`ai.cancel`（命令 77→79）+ 事件转发 + 取消；12 用例 + 5 回退实验（1 处断言强度不足当场补强），详见 §五 |
 | **02i** | 客户端消费（最小形态） | ✅ 完成 | 2026-09-19 | `ecd85d4` | 批次 5；流式气泡 + done 三选一分发 + 确认门，详见 §五 |
 | **收口** | P1 四板 + T-M7-01 真机复认 | ⏳ 未开始 | | | 批次 6 |
 
@@ -1364,13 +1364,7 @@ Android tests 也真的跑过了** ✅），第 12 步 `dependencyCheckAnalyze` 
   4. **不做取消 UI**——`bridge.cancelAgent()` 未接线（P1 最小形态没有触发点；协议已就绪）。
   5. **不碰 02h 的文件**——桥命令的实现归 02h，本卡只消费（见下「与 02h 的并行方式」）。
 
-**与 02h 的并行方式（本卡实施时的实际情况）：** 领取本卡时看板记 02h「未开始」，但**开工后桥层
-契约已出现在工作区**（并发会话在写 02h，`bridge-types.ts` 的 `AiStreamEvent` / `AiStreamDoneData`
-与 `native-bridge.ts` 的 `runAgent` / `cancelAgent` / `onAiStream` 均已就位）。本卡因此**改用它的
-真实类型**（import 契约类型，不重复定义），并在实现中吃下它的两条形态：①`runAgent` **立即返回**
-`{pending, streamId}`（「命令返回 pending + 事件推送结果」，同 `requestPermission`），**本轮结束以
-`done` / `error` 事件为准**——所以 `runAgent` 的 resolve **不退订**、也**不**当作回合结束；②事件带
-`streamId`，按它过滤归属（P1 单流 + 并发互斥，ack 到达前到达的事件按单流处理）。
+**与 02h 的并行方式（本卡实施时的实际情况，含一次自伤）：** 领取本卡时看板记 02h「未开始」，但**开工后桥层契约已出现在工作区**（并发会话在写 02h）。本卡遂**改用它的真实类型**（import `bridge-types.ts` 的 `AiStreamEvent` / `AiStreamDoneData`）——**这一步是错的，见下「远端 CI 红与一次自伤」**。02h 的两条形态本卡照实吃下：①`runAgent` **立即返回** `{pending, streamId}`（「命令返回 pending + 事件推送结果」，同 `requestPermission`），**本轮结束以 `done` / `error` 事件为准**——所以 `runAgent` 的 resolve **不退订**、也**不**当作回合结束；②事件带 `streamId`，按它过滤归属（P1 单流 + 并发互斥，ack 到达前到达的事件按单流处理）。
 
 **修改的文档、契约与代码：**
 
@@ -1379,7 +1373,7 @@ Android tests 也真的跑过了** ✅），第 12 步 `dependencyCheckAnalyze` 
   `assistant-page-stream.test.tsx`（新建，4 用例）、`confirmation-card.test.tsx`（+3 用例）
 - 文档：本文件 §一 / §五、`production-execution-plan.md` 的 T-M7-02i 行
 - **契约零改动**：`bridge-types.ts` / `native-bridge.ts` / `contracts/` 与 Kotlin 侧**一行未动**
-  （本卡只 import 02h 的契约，不改桥层）
+  （本卡只用桥层的能力、不改桥层；`use-assistant.ts` 内自带一份结构化窄契约，理由见下）
 
 **验证命令与结果：**
 
@@ -1388,6 +1382,30 @@ cd app && npx tsc --noEmit      # 0 错
 cd app && npx vitest run        # 1135 passed（同树基线 1107 + 本卡 21 + 并发会话 02h 在途 7）
 ./gradlew :app:testDebugUnitTest --rerun-tasks   # 406 tests / 0 failures / 1 skipped（基线 394 + 并发会话 02h 在途 12）
 ```
+
+**远端 CI 红与一次自伤（2026-09-19，已修，提交 `113c474`）：**
+
+首次推送（`ecd85d4`）后远端 CI 的 Client 作业**红在 typecheck**：
+
+```
+error TS2305: Module '".../bridge-types"' has no exported member 'AiStreamEvent'
+error TS2339: Property 'onAiStream' does not exist on type 'NativeBridge'
+```
+
+**根因是「本地验证的树」与「提交的树」不是同一棵**：本卡把类型接到了 02h 的契约上，而 02h 的
+实现当时**只在工作区、未提交**——本地 `tsc` 因此通过（工作区有那些符号），提交却只带上本卡的
+文件，HEAD 于是处于「引用了尚不存在的符号」的状态，编译不过。
+
+**修法（`113c474`）：** `use-assistant.ts` **自带一份结构化窄接口**（`AgentStreamBridge` /
+`AgentStreamEvent` / `AgentStreamDone`，字段与 02h 的实现**逐一对齐**）+ **运行时能力探测**，
+不再引用任何未提交的符号。桥落地后自动接通；桥缺失或 APK 版本落后时整条回落单发链路。
+**代价：契约暂时存在两份定义**——待 02h 提交后应合并回 `bridge-types.ts`（那里才是契约类型的
+唯一源），见下「开放风险」第 4 条。
+
+**验证方式一并纠正：** 这次改在**干净 HEAD 的 worktree**（`git worktree add` + `node_modules`
+junction）里跑，而不是带着别人未提交改动的工作区——`tsc` 0 错、本卡 6 个测试文件 138 passed；
+主仓库全量 `tsc` 0 错 / vitest 1135 passed。**教训：并行会话下「本地绿」不等于「HEAD 绿」**——
+依赖别人未提交的改动时，要么等它提交，要么自带契约；验证时也该在干净树上跑一遍。
 
 **回退实验（11/11 全红，脚本在系统临时目录、不入库；逐处按 sha256 逐字节还原）：**
 
@@ -1462,6 +1480,11 @@ cd app && npx vitest run        # 1135 passed（同树基线 1107 + 本卡 21 + 
   `list(result.pending_input)`（**数组**），而 02h 的 `AiStreamDoneData.pending_input` 写的是
   `string | null`。**P1 该字段恒为空**（02g 记录：端点不接收中途输入），所以本卡不消费它、
   不构成运行时缺陷；但**两边迟早要对齐**，否则 P2 接中途输入时必踩。**责任人：02h / P2。**
+- **★ 契约暂时有两份定义** —— `use-assistant.ts` 自带的 `AgentStreamBridge` / `AgentStreamEvent` /
+  `AgentStreamDone` 与 `bridge-types.ts` 的同名类型（02h 提交后）是**同一件事的两份写法**。
+  这是「02h 未提交时 HEAD 必须自洽」的代价（见上「远端 CI 红与一次自伤」）。**合并时机：02h
+  提交后**——把 `use-assistant.ts` 的三处改为 import、删掉本地那份。**责任人：02h 交付后由
+  M7 收口执行**（两份长期并存的话，02h 后续加字段时必漂移）。
 - **取消无入口**——`cancelAgent()` 协议已就绪（桥命令 `ai.cancel`），但 P1 最小形态没有 UI
   触发点（架构 §9.2 的「停止生成」按钮归 P2）。**责任人：P2（T-M7-03）。**
 - **12 s 慢速提示在流式下的口径**——流式期间若长时间无事件，既有 12 s 计时器照常触发
@@ -1475,6 +1498,157 @@ cd app && npx vitest run        # 1135 passed（同树基线 1107 + 本卡 21 + 
 **下一项未阻塞任务：** **02h（客户端桥通道）** —— 与本卡**并行推进中**（其契约已在工作区，本卡
 据此实现）。它交付后即可做本卡记录的「端到端验证」；此后是**批次 6 收口**（四板 + T-M7-01 真机
 复认）。
+
+---
+
+### 02h · 客户端桥通道（✅ 2026-09-19）
+
+**任务编号：** T-M7-02h　**提交：** `<本卡 feat 提交>`
+
+**完成范围 / 明确未做：**
+
+- **完成：**
+  - **`app/build.gradle.kts`**——`okhttp-sse:4.12.0`（`implementation`）；另加
+    `mockwebserver:4.12.0` 到 **`testImplementation`**（原本只有 `androidTestImplementation`）
+    ——JVM 单测要直连真实 HTTP 回环验证 SSE，见下「测试方式」。
+  - **`AiGatewayClient.kt`**——`agentStream(input, bookId, conversationId, onEvent)`：`POST /ai/agent`
+    的 SSE 长连接，挂起直到流结束 / 取消 / 链路失败；`internal streamEvents(request, onEvent)` 承担
+    真正的帧透传（internal 以便测试直连 MockWebServer，同 `AozoraBridge.dispatch` 的 R-M4-21 先例）；
+    **独立的 `streamClient`**（见决策 2）；`mapStreamFailure`（HTTP 状态优先，只给状态码/类型，
+    不回显正文）；`buildAgentRequest`（首轮不带 `conversation_id`）；顺带把 token 获取抽成
+    `authorize()` 供 `executeAuthorized` 与 `agentStream` 共用——**行为等价**，快路径零变化。
+  - **`BridgeProtocol.kt` / `bridge-types.ts`**——`ai.agent` / `ai.cancel`（**命令 77 → 79**）+
+    `AiAgentParams` / `AiAgentAck` / `AiStreamEvent` / `AiStreamEventName` / `AiStreamDoneData` /
+    `AiStreamErrorData`。
+  - **`AozoraBridge.kt`**——`handleAiAgent`（**立即应答** `{pending, streamId}`，`scope.launch` 收流，
+    事件逐帧转发，终态兜底见决策 4）、`handleAiCancel`（`cancelAndJoin`）、`dispatchAiStreamEvent`
+    （`window.__aozoraAiStream__`，照 `onPermissionResult` 的链式包装先例）、`activeStreamJob`
+    （仿 `activeParseJob`）。
+  - **`native-bridge.ts`**——`runAgent` / `cancelAgent` / `onAiStream`（链式包装 + 退订还原）。
+  - **`SecurityConfigTest.kt`**——硬编码断言 77 → 79；`native-bridge.test.ts` 的 `expectedCommands` 同步。
+- **明确未做（逐条对应卡面的职责边界）：**
+  1. **不做 UI**——渲染归 02i（本卡只把帧送进 WebView）。
+  2. **不做客户端层灰度开关**——落点在 02i 的 `AI_AGENT_CLIENT_ENABLED`（本卡不含调用点）。
+  3. **Token 不出 Kotlin 层**（ADR-003 不变）——Bearer 由 Kotlin 注入，WebView 只收到帧。
+  4. **不解析任何事件名**——桥只识别 `done` / `error` 两个终态名（用于判定兜底），其余原样透传。
+
+**关键设计决策（记录下来的六条）：**
+
+| # | 决策 | 理由 |
+|---|---|---|
+| 1 | **`ai.agent` 立即应答 `{pending, streamId}`，事件走推送**，不是「等流结束才 resolve」 | 桥的命令通道是请求-响应，SSE 是长连接；「命令返回 pending + 事件推送结果」是架构 §8.2 的既定模式，同 `permissions.request`。`streamId` = 该轮 `ai.agent` 的 requestId，前端据此归属事件（02i 已按此消费） |
+| 2 | **SSE 用独立 OkHttpClient**：`callTimeout = 0` + `readTimeout = 25 s` | 卡面要求：25 s 是快路径**单发**预算，而一轮 loop 由多步串行构成、必然超出（§8.3）。所以 `callTimeout = 0` 去掉**整轮**的总时长上限，改由 `readTimeout` 表达 §8.3 那条「**单步静默 25 s**」——与快路径的用户可感 SLO 同值；服务端空闲心跳 15 s，正常情况下远不会触发 |
+| 3 | **取消 = 关连接**，不新增取消端点 | 02g 交接：服务端把断连当取消。`ai.cancel` 只做 `cancelAndJoin`，等连接真正收尾再应答——否则前端可能在取消返回后又收到一帧 |
+| 4 | **Kotlin 侧补发 `error` 兜底**：链路失败，或**流结束却没收到终态帧** | 桥层失败（网络断、认证失效、服务端进程重启、中间层断开）不会有任何一帧到达前端，前端会一直等一个不再到来的 `done`。补发用的码是既有桥错误码族（`timeout` / `network` / `auth_lost` / `429` / `503`）+ 新的 `stream_ended`；文案固定、不透传正文 |
+| 5 | **新一轮替换旧一轮**（`activeStreamJob?.cancel()`） | 桥只有一条事件通道、一轮对话也只该有一个在跑的回合；事件里带 `streamId` 是第二层保险（02i 已按 `streamId` 过滤） |
+| 6 | **事件载荷 `{streamId, event, data}`，`data` 原样透传** | 02g-2 的 `delta` 已是**多帧 + `channel`**：桥层**逐帧转发、不合并也不丢弃**（服务端已按 100 ms 合并）。桥不认识事件名，所以 §8.1 的八类与后续任何协议细化都不需要动桥 |
+
+**测试方式（JVM 层能做到的最深一层）：**
+
+两条测试类都用**真实 OkHttp + MockWebServer 回环**，不是打桩：
+
+1. `AiGatewayClientStreamTest`（4 用例）——帧按序透传（含**心跳注释帧被忽略**）、`done` 后正常返回、
+   请求面（POST 路径 / `Bearer` / `Accept: text/event-stream` / body 三键）、三个前置失败的映射
+   （503 → `Unavailable`、429 → `RateLimited`、401 → `AuthLost`）、**取消终止流**。
+2. `AozoraBridgeAiStreamTest`（8 用例）——命令注册面、参数校验、立即应答的形状、**SSE 帧 → WebView
+   JS 的推送**（解析 `evaluateJavascript` 捕获到的 JS 取回载荷）、终态兜底的正反两面、**有活动流时的取消**。
+
+**卡面的四项验证逐条落点：** ①命令计数 79（`SecurityConfigTest` + `native-bridge.test.ts`）；
+②TS 命令完整性契约测试（同上）；③SSE 事件送达（`aiAgent_forwardsServerFramesToWebView` 断言
+`streamId` / `event` / `data` 三字段落到 JS）；④取消能终止 loop（`agentStream_cancel_terminatesTheStream`
++ `aiCancel_terminatesTheRunningStream`，后者还断言**取消后即便服务端继续发帧也不得再送达**）。
+
+**回退实验（5/5 有效；逐处按 sha256 逐字节还原，脚本在系统临时目录、不入库）：**
+
+| # | 变异 | 结果 |
+|---|---|---|
+| M1 | 删掉终态兜底的 `error` 帧 | RED — `aiAgent_emitsLocalErrorWhenTheStreamEndsWithoutTerminalFrame` |
+| M2 | 终态标记失效（收到 `done` 也不记） | RED — `aiAgent_doesNotEmitLocalErrorAfterATerminalFrame` + `aiAgent_forwardsServerFramesToWebView` |
+| M3 | `ai.cancel` 只应答、不真的取消 | RED — `aiCancel_terminatesTheRunningStream` |
+| M4 | 推送回调名在 `typeof` 守卫处写歪 | **首次 GREEN** → 补强断言后 RED（见下） |
+| M5 | TS `onAiStream` 不解析 JSON、派发原字符串 | RED — 2 条 TS 用例 |
+
+**M4 是本卡最值钱的一次实验**：最初的断言是 `js.contains("__aozoraAiStream__")`——**宽匹配**。
+变异只改了 `typeof window.__aozoraAiStream__ === 'function'` 这一处（调用行仍留原名），JS 文本
+照样"包含"该名字、断言通过，而**真实浏览器里守卫恒假、事件永远送不到**。改成两处**分别断言**
+（守卫 + 调用）后才变红。教训记在这里：**对"生成出来的 JS 文本"，宽匹配等于没测**。
+
+**测试过程中踩到并修掉的一处测试环境陷阱（非产品缺陷）：** `aiCancel_terminatesTheRunningStream`
+最初用默认 scope（`Dispatchers.Main`）——Robolectric 的 paused looper 下，`runBlocking` 直调
+`dispatch` 会**占住主线程**，而 `cancelAndJoin` 等的那个 job 恰恰排在同一个 looper 上 → **死锁**
+（第一次跑批把构建卡了 10 分钟，只能杀进程）。改为注入 `CoroutineScope(Dispatchers.IO)` 后正常。
+**真机上不存在这个问题**：Main looper 持续运行，两条协程都在 Main 上也能正常收尾——记下来是因为
+它长得像产品缺陷，下次别再往那个方向查。
+
+**对 02i 交接项的处理（跨卡对齐）：**
+
+- **★ 已修：`pending_input` 的类型。** 02i 指出我写的是 `string | null`，而服务端
+  `_done_payload` 返回 `list(result.pending_input)`（`tuple[str, ...]` → **数组**）。已改为
+  `string[]` 并注明「P1 恒为空数组」。**这条走的是 02i 的交接而不是我自己发现——两卡并行时
+  "契约由一方写、另一方读"的典型缺口。**
+- **未处置：自动执行的写操作无撤销卡**（02i 登记）——服务端只在**挂起**时发带提案的 `confirm` 帧，
+  Step 1 高置信自动执行走的是 `tool_result` 摘要，`done.executions` 只给 `transaction_ids`。
+  要让客户端渲染撤销卡需服务端在自动执行时也发一帧带提案的载荷——**属协议增量，须走
+  `需求变更规范`，不在本卡**。**责任人：P2 / 收口。**
+- **已确认无需动作：** 桥侧新增的 `stream_ended` 码与既有的 `timeout` / `network` / `auth_lost` /
+  `429` / `503` 一样，02i 的 `error` 分支不区分 `code`、统一按「本轮没做成」收尾 ✓。
+
+**修改的文档、契约与代码：**
+
+- 代码：`app/build.gradle.kts`、`app/src/main/java/com/aozora/app/ai/AiGatewayClient.kt`、
+  `app/src/main/java/com/aozora/app/bridge/AozoraBridge.kt`、`BridgeProtocol.kt`、
+  `app/src/platform/bridge/bridge-types.ts`、`native-bridge.ts`
+- 测试：`app/src/test/java/com/aozora/app/ai/AiGatewayClientStreamTest.kt`（新建，4）、
+  `app/src/test/java/com/aozora/app/bridge/AozoraBridgeAiStreamTest.kt`（新建，8）、
+  `SecurityConfigTest.kt`、`app/src/__tests__/bridge/native-bridge.test.ts`（+8）
+- 文档：本文件 §一 / §五、`production-execution-plan.md` 的 T-M7-02h 行
+- **契约零改动**：`contracts/` 与 `server/` 一行未动；02i 的 `use-assistant.ts` 一行未动
+
+**验证命令与结果：**
+
+```
+./gradlew :app:testDebugUnitTest --rerun-tasks   # 406 tests / 0 failures / 1 skipped
+                                                 # 同树基线 394 + 本卡 12（两条新测试类）
+cd app && npx vitest run                         # 1135 passed（本卡 +8；同树含 02i 的 21）
+cd app && npx tsc --noEmit                       # 0 错
+```
+
+**数据 / 同步 / AI / 安全影响：**
+
+- **数据与同步：零影响**——无模型改动、无迁移、不进 sync 协议。
+- **AI：客户端首次具备 agent 通道的传输能力**，但本卡**不含任何调用点**——走不走流由 02i 的
+  `AI_AGENT_CLIENT_ENABLED`（默认关闭）决定。开关关闭时一次请求都不会发出。
+- **安全：** ①**Token 全程不出 Kotlin 层**（ADR-003 不变）——WebView 只收帧，永远拿不到 Bearer；
+  ②`error` 事件（含桥侧补发的兜底）**只给码与固定文案**，不透传异常正文或服务端消息；
+  ③事件载荷原样透传但**不落库**（桥无持久化面）；④取消即断连，服务端未提交即回滚，不产生半截写入。
+- **隐私：** 无新增日志面——桥层不打日志、不写库；帧只经过内存。
+
+**兼容与回退方式：**
+
+- **向前兼容：** 纯增量——两条命令 + 一个全局回调 + 一个客户端类。旧 JS（不认识 `ai.agent`）完全
+  不受影响；`okhttp-sse` 只被 `agentStream` 用到。02i 的能力探测（`typeof runAgent === 'function'`）
+  恰好兜住「JS 与 APK 版本不同步」的部署形态。
+- **回退** = 删两条命令常量与两处 handler + `agentStream` / `streamEvents` / `streamClient` /
+  `mapStreamFailure` / `buildAgentRequest` + TS 三个方法 + 两条测试类。`authorize()` 的抽取可原样
+  保留（行为等价），快路径 25 s 与既有 AI 链路一行未变。
+
+**开放风险与责任人：**
+
+- **★ 端到端未经真实链路（本卡最大的残余）**——本卡的验证止于 **JVM/WebView 可达的最深一层**
+  （真实 OkHttp + 真实 SSE 帧 + 真实 `evaluateJavascript` 注入 + 真机同款 scope 语义），
+  但「服务端 → 经桥 → WebView」这条链**一次都没跑过**；经 nginx 的那一段还叠加 R-PROD-22
+  （本机无 nginx、无 docker 守护进程）。**责任人：M7 收口**（与 02i 同款交接）。收口时的最小配方：
+  ①服务端 `ai_agent_enabled=true` + DeepSeek key；②客户端把 `AI_AGENT_CLIENT_ENABLED` 临时置
+  `true`；③模拟器 + `adb reverse`；④跑三态——**多步任务**（看步骤与多帧 `delta`）、**挂起提案**
+  （`done.proposals` → 确认卡）、**失败收尾**（断网或撞 429 → 气泡保留半截 + 失败标注）。
+- **`readTimeout = 25 s` 贴合卡面口径，但仍是初值**——相对服务端 15 s 心跳只有 1.67 倍余量。真机弱网下若出现"推理中途被判链路已死"，
+  该值需按实测调整（改一处常量）。**责任人：收口。**
+- **取消 UI 无入口**——`ai.cancel` 与 `cancelAgent()` 协议已就绪，P1 最小形态没有触发点（归 P2）。**责任人：P2。**
+- **02i 记录的「JVM 基线含并发会话在途增量」已闭环**——那 12 例即本卡的 `AiGatewayClientStreamTest`
+  （4）与 `AozoraBridgeAiStreamTest`（8），现已随本卡提交，不再是"在途"。
+
+**下一项未阻塞任务：** **批次 6 收口**——四板全绿、T-M7-01 遗留的真机双设备换机 bootstrap 复认，
+以及上面那条**端到端真机路径**（02h + 02i 的共同残余）。
 
 ---
 

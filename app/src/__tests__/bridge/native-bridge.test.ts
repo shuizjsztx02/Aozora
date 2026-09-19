@@ -36,6 +36,7 @@ afterEach(() => {
   delete win.__aozoraVoiceFinal__
   delete win.__aozoraVoiceError__
   delete win.__aozoraImageProgress__
+  delete win.__aozoraAiStream__
 })
 
 // ─── 类型完整性 ───
@@ -89,6 +90,9 @@ describe('Bridge types — 命令完整性', () => {
     'ai.interpret',
     'ai.validate',
     'ai.execute',
+    // T-M7-02h: agent 流式通道
+    'ai.agent',
+    'ai.cancel',
     // T-M4-04a: 权限管理
     'permissions.getStatus',
     'permissions.request',
@@ -142,7 +146,7 @@ describe('Bridge types — 命令完整性', () => {
     'persona.archive',
   ]
 
-  it('BridgeCommands 包含所有 77 个命令（含 AI 4 个 + 权限 3 个 + 语音 2 个 + 图片 4 个 + 同意 2 个 + 导出 4 个 + 账号删除 2 个 + 反馈 1 个 + FIX 4 个 + T7-2 账户更新 1 个 + 第八轮分类/图标/存钱 7 个 + T9-5a meta 2 个 + T10-3 auth 4 个 + T11-2 widget 1 个 + T11-4 scheduled 4 个 + T11-7 persona 4 个 + T12-7 交易更新 1 个 + T14-2 账本更新 1 个 + T16-5 主题背景 1 个）', () => {
+  it('BridgeCommands 包含所有 79 个命令（含 AI 6 个 + 权限 3 个 + 语音 2 个 + 图片 4 个 + 同意 2 个 + 导出 4 个 + 账号删除 2 个 + 反馈 1 个 + FIX 4 个 + T7-2 账户更新 1 个 + 第八轮分类/图标/存钱 7 个 + T9-5a meta 2 个 + T10-3 auth 4 个 + T11-2 widget 1 个 + T11-4 scheduled 4 个 + T11-7 persona 4 个 + T12-7 交易更新 1 个 + T14-2 账本更新 1 个 + T16-5 主题背景 1 个 + T-M7-02h agent 2 个）', () => {
     const actualCommands = Object.values(BridgeCommands)
     expect(actualCommands).toHaveLength(expectedCommands.length)
     for (const cmd of expectedCommands) {
@@ -1078,5 +1082,125 @@ describe('NativeBridge — T-M5-05c 应用内反馈', () => {
       expect(err).toBeInstanceOf(BridgeError)
       expect((err as BridgeError).code).toBe('rate_limited')
     }
+  })
+})
+
+// ─── T-M7-02h: agent 流式通道 ───
+
+describe('NativeBridge — agent 流式通道（T-M7-02h）', () => {
+  let bridge: NativeBridge
+  let mockNative: ReturnType<typeof installMockBridge>
+
+  beforeEach(() => {
+    bridge = new NativeBridge()
+    mockNative = installMockBridge()
+  })
+
+  function ackAgent(requestId: string, data: Record<string, unknown>) {
+    setTimeout(() => simulateResponse(requestId, data), 0)
+  }
+
+  it('runAgent 发送 ai.agent，首轮不带 conversation_id', async () => {
+    mockNative.call.mockImplementation((_v: number, requestId: string) => {
+      ackAgent(requestId, { pending: true, streamId: requestId })
+    })
+    const ack = await bridge.runAgent('记一笔 12 块', 'book-1')
+
+    const [version, requestId, command, payload] = mockNative.call.mock.calls[0]
+    expect(version).toBe(BRIDGE_VERSION)
+    expect(command).toBe('ai.agent')
+    expect(JSON.parse(payload)).toEqual({ input: '记一笔 12 块', book_id: 'book-1' })
+    // 即时应答把 streamId 交给前端——事件里的 streamId 与它相等
+    expect(ack).toEqual({ pending: true, streamId: requestId })
+  })
+
+  it('runAgent 带上轮 done 帧回传的 conversation_id', async () => {
+    mockNative.call.mockImplementation((_v: number, requestId: string) => {
+      ackAgent(requestId, { pending: true, streamId: requestId })
+    })
+    await bridge.runAgent('改成 3000', 'book-1', 'conv-7')
+
+    expect(JSON.parse(mockNative.call.mock.calls[0][3])).toEqual({
+      input: '改成 3000',
+      book_id: 'book-1',
+      conversation_id: 'conv-7',
+    })
+  })
+
+  it('cancelAgent 发送 ai.cancel 并回传 cancelled', async () => {
+    mockNative.call.mockImplementation((_v: number, requestId: string) => {
+      ackAgent(requestId, { cancelled: true })
+    })
+    const result = await bridge.cancelAgent()
+
+    expect(mockNative.call.mock.calls[0][2]).toBe('ai.cancel')
+    expect(result).toEqual({ cancelled: true })
+  })
+
+  it('onAiStream 收到事件（JSON 字符串解析为对象）', () => {
+    const received: unknown[] = []
+    const off = bridge.onAiStream((e) => received.push(e))
+
+    win.__aozoraAiStream__(JSON.stringify({
+      streamId: 'req_1',
+      event: 'tool_call',
+      data: { tool: 'budget_list', step: 1, message: '正在查询预算…' },
+    }))
+
+    expect(received).toHaveLength(1)
+    expect(received[0]).toMatchObject({
+      streamId: 'req_1',
+      event: 'tool_call',
+      data: { tool: 'budget_list', step: 1 },
+    })
+    off()
+  })
+
+  it('onAiStream 取消订阅后还原全局槽位且不再收到事件', () => {
+    const received: unknown[] = []
+    const before = win.__aozoraAiStream__
+    const off = bridge.onAiStream((e) => received.push(e))
+    off()
+
+    // 没有前一个回调时，退订即把槽位还原（不再是函数）
+    expect(win.__aozoraAiStream__).toBe(before)
+    expect(received).toHaveLength(0)
+  })
+
+  it('onAiStream 退订不误伤后来注册的监听者', () => {
+    const first: unknown[] = []
+    const second: unknown[] = []
+    const offFirst = bridge.onAiStream((e) => first.push(e))
+    const offSecond = bridge.onAiStream((e) => second.push(e))
+
+    offFirst()
+    win.__aozoraAiStream__(JSON.stringify({ streamId: 'req_1', event: 'delta', data: { text: '好' } }))
+
+    expect(first).toHaveLength(1) // 退订前已链在 second 之前，事件仍经它过一遍
+    expect(second).toHaveLength(1)
+    offSecond()
+  })
+
+  it('onAiStream 链式保留先注册的回调（多实例共存）', () => {
+    const first: unknown[] = []
+    const second: unknown[] = []
+    const offFirst = bridge.onAiStream((e) => first.push(e))
+    const offSecond = new NativeBridge().onAiStream((e) => second.push(e))
+
+    win.__aozoraAiStream__(JSON.stringify({ streamId: 'req_1', event: 'done', data: { steps: 2 } }))
+
+    expect(first).toHaveLength(1)
+    expect(second).toHaveLength(1)
+    offFirst()
+    offSecond()
+  })
+
+  it('onAiStream 畸形 JSON 不抛错也不派发', () => {
+    const received: unknown[] = []
+    const off = bridge.onAiStream((e) => received.push(e))
+
+    expect(() => win.__aozoraAiStream__('{ not json')).not.toThrow()
+    expect(received).toHaveLength(0)
+    off()
   })
 })

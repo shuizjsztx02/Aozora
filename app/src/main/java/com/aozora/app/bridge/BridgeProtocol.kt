@@ -103,6 +103,14 @@ object BridgeCommands {
     const val AI_VALIDATE = "ai.validate"
     const val AI_EXECUTE = "ai.execute"
 
+    // T-M7-02h（决策 #1：桥计数本轮唯一变更点 77→79）：agent 流式通道。
+    // ai.agent 立即应答 {pending, streamId}，事件随后经 window.__aozoraAiStream__
+    // 逐帧推送（同 permissions.request 的「返回 pending + 事件推送结果」模式，
+    // 架构 §8.2）；ai.cancel = 关掉 SSE 长连接——服务端把断连当取消，没有
+    // 单独的取消端点（02g 交接）。
+    const val AI_AGENT = "ai.agent"
+    const val AI_CANCEL = "ai.cancel"
+
     // T-M4-04a: 权限管理
     const val PERMISSIONS_GET_STATUS = "permissions.getStatus"
     const val PERMISSIONS_REQUEST = "permissions.request"
@@ -187,6 +195,7 @@ object BridgeCommands {
         REMINDER_GET_STATUS, REMINDER_SET, REMINDER_CHECK_PERMISSION,
         AI_REPORT,
         AI_INTERPRET, AI_VALIDATE, AI_EXECUTE,
+        AI_AGENT, AI_CANCEL,
         PERMISSIONS_GET_STATUS, PERMISSIONS_REQUEST, PERMISSIONS_OPEN_SETTINGS,
         VOICE_START_RECORDING, VOICE_STOP_RECORDING,
         IMAGE_PICK, IMAGE_DELETE,

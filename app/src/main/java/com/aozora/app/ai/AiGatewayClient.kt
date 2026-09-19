@@ -11,6 +11,9 @@ import okhttp3.OkHttpClient
 import okhttp3.Request
 import okhttp3.RequestBody.Companion.toRequestBody
 import okhttp3.Response
+import okhttp3.sse.EventSource
+import okhttp3.sse.EventSourceListener
+import okhttp3.sse.EventSources
 import org.json.JSONObject
 import java.io.IOException
 import java.io.InterruptedIOException
@@ -25,7 +28,8 @@ import kotlin.coroutines.resumeWithException
  * Responsible for:
  * - Token injection via [AuthClient]
  * - POST to /ai/ endpoints on the app server
- * - 25 s call timeout (aligned with ADR-003 SLO)
+ * - 25 s call timeout (aligned with ADR-003 SLO); the SSE agent channel
+ *   opts out of it — a multi-step turn cannot fit in 25 s (T-M7-02h)
  * - Error mapping to bridge error codes
  *
  * Token never leaves the Kotlin layer — the WebView receives only the
@@ -44,6 +48,25 @@ class AiGatewayClient(
      */
     private val httpClient: OkHttpClient = httpClient.newBuilder()
         .callTimeout(CALL_TIMEOUT_SECONDS, TimeUnit.SECONDS)
+        .build()
+
+    /**
+     * T-M7-02h: SSE 专用 client —— **长连接不能背 25 s 的 `callTimeout`**。
+     *
+     * 那个预算是快路径单发（ADR-003 SLO），而一轮 agent loop 由多次模型调用
+     * 串行构成，必然超出（架构 §8.3）。这里覆盖两点：
+     *
+     * - `callTimeout = 0`：**整轮没有总时长上限**，由服务端的步骤边界 + 用户的
+     *   取消兜底（server 侧单步 20 s，见 02g）。
+     * - `readTimeout = 25 s`：它是「多久没有数据就判链路已死」，表达的是 §8.3
+     *   那条**单步静默 25 s** 的口径（与快路径的用户可感 SLO 同值）。服务端空闲
+     *   心跳是 15 s（`ai_agent_heartbeat_seconds`），故正常情况下远不会触发。
+     *
+     * `newBuilder()` 仍共享连接池与调度器。
+     */
+    private val streamClient: OkHttpClient = httpClient.newBuilder()
+        .callTimeout(0, TimeUnit.SECONDS)
+        .readTimeout(STREAM_READ_TIMEOUT_SECONDS, TimeUnit.SECONDS)
         .build()
 
     sealed class AiError(message: String, cause: Throwable? = null) : Exception(message, cause) {
@@ -89,6 +112,35 @@ class AiGatewayClient(
             timeoutSeconds = IMAGE_PARSE_TIMEOUT_SECONDS,
         )
 
+    /**
+     * T-M7-02h: POST /ai/agent —— 一轮 agent 回合的 SSE 流。
+     *
+     * 挂起直到流结束（服务端发出 `done` / `error` 帧后关闭连接）、被取消
+     * （用户点了停止 → 协程取消 → 底层连接关闭，服务端把断连当取消），或
+     * 链路失败（抛 [AiError]）。
+     *
+     * [onEvent] 在 OkHttp 的读线程上按帧回调 `(event, data)` 并**原样透传**：
+     * 事件语义属服务端（`server/src/modules/ai/stream.py`），这一层不认识任何
+     * 事件名。心跳注释帧（`: ping`）由 okhttp-sse 自行忽略，不会到达这里。
+     */
+    suspend fun agentStream(
+        input: String,
+        bookId: String,
+        conversationId: String? = null,
+        onEvent: (event: String, data: String) -> Unit,
+    ) {
+        val token = authorize()
+        val request = Request.Builder()
+            .url("$baseUrl/ai/agent")
+            .post(buildAgentRequest(input, bookId, conversationId).toRequestBody(JSON))
+            .header("Authorization", "Bearer $token")
+            .header("Content-Type", "application/json")
+            .header("Accept", "text/event-stream")
+            .header("X-Request-Id", UUID.randomUUID().toString())
+            .build()
+        streamEvents(request, onEvent)
+    }
+
     // ─── internal ────────────────────────────────────────────────────────
 
     private fun buildInterpretRequest(input: String, contextJson: String?): String {
@@ -126,18 +178,28 @@ class AiGatewayClient(
             .put("book_id", bookId)
             .toString()
 
+    /** 首轮不带 `conversation_id`：服务端建会话，`done` 帧回传其 id 供下一轮复用。 */
+    private fun buildAgentRequest(input: String, bookId: String, conversationId: String?): String {
+        val body = JSONObject().put("input", input).put("book_id", bookId)
+        if (conversationId != null) body.put("conversation_id", conversationId)
+        return body.toString()
+    }
+
+    /** 取一个有效 access token；认证失效统一翻成 [AiError.AuthLost]。 */
+    private suspend fun authorize(): String = withContext(Dispatchers.IO) {
+        try {
+            authClient.ensureValidAccessToken()
+        } catch (e: AuthClient.AuthLostException) {
+            throw AiError.AuthLost(e)
+        }
+    }
+
     private suspend fun executeAuthorized(
         url: String,
         bodyJson: String,
         timeoutSeconds: Long = CALL_TIMEOUT_SECONDS,
     ): String {
-        val token = withContext(Dispatchers.IO) {
-            try {
-                authClient.ensureValidAccessToken()
-            } catch (e: AuthClient.AuthLostException) {
-                throw AiError.AuthLost(e)
-            }
-        }
+        val token = authorize()
 
         val request = Request.Builder()
             .url(url)
@@ -205,6 +267,71 @@ class AiGatewayClient(
         }
     }
 
+    /**
+     * 打开 SSE 长连接并按帧回调；挂起直到结束 / 取消 / 失败。
+     *
+     * internal：JVM 单测直连 MockWebServer 验证帧透传与取消，不必绕经 token
+     * （与 `AozoraBridge.dispatch` 的 R-M4-21 先例同法）。
+     */
+    internal suspend fun streamEvents(
+        request: Request,
+        onEvent: (event: String, data: String) -> Unit,
+    ) {
+        suspendCancellableCoroutine { cont ->
+            val listener = object : EventSourceListener() {
+                override fun onEvent(
+                    eventSource: EventSource,
+                    id: String?,
+                    type: String?,
+                    data: String,
+                ) {
+                    if (!cont.isActive) return
+                    // 事件回调**不许杀掉流**：异常抛出去会中断 EventSource 的读循环，
+                    // 把一次帧解析失误升级成整轮失败。
+                    try {
+                        onEvent(type.orEmpty(), data)
+                    } catch (_: Exception) {
+                    }
+                }
+
+                override fun onClosed(eventSource: EventSource) {
+                    if (cont.isActive) cont.resume(Unit)
+                }
+
+                override fun onFailure(eventSource: EventSource, t: Throwable?, response: Response?) {
+                    if (!cont.isActive) return
+                    cont.resumeWithException(mapStreamFailure(t, response))
+                }
+            }
+            val source = EventSources.createFactory(streamClient).newEventSource(request, listener)
+            cont.invokeOnCancellation { source.cancel() }
+        }
+    }
+
+    /**
+     * SSE 链路的失败映射。**HTTP 状态优先**——okhttp-sse 在非 2xx 时带 response
+     * 回调 `onFailure`（`processResponse` 里那次），而流中途断开时 response 是
+     * 已经开始的 200，那时才看异常类型。口径与服务端的 `error` 帧一致：只给
+     * 状态码与类型，**不回显正文**。
+     */
+    private fun mapStreamFailure(t: Throwable?, response: Response?): AiError {
+        val code = response?.code ?: 0
+        if (code != 0 && code != 200) {
+            return when (code) {
+                401 -> AiError.AuthLost()
+                429 -> AiError.RateLimited()
+                503 -> AiError.Unavailable(code)
+                else -> AiError.Network("Server error: HTTP $code")
+            }
+        }
+        return when (t) {
+            // 读超时（心跳静默超过 streamClient 的 readTimeout）与调用超时
+            // 都是 InterruptedIOException，与同步路径同一口径。
+            is InterruptedIOException -> AiError.Timeout(t)
+            else -> AiError.Network(t?.message ?: "Stream failed", t)
+        }
+    }
+
     /** Best-effort extraction of the server's ``ErrorResponse.message``. */
     private fun serverMessage(body: String, code: Int): String {
         val msg = try {
@@ -220,5 +347,7 @@ class AiGatewayClient(
         private const val CALL_TIMEOUT_SECONDS = 25L
         /** T-M4-04e: 视觉模型较慢，图片解析使用 120s 超时。 */
         private const val IMAGE_PARSE_TIMEOUT_SECONDS = 120L
+        /** T-M7-02h: SSE 静默上限 = 架构 §8.3 的「单步静默 25 s」口径。 */
+        private const val STREAM_READ_TIMEOUT_SECONDS = 25L
     }
 }

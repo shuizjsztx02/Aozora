@@ -29,6 +29,8 @@ import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.cancelAndJoin
 import org.json.JSONObject
+import org.json.JSONTokener
+import java.util.concurrent.atomic.AtomicBoolean
 import kotlin.coroutines.coroutineContext
 
 /**
@@ -76,11 +78,19 @@ class AozoraBridge(
         internal const val BG_MAX_DIMENSION = 1080
         internal const val BG_QUALITY = 70
         internal const val BG_MAX_BYTES = 2 * 1024 * 1024
+
+        // T-M7-02h: 仅用于识别流是否已收到终态帧（服务端 EventType 的两端）
+        private const val EVENT_DONE = "done"
+        private const val EVENT_ERROR = "error"
     }
 
     // NEW-R6-2 fix: 追踪当前活跃的 parse Job，以便取消
     @Volatile
     private var activeParseJob: Job? = null
+
+    // T-M7-02h: 追踪当前活跃的 agent 流（同一时刻至多一个），以便 ai.cancel
+    @Volatile
+    private var activeStreamJob: Job? = null
     @JavascriptInterface
     fun call(version: Int, requestId: String, command: String, payloadJson: String) {
         if (version != BridgeProtocol.VERSION) {
@@ -177,6 +187,10 @@ class AozoraBridge(
             BridgeCommands.AI_INTERPRET -> handleAiInterpret(requestId, payload)
             BridgeCommands.AI_VALIDATE -> handleAiValidate(requestId, payload)
             BridgeCommands.AI_EXECUTE -> handleAiExecute(requestId, payload)
+
+            // T-M7-02h: agent 流式通道（事件经 window.__aozoraAiStream__ 推送）
+            BridgeCommands.AI_AGENT -> handleAiAgent(requestId, payload)
+            BridgeCommands.AI_CANCEL -> handleAiCancel(requestId)
 
             // T-M4-04a: 权限管理
             BridgeCommands.PERMISSIONS_GET_STATUS -> handlePermissionsGetStatus(requestId)
@@ -1212,6 +1226,131 @@ class AozoraBridge(
             BridgeResponse.error(requestId, "auth_lost", "Authentication required")
         }
     }
+
+    // ─── T-M7-02h: agent 流式通道 ───
+
+    /**
+     * T-M7-02h: `ai.agent` —— 启动一轮 agent 回合（ADR-003 通道）。
+     *
+     * **立即应答** `{pending, streamId}`，服务端事件随后经
+     * `window.__aozoraAiStream__` 逐帧推送（「命令返回 pending + 事件推送结果」，
+     * 同 `permissions.request` 与架构 §8.2）。流上**不设单发超时**：一轮 loop 由
+     * 多个步骤构成，时长上限由服务端步骤边界与用户的 `ai.cancel` 兜底（§8.3）。
+     *
+     * 已有活动流时**取消旧的、启动新的**——桥只有一条事件通道，一轮对话也只该
+     * 有一个在跑的回合；前端按事件里的 `streamId`（= 本轮 ai.agent 的 requestId）
+     * 归属事件。
+     *
+     * 取消（`CancellationException`）不推事件：发起方已经知道。链路失败与「连接
+     * 在终态帧之前结束」都会补一个 `error` 事件收尾，否则前端会一直等一个不再
+     * 到来的 `done`。
+     */
+    private fun handleAiAgent(requestId: String, p: JSONObject): BridgeResponse {
+        val client = aiGatewayClient
+            ?: return BridgeResponse.error(requestId, "unavailable", "AI gateway client not injected")
+        val input = p.optString("input", null)
+            ?: return BridgeResponse.error(requestId, "invalid_input", "Missing required field: input")
+        val bookId = p.optString("book_id", null)
+            ?: return BridgeResponse.error(requestId, "invalid_input", "Missing required field: book_id")
+        // 首轮不带 conversation_id（服务端建会话，done 帧回传其 id 供下一轮复用）。
+        val conversationId = p.optString("conversation_id", "").ifBlank { null }
+
+        activeStreamJob?.cancel()
+        val streamId = requestId
+        val job = scope.launch {
+            val self = coroutineContext[Job]
+            val terminalSeen = AtomicBoolean(false)
+            try {
+                client.agentStream(input, bookId, conversationId) { event, data ->
+                    if (event == EVENT_DONE || event == EVENT_ERROR) terminalSeen.set(true)
+                    dispatchAiStreamEvent(streamId, event, data)
+                }
+                if (!terminalSeen.get()) {
+                    // 服务端重启 / 中间层断开：流结束了却没有终态帧。
+                    dispatchAiStreamEvent(
+                        streamId,
+                        EVENT_ERROR,
+                        localStreamError("stream_ended", "The stream ended before a result"),
+                    )
+                }
+            } catch (e: AiGatewayClient.AiError) {
+                dispatchAiStreamEvent(streamId, EVENT_ERROR, localStreamError(e))
+            } finally {
+                if (activeStreamJob === self) activeStreamJob = null
+            }
+        }
+        activeStreamJob = job
+        return BridgeResponse.success(
+            requestId,
+            JSONObject().put("pending", true).put("streamId", streamId).toString(),
+        )
+    }
+
+    /**
+     * T-M7-02h: `ai.cancel` —— 取消活动流。
+     *
+     * 服务端把**断连**当取消（02g：没有单独的取消端点），所以这里唯一要做的事
+     * 就是关掉 SSE 连接。`cancelAndJoin` 等连接真正收尾再应答，否则前端可能在
+     * 取消返回之后又收到一帧。无活动流时 `cancelled=false`（幂等）。
+     */
+    private suspend fun handleAiCancel(requestId: String): BridgeResponse {
+        val job = activeStreamJob
+        // 先摘引用再取消：job 的 finally 只在仍指向自己时才清空，避免误清新一轮。
+        activeStreamJob = null
+        if (job != null) job.cancelAndJoin()
+        return BridgeResponse.success(
+            requestId,
+            JSONObject().put("cancelled", job != null).toString(),
+        )
+    }
+
+    /**
+     * 推送一帧 agent 事件到 WebView（`window.__aozoraAiStream__`）。
+     *
+     * 载荷 `{streamId, event, data}`：`data` 是服务端帧的原样 JSON（解析失败时
+     * 退化为字符串——畸形帧不许把桥打挂）。帧语义与字段表见
+     * `server/src/modules/ai/stream.py`，Kotlin 这一层不认识任何事件名。
+     */
+    private fun dispatchAiStreamEvent(streamId: String, event: String, dataJson: String) {
+        val data = try {
+            JSONTokener(dataJson).nextValue()
+        } catch (_: Exception) {
+            dataJson
+        }
+        val payload = JSONObject()
+            .put("streamId", streamId)
+            .put("event", event)
+            .put("data", data)
+        val js = """
+            (function(){
+              try {
+                if (typeof window.__aozoraAiStream__ === 'function') {
+                  window.__aozoraAiStream__(${JSONObject.quote(payload.toString())});
+                }
+              } catch (e) {}
+            })();
+        """.trimIndent()
+        try {
+            webView.post { webView.evaluateJavascript(js, null) }
+        } catch (_: Exception) {
+            // WebView 已销毁 —— 丢弃该帧（同 respond 的 CR-05 口径）
+        }
+    }
+
+    /** 桥侧本地失败的 error 事件载荷：码与既有桥错误码同族，文案固定、不泄正文。 */
+    private fun localStreamError(e: AiGatewayClient.AiError): String {
+        val (code, message) = when (e) {
+            is AiGatewayClient.AiError.Timeout -> "timeout" to "AI agent request timed out"
+            is AiGatewayClient.AiError.RateLimited -> "429" to "AI rate limit exceeded"
+            is AiGatewayClient.AiError.Unavailable -> "503" to "AI service unavailable"
+            is AiGatewayClient.AiError.AuthLost -> "auth_lost" to "Authentication required"
+            is AiGatewayClient.AiError.Network -> "network" to "Network error"
+        }
+        return localStreamError(code, message)
+    }
+
+    private fun localStreamError(code: String, message: String): String =
+        JSONObject().put("code", code).put("message", message).toString()
 
     // ─── 响应发送 ───
 

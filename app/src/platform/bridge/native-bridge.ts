@@ -42,6 +42,8 @@ import {
   type AiInterpretResponse,
   type AiValidateResponse,
   type AiExecuteResponse,
+  type AiAgentAck,
+  type AiStreamEvent,
   type PermissionStatusData,
   type PermissionType,
   type PermissionResultEvent,
@@ -477,6 +479,60 @@ export class NativeBridge {
   /** AI 执行已验证的 ActionProposal（ADR-003 通道，25s 超时）。 */
   async executeProposal(proposal: Record<string, unknown>, bookId: string, confirmationToken: string): Promise<AiExecuteResponse> {
     return this.call<AiExecuteResponse>('ai.execute', { proposal, book_id: bookId, confirmation_token: confirmationToken }, { timeoutMs: AI_TIMEOUT })
+  }
+
+  // ─── T-M7-02h: agent 流式通道 ───
+
+  /**
+   * 启动一轮 agent 回合（ADR-003 通道）。
+   *
+   * **立即返回** `{pending, streamId}`——服务端事件经 `onAiStream` 推送
+   * （「命令返回 pending + 事件推送结果」，同 `requestPermission`，架构 §8.2）。
+   * 事件是流式的，这里**不设 25 s 单发超时**：一轮 loop 由多个步骤构成，
+   * 时长上限由服务端步骤边界与用户的 `cancelAgent()` 兜底（架构 §8.3）。
+   *
+   * @param conversationId 上一轮 `done.conversation_id`；首轮省略。
+   */
+  async runAgent(input: string, bookId: string, conversationId?: string | null): Promise<AiAgentAck> {
+    const payload: Record<string, unknown> = { input, book_id: bookId }
+    if (conversationId) payload.conversation_id = conversationId
+    return this.call<AiAgentAck>('ai.agent', payload)
+  }
+
+  /**
+   * 取消当前 agent 流。服务端把断连当取消（没有单独的取消端点），
+   * 因此这里的动作就是关掉 SSE 长连接；无活动流时返回 `{cancelled: false}`。
+   */
+  async cancelAgent(): Promise<{ cancelled: boolean }> {
+    return this.call('ai.cancel')
+  }
+
+  /**
+   * 注册 agent 流事件监听（原生 → Web 推送）。返回取消订阅函数。
+   *
+   * 原生侧通过 `window.__aozoraAiStream__` 调用；事件带 `streamId`
+   * （= `runAgent` 那次调用的 requestId），多实例/多流时据此归属。
+   */
+  onAiStream(listener: (event: AiStreamEvent) => void): () => void {
+    if (typeof window === 'undefined') return () => {}
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const prev = (window as any).__aozoraAiStream__
+    const wrapped = (eventJson: string) => {
+      try {
+        const event = typeof eventJson === 'string' ? JSON.parse(eventJson) : eventJson
+        listener(event as AiStreamEvent)
+      } catch { /* ignore parse errors */ }
+      if (typeof prev === 'function') prev(eventJson)
+    }
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    ;(window as any).__aozoraAiStream__ = wrapped
+    return () => {
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      if ((window as any).__aozoraAiStream__ === wrapped) {
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        ;(window as any).__aozoraAiStream__ = prev
+      }
+    }
   }
 
   // ─── T-M4-04a: 权限管理 ───
