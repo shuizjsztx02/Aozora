@@ -69,7 +69,7 @@ describe('assistant-chat-store', () => {
     expect(useAssistantChatStore.getState().messages).toEqual([])
   })
 
-  it('持久化到 localStorage key aozora-assistant-chat，partialize 只落数据字段（v2）', () => {
+  it('持久化到 localStorage key aozora-assistant-chat，partialize 只落数据字段（v3）', () => {
     useAssistantChatStore.getState().setMessages(many(2))
     const raw = localStorage.getItem(STORAGE_KEY)
     expect(raw).toBeTruthy()
@@ -78,10 +78,14 @@ describe('assistant-chat-store', () => {
     // T-M7-03b：v2 起多会话——会话维度也落盘（否则切页 remount 后退回单会话）
     expect(parsed.state.projections).toEqual({})
     expect(parsed.state.activeConversationId).toBeNull()
+    // T-M7-04e：v3 起多一个日志游标（跨设备增量补齐的起点）
+    expect(parsed.state.cursors).toEqual({})
     expect(parsed.state.setMessages).toBeUndefined()
     expect(parsed.state.clear).toBeUndefined()
     expect(parsed.state.switchConversation).toBeUndefined()
-    expect(parsed.version).toBe(2)
+    expect(parsed.state.setCursor).toBeUndefined()
+    expect(parsed.state.forgetCursor).toBeUndefined()
+    expect(parsed.version).toBe(3)
   })
 
   it('setItem 抛错（quota/隐私模式）：写入静默降级为内存态，不抛', () => {
@@ -219,7 +223,7 @@ describe('assistant-chat-store — 多会话分桶（T-M7-03b）', () => {
     expect(st.projections).toEqual({})
   })
 
-  it('v1 迁移后继续写入：新消息追加在旧历史之后，落盘升为 v2', async () => {
+  it('v1 迁移后继续写入：新消息追加在旧历史之后，落盘升为 v3', async () => {
     localStorage.setItem(STORAGE_KEY, JSON.stringify({
       state: { messages: many(2) }, version: 1,
     }))
@@ -228,7 +232,7 @@ describe('assistant-chat-store — 多会话分桶（T-M7-03b）', () => {
     mod.useAssistantChatStore.getState().setMessages(prev => [...prev, msg(9)])
 
     const parsed = JSON.parse(localStorage.getItem(STORAGE_KEY)!)
-    expect(parsed.version).toBe(2)
+    expect(parsed.version).toBe(3)
     expect(parsed.state.messages.map((m: AssistantMessage) => m.id)).toEqual(['m-0', 'm-1', 'm-9'])
   })
 
@@ -312,5 +316,80 @@ describe('assistant-chat-store — 新会话（T-M7-03d 收口）', () => {
     expect(toServerConversationId(LOCAL_ID_PREFIX + 'x')).toBeNull()
     expect(toServerConversationId('6f1c0f2e-0000-4000-8000-000000000001'))
       .toBe('6f1c0f2e-0000-4000-8000-000000000001')
+  })
+})
+
+/**
+ * T-M7-04e：日志游标——「这条投影已覆盖到日志的哪一行」。
+ *
+ * 它是跨设备增量补齐的起点，因此有三条必须钉住的口径：
+ * ① **只前进**（乱序到达的拉取不能把游标往回拨，否则下一批增量会重复取回旧行）；
+ * ② **会话没了就一并作废**（删除 / 404 两条路径）；
+ * ③ **v2 存量数据一律迁成「未知」**——04e 之前的桶反推不出日志位置，未知即不做增量。
+ */
+describe('assistant-chat-store — 日志游标（T-M7-04e）', () => {
+  it('setCursor 只前进：更小的值不覆盖，相等的值也不重写', () => {
+    s().setCursor('conv-A', 8)
+    expect(s().cursors['conv-A']).toBe(8)
+
+    s().setCursor('conv-A', 3)      // 迟到的旧批次
+    expect(s().cursors['conv-A']).toBe(8)
+
+    s().setCursor('conv-A', 12)
+    expect(s().cursors['conv-A']).toBe(12)
+  })
+
+  it('forgetCursor 抹成未知；本就没有时不动 state 引用', () => {
+    s().setCursor('conv-A', 5)
+    s().forgetCursor('conv-A')
+    expect(s().cursors['conv-A']).toBeUndefined()
+
+    const before = s().cursors
+    s().forgetCursor('conv-A')
+    expect(s().cursors).toBe(before)   // 无变化不产生新对象（zustand 的浅比较据此跳过渲染）
+  })
+
+  it('clear（登出）把游标一并清掉——它是本地事实，不该跨账号留着', () => {
+    s().setCursor('conv-A', 5)
+    s().clear()
+    expect(s().cursors).toEqual({})
+  })
+
+  it('删除会话：游标与投影一起作废；删的不是当前会话时消息不动', () => {
+    s().switchConversation('conv-B')
+    s().setCursor('conv-B', 3)
+    s().setCursor('conv-A', 9)
+
+    s().removeConversation('conv-A', 'conv-B')
+
+    expect(s().cursors['conv-A']).toBeUndefined()
+    expect(s().cursors['conv-B']).toBe(3)
+    expect(s().activeConversationId).toBe('conv-B')
+  })
+
+  it('陈旧 id 的降级（forgetConversation）：游标随 id 一起丢，消息原地保留', () => {
+    s().switchConversation('conv-A')
+    s().setMessages(many(2))
+    s().setCursor('conv-A', 7)
+
+    s().forgetConversation()
+
+    expect(s().activeConversationId).toBeNull()
+    expect(s().cursors['conv-A']).toBeUndefined()
+    expect(s().messages.map(m => m.id)).toEqual(['m-0', 'm-1'])
+  })
+
+  it('v2 存量数据迁到 v3：游标为空（未知），投影一条不动', async () => {
+    localStorage.setItem(STORAGE_KEY, JSON.stringify({
+      state: { messages: many(1), projections: { 'conv-A': many(2, 10) }, activeConversationId: 'conv-A' },
+      version: 2,
+    }))
+    vi.resetModules()
+    const mod = await import('../../platform/store/assistant-chat-store')
+    const st = mod.useAssistantChatStore.getState()
+
+    expect(st.cursors).toEqual({})
+    expect(st.messages.map(m => m.id)).toEqual(['m-0'])
+    expect(st.projections['conv-A'].map(m => m.id)).toEqual(['m-10', 'm-11'])
   })
 })

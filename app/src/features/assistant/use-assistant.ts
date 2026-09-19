@@ -92,6 +92,8 @@ import {
   useAssistantStream,
   type AgentStreamBridge, type AgentStreamProjection, type StreamingBubble,
 } from './use-assistant-stream'
+// T-M7-04e：中断轮的文案与重建侧共用一份（同一件事只有一句说法）
+import { INTERRUPTED_TURN_NOTE } from './history-projection'
 import { newUuid } from '../../platform/uuid'
 import { todayBizDate } from '../../domain/date'
 import { META_KEY_DEFAULT_ACCOUNT_ID, META_KEY_DEFAULT_BOOK_ID } from '../../domain/meta'
@@ -423,6 +425,9 @@ export function useAssistant({
   const adoptConversation = useAssistantChatStore(s => s.adoptConversation)
   // T-M7-03d：陈旧 conversation_id 的降级（服务端 404 → 桥的 `not_found` 帧）
   const forgetConversation = useAssistantChatStore(s => s.forgetConversation)
+  // T-M7-04e：跨设备按需重建的日志游标——收尾时落盘，`use-conversations` 拿它做增量补齐
+  const setCursor = useAssistantChatStore(s => s.setCursor)
+  const forgetCursor = useAssistantChatStore(s => s.forgetCursor)
   const [phase, setPhase] = useState<AssistantPhase>('idle')
   const [activeProposal, setActiveProposal] = useState<ActionProposal | null>(null)
   const [cardStatus, setCardStatus] = useState<CardStatus | null>(null)
@@ -870,6 +875,10 @@ export function useAssistant({
   const settleStream = useCallback(async (p: AgentStreamProjection) => {
     finishProcessing()
     const text = p.text
+    // T-M7-04e：游标要落在**活动桶的键**上。成功路径的第 1 轮里这个值还是 null
+    // （要等下面的 `adoptConversation` 才变成服务端 id），所以那里不用它、用
+    // `done.conversation_id`；失败与取消两条路径的活动键就是会话本身的键。
+    const activeKey = useAssistantChatStore.getState().activeConversationId
 
     if (p.canceled) {
       // T-M7-03e：审批四值的 `cancelled`——用户主动中止整个任务。挂着的确认卡是
@@ -877,6 +886,12 @@ export function useAssistant({
       // 不变式 3：取消必须收敛到一致状态，不留悬挂的确认卡）。**零写。**
       dropApprovals(() => true)
       setInterrupted(null)
+      // T-M7-04e：**取消把游标抹成未知**——服务端在断连取消时**不写任何日志事件**
+      // （`CancelledError` 不被 `except Exception` 捕获），但这一轮**已经落库的部分**
+      // 确实在游标之后；而本机这半截气泡是流的拼接、反推不出它对应到日志的哪一行。
+      // 推进会漏、不推进会重，唯一安全的选择是**放弃这条会话的增量**——下一次正常
+      // 收尾会把游标重新写上（自愈）。理由详见 store 的 `forgetCursor`。
+      if (activeKey !== null) forgetCursor(activeKey)
       appendAssistantMessage(text ? `${text}\n\n已取消` : '已取消')
       return
     }
@@ -907,14 +922,22 @@ export function useAssistant({
       const dropped = dropApprovals(() => true)
       setInterrupted({ input: lastTurnInputRef.current })
       const note = dropped > 0 ? '；未确认的改动没有记录' : ''
+      // T-M7-04e：失败轮的日志位置也要落盘。续读（`catchUp`）刚把游标推到了服务端日志
+      // 的真实位置，`logCursor` 带的就是它——不写的话，这一轮留在日志里的 `user` 事件
+      // 会在下一次增量补齐时**重复显示一次**。取的是**常量**：同一件事只有一份文案
+      // （重建侧用同一个，`history-projection.ts`）。
+      if (activeKey !== null && p.logCursor > 0) setCursor(activeKey, p.logCursor)
       appendAssistantMessage(text
-        ? `${text}\n\n⚠️ 连接中断，本轮未完成${note}`
-        : `⚠️ 连接中断，本轮未完成${note}`)
+        ? `${text}\n\n${INTERRUPTED_TURN_NOTE}${note}`
+        : `${INTERRUPTED_TURN_NOTE}${note}`)
       return
     }
 
     // 会话 id 固化进 store：下一轮必须带上，否则每轮都开新会话（02f 的会话索引靠它接续）
     adoptConversation(done.conversation_id)
+    // T-M7-04e：本轮结束的日志位置落盘（跨设备增量补齐的起点）。用收尾时的 `logCursor`
+    // 而不是 `done.seq`——两者在这里恒等，取同一个来源少一处口径。
+    if (p.logCursor > 0) setCursor(done.conversation_id, p.logCursor)
     setInterrupted(null)
 
     // T-M7-03e：`done.proposals` 是**权威清单**（`stream.py` 口径），用它核对队列——
@@ -966,7 +989,8 @@ export function useAssistant({
       : '本轮没能得出结论，换个说法再试试？'))
   }, [
     adoptConversation, appendAssistantMessage, bridge, dropApprovals, enqueueApproval,
-    finishProcessing, forgetConversation, setMessages, showPendingApproval,
+    finishProcessing, forgetConversation, forgetCursor, setCursor, setMessages,
+    showPendingApproval,
   ])
 
   /**

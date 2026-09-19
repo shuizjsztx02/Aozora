@@ -32,6 +32,11 @@
  * 按游标（上一轮 `done.seq`）调 `conversation.events?after_seq=` 续读一次，把补得到
  * 的正文放进投影的 `recovered` 交给上层（见 `recoveredMessages` 的三条裁剪规则）。
  * **游标是内存态**、续读失败退化成「什么都不补」——补救不该把中断提示本身拖没。
+ *
+ * T-M7-04e：投影多一个**交接字段** `logCursor`（收尾时本机已并入日志的到哪儿）。
+ * 本 hook 的行为一行未变——它只是把 `settle` 那一刻的游标一并交出去，由上层落盘，
+ * 供 `use-conversations` 的跨设备增量补齐当起点（决策见
+ * `docs/adr/ADR-008-conversation-cross-device.md`）。
  */
 
 import { useCallback, useEffect, useRef, useState } from 'react'
@@ -144,6 +149,17 @@ export interface AgentStreamProjection {
    * 它们不在本卡（见 `recoveredMessages`）。
    */
   recovered: RecoveredMessage[]
+  /**
+   * T-M7-04e：这一轮收尾时**本机已并入日志的到哪儿**（事件 `seq`；0 = 还没并过）。
+   *
+   * 与 `recovered` 同样是**交接字段**而非渲染态：上层（`use-assistant`）在收尾时
+   * 把它写进 store 的 `cursors`，作为跨设备增量补齐的起点。
+   *
+   * 值取 `settle` 那一刻的游标，因此两条路径都对：正常收尾是 `done.seq`；**失败
+   * 收尾是续读拉到的最大 `seq`**（`catchUp` 先跑、已经推进了游标）——后者是必须的，
+   * 否则失败轮留在日志里的 `user` 事件会在下一次增量补齐时**重复显示一次**。
+   */
+  logCursor: number
 }
 
 /** 续读回来的一条补记：`seq` 是它在日志里的位置，`text` 是要补的正文。 */
@@ -156,7 +172,7 @@ export function createStreamProjection(): AgentStreamProjection {
   return {
     text: '', reasoning: '', steps: [], confirmProposals: [],
     deviceRequests: [], done: null, error: null, canceled: false, settled: false,
-    recovered: [],
+    recovered: [], logCursor: 0,
   }
 }
 
@@ -362,7 +378,11 @@ export function useAssistantStream({
    *
    *  **游标**（T-M7-04b）在收尾时推进：`done` 带回服务端会话 id 与 `seq`（本轮结束
    *  时的事件序号），它就是下一次断连时 `after_seq` 的起点。放在 `settle` 而不是
-   *  `done` 分支上，是因为取消 / 失败路径也不能把上一轮的游标弄丢。 */
+   *  `done` 分支上，是因为取消 / 失败路径也不能把上一轮的游标弄丢。
+   *
+   *  **T-M7-04e**：同一个值随投影一并交出（`logCursor`）——上层据此在 store 里落盘，
+   *  跨设备的下一次增量补齐从它开始。失败收尾走的是 `settleAfterRecovery`，续读已经
+   *  把游标推到了服务端日志的真实位置，落盘的因此也是一个精确值。 */
   const settle = useCallback((final: AgentStreamProjection) => {
     if (final.done) {
       cursorRef.current = {
@@ -372,7 +392,7 @@ export function useAssistantStream({
     }
     settledRef.current = true
     unsubscribe()
-    onSettledRef.current(final)
+    onSettledRef.current({ ...final, logCursor: cursorRef.current.seq })
     projectionRef.current = null
     setProjection(null)
   }, [unsubscribe])

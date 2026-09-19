@@ -17,7 +17,7 @@
  *   ——后半段在 `use-assistant-agent-stream.test.ts` 里（那是它自然的家）。
  */
 import { describe, it, expect, vi, beforeEach } from 'vitest'
-import { render, screen, waitFor } from '@testing-library/react'
+import { act, render, screen, waitFor } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { MemoryRouter } from 'react-router'
 import { AssistantPage } from '../../features/assistant/AssistantPage'
@@ -47,6 +47,8 @@ const mockBridge = vi.hoisted(() => ({
   listConversations: vi.fn(),
   renameConversation: vi.fn(),
   deleteConversation: vi.fn(),
+  // T-M7-04e：会话正文的按需拉取（04b 交付的桥命令，本卡起被消费）
+  fetchConversationEvents: vi.fn(),
 }))
 
 vi.mock('../../platform/hooks/use-voice', () => ({ useVoice: () => mockVoice }))
@@ -100,6 +102,15 @@ function bridgeError(code: string): Error & { code: string } {
   return Object.assign(new Error(code), { code })
 }
 
+/** T-M7-04e：一条服务端会话事件（形状同 `AiConversationEventItem`）。 */
+function serverEvent(seq: number, type: string, content: string, turn = 1) {
+  return {
+    seq, turn, type,
+    data: { role: type, content },
+    created_at: '2026-09-19T11:00:00Z',
+  }
+}
+
 const renderPage = () =>
   render(
     <MemoryRouter>
@@ -123,7 +134,12 @@ describe('AssistantPage — 会话列表（T-M7-03d）', () => {
     mockBridge.listConversations.mockReset().mockResolvedValue({ conversations: [] })
     mockBridge.renameConversation.mockReset()
     mockBridge.deleteConversation.mockReset().mockResolvedValue({ success: true })
-    useAssistantChatStore.setState({ activeConversationId: null, messages: [], projections: {} })
+    // T-M7-04e：默认「拉得到、但没有事件」——不写实现的用例会被这里的默认值兜住
+    mockBridge.fetchConversationEvents = vi.fn()
+      .mockResolvedValue({ conversation_id: 'c-1', events: [] })
+    useAssistantChatStore.setState({
+      activeConversationId: null, messages: [], projections: {}, cursors: {},
+    })
   })
 
   it('打开抽屉：列出服务端会话，当前会话高亮', async () => {
@@ -459,5 +475,226 @@ describe('assistant-chat-store — 03d 的两个会话动作', () => {
     expect(s.activeConversationId).toBe('c-1')
     expect(s.messages.map(m => m.text)).toEqual(['当前'])
     expect(s.projections['c-2']).toBeUndefined()
+  })
+})
+
+/**
+ * T-M7-04e：**跨设备正文按需重建**。
+ *
+ * 决策见 `docs/adr/ADR-008-conversation-cross-device.md`：会话正文不做双向同步实体，
+ * 切到一条本机没缓存的服务端会话时**从服务端事件日志重建**投影 B。
+ *
+ * 这里钉的是三条刷新规则与它们各自的可见后果（纯变换本身在
+ * `assistant-history-projection.test.ts`）：
+ *   ① 无缓存 → 全量重建（**换设备后打开旧会话**就是这一条）；
+ *   ② 有缓存且游标已知 → 从游标增量补齐，**本地已有的消息一条不动**；
+ *   ③ 有缓存但游标未知 → 不拉取（宁可少刷新一次，也不要重复显示一轮）。
+ * 外加：拉取失败不报错但要说明、迟到的响应要丢、旧 APK 要退化成说明性空态。
+ */
+describe('AssistantPage — 跨设备正文重建（T-M7-04e）', () => {
+  beforeEach(() => {
+    vi.clearAllMocks()
+    Element.prototype.scrollTo = vi.fn() as unknown as typeof Element.prototype.scrollTo
+    hookState.phase = 'idle'
+    hookState.streaming = null
+    Object.defineProperty(navigator, 'onLine', { value: true, configurable: true })
+    mockBridge.listConversations.mockReset().mockResolvedValue({ conversations: [] })
+    mockBridge.renameConversation.mockReset()
+    mockBridge.deleteConversation.mockReset().mockResolvedValue({ success: true })
+    mockBridge.fetchConversationEvents = vi.fn()
+      .mockResolvedValue({ conversation_id: 'c-1', events: [] })
+    useAssistantChatStore.setState({
+      activeConversationId: null, messages: [], projections: {}, cursors: {},
+    })
+  })
+
+  it('① 本机无缓存：切过去拉日志、重建出正文（换设备后打开旧会话）', async () => {
+    mockBridge.listConversations.mockResolvedValue({
+      conversations: [serverConversation('c-1', '午饭记账')],
+    })
+    mockBridge.fetchConversationEvents.mockResolvedValue({
+      conversation_id: 'c-1',
+      events: [
+        serverEvent(1, 'user', '午饭 12.5'),
+        serverEvent(2, 'assistant', '已按 12.5 计入餐饮'),
+      ],
+    })
+
+    renderPage()
+    await openDrawer()
+    await userEvent.click(await screen.findByTestId('conversation-select-c-1'))
+
+    await waitFor(() => expect(useAssistantChatStore.getState().messages.map(m => m.text))
+      .toEqual(['午饭 12.5', '已按 12.5 计入餐饮']))
+    // 没有游标 → 不带 after_seq（全量）
+    expect(mockBridge.fetchConversationEvents).toHaveBeenCalledWith('c-1', null)
+    // 拉到的位置落进游标，供下一次增量补齐
+    expect(useAssistantChatStore.getState().cursors['c-1']).toBe(2)
+  })
+
+  it('① 重建出的历史里，被中断的那一轮留下标注而不是消失', async () => {
+    mockBridge.listConversations.mockResolvedValue({
+      conversations: [serverConversation('c-1', '断过一轮')],
+    })
+    mockBridge.fetchConversationEvents.mockResolvedValue({
+      conversation_id: 'c-1',
+      events: [
+        serverEvent(1, 'user', '午饭 12.5'),
+        serverEvent(2, 'error', 'The assistant could not complete this turn'),
+      ],
+    })
+
+    renderPage()
+    await openDrawer()
+    await userEvent.click(await screen.findByTestId('conversation-select-c-1'))
+
+    await waitFor(() => expect(useAssistantChatStore.getState().messages.map(m => m.text))
+      .toEqual(['午饭 12.5', '⚠️ 连接中断，本轮未完成']))
+  })
+
+  it('② 有缓存且游标已知：只补尾部，本地已有的消息（含历史记账卡）一条不动', async () => {
+    mockBridge.listConversations.mockResolvedValue({
+      conversations: [serverConversation('c-1', '午饭记账')],
+    })
+    // 本地缓存：一条带提案的历史卡——重建只认得正文，所以绝不能拿重建结果顶替它
+    const localCard = {
+      ...msg('m-card', '已记录 1 笔交易'), proposalStatus: 'committed' as const,
+    }
+    useAssistantChatStore.setState({
+      activeConversationId: null,
+      messages: [],
+      projections: { 'c-1': [localCard] },
+      cursors: { 'c-1': 5 },
+    })
+    mockBridge.fetchConversationEvents.mockResolvedValue({
+      conversation_id: 'c-1',
+      events: [serverEvent(6, 'assistant', '在别的设备上补的一句', 2)],
+    })
+
+    renderPage()
+    await openDrawer()
+    await userEvent.click(await screen.findByTestId('conversation-select-c-1'))
+
+    await waitFor(() => expect(useAssistantChatStore.getState().messages.map(m => m.text))
+      .toEqual(['已记录 1 笔交易', '在别的设备上补的一句']))
+    // 增量：带上游标，不重取已经并过的行
+    expect(mockBridge.fetchConversationEvents).toHaveBeenCalledWith('c-1', 5)
+    expect(useAssistantChatStore.getState().cursors['c-1']).toBe(6)
+    // 卡片仍在原地
+    expect(useAssistantChatStore.getState().messages[0].proposalStatus).toBe('committed')
+  })
+
+  it('③ 有缓存但游标未知：原样保留，一个请求都不发（宁可少刷新，也不要重复显示）', async () => {
+    mockBridge.listConversations.mockResolvedValue({
+      conversations: [serverConversation('c-1', '午饭记账')],
+    })
+    useAssistantChatStore.setState({
+      activeConversationId: null,
+      messages: [],
+      projections: { 'c-1': [msg('m-old', '04e 之前留下的历史')] },
+      cursors: {},   // 存量桶：反推不出日志位置
+    })
+
+    renderPage()
+    await openDrawer()
+    await userEvent.click(await screen.findByTestId('conversation-select-c-1'))
+
+    await waitFor(() => expect(useAssistantChatStore.getState().messages.map(m => m.text))
+      .toEqual(['04e 之前留下的历史']))
+    expect(mockBridge.fetchConversationEvents).not.toHaveBeenCalled()
+  })
+
+  it('本机会话（本地槽 / local:*）不发请求——它本来就没有服务端日志', async () => {
+    mockBridge.listConversations.mockResolvedValue({ conversations: [] })
+    useAssistantChatStore.setState({
+      activeConversationId: null, messages: [msg('l1', '离线记的一笔')],
+      projections: {}, cursors: {},
+    })
+
+    renderPage()
+    await openDrawer()
+    // 本地槽那一行就是当前会话（id 为 null）
+    await userEvent.click(await screen.findByTestId('conversation-select-local'))
+
+    expect(mockBridge.fetchConversationEvents).not.toHaveBeenCalled()
+  })
+
+  it('拉取失败：不报错、不弹红条，空态说明的是「拿不到」而不是「没有消息」', async () => {
+    mockBridge.listConversations.mockResolvedValue({
+      conversations: [serverConversation('c-1', '午饭记账')],
+    })
+    mockBridge.fetchConversationEvents.mockRejectedValue(bridgeError('network'))
+
+    renderPage()
+    await openDrawer()
+    await userEvent.click(await screen.findByTestId('conversation-select-c-1'))
+
+    expect(await screen.findByText(/暂时拉不到这条会话的消息/)).toBeInTheDocument()
+  })
+
+  it('拉回来了但日志是空的：说明的是「还没有消息」，不是「拿不到」', async () => {
+    mockBridge.listConversations.mockResolvedValue({
+      conversations: [serverConversation('c-1', '新建的会话')],
+    })
+    mockBridge.fetchConversationEvents.mockResolvedValue({ conversation_id: 'c-1', events: [] })
+
+    renderPage()
+    await openDrawer()
+    await userEvent.click(await screen.findByTestId('conversation-select-c-1'))
+
+    expect(await screen.findByText('这条会话还没有消息')).toBeInTheDocument()
+  })
+
+  it('旧 APK（桥没有 conversation.events）：不炸、空态说明当前版本读不到正文', async () => {
+    mockBridge.listConversations.mockResolvedValue({
+      conversations: [serverConversation('c-1', '午饭记账')],
+    })
+    // 模拟命令表里没有这一条
+    delete (mockBridge as { fetchConversationEvents?: unknown }).fetchConversationEvents
+
+    renderPage()
+    await openDrawer()
+    await userEvent.click(await screen.findByTestId('conversation-select-c-1'))
+
+    expect(await screen.findByText(/当前版本不支持跨设备读取/)).toBeInTheDocument()
+  })
+
+  it('迟到的批次被丢弃：拉取途中切走，先回来的那批不落到新会话上', async () => {
+    mockBridge.listConversations.mockResolvedValue({
+      conversations: [serverConversation('c-1', 'A')],
+    })
+    useAssistantChatStore.setState({
+      activeConversationId: null, messages: [msg('l1', '本机会话')],
+      projections: {}, cursors: {},
+    })
+    let releaseC1: (v: unknown) => void = () => {}
+    mockBridge.fetchConversationEvents = vi.fn((id: string) => {
+      if (id === 'c-1') return new Promise((resolve) => { releaseC1 = resolve })
+      return Promise.resolve({ conversation_id: id, events: [] })
+    })
+
+    renderPage()
+    await openDrawer()
+    await userEvent.click(await screen.findByTestId('conversation-select-c-1'))
+    // 切回**本机会话**：它不发请求（没有服务端日志），因此不会推进批次序号——
+    // 这正是「换了会话」那道守卫唯一可达的路径。两次都在拉取的切换由序号守卫挡在
+    // 更前面一行，打在那条路径上的变异测不出这道守卫（本用例的第一版就是假绿）。
+    await openDrawer()
+    await userEvent.click(await screen.findByTestId('conversation-select-local'))
+
+    await act(async () => {
+      releaseC1({
+        conversation_id: 'c-1',
+        events: [serverEvent(9, 'assistant', 'A 的正文', 5)],
+      })
+      await Promise.resolve()
+      await Promise.resolve()
+    })
+
+    // 它已经不属于当前会话：正文不落、游标也不推（没并进任何桶的东西不算「已覆盖」）
+    expect(mockBridge.fetchConversationEvents).toHaveBeenCalledTimes(1)
+    expect(useAssistantChatStore.getState().activeConversationId).toBeNull()
+    expect(useAssistantChatStore.getState().messages.map(m => m.text)).toEqual(['本机会话'])
+    expect(useAssistantChatStore.getState().cursors['c-1']).toBeUndefined()
   })
 })

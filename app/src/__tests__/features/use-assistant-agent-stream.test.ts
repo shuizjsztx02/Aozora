@@ -1304,3 +1304,93 @@ describe('use-assistant — 断连续跑（T-M7-04b）', () => {
     expect(lastMsg(result).text).toContain('已取消')
   })
 })
+
+
+/**
+ * T-M7-04e：**日志游标的落盘路径**。
+ *
+ * 游标是「本机已并入日志的到哪儿」，`use-conversations` 拿它做跨设备增量补齐。它的
+ * 三个写入点在 `use-assistant.settleStream` 里，各对应一种收尾：
+ *
+ *   · **正常收尾** → `done.seq`（本轮结束的位置）；
+ *   · **失败收尾** → 续读拉到的最大 `seq`——**不写就会重影**：失败轮留在日志里的
+ *     `user` 事件会在下一次增量补齐时被再并一次；
+ *   · **取消** → **抹成未知**（服务端断连取消不写任何日志事件，而本轮已落库的部分
+ *     确实在游标之后，推进会漏、不推进会重）。
+ */
+describe('use-assistant — 日志游标落盘（T-M7-04e）', () => {
+  beforeEach(() => {
+    vi.clearAllMocks()
+    listeners = []
+    mockBridge.onAiStream.mockImplementation((l: (ev: AgentStreamEvent) => void) => {
+      listeners.push(l)
+      return () => { listeners = listeners.filter(x => x !== l) }
+    })
+    mockBridge.runAgent.mockResolvedValue({ pending: true, streamId: STREAM_ID })
+    mockBridge.isAvailable.mockReturnValue(true)
+    mockBridge.interpretAI.mockResolvedValue(null)
+    vi.mocked(parseInput).mockReturnValue(chatProposal())
+    mockBridge.fetchConversationEvents = vi.fn()
+      .mockResolvedValue({ conversation_id: 'conv-1', events: [] })
+    useAssistantChatStore.getState().clear()
+  })
+
+  const cursors = () => useAssistantChatStore.getState().cursors
+
+  it('正常收尾：游标写成本轮结束的 seq', async () => {
+    const { result } = setup()
+    await act(async () => {
+      const p = result.current.submitInput('你好')
+      await Promise.resolve()
+      emit('done', donePayload({ conversation_id: 'conv-1', seq: 7 }))
+      await p
+    })
+
+    expect(cursors()['conv-1']).toBe(7)
+  })
+
+  it('失败收尾：游标推到续读拉到的最大 seq（否则失败轮的 user 事件会重复并入）', async () => {
+    const { result } = setup()
+    await act(async () => {
+      const p = result.current.submitInput('第一句')
+      await Promise.resolve()
+      emit('done', donePayload({ conversation_id: 'conv-1', seq: 7 }))
+      await p
+    })
+    mockBridge.fetchConversationEvents = vi.fn().mockResolvedValue({
+      conversation_id: 'conv-1',
+      events: [
+        { seq: 8, turn: 2, type: 'user', data: { role: 'user', content: '第二句' }, created_at: 'x' },
+        { seq: 9, turn: 2, type: 'assistant', data: { role: 'assistant', content: '半句' }, created_at: 'x' },
+      ],
+    })
+
+    await act(async () => {
+      const p = result.current.submitInput('第二句')
+      await Promise.resolve()
+      emitAll([['error', { code: 'ai_unavailable', message: '断了' }]])
+      await p
+    })
+
+    expect(cursors()['conv-1']).toBe(9)
+  })
+
+  it('取消：游标抹成未知（本地那半截与服务端日志的位置对不上，宁可下次不做增量）', async () => {
+    const { result } = setup()
+    await act(async () => {
+      const p = result.current.submitInput('第一句')
+      await Promise.resolve()
+      emit('done', donePayload({ conversation_id: 'conv-1', seq: 7 }))
+      await p
+    })
+    expect(cursors()['conv-1']).toBe(7)
+
+    await act(async () => {
+      void result.current.submitInput('第二句')
+      await Promise.resolve()
+    })
+    await act(async () => { await result.current.cancelStream() })
+
+    expect(cursors()['conv-1']).toBeUndefined()
+  })
+})

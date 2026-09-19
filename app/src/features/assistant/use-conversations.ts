@@ -14,8 +14,11 @@
  *      即最近活跃的另一条）；一条不剩则切回本地会话桶。store 只管执行，
  *      目标由这里算好传下去（见 `removeConversation`）。
  *
- * **不做会话正文跨设备同步**（归 P3 的 04e）：切换到一个本机没缓存过的会话时，
- * 消息区是空的——`GET /ai/conversations/{id}/events` 有意留在 P3 消费。
+ * **会话正文跨设备（T-M7-04e）**：**按需从服务端事件日志重建**，不做双向同步实体
+ * （决策见 `docs/adr/ADR-008-conversation-cross-device.md`）。投影 B 是日志的派生数据，
+ * 服务端永远权威，因此没有合并规则、没有冲突策略——客户端从不把投影写回去。
+ * 三条刷新规则（`selectConversation` 内逐条注明）：无缓存 → 全量重建；有缓存且游标
+ * 已知 → 增量补齐尾部；有缓存但游标未知 → 原样保留。
  *
  * **流式期间禁止切换**（`busy`）：一轮的输出落在活动会话桶上（`setMessages` 是
  * 扁平的），流中切换会让这一轮的消息落到「切过去之后」的会话里。根治要把一轮绑到
@@ -34,19 +37,29 @@
  */
 
 import { useCallback, useEffect, useRef, useState } from 'react'
-import type { AiConversationListResponse, AiConversationSummary } from '../../platform/bridge/bridge-types'
+import type {
+  AiConversationEventsResponse, AiConversationListResponse, AiConversationSummary,
+} from '../../platform/bridge/bridge-types'
 import { useBridge } from '../../platform/hooks/use-bridge'
-import { useAssistantChatStore, LOCAL_CONVERSATION_KEY, isLocalConversationKey, toServerConversationId } from '../../platform/store/assistant-chat-store'
+import {
+  useAssistantChatStore, LOCAL_CONVERSATION_KEY, isLocalConversationKey, toServerConversationId,
+} from '../../platform/store/assistant-chat-store'
+import { maxSeqOf, projectHistoryFromEvents } from './history-projection'
 import type { AssistantMessage } from './use-assistant'
 
 /**
  * 会话索引的窄接口 + 运行时能力探测（同 02h / 03b 的 `AgentStreamBridge`）：
  * 旧 APK 的命令表里没有这三条，探测为假时**整块降级**，不炸页面。
+ *
+ * `fetchConversationEvents` 是 **04e 新消费**的可选命令（04b 已交付，桥计数 83）——
+ * 它**不进 `canUseIndex` 的探测**：会话列表本身照常可用，只有「本机没缓存过的会话
+ * 看不到正文」这一件事退化为现状的空态（文案区分，见 `canSyncContent`）。
  */
 interface ConversationBridge {
   listConversations(): Promise<AiConversationListResponse>
   renameConversation(id: string, title: string): Promise<AiConversationSummary>
   deleteConversation(id: string): Promise<{ success: boolean }>
+  fetchConversationEvents?(id: string, afterSeq?: number | null): Promise<AiConversationEventsResponse>
 }
 
 /** 列表的一行（已归一化：服务端会话与本机未固化的会话都渲染成它）。 */
@@ -66,6 +79,14 @@ const LOCAL_SUBTITLE = '本机 · 未同步'
 
 /** 降级原因（null = 正常）。三种原因的用户说法在 `DEGRADED_HINT`。 */
 export type DegradedReason = 'offline' | 'unauthenticated' | 'unsupported'
+
+/**
+ * T-M7-04e：当前会话正文的一次按需拉取的状态。
+ *
+ * 只有两种取值——**增量补齐没有这个状态**：那时本地那份投影本来就在屏幕上，
+ * 补上了就补上了，补不上也不该把已有的消息换成一句错误。
+ */
+export type ProjectionLoadState = 'loading' | 'failed'
 
 export const DEGRADED_HINT: Record<DegradedReason, string> = {
   offline: '离线中，仅显示本机缓存',
@@ -106,7 +127,7 @@ export interface UseConversationsResult {
   /** 流式进行中：UI 据此禁用切换 / 新建 / 重命名 / 删除 */
   busy: boolean
   /** 当前活动会话的桶键（null = 本地槽）。消息区据此区分「新会话」与「这条服务端
-   *  会话的消息不在本机」（正文跨设备同步归 P3 的 04e） */
+   *  会话的消息不在本机」——后者自 04e 起由 `projectionLoad` 进一步细分 */
   activeConversationId: string | null
   /** 开一条新会话（当前那条本地会话让位、内容保留，见 store 的 `newConversation`） */
   createConversation: () => void
@@ -117,6 +138,10 @@ export interface UseConversationsResult {
   /** 删除 —— 同上，`id` 是服务端会话 id */
   deleteConversation: (id: string) => Promise<void>
   dismissError: () => void
+  /** T-M7-04e：当前活动会话的正文拉取状态（`null` = 无事发生）。切到别的会话即失效 */
+  projectionLoad: ProjectionLoadState | null
+  /** T-M7-04e：桥是否具备按需拉取会话正文的能力。false = 旧 APK，空态文案据此说明 */
+  canSyncContent: boolean
 }
 
 /** 操作失败的用户可读文案（桥错误码 → 中文；未知码走兜底，不透传英文原文）。 */
@@ -140,6 +165,10 @@ export function useConversations({
   const switchConversation = useAssistantChatStore(s => s.switchConversation)
   const newConversation = useAssistantChatStore(s => s.newConversation)
   const removeConversation = useAssistantChatStore(s => s.removeConversation)
+  // T-M7-04e：按需重建/增量补齐要读游标、并把推到的位置写回去
+  const cursors = useAssistantChatStore(s => s.cursors)
+  const setMessages = useAssistantChatStore(s => s.setMessages)
+  const setCursor = useAssistantChatStore(s => s.setCursor)
 
   const [items, setItems] = useState<AiConversationSummary[]>([])
   const [loaded, setLoaded] = useState(false)
@@ -149,11 +178,18 @@ export function useConversations({
   const [error, setError] = useState<string | null>(null)
   /** 关掉抽屉后再打开不该看到上一轮的加载态——用序号丢弃迟到的响应 */
   const loadSeqRef = useRef(0)
+  /** T-M7-04e：正文拉取的加载态。带**桶键**——换会话后旧状态自动失效，不必手工清 */
+  const [projectionLoad, setProjectionLoad] =
+    useState<{ key: string; state: ProjectionLoadState } | null>(null)
+  /** 同上，丢弃迟到的正文批次（用户在拉取途中又切了一次） */
+  const refreshSeqRef = useRef(0)
 
   const conversationBridge = bridge as unknown as Partial<ConversationBridge>
   const canUseIndex = typeof conversationBridge.listConversations === 'function' &&
     typeof conversationBridge.renameConversation === 'function' &&
     typeof conversationBridge.deleteConversation === 'function'
+  /** T-M7-04e：与 `canUseIndex` **分开探测**——旧 APK 的会话列表照常可用，只是没有正文 */
+  const canSyncContent = typeof conversationBridge.fetchConversationEvents === 'function'
   const offline = typeof navigator !== 'undefined' && !navigator.onLine
 
   /**
@@ -227,10 +263,53 @@ export function useConversations({
 
   const selectConversation = useCallback((id: string | null) => {
     if (streaming) return
+    const key = id ?? LOCAL_CONVERSATION_KEY
+    // 缓存判据必须在**切换之前**取：`switchConversation` 会把当前桶搬进 projections，
+    // 之后再问「目标桶有没有缓存」得到的永远是刚搬过去的那份。
+    const cached = key === activeKey ? messages : projections[key]
     // 降级态**允许**切换：切换只读本机缓存，不是写操作（禁用的是新建与重命名 /
     // 删除，见卡面「只读本地投影缓存、禁用新建」）
     switchConversation(id)
-  }, [streaming, switchConversation])
+
+    // ─── T-M7-04e：切过去之后按需把正文补上 ───
+    const serverId = toServerConversationId(id)
+    if (!serverId || !canSyncContent) return
+    const from = cursors[key] ?? 0
+    // 三条刷新规则，每条对应一个真实状态：
+    //   ① **无缓存**（`cached === undefined`，只在服务端会话上出现）→ **全量重建**。
+    //      这就是「换设备后打开旧会话」那条路径。
+    //   ② **有缓存且游标已知** → 从游标**增量补齐**尾部（别的设备在这之后写的轮次）。
+    //      本地已有的消息一条不动——历史只读记账卡、离线轮的中断标注都留在原地
+    //      （重建只认得正文，重来一遍会把卡片清掉）。
+    //   ③ **有缓存但游标未知**（04e 之前落盘的存量桶、或取消过的会话）→ **原样保留**。
+    //      未知即无从判断该从哪儿续，宁可少刷新一次，也不要重复显示一轮。
+    if (cached !== undefined && from <= 0) return
+    const seq = ++refreshSeqRef.current
+    if (cached === undefined) setProjectionLoad({ key, state: 'loading' })
+    conversationBridge.fetchConversationEvents!(serverId, from > 0 ? from : null)
+      .then((res) => {
+        if (seq !== refreshSeqRef.current) return
+        // 拉取途中用户又切走了：这批事件**没有落点**（store 只能往活动桶写），丢掉。
+        // 游标同样不推——没并进任何桶的东西不算「本机已覆盖」。
+        if (useAssistantChatStore.getState().activeConversationId !== id) return
+        const events = Array.isArray(res?.events) ? res.events : []
+        const added = projectHistoryFromEvents(events)
+        if (added.length > 0) setMessages(prev => [...prev, ...added])
+        const through = maxSeqOf(events)
+        if (through > from) setCursor(key, through)
+        setProjectionLoad(null)
+      })
+      .catch(() => {
+        if (seq !== refreshSeqRef.current) return
+        // **增量补齐失败不报错**：本地那份仍然在屏幕上、仍然可用，下次进来再补。
+        // 只有全量重建失败才说话——那时屏幕上是空的，不说就是「这条会话没有消息」，
+        // 而那是一句假话。
+        if (cached === undefined) setProjectionLoad({ key, state: 'failed' })
+      })
+  }, [
+    streaming, activeKey, messages, projections, cursors, canSyncContent,
+    conversationBridge, switchConversation, setMessages, setCursor,
+  ])
 
   const renameConversation = useCallback(async (id: string, title: string) => {
     const trimmed = title.trim()
@@ -274,6 +353,12 @@ export function useConversations({
     renameConversation,
     deleteConversation,
     dismissError: () => setError(null),
+    // 加载态只在**键还是当前会话**时成立：切走即失效，不必手工清（同 03d 的
+    // `loadSeqRef` 口径——用序号/键丢弃过期状态，而不是靠一堆 setState）
+    projectionLoad: projectionLoad && projectionLoad.key === activeKey
+      ? projectionLoad.state
+      : null,
+    canSyncContent,
   }
 }
 

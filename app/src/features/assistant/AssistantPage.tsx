@@ -138,6 +138,31 @@ function MessageAvatar({ role, icon, name }: {
   )
 }
 
+/**
+ * T-M7-04e：消息区空态的一句话。
+ *
+ * 四种状态各对应一个**真实原因**，刻意不合并——合并就会说谎：
+ *   本地槽 → 这是一条还没说过话的新会话；
+ *   拉取中 → 正在从服务端日志重建（换设备后打开旧会话就是这一眼）；
+ *   拉取失败 → 有这条会话、这一刻拿不到它的正文；
+ *   拉到了但空 → 服务端日志里确实没有可显示的内容；
+ *   桥没有这条命令（旧 APK）→ 本机看不到别人写的正文，与上面几种都不是一回事。
+ *
+ * 决策背景见 `docs/adr/ADR-008-conversation-cross-device.md`。
+ */
+function emptyMessagesHint(
+  activeConversationId: string | null,
+  load: 'loading' | 'failed' | null,
+  canSyncContent: boolean,
+): string {
+  if (activeConversationId === null) return '输入记账短句，如「午饭 12.5」'
+  if (load === 'loading') return '正在载入这条会话…'
+  if (load === 'failed') return '暂时拉不到这条会话的消息（离线或网络异常），重进可再试'
+  return canSyncContent
+    ? '这条会话还没有消息'
+    : '这条会话的消息不在这台设备上（当前版本不支持跨设备读取）'
+}
+
 export function AssistantPage() {
   const bridge = useBridge()
   const navigate = useNavigate()
@@ -566,11 +591,13 @@ export function AssistantPage() {
             <div className="text-center">
               <div className="text-4xl mb-3">💬</div>
               <p className="text-sm" style={{ color: 'var(--ink2)' }}>
-                {/* T-M7-03d：切到一条服务端会话而本机没有它的消息时，别假装是新会话
-                    （正文跨设备同步归 P3 的 04e） */}
-                {conversations.activeConversationId
-                  ? '这条会话的消息不在这台设备上（跨设备同步将在后续版本支持）'
-                  : '输入记账短句，如「午饭 12.5」'}
+                {/* T-M7-03d / T-M7-04e：切到一条服务端会话而本机没有它的消息时，
+                    别假装是新会话——正文按需重建（04e），四种状态各有各的说法 */}
+                {emptyMessagesHint(
+                  conversations.activeConversationId,
+                  conversations.projectionLoad,
+                  conversations.canSyncContent,
+                )}
               </p>
             </div>
           </div>
