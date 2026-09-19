@@ -16,11 +16,28 @@ Turn          一次用户输入跑完整个 loop。**配额与窗口都以它�
               进消息流，所以一轮里可以有多条 user 消息——按 user 消息切会把一
               轮切成两半，窗口起点落在轮中间时用户最初的提问就丢了（复审 P2-1，
               见 ``models/ai.py`` 的 ``turn`` 列）。
-Event         会话日志里的一行，即 loop 消息流里的一条消息（``type`` 就是角色），
-              带轮号 ``turn``。
+Event         会话日志里的一行，带轮号 ``turn``。
 窗口          最近 N 轮原文 + 字符双限（架构 §6.4）。超窗轮次**直接丢**——
               P1 不生成摘要，原文仍在日志里（P3 才做 ``replace`` 压缩）。
 ============  ==================================================================
+
+事件分两档（T-M7-04a，架构 §6.2）
+---------------------------------
+
+**Surface 事件**（``SURFACE_EVENT_TYPES``）一一对应 loop 消息流里的一条消息，
+``data`` 就是那条 API 消息字典，**只有它们进模型上下文**（投影 A）。**结构性
+事件**（``STRUCTURAL_EVENT_TYPES``：审批 / 设备 / 错误 / 配额 / 安全 / 摘要替换）
+是「发生过什么」的留档，只进投影 B（UI）与投影 C（审计）。分档的**单一来源**是
+那两个常量：:meth:`ConversationService.history` 按前者过滤，写入时按前者派生
+``ignorable`` 列——读侧信常量、不信数据列，两者的一致性由测试钉死。
+
+于是「结构性事件不占 token」是**代码结构上的事实**而不是一句设计承诺：它们连
+``history()`` 的返回值都进不去。这也是 P1 的 R-PROD-15 残余（当时全部事件都进
+上下文）的关闭点。
+
+**与下行 SSE 的八类事件是两个不同的枚举**（``stream.EventType``）：值有同名
+（``error`` / ``device_request``），但一个是协议帧、一个是日志行，不得混用；
+``confirm`` 帧对应的日志类型是 ``approval_request``。
 
 三条不能破的约束
 ----------------
@@ -89,11 +106,38 @@ from .service import build_usage_row
 
 logger = logging.getLogger(__name__)
 
-#: 事件类型 = 消息角色。P1 只有这三种（``system`` 刻意不在其中，见模块 docstring）。
+#: **Surface 事件**——一一对应 loop 消息流里的一条消息，``data`` 就是那条 API
+#: 消息字典，**只有它们进模型上下文**（架构 §6.2 投影 A）。``system`` 刻意不在
+#: 其中（见模块 docstring）。``assistant`` 一条覆盖「模型回复」与「工具调用」两个
+#: 语义——``tool_calls`` 挂在同一条消息的 ``data`` 里，不另立事件。
 EVENT_USER = "user"
 EVENT_ASSISTANT = "assistant"
 EVENT_TOOL = "tool"
-EVENT_TYPES = frozenset({EVENT_USER, EVENT_ASSISTANT, EVENT_TOOL})
+SURFACE_EVENT_TYPES = frozenset({EVENT_USER, EVENT_ASSISTANT, EVENT_TOOL})
+
+#: **结构性事件**——留档，只进投影 B（UI）与投影 C（审计），不占 token。
+#: 各类型的生产者状态见架构 §6.2 的表；方括号里是当前的真实生产者。
+EVENT_APPROVAL_REQUEST = "approval_request"  # [待接] 审批请求（确认卡留档）
+EVENT_APPROVAL_RESULT = "approval_result"    # [待接] 审批结果（写操作回执）
+EVENT_DEVICE_REQUEST = "device_request"      # [无] 设备指令；通道归 P4
+EVENT_ERROR = "error"                        # [待接] 一轮失败；随 04b 逐事件落库
+EVENT_REPLACE = "replace"                    # [04c] 长历史被摘要替换（原文保留）
+EVENT_QUOTA = "quota"                        # [record_turn] 每轮用量，与消息同轮
+EVENT_SECURITY = "security"                  # [待接] 结论归 04d 的访问面审计
+STRUCTURAL_EVENT_TYPES = frozenset({
+    EVENT_APPROVAL_REQUEST,
+    EVENT_APPROVAL_RESULT,
+    EVENT_DEVICE_REQUEST,
+    EVENT_ERROR,
+    EVENT_REPLACE,
+    EVENT_QUOTA,
+    EVENT_SECURITY,
+})
+
+#: 类型全集。合法 ``type`` 只能是它里面的值（写入侧校验）。
+#: **列宽**：``type`` 是 ``varchar(32)``——实测量过 ``varchar(16)`` 正好是全集里
+#: 最长的 ``approval_request`` 的顶格长度、零余量（PG 17.11，17 字符即被拒）。
+EVENT_TYPES = SURFACE_EVENT_TYPES | STRUCTURAL_EVENT_TYPES
 
 #: 自动标题的字符上限（**不含**截断处的省略号）。一行的长度就够——它在侧栏 /
 #: 抽屉里占一行，长了也只能截断显示。用户重命名不受这个数字约束（那是
@@ -244,9 +288,11 @@ class ConversationService:
     ) -> list[AIConversationEvent]:
         """按 ``seq`` 升序读会话事件；给了 ``after_seq`` 就只取其后（增量读取）。
 
-        **原样读出** ``type`` 与 ``data``——不过滤、不改写（完整事件日志的
-        ``ignorable`` / Surface 子集归 P3 的 04a）。``data`` 与 :meth:`history`
-        是同一个数据面：工具结果里的内部 ID 在 ``agent`` 侧就被剥掉了。
+        **投影 B / C 的读面：原样返回全部事件**——不做 Surface 过滤（那是
+        :meth:`history` 的事），也不改写 ``type`` / ``data``。结构性事件因此
+        和消息一样读得到，UI 与审计两侧要的信息都在。``data`` 与
+        :meth:`history` 是同一个数据面：工具结果里的内部 ID 在 ``agent`` 侧
+        就被剥掉了。
 
         ``after_seq`` 的语义是**严格大于**：客户端拿上一批最后一条的 ``seq``
         再拉一次，不会重复收到它（断线重连的续读就靠这条）。
@@ -261,14 +307,20 @@ class ConversationService:
     # -- 上下文窗口 -------------------------------------------------------
 
     async def history(self, conversation: AIConversation) -> list[dict[str, Any]]:
-        """投影出模型上下文窗口（最近 N 轮原文，另受字符上限约束）。
+        """投影出模型上下文窗口（**只含 Surface 事件**，最近 N 轮，另受字符上限约束）。
 
         返回值可直接作为 ``AgentLoop.run(history=…)`` 的输入：不含 system，
         按 seq 有序，轮边界完整（整轮同进同出）。
 
+        **只取 Surface 事件**（T-M7-04a）——白名单下推到 SQL，结构性事件根本
+        不取出来：它们没有上限（每轮一条 quota、将来每个提案一条审批），全取
+        出来只为丢掉是纯浪费。这就是「结构性事件不占 token」在代码里的落点。
+
         **按 ``turn`` 分组整取**——不是按 ``user`` 消息切：一轮里可以有多条 user
         消息（中途输入），按后者切会把一轮切成两半，窗口起点落在轮中间时用户
         最初的提问就丢了（复审 P2-1 实测：N=1 时只剩「补一句 + 回答」两句）。
+        分组因此只能看见 Surface 事件，**只有结构性事件的轮次整个不出现**——
+        那正是想要的（它没有可进上下文的内容）。
 
         **字符超限时丢最早轮次**（架构 §6.4），但**至少保留最近一轮**——窗口
         空掉会让「追问」失去指代对象，那正是本卡要解决的痛点；宁可超一点预算
@@ -276,7 +328,10 @@ class ConversationService:
         """
         rows = (await self._db.scalars(
             select(AIConversationEvent)
-            .where(AIConversationEvent.conversation_id == conversation.id)
+            .where(
+                AIConversationEvent.conversation_id == conversation.id,
+                AIConversationEvent.type.in_(SURFACE_EVENT_TYPES),
+            )
             .order_by(AIConversationEvent.seq)
         )).all()
         if not rows:
@@ -327,13 +382,71 @@ class ConversationService:
         if not prepared:
             return 0
 
+        written = await self._insert_events(conversation, prepared)
+        self._note_activity(conversation, messages)
+        await self._db.flush()
+        return written
+
+    async def append_events(
+        self,
+        conversation: AIConversation,
+        events: Sequence[tuple[str, Mapping[str, Any]]],
+        *,
+        same_turn: bool = False,
+    ) -> int:
+        """追加一批**结构性事件**（配额 / 审批 / 设备 / 错误 / 安全 / 摘要替换）。
+
+        ``events`` 是 ``(type, data)`` 序列，``type`` 必须在
+        :data:`STRUCTURAL_EVENT_TYPES` 里——**Surface 类型禁止从这条通道写入**：
+        它们的 ``data`` 必须是 API 消息字典（:meth:`append_turn` 的产出），从这里
+        塞一条形状不对的进去，下一轮就是模型侧 400。校验因此是白名单而不是
+        「在全集里」（:func:`_prepare_structural_events`）。
+
+        ``same_turn``：这批事件属于**当前这一轮**（如 :meth:`record_turn` 的用量
+        事件，紧跟 :meth:`append_turn` 之后）时不占新轮号——另立轮号会在日志里
+        留下「有轮号、没内容」的空轮。默认自成一轮（失败轮的用量、04b 的错误）。
+
+        返回写入的事件条数。
+        """
+        prepared = _prepare_structural_events(events)
+        if not prepared:
+            return 0
+
+        written = await self._insert_events(conversation, prepared, same_turn=same_turn)
+        # 结构性事件也是「写入事件」——列表按最后一次写入排序，它同样算数。
+        conversation.last_active_at = datetime.now(UTC)
+        await self._db.flush()
+        return written
+
+    async def _insert_events(
+        self,
+        conversation: AIConversation,
+        prepared: Sequence[tuple[str, dict[str, Any]]],
+        *,
+        same_turn: bool = False,
+    ) -> int:
+        """把一批已校验的事件写进日志：分配 ``(seq, turn)``、撞车重试一次。
+
+        ``time`` 由本层统一取**写入时刻**（``datetime.now(UTC)``），同批事件因此
+        共用同一个时间戳。它与 ``created_at`` **不等价**：后者是 ``server_default
+        now()``，而 PG 的 ``now()`` 是**事务**时刻——一轮 loop 跑完才落库，dev 实测
+        二者相差数秒。要「这一轮何时开始」看 ``created_at``，要「事件何时写下」看
+        ``time``。04b 改为逐事件落库时，这个值改由调用方按事件实际发生的时刻给出。
+
+        ``ignorable`` 按 :data:`SURFACE_EVENT_TYPES` **派生**而不是由调用方给：
+        它与 :meth:`history` 的过滤条件必须同源，否则会出现「标了可忽略却进了
+        上下文」的漂移。
+        """
+        now = datetime.now(UTC)
         # 轮号与序号都在写之前算好；两个并发请求可能算出同一组值，唯一索引会拒绝
         # 其中一个。用 **SAVEPOINT** 包住写入：撞车时只回滚这一次尝试（而不是调用方
         # 在这个 session 上的整个事务，那里还可能有别的未提交写入），重算后重试一次。
         # 用 Core insert 而不是 ``session.add()``——撞车后没有 ORM 对象需要从
         # 身份映射里摘除，重试路径因此是干净的。
         for attempt in (1, 2):
-            next_seq, next_turn = await self._next_position(conversation)
+            next_seq, next_turn = await self._next_position(
+                conversation, same_turn=same_turn,
+            )
             try:
                 async with self._db.begin_nested():
                     await self._db.execute(
@@ -346,6 +459,8 @@ class ConversationService:
                                 "turn": next_turn,
                                 "type": event_type,
                                 "data": data,
+                                "time": now,
+                                "ignorable": event_type not in SURFACE_EVENT_TYPES,
                             }
                             for offset, (event_type, data) in enumerate(prepared)
                         ],
@@ -361,8 +476,6 @@ class ConversationService:
                     },
                 )
                 continue
-            self._note_activity(conversation, messages)
-            await self._db.flush()
             return len(prepared)
 
         raise AssertionError("unreachable: retry loop always returns or raises")
@@ -379,15 +492,26 @@ class ConversationService:
             conversation.title = _derive_title(messages)
         conversation.last_active_at = datetime.now(UTC)
 
-    async def _next_position(self, conversation: AIConversation) -> tuple[int, int]:
-        """下一个 ``(seq, turn)``——都在会话内单调递增，从 1 开始。"""
+    async def _next_position(
+        self, conversation: AIConversation, *, same_turn: bool = False,
+    ) -> tuple[int, int]:
+        """下一个 ``(seq, turn)``——``seq`` 恒为会话内单调递增，从 1 开始。
+
+        ``same_turn=True`` 时**不占新轮号**，挂在本会话最后一批事件的那个
+        ``turn`` 上：本轮的结构性事件（如用量）属于这一轮。会话里还没有任何
+        事件时（``turn`` 仍是 0）退回 +1 —— 轮号从 1 开始，不会出现 0。
+        """
         row = (await self._db.execute(
             select(
                 func.coalesce(func.max(AIConversationEvent.seq), 0),
                 func.coalesce(func.max(AIConversationEvent.turn), 0),
             ).where(AIConversationEvent.conversation_id == conversation.id)
         )).one()
-        return int(row[0]) + 1, int(row[1]) + 1
+        next_seq = int(row[0]) + 1
+        last_turn = int(row[1])
+        if same_turn and last_turn > 0:
+            return next_seq, last_turn
+        return next_seq, last_turn + 1
 
     async def record_turn(
         self,
@@ -399,12 +523,22 @@ class ConversationService:
         request_id: str,
         prompt_tokens: int,
         completion_tokens: int,
+        same_turn: bool = False,
     ) -> None:
-        """记一轮的用量（一个 Turn 一条 ``ai_usage`` 行）。
+        """记一轮的用量：一条 ``ai_usage`` 行 + 一条 ``quota`` 事件。
 
         会话级配额与 guest 日配额共用这一张表：前者按 ``conversation_id`` 聚合，
         后者按 ``(user_id, created_at)`` 聚合，互不影响（快路径的行
         ``conversation_id`` 为 NULL）。
+
+        **``quota`` 事件是投影 C 的会话内用量留痕**（T-M7-04a）。``ai_usage``
+        是配额的**计数基座**，它必须活得比会话长（``ON DELETE SET NULL``，登出
+        再登入不能把配额刷回满额），因此不能承担「这一轮花了多少」的会话内视图；
+        事件日志可以，且会随会话一起被保留期清理。
+
+        ``same_turn`` 由调用方声明**本轮的消息刚写进日志**（成功轮）——用量事件
+        因此与消息同轮，不另占轮号；失败轮没有消息事件，它自成一轮（那正是它
+        的轮号）。
         """
         self._db.add(build_usage_row(
             user_id=user.id,
@@ -416,6 +550,20 @@ class ConversationService:
             conversation_id=conversation.id,
         ))
         await self._db.flush()
+        await self.append_events(
+            conversation,
+            [(
+                EVENT_QUOTA,
+                {
+                    "provider": provider,
+                    "model": model,
+                    "prompt_tokens": prompt_tokens,
+                    "completion_tokens": completion_tokens,
+                    "tokens": prompt_tokens + completion_tokens,
+                },
+            )],
+            same_turn=same_turn,
+        )
 
     # -- 配额 -------------------------------------------------------------
 
@@ -493,6 +641,10 @@ def _prepare_events(
     - 未知角色、或以 ``tool`` 开头（说明调用方切在了轮中间）**抛 ValueError**：
       这两种都是调用方的编程错误，静默写入会把问题推迟到下一轮的 400；
     - assistant 消息的 ``reasoning_content`` 规范化成字符串（缺键或 null → 空串）。
+
+    **角色白名单是 Surface 子集**，不是 :data:`EVENT_TYPES`：结构性事件的
+    ``data`` 不是消息字典，把 ``approval_request`` 之类当角色放行等于写一条
+    进不了上下文、却又不满足消息契约的日志行（T-M7-04a）。
     """
     prepared: list[tuple[str, dict[str, Any]]] = []
     for message in messages:
@@ -503,7 +655,7 @@ def _prepare_events(
                 extra={"outcome": "system_message_dropped"},
             )
             continue
-        if role not in EVENT_TYPES:
+        if role not in SURFACE_EVENT_TYPES:
             raise ValueError(f"unsupported conversation event role: {role!r}")
         if role == EVENT_TOOL and not prepared:
             raise ValueError("conversation turn must not start with a tool result")
@@ -517,8 +669,35 @@ def _prepare_events(
     return prepared
 
 
+def _prepare_structural_events(
+    events: Sequence[tuple[str, Mapping[str, Any]]],
+) -> list[tuple[str, dict[str, Any]]]:
+    """校验一批结构性事件并转成待写入的 ``(type, data)``。
+
+    **白名单是 :data:`STRUCTURAL_EVENT_TYPES`，不是全集**：Surface 类型只能由
+    :func:`_prepare_events` 从 loop 消息流派生——它们的 ``data`` 必须是 API
+    消息字典。从这条通道写一条形状不对的 ``user`` / ``assistant`` 进日志，
+    要到下一轮模型请求时才以 400 暴露，归因困难。
+
+    ``data`` 浅拷贝一份：调用方后续改动自己的字典不该影响已排队的写入。
+    """
+    prepared: list[tuple[str, dict[str, Any]]] = []
+    for event_type, data in events:
+        if event_type not in STRUCTURAL_EVENT_TYPES:
+            raise ValueError(
+                f"not a structural conversation event type: {event_type!r}",
+            )
+        prepared.append((event_type, dict(data)))
+    return prepared
+
+
 def _window_chars(window: Sequence[Sequence[dict[str, Any]]]) -> int:
-    """窗口的字符量：按消息的序列化长度估。"""
+    """窗口的字符量：按消息的序列化长度估。
+
+    入参是 :meth:`ConversationService.history` 已经滤过的那一版窗口——里面
+    **只有 Surface 事件**。这个数因此就是模型上下文的字符预算本身：结构性事件
+    既不进窗口，也不参与这里的计算（T-M7-04a 之前它们两样都占）。
+    """
     return sum(
         len(json.dumps(message, ensure_ascii=False))
         for turn in window

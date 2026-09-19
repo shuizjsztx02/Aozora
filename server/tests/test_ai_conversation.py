@@ -328,11 +328,11 @@ class TestEventLog:
         real_position = service._next_position
         calls = {"count": 0}
 
-        async def stale_once(conv):
+        async def stale_once(conv, *, same_turn=False):
             calls["count"] += 1
             if calls["count"] == 1:
                 return (1, 1)  # 陈旧位置：与已有事件撞车
-            return await real_position(conv)
+            return await real_position(conv, same_turn=same_turn)
 
         monkeypatch.setattr(service, "_next_position", stale_once)
 
@@ -585,6 +585,7 @@ class TestMultiTurnClarification:
             user, conversation, provider=first.name, model=MODEL,
             request_id="req-1", prompt_tokens=first_result.prompt_tokens,
             completion_tokens=first_result.completion_tokens,
+            same_turn=True,  # 与 stream 的成功路径同形态
         )
 
         # 第二轮：用户只回一个「500」。
@@ -722,10 +723,12 @@ class TestCleanup:
         await service.record_turn(
             guest, conversation, provider="p", model=MODEL, request_id="r",
             prompt_tokens=3, completion_tokens=4,
+            same_turn=True,  # 消息刚写进去，用量事件与它同轮
         )
+        # 一条 user 消息 + 一条 quota 用量事件（T-M7-04a）。
         assert (await db.scalar(
             select(func.count()).select_from(AIConversationEvent)
-        )) == 1
+        )) == 2
 
         await auth.logout(refresh, "dev-1")
 

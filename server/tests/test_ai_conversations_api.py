@@ -489,9 +489,11 @@ class TestConversationEvents:
         payload = (await env.events(conversation_id)).json()
         assert payload["conversation_id"] == conversation_id
         events = payload["events"]
-        assert [e["seq"] for e in events] == [1, 2]
-        assert [e["type"] for e in events] == ["user", "assistant"]
-        assert [e["turn"] for e in events] == [1, 1]
+        # 第三条是本轮的 ``quota`` 用量事件（T-M7-04a）：投影 B **不过滤**，
+        # 结构性事件与消息一样读得到；它与消息同轮（``same_turn``）。
+        assert [e["seq"] for e in events] == [1, 2, 3]
+        assert [e["type"] for e in events] == ["user", "assistant", "quota"]
+        assert [e["turn"] for e in events] == [1, 1, 1]
         assert events[0]["data"] == {"role": "user", "content": "午饭花了 12 块"}
         assert events[1]["data"]["content"] == "好的，记下了。"
         # 客户端拿这些事件**重建投影**，所以形状就是契约：assistant 消息一定带
@@ -508,7 +510,7 @@ class TestConversationEvents:
         await env.turn("第二轮", conversation_id=conversation_id)
 
         delta = (await env.events(conversation_id, after_seq=last_seq)).json()["events"]
-        assert [e["seq"] for e in delta] == [last_seq + 1, last_seq + 2]
+        assert [e["seq"] for e in delta] == [last_seq + 1, last_seq + 2, last_seq + 3]
         assert all(e["turn"] == 2 for e in delta)
         # 严格大于：同一个 after_seq 再拉一次得到同一批，不重复
         assert (await env.events(conversation_id, after_seq=last_seq)).json()["events"] == delta
@@ -519,7 +521,8 @@ class TestConversationEvents:
         await env.turn("第二轮", conversation_id=conversation_id)
 
         events = (await env.events(conversation_id)).json()["events"]
-        assert [e["turn"] for e in events] == [1, 1, 2, 2]
+        # 两条消息 + 一条同轮用量事件，每轮三行（T-M7-04a）。
+        assert [e["turn"] for e in events] == [1, 1, 1, 2, 2, 2]
 
     async def test_events_of_fresh_conversation_are_empty(self, env: ConversationEnv):
         conversation_id = await env.seed()

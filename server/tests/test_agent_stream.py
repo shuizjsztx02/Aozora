@@ -1099,8 +1099,14 @@ class TestPersistence:
 
         events = await _rows(stream_env, AIConversationEvent,
                              conversation_id=conversation_id)
-        assert [e.type for e in events] == ["user", "assistant", "tool", "assistant"]
-        assert [e.seq for e in events] == [1, 2, 3, 4]
+        # 末尾的 ``quota`` 是本轮的用量事件（T-M7-04a）——它与消息**同轮同批**，
+        # 是投影 C 的留痕（``ignorable``），不进模型上下文。
+        assert [e.type for e in events] == [
+            "user", "assistant", "tool", "assistant", "quota",
+        ]
+        assert [e.seq for e in events] == [1, 2, 3, 4, 5]
+        assert [e.turn for e in events] == [1, 1, 1, 1, 1]
+        assert [e.ignorable for e in events] == [False] * 4 + [True]
 
         usage = await _rows(stream_env, AIUsage, conversation_id=conversation_id)
         assert len(usage) == 1  # 一个 Turn 一条行

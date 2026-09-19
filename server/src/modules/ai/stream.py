@@ -586,6 +586,7 @@ async def _execute_turn(
 
     try:
         await conversations.append_turn(conversation, result.messages)
+        # ``same_turn``：用量事件挂在本轮（消息刚写进去）——它不属于新的一轮。
         await conversations.record_turn(
             user,
             conversation,
@@ -594,6 +595,7 @@ async def _execute_turn(
             request_id=request_id,
             prompt_tokens=result.prompt_tokens,
             completion_tokens=result.completion_tokens,
+            same_turn=True,
         )
         await session.commit()
     except Exception as exc:  # noqa: BLE001 — 落库失败不能冒充成功

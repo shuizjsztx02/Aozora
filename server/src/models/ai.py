@@ -14,6 +14,7 @@ from typing import Any
 from sqlalchemy import (
     JSON,
     BigInteger,
+    Boolean,
     DateTime,
     ForeignKey,
     Index,
@@ -94,12 +95,15 @@ class AIConversation(Base, AuditMixin):
 
 
 class AIConversationEvent(Base):
-    """会话事件日志（P1 最小形态）。
+    """会话事件日志（T-M7-04a 起为完整形态）。
 
-    P1 只做「够多轮上下文读写」的那一形态——这里存的就是 loop 的消息流本身
-    （``type`` 即消息角色），读出来直接作为下一次 ``AgentLoop.run(history=…)``
-    的输入。P3（T-M7-04）演进为完整事件日志：补 ``ignorable`` 与 Surface 子集
-    定义，那时才出现工具调用、审批、设备指令等**不占 token** 的结构性事件。
+    事件分两档（架构 §6.2「事件类型全集与 Surface 子集」）：**Surface 事件**
+    （``user`` / ``assistant`` / ``tool``）一一对应 loop 消息流里的一条消息，
+    ``data`` 就是那条 API 消息字典，是唯一进模型上下文（投影 A）的一档；
+    **结构性事件**（审批 / 设备 / 错误 / 配额 / 安全 / 摘要替换）是留档，
+    只进投影 B（UI）与投影 C（审计）。两档的划分落为 ``conversation.py`` 的
+    ``SURFACE_EVENT_TYPES`` 单一来源常量——**读侧按它过滤，写侧按它派生
+    ``ignorable``**，两者的一致性由测试钉死。
 
     固定语义（不要在这些点上顺手扩展）：
 
@@ -110,14 +114,23 @@ class AIConversationEvent(Base):
       流），所以「按 user 消息切轮」会把一轮切成两半——窗口起点落在轮中间时，
       用户最初的提问会被丢掉、只留下后补的那一句，而「追问指代」正是本卡要解决
       的问题。``turn`` 由写入方一次性分配，读取方只按它分组，不猜。
-    - ``data`` 是消息字典（含 ``reasoning_content``；assistant 消息**必须**带该
-      键，空串可——真实 API 探针实测缺键会让整轮 400，见 §五 02d 记录）。
-    - ``type`` P1 取值只有 ``user`` / ``assistant`` / ``tool``；**不存 system**
+    - ``time`` 是**事件落进日志**的时刻（写法上由服务端取 ``datetime.now(UTC)``），
+      ``created_at`` 是**事务开启**时刻（``server_default=now()``；PG 的 ``now()``
+      是 ``transaction_timestamp()``，不是语句时刻）。两者**不等价**：``agent``
+      一轮要把整个 loop 跑完才落库，实测二者相差数秒。要「这一轮从什么时候开始」
+      看 ``created_at``，要「这条事件什么时候发生」看 ``time``——04b 逐事件落库
+      后 ``time`` 改由各事件的实际发生时刻给出，两者的分工才完全展开。
+    - ``data`` 是事件载荷。Surface 事件即消息字典（含 ``reasoning_content``；
+      assistant 消息**必须**带该键，空串可——真实 API 探针实测缺键会让整轮 400，
+      见 §五 02d 记录）；结构性事件的载荷随类型而定，**不进模型上下文**，因此
+      可以含内部 ID（那是投影 B 让卡片可执行所需）。
+    - ``type`` Surface 取值只有 ``user`` / ``assistant`` / ``tool``；**不存 system**
       ——系统提示由 loop 每轮按 ToolContext 现算（含当天日期与本账本对象名单），
       存下来会在换账本后变成过期数据，且会出现两条 system。
     - 事件**按轮原子写入**（一轮 = 一次用户输入跑完 loop，含中途输入），因此按
       ``turn`` 整取永远不会切断「带 tool_calls 的 assistant 消息」与其
-      ``role:"tool"`` 结果之间——孤立结果会被 API 以 400 拒绝。
+      ``role:"tool"`` 结果之间——孤立结果会被 API 以 400 拒绝。**结构性事件与
+      消息同批同轮**（如每轮的 ``quota`` 事件），不另占轮号。
     """
 
     __tablename__ = "ai_conversation_events"
@@ -141,8 +154,22 @@ class AIConversationEvent(Base):
     seq: Mapped[int] = mapped_column(BigInteger, nullable=False)
     # T-M7-02f 复审 P2-1：窗口截断的唯一依据，见类 docstring。
     turn: Mapped[int] = mapped_column(BigInteger, nullable=False)
-    type: Mapped[str] = mapped_column(String(16), nullable=False)
+    # T-M7-04a：varchar(32)。实测量过——varchar(16) 正好是全集里最长的
+    # ``approval_request`` 的顶格长度、零余量（PG 17.11，17 字符即被拒），
+    # 故加倍留余量，免得后续加一个类型名就要再来一次迁移。
+    type: Mapped[str] = mapped_column(String(32), nullable=False)
     data: Mapped[dict[str, Any]] = mapped_column(JSON, nullable=False)
+    # T-M7-04a：事件时间（写法上由服务端取 UTC 此刻）。``server_default`` 只是
+    # 让 DB 层也能填（``created_at`` 同口径）——注意 PG 的 ``now()`` 是**事务**
+    # 时刻，与本列由写入方取的时刻不是一回事，见类 docstring。
+    time: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), nullable=False,
+    )
+    # T-M7-04a：结构性事件标记（写侧由 ``SURFACE_EVENT_TYPES`` 派生）。
+    # 读侧过滤以常量为准，本列供投影 C 与按类型检索用（04c / 04d）。
+    ignorable: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, default=False, server_default="false",
+    )
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), nullable=False,
     )
