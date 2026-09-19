@@ -2,11 +2,14 @@
  * T14-4（REQ-42 / 决策 #7）：assistant-chat-store 单测。
  *
  * 覆盖：updater/值双形态写入、200 条截断保尾、clear、持久化 key 与 partialize
- * （只落 messages）、setItem/getItem 抛错静默容错、模块重载后历史恢复。
+ * （只落数据字段）、setItem/getItem 抛错静默容错、模块重载后历史恢复。
+ *
+ * T-M7-03b（P2）：多会话分桶——`switchConversation` 互不串扰、`adoptConversation`
+ * 把本地会话固化到服务端 id、`clear` 清全部桶、**v1 落盘数据迁移**（version bump）。
  */
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
 import {
-  useAssistantChatStore, MAX_ASSISTANT_MESSAGES,
+  useAssistantChatStore, MAX_ASSISTANT_MESSAGES, LOCAL_CONVERSATION_KEY,
 } from '../../platform/store/assistant-chat-store'
 import type { AssistantMessage } from '../../features/assistant/use-assistant'
 
@@ -16,15 +19,18 @@ const msg = (i: number): AssistantMessage => ({ id: `m-${i}`, role: 'user', text
 const many = (n: number, start = 0) =>
   Array.from({ length: n }, (_, k) => msg(start + k))
 
+const s = () => useAssistantChatStore.getState()
+
+// store 是模块级单例——每个用例前复位（含会话维度），否则上一条用例的活动会话会串场
+beforeEach(() => {
+  useAssistantChatStore.getState().clear()
+  localStorage.clear()
+})
+afterEach(() => {
+  vi.restoreAllMocks()
+})
+
 describe('assistant-chat-store', () => {
-  beforeEach(() => {
-    // 先清内存态（setState 会触发 persist 写），再清 localStorage
-    useAssistantChatStore.setState({ messages: [] })
-    localStorage.clear()
-  })
-  afterEach(() => {
-    vi.restoreAllMocks()
-  })
 
   it('setMessages 接受直接数组与 React 风格 updater', () => {
     useAssistantChatStore.getState().setMessages(many(2))
@@ -59,15 +65,19 @@ describe('assistant-chat-store', () => {
     expect(useAssistantChatStore.getState().messages).toEqual([])
   })
 
-  it('持久化到 localStorage key aozora-assistant-chat，partialize 只落 messages', () => {
+  it('持久化到 localStorage key aozora-assistant-chat，partialize 只落数据字段（v2）', () => {
     useAssistantChatStore.getState().setMessages(many(2))
     const raw = localStorage.getItem(STORAGE_KEY)
     expect(raw).toBeTruthy()
     const parsed = JSON.parse(raw!)
     expect(parsed.state.messages).toHaveLength(2)
+    // T-M7-03b：v2 起多会话——会话维度也落盘（否则切页 remount 后退回单会话）
+    expect(parsed.state.projections).toEqual({})
+    expect(parsed.state.activeConversationId).toBeNull()
     expect(parsed.state.setMessages).toBeUndefined()
     expect(parsed.state.clear).toBeUndefined()
-    expect(parsed.version).toBe(1)
+    expect(parsed.state.switchConversation).toBeUndefined()
+    expect(parsed.version).toBe(2)
   })
 
   it('setItem 抛错（quota/隐私模式）：写入静默降级为内存态，不抛', () => {
@@ -96,5 +106,129 @@ describe('assistant-chat-store', () => {
     const { messages } = mod.useAssistantChatStore.getState()
     expect(messages).toHaveLength(3)
     expect(messages.map(m => m.id)).toEqual(['m-0', 'm-1', 'm-2'])
+  })
+})
+
+describe('assistant-chat-store — 多会话分桶（T-M7-03b）', () => {
+  it('switchConversation：切换会话互不串扰，切回来还是当时的样子', () => {
+    s().setMessages(many(2))                       // 本地会话：m-0 / m-1
+    s().switchConversation('conv-A')
+    expect(s().messages).toEqual([])               // 新会话是空的，不串到本地会话
+    s().setMessages(many(2, 10))                   // conv-A：m-10 / m-11
+
+    s().switchConversation(null)                   // 切回本地会话
+    expect(s().messages.map(m => m.id)).toEqual(['m-0', 'm-1'])
+
+    s().switchConversation('conv-A')
+    expect(s().messages.map(m => m.id)).toEqual(['m-10', 'm-11'])
+  })
+
+  it('switchConversation：离开的会话写入缓存，目标会话出缓存、不留副本', () => {
+    s().switchConversation('conv-A')
+    // 空会话也照样入缓存（否则切回来会「继承」别人的消息）
+    expect(s().projections[LOCAL_CONVERSATION_KEY]).toEqual([])
+    s().setMessages(many(1, 10))                   // conv-A：m-10
+    s().switchConversation('conv-B')
+
+    expect(s().activeConversationId).toBe('conv-B')
+    expect(s().messages).toEqual([])
+    expect(s().projections['conv-A'].map(m => m.id)).toEqual(['m-10'])
+    expect(s().projections['conv-B']).toBeUndefined() // 活动会话不留在缓存里
+  })
+
+  it('switchConversation 到同一个会话是 no-op（不把活动会话搬进缓存）', () => {
+    s().switchConversation('conv-A')
+    s().setMessages(many(1, 10))
+    s().switchConversation('conv-A')
+    expect(s().messages.map(m => m.id)).toEqual(['m-10'])
+    expect(s().projections['conv-A']).toBeUndefined()
+  })
+
+  it('adoptConversation：首轮 done 交回 id → 当前投影换键，不搬家、不留副本', () => {
+    s().setMessages(many(2))                       // 本地会话的消息
+    s().adoptConversation('conv-42')
+
+    expect(s().activeConversationId).toBe('conv-42')
+    expect(s().messages.map(m => m.id)).toEqual(['m-0', 'm-1'])
+    expect(s().projections[LOCAL_CONVERSATION_KEY]).toBeUndefined()
+  })
+
+  it('adoptConversation 重复同一个 id 是 no-op', () => {
+    s().adoptConversation('conv-42')
+    s().setMessages(many(1))
+    s().adoptConversation('conv-42')
+    expect(s().messages).toHaveLength(1)
+  })
+
+  it('clear（登出挂钩）清空全部会话与缓存', () => {
+    s().setMessages(many(2))
+    s().switchConversation('conv-A')
+    s().setMessages(many(1, 10))
+
+    s().clear()
+    expect(s().messages).toEqual([])
+    expect(s().projections).toEqual({})
+    expect(s().activeConversationId).toBeNull()
+  })
+
+  it('会话维度跨模块重载一并恢复（activeConversationId + 其他桶）', async () => {
+    s().switchConversation('conv-A')
+    s().setMessages(many(1, 10))
+    s().switchConversation('conv-B')
+    s().setMessages(many(1, 20))
+
+    vi.resetModules()
+    const mod = await import('../../platform/store/assistant-chat-store')
+    const st = mod.useAssistantChatStore.getState()
+    expect(st.activeConversationId).toBe('conv-B')
+    expect(st.messages.map(m => m.id)).toEqual(['m-20'])
+    expect(st.projections['conv-A'].map(m => m.id)).toEqual(['m-10'])
+  })
+
+  it('v1 落盘数据迁移：扁平单会话历史进本地桶，一条不丢', async () => {
+    // v1 的实际落盘形状：{ state: { messages }, version: 1 }
+    localStorage.setItem(STORAGE_KEY, JSON.stringify({
+      state: { messages: many(3).map(m => ({ ...m, proposalStatus: 'committed' })) },
+      version: 1,
+    }))
+    vi.resetModules()
+    const mod = await import('../../platform/store/assistant-chat-store')
+    const st = mod.useAssistantChatStore.getState()
+
+    expect(st.messages.map(m => m.id)).toEqual(['m-0', 'm-1', 'm-2'])
+    expect(st.messages[0].proposalStatus).toBe('committed')
+    expect(st.activeConversationId).toBeNull()   // 旧数据没有会话维度 → 本地桶
+    expect(st.projections).toEqual({})
+  })
+
+  it('v1 迁移后继续写入：新消息追加在旧历史之后，落盘升为 v2', async () => {
+    localStorage.setItem(STORAGE_KEY, JSON.stringify({
+      state: { messages: many(2) }, version: 1,
+    }))
+    vi.resetModules()
+    const mod = await import('../../platform/store/assistant-chat-store')
+    mod.useAssistantChatStore.getState().setMessages(prev => [...prev, msg(9)])
+
+    const parsed = JSON.parse(localStorage.getItem(STORAGE_KEY)!)
+    expect(parsed.version).toBe(2)
+    expect(parsed.state.messages.map((m: AssistantMessage) => m.id)).toEqual(['m-0', 'm-1', 'm-9'])
+  })
+
+  it('v1 迁移容忍畸形载荷（messages 不是数组）→ 空态，不炸', async () => {
+    localStorage.setItem(STORAGE_KEY, JSON.stringify({ state: { messages: 'oops' }, version: 1 }))
+    vi.resetModules()
+    const mod = await import('../../platform/store/assistant-chat-store')
+    expect(mod.useAssistantChatStore.getState().messages).toEqual([])
+  })
+
+  it('v1 迁移同样受 200 条上限约束（弃旧保新）', async () => {
+    localStorage.setItem(STORAGE_KEY, JSON.stringify({
+      state: { messages: many(260) }, version: 1,
+    }))
+    vi.resetModules()
+    const mod = await import('../../platform/store/assistant-chat-store')
+    const { messages } = mod.useAssistantChatStore.getState()
+    expect(messages).toHaveLength(MAX_ASSISTANT_MESSAGES)
+    expect(messages.at(-1)!.id).toBe('m-259')
   })
 })

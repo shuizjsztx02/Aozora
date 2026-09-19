@@ -49,9 +49,20 @@
  *     本文件用**结构化窄接口 + 运行时能力探测**取用它们（见 `AgentStreamBridge`），
  *     因此桥未落地或 APK 版本落后时自动回落，不需要与 02h 并行改同一批文件。
  *   - 开关关闭**或桥不具备能力** → 整条回落既有 ai.interpret 单发链路，12 s / 25 s 体验不变。
+ *
+ * T-M7-03b（P2 客户端基座）：流式消费段**搬去 `use-assistant-stream.ts`**——事件 → 状态的
+ *   纯 reducer（八类事件全消费，投影态含步骤/挂起提案/设备指令）与订阅收发的 hook 分离，
+ *   本文件只留编排与卡流程。三处随之变化：
+ *   - 会话 id 由内存 ref（切页 remount 即丢）**提升到 store**（`activeConversationId`），
+ *     `done.conversation_id` 交回时用 `adoptConversation` 把当前会话固化到那个 id 上；
+ *   - `ai.cancel` **接线**（P1 只有桥协议没有调用点）：新增 `cancelStream()`，
+ *     取消后三个互斥瞬时态收敛为空且零写（03e 的「停止生成」按钮接它）；
+ *   - messages 按会话分桶（`assistant-chat-store` v2），会话切换互不串扰。
+ *   职责边界不变：**重构只搬家不换语义**，三个瞬时态的约束、v2 分发矩阵、快路径
+ *   12 s / 25 s 体验一律照旧。
  */
 
-import { useState, useCallback, useRef, useEffect } from 'react'
+import { useState, useCallback, useRef, useEffect, useMemo } from 'react'
 import type { ActionProposal } from '../../domain/action-proposal'
 import { parseInput, type ParseContext } from '../../domain/nlu/parser'
 import {
@@ -63,16 +74,25 @@ import {
 } from '../../domain/ai-proposal-builder'
 import { useBridge } from '../../platform/hooks/use-bridge'
 import { useAssistantChatStore } from '../../platform/store/assistant-chat-store'
+import {
+  useAssistantStream,
+  type AgentStreamBridge, type AgentStreamProjection, type StreamingBubble,
+} from './use-assistant-stream'
 import { newUuid } from '../../platform/uuid'
 import { todayBizDate } from '../../domain/date'
 import { META_KEY_DEFAULT_ACCOUNT_ID, META_KEY_DEFAULT_BOOK_ID } from '../../domain/meta'
 import type {
   AccountData, BookData, BudgetData, CategoryData, SavingsGoalData, TransactionData,
 } from '../../platform/bridge/bridge-types'
-import type {
-  AiInterpretContext, AiStreamDoneData, AiStreamEvent, AiValidateVerdict,
-} from '../../platform/bridge/bridge-types'
+import type { AiInterpretContext, AiValidateVerdict } from '../../platform/bridge/bridge-types'
 import type { Category } from '../../domain/types'
+
+// T-M7-03b：流式契约与接线搬去 use-assistant-stream.ts；这几个名字从这里转出，
+// 是为了不动既有 import 面（02i 的用例与后续卡片都从本文件取类型）。
+export type {
+  AgentStreamBridge, AgentStreamDone, AgentStreamEvent, AgentStepView,
+  AgentStreamProjection, StreamingBubble,
+} from './use-assistant-stream'
 
 export interface AssistantMessage {
   id: string
@@ -156,7 +176,12 @@ export interface PendingConfig {
 }
 
 // ───────────────────────────────────────────────────────────────────────────
-// T-M7-02i：agent 流式通道的消费契约
+// T-M7-02i / T-M7-03b：agent 流式通道的消费契约
+//
+// 契约类型（`AgentStreamEvent` / `AgentStreamDone`）的源在 `bridge-types.ts`；
+// 窄接口 `AgentStreamBridge`、投影态 `AgentStreamProjection` 与收发的 hook 在
+// `use-assistant-stream.ts`。本文件只保留**开关**——它是客户端灰度的一部分，
+// 默认值与服务端同口径（P2 各卡不得改动，见 T-M7-03 计划 §五 第 4 项）。
 // ───────────────────────────────────────────────────────────────────────────
 
 /**
@@ -170,49 +195,6 @@ export interface PendingConfig {
  * `runAgent` 会以桥错误 reject，本轮直接按失败收尾（不会静默回落）。
  */
 export const AI_AGENT_CLIENT_ENABLED = false
-
-/**
- * T-M7-02i：agent 流式通道的客户端桥契约（**实现见 T-M7-02h**）。
- *
- * 本卡实施时 02h 尚未提交，若 import 它的类型，HEAD 就处于「引用了尚不存在的符号」的
- * 不自洽状态（实测：远端 CI 的 typecheck 直接红）。所以这里用**结构化窄接口 + 运行时
- * 能力探测**：桥未落地时探测为假（整条回落单发链路，也顺带兜住「旧 APK 无这两条命令」），
- * 桥落地后自动接通。
- *
- * **T-M7-02h 已提交（`55923b0`）后的收口**：事件与 `done` 的载荷类型已并入
- * `bridge-types.ts`（那里是契约类型的唯一源），下面两个名字退化为**别名**。
- * 窄接口本身保留——它表达的是「桥可能不具备流式能力」，与契约类型不是一回事。
- */
-export interface AgentStreamBridge {
-  runAgent(
-    input: string, bookId: string, conversationId?: string | null,
-  ): Promise<{ pending: boolean; streamId: string }>
-  onAiStream(listener: (event: AgentStreamEvent) => void): () => void
-}
-
-/** T-M7-02i：agent 流的下行事件 —— **契约源在 `bridge-types.ts`**（T-M7-02h 已提交，
- *  本卡原先自带的那份已删）。别名保留只是为了不动既有 import 面。 */
-export type AgentStreamEvent = AiStreamEvent
-
-/** T-M7-02i：`done` 帧的载荷 —— 同上，契约源在 `bridge-types.ts`。
- *  `proposals` 是**仍待确认**的提案、`executions` 是**已执行**的回执，两者互斥
- *  （T-M7-02e 决策 2）；本卡只消费其中四个字段（`steps` / `usage` / `pending_input`
- *  等留给 P2）。 */
-export type AgentStreamDone = AiStreamDoneData
-
-/** T-M7-02i：流式期间的内存态气泡（**不落 messages store**）。
- *
- *  瞬时态不落盘与 T14-4 决策 #7 同口径（processing / pendingOp 等本就不进 store）；
- *  两个实际理由：① 一轮几十上百帧增量，逐帧写 localStorage 的序列化开销与帧数同阶；
- *  ② 架构 §8.5 明确「本轮不落库，重新打开会话时这半截文本不在历史里」——落盘会让
- *  用户重开 App 看到半截文本且没有失败标注。done / error 时定型成正式消息。 */
-export interface StreamingBubble {
-  /** 正文增量拼接（`delta.data.channel === 'content'`） */
-  text: string
-  /** 推理增量拼接（`delta.data.channel === 'reasoning'`；渲染为灰字折叠区，
-   *  绝不混进正文——架构 §8.5） */
-  reasoning: string
-}
 
 interface UseAssistantOptions {
   categories: CategoryData[]
@@ -263,9 +245,19 @@ interface UseAssistantReturn {
   /** T13-5：config 意图解析成功后的待确认设置操作（null=无）。 */
   pendingConfig: PendingConfig | null
   /** T-M7-02i：agent 流式期间的气泡（null=不在流式中）。**内存态**，不进 messages
-   *  store——流式期间由页面渲染，done/error 时定型成正式消息后置回 null。 */
+   *  store——流式期间由页面渲染，done/error 时定型成正式消息后置回 null。
+   *  T-M7-03b：它是 `streamProjection` 的**气泡视图**（只取正文与推理两段）；
+   *  03c 的步骤卡片流读 `streamProjection` 的 `steps`。 */
   streaming: StreamingBubble | null
+  /** T-M7-03b：agent 流式期间的**完整投影**（null=不在流式中）——八类事件都落在
+   *  这里（正文/推理增量、按 Step 归并的步骤、挂起提案、设备指令、结果与错误）。
+   *  P1 只渲染正文与推理（`streaming`），步骤卡片流归 03c。 */
+  streamProjection: AgentStreamProjection | null
   submitInput: (text: string) => Promise<void>
+  /** T-M7-03b：取消当前 agent 流（`ai.cancel` 接线）。**零写**；取消后
+   *  `activeProposal` / `pendingOp` / `pendingConfig` 一律收敛为空——
+   *  用户按下停止，就不该再留一张待确认的卡（03e 接「停止生成」按钮）。 */
+  cancelStream: () => Promise<void>
   /** 卡片编辑保存：softDelete 旧笔 + insert 新（编辑 = 替换写）。
    *  T12-9（REQ-35）：overrides = 卡内账本/预算 chip 覆盖（首提与替换写均生效）。 */
   editProposal: (edited: ActionProposal, overrides?: ProposalWriteOverrides) => Promise<void>
@@ -360,6 +352,9 @@ export function useAssistant({
   // 仍为内存 useState，不落盘（恢复后无过期撤销钮：卡由内存态门控）。
   const messages = useAssistantChatStore(s => s.messages)
   const setMessages = useAssistantChatStore(s => s.setMessages)
+  // T-M7-03b：`done.conversation_id` 交回时把当前会话固化到该 id（P1 里这只是个内存
+  // ref，切页 remount 即丢，重进就开新会话）
+  const adoptConversation = useAssistantChatStore(s => s.adoptConversation)
   const [phase, setPhase] = useState<AssistantPhase>('idle')
   const [activeProposal, setActiveProposal] = useState<ActionProposal | null>(null)
   const [cardStatus, setCardStatus] = useState<CardStatus | null>(null)
@@ -368,8 +363,6 @@ export function useAssistant({
   const [pendingOp, setPendingOp] = useState<PendingOp | null>(null)
   // T13-5（REQ-48）：config 意图的待确认设置卡
   const [pendingConfig, setPendingConfig] = useState<PendingConfig | null>(null)
-  // T-M7-02i：agent 流式气泡（内存态，见 StreamingBubble 的说明）
-  const [streaming, setStreaming] = useState<StreamingBubble | null>(null)
   const slowTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
   // C-B3 fix: 并发提交互斥
   const isSubmittingRef = useRef(false)
@@ -383,23 +376,12 @@ export function useAssistant({
   const isPendingConfirmRef = useRef(false)
   // T12-8（REQ-30 ② / 决策 #9）：云端失败轻提示会话级只弹一次，不轰炸
   const aiNoticeShownRef = useRef(false)
-  // T-M7-02i：agent 会话 id（done 帧交回，下一轮必须带上，否则每轮都开新会话）
-  const conversationIdRef = useRef<string | null>(null)
-  // T-M7-02i：流式增量的累积缓冲——逐帧 setState 会拿到陈旧闭包，且高频重建对象；
-  // 缓冲在 ref 里累积、每批一次性渲染（服务端已按 100 ms 合并窗把帧数降了一个数量级）
-  const streamBufRef = useRef({ text: '', reasoning: '' })
-  // T-M7-02i：本轮是否已收尾——done 与 error 只认先到的那个（桥命令的 resolve 也可能
-  // 在事件之后到达，收尾必须幂等）
-  const streamSettledRef = useRef(false)
-  // T-M7-02i：当前流的退订函数（卸载/新提交时兜底退订，防事件打到已结束的轮次）
-  const streamUnsubRef = useRef<(() => void) | null>(null)
 
   // C-C2 fix: 组件卸载时清理所有 timer
+  // （流事件的退订由 useAssistantStream 自己在卸载时兜底，不在这里重复）
   useEffect(() => {
     return () => {
       if (slowTimerRef.current) clearTimeout(slowTimerRef.current)
-      streamUnsubRef.current?.()
-      streamUnsubRef.current = null
     }
   }, [])
 
@@ -698,12 +680,16 @@ export function useAssistant({
   ])
 
   /**
-   * T-M7-02i：一轮 agent 流的收尾——卸载气泡，把产物落到既有链路上。
+   * T-M7-02i / T-M7-03b：一轮 agent 流的收尾——把投影里的产物落到既有链路上。
    *
-   * `done === null` 表示本轮失败（`error` 帧或桥层异常）：**保留已渲染的半截文本并
-   * 标注失败，不清空**（架构 §8.5——内容突然消失比「看到一半 + 一句失败提示」更糟）。
-   * 失败轮服务端不落库（02f 的一轮原子写入），所以这半截文本只活在本地消息里，
-   * 重开会话即不在；断连恢复归 P3。
+   * 收尾由 `useAssistantStream` 在 `done` / `error` / 取消三种情形下各调一次，载荷是
+   * **最终投影**（含正文与推理增量、步骤、`done` / `error` / `canceled` 标志）。
+   *
+   * 失败（`error` 帧或桥层异常）与取消：**保留已渲染的半截文本并标注，不清空**
+   * （架构 §8.5——内容突然消失比「看到一半 + 一句失败提示」更糟）。这两轮服务端都不
+   * 落库（02f 的一轮原子写入），所以半截文本只活在本地消息里，重开会话即不在；
+   * 断连恢复归 P3。**两者分开**：取消是用户主动、断连是被动，UI 表现与恢复路径不同
+   * （03e 的边界），故不合并成一个状态。
    *
    * 成功轮的落点按 `done` 的产物三选一，顺序即优先级：
    *   ① `executions` 非空 → 服务端已执行（单 Step 高置信），落回执 + 记事务 id 供撤销；
@@ -711,21 +697,27 @@ export function useAssistant({
    *      进 `pending-confirm` 卡态等用户点头——**不自动写库**；
    *   ③ 都没有 → 纯文本答复（chat / query），气泡定型成正式消息。
    * `proposals` 与 `executions` 互斥（T-M7-02e 决策 2），所以①②不会同时命中。
+   *
+   * **不假设「每条回复都从 `delta` 开始」**（02g-2 探针：快档直调工具那一步 0 帧
+   * `delta`）——`text` 为空时三个落点各自有兜底文案，不是错误路径。
    */
-  const settleStream = useCallback(async (done: AgentStreamDone | null) => {
-    const { text } = streamBufRef.current
-    streamUnsubRef.current?.()
-    streamUnsubRef.current = null
-    setStreaming(null)
+  const settleStream = useCallback(async (p: AgentStreamProjection) => {
     finishProcessing()
+    const text = p.text
 
+    if (p.canceled) {
+      appendAssistantMessage(text ? `${text}\n\n已取消` : '已取消')
+      return
+    }
+
+    const done = p.done
     if (!done) {
       appendAssistantMessage(text ? `${text}\n\n⚠️ 本轮未完成，请重试` : '⚠️ 本轮未完成，请重试')
       return
     }
 
-    // 会话 id 必须留存：下一轮不带就会一直开新会话（02f 的会话索引靠它接续）
-    conversationIdRef.current = done.conversation_id
+    // 会话 id 固化进 store：下一轮必须带上，否则每轮都开新会话（02f 的会话索引靠它接续）
+    adoptConversation(done.conversation_id)
 
     if (done.executions.length > 0) {
       const ids = done.executions.flatMap(e => (e.transaction_ids as string[] | undefined) ?? [])
@@ -765,73 +757,55 @@ export function useAssistant({
     appendAssistantMessage(text || (done.stop_reason === 'empty_response'
       ? '这次没想出合适的回答，换个说法再试试？'
       : '本轮没能得出结论，换个说法再试试？'))
-  }, [appendAssistantMessage, bridge, finishProcessing, setMessages])
+  }, [adoptConversation, appendAssistantMessage, bridge, finishProcessing, setMessages])
 
   /**
-   * T-M7-02i：agent 流式一轮（**开关开启时才走到这里**）。
+   * T-M7-02i / T-M7-03b：agent 流的收发（订阅、`streamId` 归属、收尾幂等、取消）
+   * 在 `useAssistantStream` 里，本 hook 只提供收尾回调。
    *
-   * 只做消费：上行交给桥（T-M7-02h 的 `runAgent`），下行事件按类型分流，收尾统一走
-   * settleStream。流的中间态**不做 intent 判定**——v2 intent 在流式中无法预知
-   * （chat/query/edit/delete/config 的 UI 形态互异），只有 `done` 的产物决定落点
-   * （架构 §9.1：复杂度对用户不可见）。
+   * 流的中间态**不做 intent 判定**——v2 intent 在流式中无法预知（chat/query/edit/
+   * delete/config 的 UI 形态互异），只有 `done` 的产物决定落点（架构 §9.1：复杂度对
+   * 用户不可见）。
+   */
+  const { projection, start: startAgentStream, cancel: cancelAgentStream } =
+    useAssistantStream({ bridge, onSettled: settleStream })
+
+  /**
+   * T-M7-03b：起一轮 agent 流（**开关开启且桥具备能力时才走到这里**——闸在
+   * `submitInput` 里，与 02i 逐字相同）。
+   *
+   * 会话 id 从 store 现读（不再是内存 ref）：`adoptConversation` 会在上一轮 `done`
+   * 时把它固化，切页 remount 也不丢。
    */
   const runAgentTurn = useCallback(async (text: string) => {
-    // 结构化窄接口 + 能力探测：桥（02h）未落地时本函数不会被调用（调用点已探过），
-    // 这里再取一次是为了让类型系统认得这两个方法。
-    const agentBridge = bridge as unknown as Partial<AgentStreamBridge>
-    streamBufRef.current = { text: '', reasoning: '' }
-    streamSettledRef.current = false
-    setStreaming({ text: '', reasoning: '' })
+    const conversationId = useAssistantChatStore.getState().activeConversationId
+    await startAgentStream(text, bookId!, conversationId)
+  }, [bookId, startAgentStream])
 
-    // 本轮流的归属 id（`runAgent` 的 ack 里给；事件里的 streamId 与它相等）。
-    // ack 到达之前到达的事件按单流处理——submitInput 的并发互斥保证了 P1 同时只有一条流。
-    let streamId: string | null = null
+  /**
+   * T-M7-03b：取消当前 agent 流（`ai.cancel` 接线；03e 的「停止生成」按钮接它）。
+   *
+   * **零写**——只关 SSE 长连接与收敛本地态，不触碰任何写命令。三个互斥瞬时态
+   * （`activeProposal` / `pendingOp` / `pendingConfig`）一并收敛为空：T12-11 的
+   * 「新输入接管会话、未决卡作废」口径在「取消」这一侧同样成立——用户按下停止，
+   * 就不该再留一张待确认的卡等着他。
+   */
+  const cancelStream = useCallback(async () => {
+    setActiveProposal(null)
+    setCardStatus(null)
+    setPendingOp(null)
+    setPendingConfig(null)
+    isPendingCategoryRef.current = false
+    isPendingConfirmRef.current = false
+    // 撤销窗（activeTxIdsRef）不动：那是**上一轮已落库**那笔的入口，与取消本轮无关
+    await cancelAgentStream()
+  }, [cancelAgentStream])
 
-    const onEvent = (ev: AgentStreamEvent) => {
-      if (streamSettledRef.current) return
-      if (streamId && ev.streamId !== streamId) return
-      if (ev.event === 'delta') {
-        const d = ev.data as { text?: unknown; channel?: unknown }
-        if (typeof d.text !== 'string') return
-        // 两个通道分流：reasoning 进灰字折叠区，绝不混进正文（架构 §8.5）
-        if (d.channel === 'reasoning') streamBufRef.current.reasoning += d.text
-        else streamBufRef.current.text += d.text
-        setStreaming({ ...streamBufRef.current })
-        return
-      }
-      if (ev.event === 'done') {
-        streamSettledRef.current = true
-        void settleStream(ev.data as unknown as AgentStreamDone)
-        return
-      }
-      if (ev.event === 'error') {
-        // 服务端安全枚举与桥侧本地失败（timeout / network / auth_lost / …）对用户是
-        // 同一件事——本轮没做成。文案不透传（安全口径），统一走失败收尾。
-        streamSettledRef.current = true
-        void settleStream(null)
-        return
-      }
-      // phase / tool_call / tool_result / confirm / device_request：P1 最小形态不渲染
-      // （步骤卡片流归 P2）。confirm 的提案不进 UI——done.proposals 才是权威清单，
-      // 按 proposalId 去重是收敛后的形态，中途那一帧只是实时信号。
-    }
-
-    streamUnsubRef.current?.()
-    streamUnsubRef.current = agentBridge.onAiStream!(onEvent)
-
-    try {
-      const ack = await agentBridge.runAgent!(text, bookId!, conversationIdRef.current)
-      streamId = ack.streamId
-    } catch {
-      // 桥层失败（旧 APK 无该命令 / 链路建不起来）：同样按本轮失败收尾
-      if (!streamSettledRef.current) {
-        streamSettledRef.current = true
-        await settleStream(null)
-      }
-    }
-    // 命令是「立即返回 ack + 事件推送」的形态（架构 §8.2），所以这里**不退订**：
-    // 本轮的结束以 done / error 为准，那两个分支各自负责退订。
-  }, [bridge, bookId, settleStream])
+  /** T-M7-03b：气泡视图——页面渲染读它（03c 的步骤卡片流读 `projection` 的 `steps`）。 */
+  const streaming = useMemo<StreamingBubble | null>(
+    () => (projection ? { text: projection.text, reasoning: projection.reasoning } : null),
+    [projection],
+  )
 
   const submitInput = useCallback(async (text: string) => {
     if (!text.trim()) return
@@ -1298,9 +1272,9 @@ export function useAssistant({
 
   return {
     messages, phase, activeProposal, cardStatus, isSlow, pendingOp, pendingConfig,
-    streaming,
+    streaming, streamProjection: projection,
     submitInput, editProposal, undoExecution, confirmOp, cancelOp,
-    confirmConfig, cancelConfig,
+    confirmConfig, cancelConfig, cancelStream,
     appendAssistantMessage,
   }
 }

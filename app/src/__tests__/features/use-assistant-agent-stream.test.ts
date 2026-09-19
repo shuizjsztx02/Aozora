@@ -12,7 +12,9 @@
  */
 import { describe, it, expect, vi, beforeEach } from 'vitest'
 import { renderHook, act, waitFor } from '@testing-library/react'
-import { useAssistant, type AgentStreamEvent } from '../../features/assistant/use-assistant'
+import {
+  useAssistant, type AgentStreamEvent, type AssistantMessage,
+} from '../../features/assistant/use-assistant'
 import { useAssistantChatStore } from '../../platform/store/assistant-chat-store'
 import { parseInput } from '../../domain/nlu/parser'
 import type { ActionProposal } from '../../domain/action-proposal'
@@ -29,6 +31,7 @@ const mockBridge = vi.hoisted(() => ({
   runAgent: vi.fn(),
   cancelAgent: vi.fn().mockResolvedValue({ cancelled: true }),
   onAiStream: vi.fn(),
+  insertBook: vi.fn().mockResolvedValue({ id: 'new-book' }),
   isAvailable: vi.fn().mockReturnValue(true),
 }))
 
@@ -103,6 +106,19 @@ function setup(opts: { agentStream?: boolean; bookId?: string | null } = {}) {
   }))
 }
 
+/** `done` 帧载荷的最小完整形状（字段表见 server/src/modules/ai/stream.py）。 */
+function donePayload(over: Record<string, unknown> = {}): Record<string, unknown> {
+  return {
+    conversation_id: 'conv-1', stop_reason: 'completed', steps: 1,
+    tool_calls: 0, writes: 0, usage: { prompt_tokens: 1, completion_tokens: 1 },
+    proposals: [], executions: [], pending_input: null,
+    ...over,
+  }
+}
+
+const lastMsg = (r: { current: { messages: AssistantMessage[] } }) =>
+  r.current.messages[r.current.messages.length - 1]
+
 describe('use-assistant — agent 流式消费（T-M7-02i）', () => {
   beforeEach(() => {
     vi.clearAllMocks()
@@ -115,7 +131,9 @@ describe('use-assistant — agent 流式消费（T-M7-02i）', () => {
     mockBridge.isAvailable.mockReturnValue(true)
     mockBridge.interpretAI.mockResolvedValue(null)
     vi.mocked(parseInput).mockReturnValue(chatProposal())
-    useAssistantChatStore.setState({ messages: [] })
+    // store 是模块级单例：**连会话维度一起复位**——上一条用例 adopt 出的
+    // activeConversationId 会带进下一轮的 runAgent 参数与消息桶
+    useAssistantChatStore.getState().clear()
   })
 
   // ─── 开关与回落 ───
@@ -441,5 +459,242 @@ describe('use-assistant — agent 流式消费（T-M7-02i）', () => {
     expect(tx.amountCents).toBe(1200)
     expect(tx.categoryId).toBe('cat-food')
     expect(result.current.messages[result.current.messages.length - 1].text).toBe('已记录 1 笔交易')
+  })
+})
+
+describe('use-assistant — 流式消费重构（T-M7-03b）', () => {
+  beforeEach(() => {
+    vi.clearAllMocks()
+    listeners = []
+    mockBridge.onAiStream.mockImplementation((l: (ev: AgentStreamEvent) => void) => {
+      listeners.push(l)
+      return () => { listeners = listeners.filter(x => x !== l) }
+    })
+    mockBridge.runAgent.mockResolvedValue({ pending: true, streamId: STREAM_ID })
+    mockBridge.cancelAgent.mockResolvedValue({ cancelled: true })
+    mockBridge.isAvailable.mockReturnValue(true)
+    mockBridge.interpretAI.mockResolvedValue(null)
+    vi.mocked(parseInput).mockReturnValue(chatProposal())
+    useAssistantChatStore.getState().clear()
+  })
+
+  // ─── 投影（八类事件里 P1 不渲染的那几类）───
+
+  it('步骤帧进投影：streamProjection 拿到 phase/tool_call/tool_result，正文仍是空的', async () => {
+    const { result } = setup()
+    let release!: () => void
+    mockBridge.runAgent.mockImplementationOnce(() => new Promise<void>(r => { release = r }))
+
+    let submitting!: Promise<void>
+    await act(async () => {
+      submitting = result.current.submitInput('把上个月的餐饮都改成交通')
+      await Promise.resolve()
+    })
+
+    await act(async () => {
+      emit('phase', { phase: 'thinking', step: 1, reasoning: 'deep' })
+      emit('tool_call', { tool: 'query_transactions', step: 1, message: '正在查询记录…' })
+    })
+    const running = result.current.streamProjection
+    // 0 帧 delta：气泡里还没有正文，但「有反应」由步骤承担
+    const runningBubble = result.current.streaming
+
+    await act(async () => { emit('tool_result', { tool: 'query_transactions', step: 1, status: 'ok' }) })
+    const finished = result.current.streamProjection
+
+    await act(async () => {
+      emit('done', donePayload({ steps: 1, tool_calls: 1 }))
+      release()
+    })
+    await act(async () => { await submitting })
+
+    expect(running?.steps).toEqual([{
+      step: 1, phase: 'thinking', reasoning: 'deep',
+      tool: 'query_transactions', message: '正在查询记录…', status: null, code: null,
+    }])
+    expect(running?.text).toBe('')
+    expect(runningBubble).toEqual({ text: '', reasoning: '' })
+    expect(finished?.steps[0].status).toBe('ok')
+    // 收尾后投影卸载（气泡让位给正式消息）
+    expect(result.current.streamProjection).toBeNull()
+  })
+
+  it('**不假设每条回复都从 delta 开始**：整轮 0 帧 delta 照常落回执', async () => {
+    const { result } = setup()
+
+    await act(async () => {
+      const p = result.current.submitInput('记一笔午饭12块')
+      await Promise.resolve()
+      emit('phase', { phase: 'tool_calling', step: 1 })
+      emit('tool_call', { tool: 'insert_transaction', step: 1, message: '正在记账…' })
+      emit('tool_result', { tool: 'insert_transaction', step: 1, status: 'ok' })
+      emit('done', donePayload({
+        tool_calls: 1, writes: 1,
+        executions: [{ proposal_id: 'agent-abc', transaction_ids: ['tx-7'], undo_window_seconds: 5 }],
+      }))
+      await p
+    })
+
+    // 没有半截文本 → 回执就是干净的一句，不带前导空行
+    expect(lastMsg(result).text).toBe('已记录 1 笔交易')
+    expect(lastMsg(result).transactionIds).toEqual(['tx-7'])
+    expect(result.current.phase).toBe('idle')
+  })
+
+  // ─── 会话 id 提升到 store ───
+
+  it('done 交回的 conversation_id 落进 store（不再只活在内存 ref）', async () => {
+    const { result } = setup()
+
+    await act(async () => {
+      const p = result.current.submitInput('你好')
+      await Promise.resolve()
+      emit('done', donePayload({ conversation_id: 'conv-77' }))
+      await p
+    })
+
+    const store = useAssistantChatStore.getState()
+    expect(store.activeConversationId).toBe('conv-77')
+    // 消息随之归到该会话名下：本地桶已改名，不留副本
+    expect(store.projections['__local__']).toBeUndefined()
+    expect(store.messages.some(m => m.text === '你好')).toBe(true)
+  })
+
+  it('会话切换互不串扰：两个会话各归各的桶，切回来原样', async () => {
+    const { result } = setup()
+
+    // 会话 A（首轮不带 id → 服务端交回 conv-A）
+    await act(async () => {
+      const p = result.current.submitInput('会话A的消息')
+      await Promise.resolve()
+      emit('done', donePayload({ conversation_id: 'conv-A', stop_reason: 'completed' }))
+      await p
+    })
+    const aTexts = result.current.messages.map(m => m.text)
+    expect(useAssistantChatStore.getState().activeConversationId).toBe('conv-A')
+
+    // 切到新会话（03d 的「新建」：切到本地桶）
+    act(() => { useAssistantChatStore.getState().switchConversation(null) })
+    expect(result.current.messages).toEqual([])
+
+    await act(async () => {
+      const p = result.current.submitInput('会话B的消息')
+      await Promise.resolve()
+      emit('done', donePayload({ conversation_id: 'conv-B' }))
+      await p
+    })
+    // 新会话首轮不带 conversation_id（不会串到 A 上）
+    expect(mockBridge.runAgent.mock.calls[1][2]).toBeNull()
+    expect(result.current.messages.map(m => m.text)).toEqual(['会话B的消息', '本轮没能得出结论，换个说法再试试？'])
+
+    // 切回 A：原样，且不带 B 的任何一条
+    act(() => { useAssistantChatStore.getState().switchConversation('conv-A') })
+    expect(result.current.messages.map(m => m.text)).toEqual(aTexts)
+    expect(result.current.messages.some(m => m.text === '会话B的消息')).toBe(false)
+
+    // 再切到 B：同样原样
+    act(() => { useAssistantChatStore.getState().switchConversation('conv-B') })
+    expect(result.current.messages.map(m => m.text))
+      .toEqual(['会话B的消息', '本轮没能得出结论，换个说法再试试？'])
+  })
+
+  // ─── 取消（ai.cancel 接线）───
+
+  it('取消（有活动流）→ 气泡卸载、三态收敛为空、零写、半截文本保留', async () => {
+    const { result } = setup()
+    const proposal = pendingProposal()
+
+    // 第一轮留下一个待确认卡（三态之一）
+    await act(async () => {
+      const p = result.current.submitInput('先看看这个月花了多少，然后记一笔午饭12块')
+      await Promise.resolve()
+      emit('done', donePayload({
+        steps: 2, tool_calls: 2, writes: 1,
+        proposals: [proposal as unknown as Record<string, unknown>],
+      }))
+      await p
+    })
+    expect(result.current.activeProposal).not.toBeNull()
+    expect(result.current.cardStatus).toBe('pending-confirm')
+
+    // 第二轮：流式中途取消
+    mockBridge.runAgent.mockImplementationOnce(() => new Promise<void>(() => { /* 永不 resolve */ }))
+    let submitting!: Promise<void>
+    await act(async () => {
+      submitting = result.current.submitInput('那上个月呢')
+      await Promise.resolve()
+    })
+    await act(async () => { emit('delta', { text: '正想说', channel: 'content', step: 1 }) })
+    expect(result.current.streaming).toEqual({ text: '正想说', reasoning: '' })
+
+    await act(async () => { await result.current.cancelStream() })
+
+    // ai.cancel 真发出去了；本地态随即收敛
+    expect(mockBridge.cancelAgent).toHaveBeenCalledTimes(1)
+    expect(result.current.streaming).toBeNull()
+    expect(result.current.streamProjection).toBeNull()
+    expect(result.current.activeProposal).toBeNull()
+    expect(result.current.cardStatus).toBeNull()
+    expect(result.current.pendingOp).toBeNull()
+    expect(result.current.pendingConfig).toBeNull()
+    expect(result.current.phase).toBe('idle')
+
+    // 零写：取消只关连接，不落任何一笔
+    expect(mockBridge.insertTransaction).not.toHaveBeenCalled()
+    expect(mockBridge.updateTransaction).not.toHaveBeenCalled()
+    expect(mockBridge.softDeleteTransaction).not.toHaveBeenCalled()
+
+    // 半截文本保留并标注取消（与「本轮失败」是两种说法，03e 据此分流）
+    expect(lastMsg(result).text).toBe('正想说\n\n已取消')
+
+    // 无活动流时再取消一次：不重复收尾（不追加第二条消息）
+    const count = result.current.messages.length
+    await act(async () => { await result.current.cancelStream() })
+    expect(result.current.messages).toHaveLength(count)
+    void submitting
+  })
+
+  it('取消（无活动流）→ 未决的 pendingOp 一并作废且零写', async () => {
+    // 未决卡由 AI 单发路径产生（agent 流的中间态不做 intent 判定）
+    mockBridge.interpretAI.mockResolvedValue({
+      output: {
+        intent: 'edit', reply: '好的，帮你改',
+        filter: { keyword: '打车' }, set: { amountCents: 500 },
+      },
+    })
+    mockBridge.listTransactionsByBook.mockResolvedValue([{
+      id: 'tx-1', bookId: 'book-1', type: 'expense', amountCents: 2300, categoryId: 'c-food',
+      accountId: null, note: '打车', bizDate: '2026-09-08', occurredAt: 1,
+      source: 'manual', version: 7, deletedAt: null,
+    }])
+    const { result } = setup({ agentStream: false })
+
+    await act(async () => { await result.current.submitInput('把打车那笔改成5块') })
+    expect(result.current.pendingOp).not.toBeNull()
+
+    await act(async () => { await result.current.cancelStream() })
+
+    expect(result.current.pendingOp).toBeNull()
+    expect(mockBridge.updateTransaction).not.toHaveBeenCalled()
+    expect(mockBridge.softDeleteTransaction).not.toHaveBeenCalled()
+  })
+
+  it('取消（无活动流）→ 未决的 pendingConfig 一并作废且零写', async () => {
+    mockBridge.interpretAI.mockResolvedValue({
+      output: {
+        intent: 'config', reply: '好的',
+        type: '', amountCents: 0, category: '', note: '', bizDate: '', confidence: 0.9,
+        config: { op: 'book.create', name: '旅行' },
+      },
+    })
+    const { result } = setup({ agentStream: false })
+
+    await act(async () => { await result.current.submitInput('新建一个叫旅行的账本') })
+    expect(result.current.pendingConfig).not.toBeNull()
+
+    await act(async () => { await result.current.cancelStream() })
+
+    expect(result.current.pendingConfig).toBeNull()
+    expect(mockBridge.insertBook).not.toHaveBeenCalled()
   })
 })

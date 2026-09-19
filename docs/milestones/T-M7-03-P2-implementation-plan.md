@@ -12,8 +12,8 @@
 
 | 卡 | 内容 | 状态 | 完成日 | 提交 | 备注 |
 |---|---|---|---|---|---|
-| **03a** | 会话索引服务端化与事件读取 API | ⏳ 未开始 | | | 批次 1；服务端面 |
-| **03b** | 客户端流事件消费重构与投影缓存 | ⏳ 未开始 | | | 批次 1；客户端基座 |
+| **03a** | 会话索引服务端化与事件读取 API | ✅ 完成 | 2026-09-19 | `<待回填>` | 批次 1；服务端面 |
+| **03b** | 客户端流事件消费重构与投影缓存 | ✅ 完成 | 2026-09-19 | `<待回填>` | 批次 1；客户端基座 |
 | **03c** | 步骤卡片流与统一智能模式 | ⏳ 未开始 | | | 批次 2 |
 | **03d** | 多会话列表与切换 | ⏳ 未开始 | | | 批次 3 |
 | **03e** | 确认卡四值与取消/打断收敛 | ⏳ 未开始 | | | 批次 3 |
@@ -142,7 +142,193 @@ cd app && npx tsc --noEmit                       # 0 错
 
 ## 六、中间结果记录
 
-_（尚无。每卡完成后按交接模板在此追加。）_
+### 03b · 客户端流事件消费重构与投影缓存（✅ 2026-09-19）
+
+**任务编号：** T-M7-03b　**提交：** `<待回填>`
+
+**完成范围 / 明确未做：**
+
+- **完成：**
+  - **新 `app/src/features/assistant/use-assistant-stream.ts`**——流式消费从 1300 行的
+    `use-assistant.ts` 拆出，按卡面要求分成两层：
+    - **纯 reducer** `applyStreamEvent(projection, event)`——**八类事件全消费**。投影态含
+      正文/推理增量、按 Step 归并的步骤视图（进行中 / 完成 / 失败三态 + 失败安全码）、
+      `confirm` 挂起提案、`device_request`、`done` / `error` / `canceled` / `settled`。
+      已 `settled` 后到达的帧一律丢弃（收尾幂等：桥侧可能在流正常结束后补发本地 `error`）。
+    - **hook** `useAssistantStream`——订阅 / 退订、`streamId` 归属、收尾幂等、取消。它
+      **不碰任何业务状态**，收尾时把最终投影整份交给上层回调，由 `use-assistant` 按既有
+      产物分发矩阵落点。
+  - **`assistant-chat-store.ts` → v2**——messages 按 `conversationId` 分桶
+    （`activeConversationId` + `projections` + 顶层 `messages` 即活动会话的投影），新增
+    `switchConversation` / `adoptConversation`；`clear()` 加强为清全部会话桶；
+    **v1 落盘数据迁移**（`migrate`：扁平单会话历史进本地桶，**一条不丢**）。
+  - **`use-assistant.ts`**——`conversationIdRef` 删除，会话 id 提升到 store；
+    `settleStream` 改吃投影；新增 `cancelStream()`（`ai.cancel` **接线**——取消后三个互斥
+    瞬时态收敛为空且零写）；新增 `streamProjection`（完整投影）与 `streaming`
+    （其气泡视图，**`AssistantPage.tsx` 一个字符未动**）。
+- **明确未做（逐条对应卡面职责边界）：**
+  1. **不做步骤卡 UI**（03c）——本卡只建投影；
+  2. **不做会话列表 UI**（03d）——只提供 `switchConversation` 机制与「互不串扰」的用例；
+  3. **不动 Kotlin 桥**——`ai.cancel` 是 02h 已交付的命令，本卡只补调用点，**未引入新桥命令**；
+  4. **三个互斥瞬时态的约束不变**——重构只搬家不换语义（v2 分发矩阵、快路径 12 s / 25 s
+     体验逐字不变）；
+  5. **未改** `AI_AGENT_CLIENT_ENABLED` 默认值（§五 第 4 项）。
+
+**关键设计决策：**
+
+| # | 决策 | 理由 |
+|---|---|---|
+| 1 | 投影 = **八类事件全消费**，不止 `delta` / `done` / `error` | 卡面要求「八类事件 → 投影态逐条断言」；03c 的步骤卡片流直接读 `steps`（三态齐全），不必再改一次消费路径 |
+| 2 | 「活动会话的投影」放顶层 `messages`，`projections` 只放**非活动**会话 | 读当前会话仍是一次属性访问——既有 `setState({ messages })` / `getState().messages` 等约 25 处调用点与 7 个测试文件零改动；不变式由 `switchConversation` / `adoptConversation` 两个动作维护（活动会话不留副本） |
+| 3 | 取消与失败**分成两个状态**（`canceled` vs `error`） | 03e 的边界：取消是用户主动、断连是被动，UI 表现与恢复路径不同，不得合并 |
+| 4 | 取消**不做** `adoptConversation` | 取消 / 失败轮服务端不落库（02f 的一轮原子写入），没有可用的会话 id 语义 |
+| 5 | `cancelStream` **不动** `activeTxIdsRef`（撤销窗） | 那是**上一轮已落库**那笔的入口，与本轮取消无关；顺手清掉会让用户丢掉上一轮的撤销权 |
+| 6 | `cancelAgent` 在窄接口里是**可选**方法 | 能力探测仍只要求 `runAgent` + `onAiStream`（02h 口径不变）；桥缺席时取消退化为「只收敛本地态」，不会变成一条新依赖 |
+
+**验证命令与结果：**
+
+| 命令 | 结果 |
+|---|---|
+| `cd app && npx vitest run` | **80 files / 1170 passed**（开工基线 79 / 1135 → 本卡 +1 文件 / +35 用例，零失败） |
+| 其中 14 个 assistant 相关文件（7 个 use-assistant/store + 5 个页面 + 2 个卡片） | **242 passed**（其中 7 个 use-assistant/store 文件的开工基线为 113，本卡 +129 用例） |
+| `cd app && npx tsc --noEmit` | **0 错** |
+| `cd app && npm run lint` | **exit 0**；本卡新增/改动的三个文件**零告警**（既有告警集合不变） |
+| `bash ./gradlew :app:testDebugUnitTest --rerun-tasks` | **406 tests / 0 failures / 1 skipped**（与 02h 记录一致；本卡未触碰 Kotlin） |
+| `cd server && python -m pytest tests/ -q` | **exit 0（全绿）**；计数含 03a 的在途用例，见下方「并发会话说明」 |
+
+**新增用例分布：**
+- 新 `assistant-stream-projection.test.ts`（17）——reducer 纯函数：八类事件逐类落进投影、
+  `delta` 按 `channel` 分流、收尾幂等（`done` 先到 / `error` 先到）、畸形帧丢弃、
+  **0 帧 `delta` 的一轮**、纯函数性（不改入参）；
+- `use-assistant-agent-stream.test.ts`（13 → 20）——投影吐给上层、**0 帧 delta 照常收尾**、
+  `conversation_id` 落 store、**会话切换互不串扰**（切回来原样、不夹带别会话）、
+  **取消（有活动流 / 无活动流）三态收敛且零写**、半截文本保留并标注取消；
+- `assistant-chat-store.test.ts`（9 → 19）——切换 / 采纳 / 清空 / 跨模块重载恢复 /
+  **v1 → v2 迁移**（含畸形载荷与 200 条上限）。
+
+**并发会话说明（数字归因）：** 本卡开工期间，**另一会话正在 03a（服务端面）的在途改动**
+（`server/src/models/ai.py`、`modules/ai/conversation.py`、`routes.py`、`schemas.py`、
+`tests/test_migrations.py` 均为未提交状态）。因此：
+- **app 侧数字是本卡基线的可靠对照**（本卡是唯一改 app 的会话）；
+- 服务端 pytest 的数字**必然含 03a 的在途用例**，不能作为本卡的基线对照——本卡
+  **未触碰任何 Python 文件**，不存在由本卡引入的服务端回归；
+- 提交用 `git commit --only <本卡文件>`，**不夹带** 03a 的在途改动。
+
+**数据 / 同步 / AI / 安全影响：**
+- **零写路径不变**：本卡新增的取消路径与流式收尾不触发任何写命令（用例逐条断言
+  `insertTransaction` / `updateTransaction` / `softDeleteTransaction` 零调用）。
+- **AI 安全**：流的错误文案仍不透传（安全口径不变）；`pending-confirm` 的确认门未被绕过
+  （既有用例仍绿）。
+- **持久化**：localStorage 同 key（`aozora-assistant-chat`）升 v2，旧数据自动迁移；登出
+  `clear()` 语义**加强**为清全部会话桶（跨账号串会话的面反而更小）。
+
+**兼容与回退方式：**
+- 灰度为既有双层开关（服务端 `ai_agent_enabled` + 客户端 `AI_AGENT_CLIENT_ENABLED`），
+  本卡未改默认值；关闭时整条回落既有单发链路。
+- 回退：纯客户端重构，`git revert` 本提交即可。持久化 v2 → v1 时旧代码读同一 key 会因
+  `version` 不匹配而回退空态（历史不显示但**不报错**）；v1 数据只多了会话维度，无破坏性。
+
+**开放风险与责任人：**
+- **端到端真机路径至今一次没跑过**（02h / 02i 的共同缺口）——本卡的全部验证仍停在单测层。
+  开关转 true 之前须先在模拟器上跑通多步任务 / 挂起提案 / 失败收尾三态。**责任人：M7 收口。**
+- 03d 接 `switchConversation` 时须定「删除当前会话后的回退目标」与 `book_id` 联动规则。
+- 03e 接 `cancelStream` 时须定「停止生成」按钮的可见条件，以及断连（被动）与取消（主动）
+  的提示差异——本卡已在投影里把两者分开（`canceled` vs `error`），但 UI 表现未定。
+- 合并窗两个参数（100 ms / 同通道同 Step）仍待真实帧分布复核（§五 第 5 项，落 03c / 收口）。
+
+**下一项未阻塞任务：** **03c（步骤卡片流与统一智能模式）**——本卡已把
+`streamProjection.steps` 备好（进行中 / 完成 / 失败三态 + 失败安全码），03c 只需渲染。
+03a 与本卡同批（批次 1），批次 2 起可直接开工。
+
+---
+
+### 03a · 会话索引服务端化与事件读取 API（✅ 2026-09-19）
+
+**任务编号：** T-M7-03a　**提交：** `<待回填>`
+
+**完成范围 / 明确未做：**
+
+- **完成：**
+  - **模型**（`server/src/models/ai.py`）——`AIConversation` 补三列：`title`（`String(120)`，
+    服务端按首轮输入派生）、`last_active_at`（**列表排序键**）、`archived_at`（软删，与
+    `Category` / `SavingsGoal` 同口径），外加复合索引 `ix_ai_conversations_user_archived_active`
+    （列表查询的形状：本人的 / 未归档的 / 按活跃倒序）。
+  - **迁移** `server/src/migrations/versions/0019_conversation_index.py`（紧接 0018；
+    只加列 + 索引，无回填、无数据迁移）。
+  - **服务**（`server/src/modules/ai/conversation.py`）——四个新方法
+    `list_conversations` / `rename` / `delete` / `events(after_seq)`；归属加载抽成
+    `load_owned`（`resolve` 复用），**已归档行与跨用户行同码**；`append_turn` 写成功后
+    更新索引（`_note_activity`：标题只在还空着时派生，活跃时间每轮刷新）。
+  - **端点**（`routes.py` + `schemas.py`）——`GET /ai/conversations`、
+    `PATCH` / `DELETE /ai/conversations/{id}`、`GET /ai/conversations/{id}/events?after_seq=`；
+    四个端点与既有 AI 端点同用 `require_active` 守卫（冻结账号一律 403）。
+  - **测试** `server/tests/test_ai_conversations_api.py`（44 例）+ `tests/test_migrations.py`
+    补 0019 的链断言与列 / 索引级断言。
+  - **文档** `docs/architecture/ai-architecture.md` 新增「会话管理端点」一节（含登出粒度结论）；
+    `production-execution-plan.md` 本卡行的验收列回填交付摘要。
+- **明确未做（逐条对应卡面职责边界）：**
+  1. **不做客户端**——03b / 03d 的面，一行未碰；
+  2. **不改 `/ai/agent` 的事件协议**——八类事件一个不多一个不少；
+  3. **不做完整事件日志**——`events()` 只按既有 `type` 原样读出，`ignorable` / Surface
+     子集归 P3 的 04a；
+  4. **不实现摘要**——`summary` 保持空串（归 04c）；
+  5. **不做保留期**——到期物理清理由 04d 负责；本卡只保证「用户主动删除」这条路径上
+     正文立刻消失。
+
+**关键设计决策：**
+
+| # | 决策 | 理由 |
+|---|---|---|
+| 1 | **删除 = 归档行 + 删事件正文** | 行留着是 `ai_usage.conversation_id` 的锚点（硬删会把它 `SET NULL`，破坏审计链），且与 04d「保留期删事件、不删会话行」同构；正文没有留的理由——用户主动删除后服务端不该再持有它 |
+| 2 | **`last_active_at` 不复用 `updated_at`** | 后者被重命名 / 软删 / 换账本一并改动，列表顺序会莫名跳位；「重命名后列表顺序不变」有用例钉住 |
+| 3 | **已删除 / 跨用户 / 不存在 = 同一个 404** | 读取面的唯一防线（02f 口径），且给客户端一条幂等重试路径（重试删除拿到 404 即「已经不是我的会话」） |
+| 4 | **`events(after_seq)` 是严格大于** | 客户端拿上一批最后一条的 `seq` 再拉一次不会重复收到它——断线续读的语义 |
+| 5 | **登出保持按用户粒度清，不引入设备维度**（P1 挂账 1 的结论） | `ai_conversations` 没有设备列、`/ai/agent` 也不带 `device_id`；加设备维度要同时改请求契约与 02h 已冻结的桥，而 P2 不做跨设备正文同步（04e 决策门）。代价：多设备下另一台机器的服务端会话会消失——客户端把 404 当「已不是我的会话」并开新会话（交 03b / 03d） |
+| 6 | **列表不分页** | 会话数由用户创建量决定，且每个会话另有轮数上限；侧栏本来就要全量 |
+
+**验证命令与结果：**
+
+| 命令 | 结果 |
+|---|---|
+| `cd server && python -m pytest tests/ -q` | **1075 passed / 37 skipped**（开工基线 1029 + 本卡 46：新文件 44 + 迁移 2） |
+| `cd server && python -m ruff check src/ tests/` | All checks passed |
+| `cd app && npx tsc --noEmit` / `npx vitest run` | 0 错 / 1170 passed（03b 会话交付后的 app 侧数字；**本卡未触碰任何 app 文件**） |
+| `bash ./gradlew :app:testDebugUnitTest --rerun-tasks` | 406 tests / 0 failures / 1 skipped（同上，本卡未触碰 Kotlin） |
+
+**回退实验（11 处变异，逐条回退后实测）：11/11 变红** —— 列表不滤软删（2 例红）、列表不按
+用户过滤（1）、排序倒置（4）、取会话不校验归属（3）、取会话不看软删（4）、删除不清事件（1）、
+删除不置归档位（4）、重命名也刷活跃时间（1）、`after_seq` 改 `>=`（1）、标题被每轮覆盖（2）、
+标题不截断（1）。
+
+**数据 / 同步 / AI / 安全影响：**
+
+- **同步：零影响**——不进 sync 协议，无 `sync_changes` 写入，客户端一行未动。
+- **AI：** 新增四个管理端点；agent 路径行为不变——`resolve` 只多一条「已归档 → 404」的过滤
+  （旧 id 被删除后不可复用，这正是不变量）。每轮多一次会话行 UPDATE（title / 活跃时间）。
+- **安全：** 会话列表是**新的读取面**，三条硬约束都有真实用例：列表只回本人、
+  rename / delete / events 三个端点的跨用户一律 404、删除后旧 id 在四个面上都是 404；
+  登出粒度结论已入档（`ai-architecture.md`）。
+- **隐私：** 用户主动删除会话会**立即清掉正文事件**，不等保留期。
+
+**兼容与回退方式：**
+
+- **纯增量**：四个新端点；既有端点与客户端行为不变（旧客户端不调用即零影响）。
+- **迁移**：只加列 + 索引，无回填。存量会话升级后 `title` 为空串（客户端兜底文案渲染）、
+  `last_active_at` 为 NULL（列表按 `created_at` 兜）——都不影响可读性。
+- **回退** = revert 本提交；`0019` 的 `downgrade` 可逆（drop 索引 + 三列）。
+
+**开放风险与责任人：**
+
+- **存量会话没有标题**——0019 不回溯派生（那要读事件表），升级后旧会话在列表里是空标题，
+  由客户端兜底文案渲染。**责任人：03d。**
+- **多设备误伤（挂账 1 的残余）**——粒度结论已定（按用户清），但「客户端把 404 降级为
+  开新会话」这一半**还没实现**。**责任人：03b / 03d。**
+- **会话列表不分页**——单账号会话数极大时列表会很长；当前没有实测分布，收口时按真实使用
+  复核（是否要 limit / 游标）。**责任人：M7 收口。**
+- **两个开关的默认值未动**（服务端 `ai_agent_enabled` / 客户端 `AI_AGENT_CLIENT_ENABLED`）。
+
+**下一项未阻塞任务：** **03c（步骤卡片流）** 与 **03d（多会话列表，对接本卡四个端点）**
+——03a 与 03b 同批（批次 1），批次 2 起可直接开工。
 
 ---
 
