@@ -157,6 +157,16 @@ class ConversationEnv:
         assert response.status_code == 200, response.text
         return _done(response.text)
 
+    async def fork(
+        self, conversation_id: str | uuid.UUID, seq: int,
+        headers: dict[str, str] | None = None,
+    ) -> httpx.Response:
+        return await self.client.post(
+            f"/ai/conversations/{conversation_id}/fork",
+            json={"seq": seq},
+            headers=headers or self.auth_headers,
+        )
+
     async def logout(self) -> httpx.Response:
         return await self.client.post(
             "/auth/logout",
@@ -666,6 +676,126 @@ class TestLogoutGranularity:
         await env.turn("记一笔")
         await env.logout()
         assert len(await env.rows(AIUsage, user_id=env.user_id)) == 1
+
+
+# ── 6b. 会话分叉（T-M7-04b）──────────────────────────────────────────────
+
+def _tool_call_event(call_id: str) -> dict[str, Any]:
+    """一条带 ``tool_calls`` 的 assistant 事件载荷（配对组的前半边）。"""
+    return {
+        "role": "assistant", "content": "", "reasoning_content": "",
+        "tool_calls": [{
+            "id": call_id, "type": "function",
+            "function": {"name": "transaction_list", "arguments": "{}"},
+        }],
+    }
+
+
+#: 一个完整配对组：``user`` → ``assistant``（带调用）→ ``tool``（结果）。
+#: 切在第 2 条与第 3 条之间就是**半截**（悬空的 ``tool_calls``），切在第 3 条之后
+#: 才安全——这是分叉端点唯一的边界条件。
+_GROUP: tuple[tuple[str, dict[str, Any]], ...] = (
+    ("user", {"role": "user", "content": "看看流水"}),
+    ("assistant", _tool_call_event("call_1")),
+    ("tool", {"role": "tool", "tool_call_id": "call_1", "content": "{}"}),
+)
+
+
+class TestForkConversation:
+    async def test_copies_the_prefix_and_leaves_the_source_untouched(
+        self, env: ConversationEnv,
+    ):
+        source = await env.seed(title="原始", messages=_GROUP)
+        before = (await env.events(source)).json()["events"]
+
+        response = await env.fork(source, 3)
+        assert response.status_code == 200, response.text
+        payload = response.json()
+        assert payload["seq"] == 3
+        forked = payload["conversation"]
+
+        assert forked["id"] != str(source)
+        assert forked["title"] == "原始"  # 标题跟着走，用户可再改名
+        # 前缀逐字节相同（含 seq / turn：它们是会话内编号，原值复制正好接着数）
+        assert (await env.events(forked["id"])).json()["events"] == before
+        # **原会话一行不动**：事件一条不少、一条不改，也不动它的活跃时间
+        assert (await env.events(source)).json()["events"] == before
+        source_row = (await env.rows(AIConversation, id=source))[0]
+        assert source_row.last_active_at is None
+        assert source_row.archived_at is None
+        # 分叉自己是一次新动作：它出现在列表上方（而不是继承父会话的活跃时间）
+        assert (await env.rows(AIConversation, id=uuid.UUID(forked["id"])))[0]\
+            .last_active_at is not None
+
+    async def test_rounds_down_to_a_complete_pairing_group(
+        self, env: ConversationEnv,
+    ):
+        """验收：**不变式 1 不因分叉被破坏**。切点落在配对组中间时向下取整到最近
+        的完整组，并把**实际**切点回报给客户端（而不是它给的那个数）。"""
+        source = await env.seed(messages=_GROUP)
+
+        payload = (await env.fork(source, 2)).json()
+
+        assert payload["seq"] == 1
+        copied = (await env.events(payload["conversation"]["id"])).json()["events"]
+        assert [e["type"] for e in copied] == ["user"]
+
+    async def test_fork_point_outside_the_event_range_is_422(
+        self, env: ConversationEnv,
+    ):
+        source = await env.seed(messages=_GROUP)
+
+        assert (await env.fork(source, 0)).status_code == 422  # schema: ge=1
+        response = await env.fork(source, 4)  # 只有 3 条事件
+        assert response.status_code == 422
+        assert response.json()["code"] == "invalid_fork_seq"
+        # 空会话没有可复制的前缀
+        empty = await env.seed()
+        assert (await env.fork(empty, 1)).status_code == 422
+
+    async def test_other_users_conversation_is_404(self, env: ConversationEnv):
+        theirs = await env.seed(
+            user_id=env.other_user_id, book_id=None, messages=_GROUP,
+        )
+
+        response = await env.fork(theirs, 3)
+        assert response.status_code == 404
+        assert response.json()["code"] == "conversation_not_found"
+
+    async def test_archived_source_is_404(self, env: ConversationEnv):
+        source = await env.seed(
+            archived_at=datetime(2026, 9, 19, tzinfo=UTC), messages=_GROUP,
+        )
+        assert (await env.fork(source, 3)).status_code == 404
+
+    async def test_forked_conversation_resumes_independently(
+        self, env: ConversationEnv,
+    ):
+        """验收：**分叉会话独立续跑**。新会话带着复制来的前缀接着往下跑，原会话
+        既不被搬走也不被改写。"""
+        source = (await env.turn("第一轮"))["conversation_id"]
+        source_events = (await env.events(source)).json()["events"]
+        cut = source_events[-1]["seq"]
+
+        forked = (await env.fork(source, cut)).json()["conversation"]
+
+        env.provider.calls.clear()
+        done = await env.turn("分叉后的一轮", conversation_id=forked["id"])
+
+        # ① 模型看到的是**分叉会话**的历史：被复制的那一轮都在，外加本轮的输入
+        sent = env.provider.calls[0]
+        assert [m["role"] for m in sent] == ["system", "user", "assistant", "user"]
+        assert sent[1]["content"] == "第一轮"
+        assert sent[3]["content"] == "分叉后的一轮"
+        # ② 新轮自占一个轮号（前缀的轮号原样保留，新的接在后面）
+        forked_events = (await env.events(forked["id"])).json()["events"]
+        assert [e["turn"] for e in forked_events] == [
+            *[e["turn"] for e in source_events], 2, 2, 2,
+        ]
+        assert done["conversation_id"] == forked["id"]
+        assert done["seq"] == forked_events[-1]["seq"]
+        # ③ 原会话一行不动——分叉不是「搬家」
+        assert (await env.events(source)).json()["events"] == source_events
 
 
 # ── 7. 未登录 / 冻结等既有守卫 ────────────────────────────────────────────

@@ -12,8 +12,9 @@
  */
 import { describe, it, expect } from 'vitest'
 import {
-  applyStreamEvent, createStreamProjection, type AgentStreamEvent,
+  applyStreamEvent, createStreamProjection, recoveredMessages, type AgentStreamEvent,
 } from '../../features/assistant/use-assistant-stream'
+import type { AiConversationEventItem } from '../../platform/bridge/bridge-types'
 
 function ev(event: string, data: Record<string, unknown> = {}): AgentStreamEvent {
   return { streamId: 's-1', event: event as AgentStreamEvent['event'], data }
@@ -159,10 +160,22 @@ describe('agent 流投影 — 八类事件逐类落进投影', () => {
       ev('error', { code: 'agent_failed', message: '本轮失败' }),
     )
     expect(p.settled).toBe(true)
-    expect(p.error).toEqual({ code: 'agent_failed', message: '本轮失败' })
+    expect(p.error).toEqual({
+      code: 'agent_failed', message: '本轮失败', conversationId: null,
+    })
     expect(p.text).toBe('我正在')
     expect(p.reasoning).toBe('先看看')
     expect(p.done).toBeNull()
+  })
+
+  it('error 带上 conversation_id 时一并留下（T-M7-04b：续读的唯一线索）', () => {
+    // 首轮断连时客户端手里还没有服务端 id（它是 done 帧给的），而续读必须
+    // 指名道姓地要哪个会话——服务端在失败帧里回传它（会话索引前置检查已提交）。
+    const p = run(ev('error', {
+      code: 'ai_unavailable', message: 'AI service is temporarily unavailable',
+      conversation_id: 'conv-9',
+    }))
+    expect(p.error?.conversationId).toBe('conv-9')
   })
 })
 
@@ -223,5 +236,62 @@ describe('agent 流投影 — 收尾幂等与边界', () => {
     const b = createStreamProjection()
     expect(a).toEqual(b)
     expect(a.steps).not.toBe(b.steps) // 不共享数组：一处追加不会污染另一处
+  })
+})
+/**
+ * T-M7-04b：断连续读的**裁剪规则**（纯函数）。
+ *
+ * `recoveredMessages` 决定「服务端日志里的哪些正文值得补进本地消息流」。三条规则
+ * 各有用例：只取最后一轮（断连只可能打断那一轮）、只取 assistant 正文（`user` 是
+ * 本端自己写的，工具与结构性事件是投影 B 的内部细节）、已在半截气泡里的不重复补。
+ */
+describe('agent 流投影 — 断连续读的裁剪规则（T-M7-04b）', () => {
+  const item = (
+    seq: number, turn: number, type: string, data: Record<string, unknown>,
+  ): AiConversationEventItem => ({
+    seq, turn, type, data, created_at: '2026-09-19T00:00:00Z',
+  })
+  const assistant = (seq: number, turn: number, content: string) =>
+    item(seq, turn, 'assistant', { role: 'assistant', content, reasoning_content: '' })
+
+  it('只取最后一批里的最后一轮（前面的轮次本地早就有）', () => {
+    const out = recoveredMessages([
+      assistant(2, 1, '第一轮的回答'),
+      item(3, 2, 'user', { role: 'user', content: '第二句' }),
+      assistant(4, 2, '第二轮的回答'),
+    ], '')
+    expect(out).toEqual([{ seq: 4, text: '第二轮的回答' }])
+  })
+
+  it('只取 assistant 的正文：user / tool / 结构性事件都不补', () => {
+    const out = recoveredMessages([
+      item(1, 1, 'user', { role: 'user', content: '看看流水' }),
+      assistant(2, 1, '我查一下'),
+      item(3, 1, 'tool', { role: 'tool', tool_call_id: 'c1', content: '{}' }),
+      item(4, 1, 'error', { code: 'ai_unavailable' }),
+    ], '')
+    expect(out).toEqual([{ seq: 2, text: '我查一下' }])
+  })
+
+  it('正文已在半截气泡里的不重复补（本地是所有步骤 delta 的拼接）', () => {
+    const out = recoveredMessages([
+      assistant(1, 1, '我先查一下。'),
+      assistant(2, 1, ''),
+    ], '我先查一下。查完了')
+    expect(out).toEqual([])
+  })
+
+  it('服务端其实写完了这一轮、但 done 帧没送到 → 补记比半截气泡长的那一段', () => {
+    const out = recoveredMessages(
+      [assistant(1, 1, '这个月还没有设置预算，你可以先设置一个。')],
+      '这个月还没有设置预算，你可以先',
+    )
+    expect(out).toEqual([{ seq: 1, text: '这个月还没有设置预算，你可以先设置一个。' }])
+  })
+
+  it('空日志 / 缺 content / 全空白 → 一条都不补', () => {
+    expect(recoveredMessages([], '正文')).toEqual([])
+    expect(recoveredMessages([item(1, 1, 'assistant', { role: 'assistant' })], '')).toEqual([])
+    expect(recoveredMessages([assistant(1, 1, '   \n ')], '')).toEqual([])
   })
 })

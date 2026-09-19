@@ -155,6 +155,25 @@ class AiGatewayClient(
         executeAuthorized("$baseUrl/ai/conversations/$conversationId", method = "DELETE")
 
     /**
+     * T-M7-04b: `GET /ai/conversations/{id}/events` —— 会话事件（正文增量）。
+     *
+     * `afterSeq` 是**严格大于**的起点：客户端拿上一批最后一条的 `seq` 再拉一次，
+     * 既补齐断连期间落下的部分，也不重复收到已有的。省略时从头拉全量（客户端还
+     * 不知道游标时的首次续读）。
+     *
+     * 返回体原样透传（`{conversation_id, events:[{seq,turn,type,data,created_at}]}`），
+     * 与其它 `/ai/` 调用同口径：这一层不认识业务字段。
+     */
+    suspend fun fetchConversationEvents(conversationId: String, afterSeq: Int?): String {
+        val path = if (afterSeq == null) {
+            "$baseUrl/ai/conversations/$conversationId/events"
+        } else {
+            "$baseUrl/ai/conversations/$conversationId/events?after_seq=$afterSeq"
+        }
+        return executeAuthorized(path, method = "GET")
+    }
+
+    /**
      * T-M7-02h: POST /ai/agent —— 一轮 agent 回合的 SSE 流。
      *
      * 挂起直到流结束（服务端发出 `done` / `error` 帧后关闭连接）、被取消

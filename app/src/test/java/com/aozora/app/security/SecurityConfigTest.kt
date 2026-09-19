@@ -45,10 +45,13 @@ class SecurityConfigTest {
         // T16-5（REQ-61，决策 #1/#7）: +THEME_PICK_BACKGROUND（theme.pickBackground）→ 77。
         // T-M7-02h（决策 #1）: +AI_AGENT/AI_CANCEL（ai.agent / ai.cancel）→ 79。
         // T-M7-03d（决策 #1）: +CONVERSATION_LIST/RENAME/DELETE（conversation.*，3 条）→ 82。
+        // T-M7-04b（决策 #1）: +CONVERSATION_EVENTS（conversation.events）→ 83。
+        //   03d 曾判「不加密钥无人调用」；04b 的服务端改成逐事件落库后，客户端要按
+        //   游标续读自己落下的部分，于是有了调用方。
         val kotlinCommands = BridgeCommands.ALL
         assertEquals(
-            "Bridge command count must be 82 (sync with bridge-types.ts)",
-            82,
+            "Bridge command count must be 83 (sync with bridge-types.ts)",
+            83,
             kotlinCommands.size
         )
         assertEquals(

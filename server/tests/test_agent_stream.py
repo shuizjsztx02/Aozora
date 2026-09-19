@@ -856,8 +856,17 @@ class TestIncrements:
         assert payload_of(body, "error")["code"] == "ai_unavailable"
         deltas = [p["text"] for name, p in parse_frames(body) if name == "delta"]
         assert "".join(deltas) == "这个月还没有设置预算，你可以先"
-        # 失败轮不写事件、不写正文（02f 的一轮原子写入）
-        assert await _rows(stream_env, AIConversationEvent) == []
+        # T-M7-04b 起本轮的写入是**逐事件**的：用户输入早已落库，失败再由
+        # ``_record_failure`` 补一条 ``error`` 事件留档。**在途的半截正文不在日志里**
+        # ——它还没产出完，无从落库；客户端照架构 §8.5 保留它并标错。
+        events = await _rows(stream_env, AIConversationEvent)
+        assert [(e.type, e.data.get("content")) for e in events] == [
+            ("user", "看看预算"), ("error", None),
+        ]
+        assert "这个月还没有设置预算" not in json.dumps(
+            [e.data for e in events], ensure_ascii=False,
+        )
+        # 首次调用即失败 = 零计费 → 一条用量行都不写（口径未变）
         assert await _rows(stream_env, AIUsage, user_id=stream_env.user_id) == []
 
 
@@ -947,10 +956,18 @@ class TestIncrementalDelivery:
         assert stream.headers["x-accel-buffering"] == "no"
         assert event_names(stream.body)[-1] == "done"
 
-    async def test_disconnect_cancels_the_turn_and_persists_nothing(
+    async def test_disconnect_cancels_the_turn_and_keeps_what_was_written(
         self, stream_env: StreamEnv,
     ):
-        """断连 = 取消（不把最多 20 s 的在途请求跑完），且本轮不落库、连接归还。"""
+        """断连 = 取消（不把最多 20 s 的在途请求跑完）、连接归还，**且已经落库的
+        部分留在日志里**。
+
+        P1（02f 的一轮原子写入）在这里断言的是「一条事件都没有」；T-M7-04b 把写入
+        粒度改成逐事件之后，正确的契约是「**回滚尚未提交的那一批**」——本用例这一
+        轮只写了用户输入那一条（模型请求还没回来），所以日志里正好是它。用户看到
+        的答案、以及这一轮已经跑完的步骤，从此断连也不会消失（这是本卡的全部
+        意义，代价是会话日志里会留下没跑完的轮次——由 ``error`` 事件说明原因）。
+        """
         never = asyncio.Event()
         stream_env.provider.reset([_blocked(never, _text("不会走到这里"))])
         stream = open_direct_stream(
@@ -964,8 +981,10 @@ class TestIncrementalDelivery:
         await stream.disconnect()
 
         assert stream_env.provider.cancelled == 1
-        assert await _rows(stream_env, AIConversationEvent,
-                           conversation_id=conversation_id) == []
+        events = await _rows(stream_env, AIConversationEvent,
+                             conversation_id=conversation_id)
+        assert [(e.type, e.data["content"]) for e in events] == [("user", "你好")]
+        # 一整个 provider 调用都没回来 = 零计费 → 不写用量行（口径未变）
         assert await _rows(stream_env, AIUsage, conversation_id=conversation_id) == []
         # 连接归还连接池：不归还的话池满之后所有请求一起挂
         pool = stream_env.engine.sync_engine.pool
@@ -1254,13 +1273,26 @@ class TestFailure:
         # 异常正文（可能含用户原话或库结构）绝不外泄
         assert "boom" not in body and "internal detail" not in body
 
-    async def test_failed_turn_persists_no_events(self, stream_env: StreamEnv):
+    async def test_failed_turn_keeps_what_it_wrote_and_records_the_error(
+        self, stream_env: StreamEnv,
+    ):
+        """失败轮**不再什么都不留**（P1 的挂账 2「失败轮不落库」的收口）。
+
+        T-M7-04b 起：本轮已完成的步骤留在日志里 + 一条 ``error`` 事件说明它为什么
+        停在半路。这条事件是 04a 留给 04b 的生产者（架构 §6.2 的类型表）。
+        """
         stream_env.provider.reset([ProviderError(status=None, retryable=False, reason="timeout")])
         _, body = await stream_env.turn("你好")
         conversation_id = uuid.UUID(payload_of(body, "error")["conversation_id"])
 
-        assert await _rows(stream_env, AIConversationEvent,
-                           conversation_id=conversation_id) == []
+        events = await _rows(stream_env, AIConversationEvent,
+                             conversation_id=conversation_id)
+        assert [e.type for e in events] == ["user", "error"]
+        assert events[1].data["code"] == payload_of(body, "error")["code"]
+        # 结构性事件：不进模型上下文（投影 A），只进投影 B / C
+        assert events[1].ignorable is True
+        # 载荷只有安全枚举码与固定文案——异常正文绝不落日志（脱敏口径）
+        assert set(events[1].data) == {"code", "message"}
 
     async def test_failed_turn_with_nothing_billed_records_nothing(
         self, stream_env: StreamEnv,

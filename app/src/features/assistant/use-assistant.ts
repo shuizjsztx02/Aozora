@@ -898,8 +898,12 @@ export function useAssistant({
       }
       // T-M7-03e：失败 / 断连是**被动**中断（与用户主动取消是两回事，故不合并）。
       // ① 没被回答的挂起提案按 `unavailable` 收敛——**视为拒绝**，零写；
-      // ② 留一个重连入口（R-PROD-19：弱网 / 后台断连的提示与恢复起点；按
-      //    `conversation_id` + `seq` 的续跑归 P3 的 04b）。
+      // ② 留一个重连入口（R-PROD-19：弱网 / 后台断连的提示与恢复起点）。
+      // T-M7-04b：先补记服务端日志里**已经落库**的部分——服务端自本卡起逐事件落库，
+      // 断连不再等于「这一轮什么都没留下」；补得到的正文（`recovered`）按到达顺序
+      // 落在中断提示**之前**，读起来就是「做到哪 → 然后断了」。空数组是常态
+      // （本地半截气泡已经包含那些正文，见 `recoveredMessages` 的规则 ③）。
+      for (const item of p.recovered) appendAssistantMessage(item.text)
       const dropped = dropApprovals(() => true)
       setInterrupted({ input: lastTurnInputRef.current })
       const note = dropped > 0 ? '；未确认的改动没有记录' : ''

@@ -26,10 +26,21 @@
  * 并新增 `onConfirm` 在帧到达时**实时转发**给上层——确认卡因此能事件驱动地出现，
  * 而不是等 `done` 之后按产物分发（P1 的时序）。本 hook 仍不碰业务状态：转发的是
  * 「又有了一张挂起提案」这件事本身；可不可执行由 `done.proposals`（权威清单）决定。
+ *
+ * T-M7-04b：**断连重连续跑**的客户端一半。服务端自本卡起**逐事件落库**（每个配对组
+ * 一写一提交），所以断连时这一轮**已经跑完的步骤留在日志里**；本 hook 在失败收尾前
+ * 按游标（上一轮 `done.seq`）调 `conversation.events?after_seq=` 续读一次，把补得到
+ * 的正文放进投影的 `recovered` 交给上层（见 `recoveredMessages` 的三条裁剪规则）。
+ * **游标是内存态**、续读失败退化成「什么都不补」——补救不该把中断提示本身拖没。
  */
 
 import { useCallback, useEffect, useRef, useState } from 'react'
-import type { AiStreamDoneData, AiStreamEvent } from '../../platform/bridge/bridge-types'
+import type {
+  AiConversationEventItem,
+  AiConversationEventsResponse,
+  AiStreamDoneData,
+  AiStreamEvent,
+} from '../../platform/bridge/bridge-types'
 
 /**
  * T-M7-02i：agent 流式通道的客户端桥契约（**实现见 T-M7-02h**）。
@@ -46,6 +57,11 @@ export interface AgentStreamBridge {
   /** 关掉 SSE 长连接——服务端把断连当取消（没有单独的取消端点）。
    *  可选：能力探测不要求它（取消在桥缺席时退化为「只收敛本地态」）。 */
   cancelAgent?(): Promise<{ cancelled: boolean }>
+  /** T-M7-04b：按 `after_seq` 续读会话事件（断连重连的续读入口）。
+   *  可选：能力探测不要求它——桥缺席时续跑退化为「什么都不补」，中断提示照旧。 */
+  fetchConversationEvents?(
+    id: string, afterSeq?: number | null,
+  ): Promise<AiConversationEventsResponse>
 }
 
 /** agent 流的下行事件——**契约源在 `bridge-types.ts`**（T-M7-02h 已提交）。 */
@@ -113,20 +129,64 @@ export interface AgentStreamProjection {
   /** `done` 帧载荷（null = 尚未收到，或本轮以失败/取消收尾） */
   done: AgentStreamDone | null
   /** 失败收尾的错误码与文案（null = 无错）。**不覆盖 `text`**——半截文本保留 */
-  error: { code: string; message: string } | null
+  error: { code: string; message: string; conversationId: string | null } | null
   /** 用户主动取消。与 `error` 是两件事：前者主动、后者被动，UI 表现与恢复路径不同
    *  （03e 的边界），故不合并成一个状态 */
   canceled: boolean
   /** 已收尾——`done` / `error` / 取消**只认先到的那个**（桥侧可能在流正常结束后
    *  补发一个本地 `error`，如连接关闭） */
   settled: boolean
+  /**
+   * 断连收尾时从服务端日志**续读**回来的补记（T-M7-04b，按 `seq` 升序）。
+   *
+   * 空数组 = 没有可补的（没断连 / 桥不支持 / 续读失败 / 服务端也没留下什么）。
+   * 只承载**可渲染的助手正文**——工具步骤与结构性事件是投影 B 的内部细节，重建
+   * 它们不在本卡（见 `recoveredMessages`）。
+   */
+  recovered: RecoveredMessage[]
+}
+
+/** 续读回来的一条补记：`seq` 是它在日志里的位置，`text` 是要补的正文。 */
+export interface RecoveredMessage {
+  seq: number
+  text: string
 }
 
 export function createStreamProjection(): AgentStreamProjection {
   return {
     text: '', reasoning: '', steps: [], confirmProposals: [],
     deviceRequests: [], done: null, error: null, canceled: false, settled: false,
+    recovered: [],
   }
+}
+
+/**
+ * T-M7-04b：续读回来的事件 → 要补的正文。
+ *
+ * 三条规则，每条都对应一个真实约束：
+ *
+ * ① **只取最后一批里的最后一轮**。断连只可能打断**正在跑的那一轮**，而 `after_seq`
+ *    起点不保证精确（首轮没有游标时会拉回整个日志）——按 `turn` 取最大的那一轮，
+ *    前面的轮次客户端本地早就有，重复追加就是重影。
+ * ② **只取 `assistant` 的正文**。`user` 事件一定是本端自己写下的（P1/P2 的端点不
+ *    接收中途输入），工具事件与结构性事件是投影 B 的内部细节（步骤卡片是瞬时 UI）。
+ * ③ **已在半截气泡里的不再追加**。本地 `text` 是**所有步骤** `delta` 的拼接，因此
+ *    跑完那几步的正文本来就在里面；真正补得到的只有「服务端其实写完了这一轮、
+ *    但 `done` 帧没送到客户端」那一类——那时日志里的正文比半截气泡长。
+ */
+export function recoveredMessages(
+  events: AiConversationEventItem[], rendered: string,
+): RecoveredMessage[] {
+  if (events.length === 0) return []
+  const lastTurn = Math.max(...events.map(e => e.turn))
+  const out: RecoveredMessage[] = []
+  for (const event of events) {
+    if (event.turn !== lastTurn || event.type !== 'assistant') continue
+    const text = typeof event.data.content === 'string' ? event.data.content : ''
+    if (!text.trim() || rendered.includes(text)) continue
+    out.push({ seq: event.seq, text })
+  }
+  return out
 }
 
 /** 提案的服务端 id（去重键）。不是字符串（畸形帧）→ null，该帧无法去重。 */
@@ -215,8 +275,14 @@ export function applyStreamEvent(
     case 'done':
       return { ...p, settled: true, done: d as unknown as AgentStreamDone }
     case 'error':
-      // 保留半截文本（架构 §8.5）：只标注失败，`text` / `reasoning` 原样留在投影里
-      return { ...p, settled: true, error: { code: str(d.code) ?? 'unknown', message: str(d.message) ?? '' } }
+      // 保留半截文本（架构 §8.5）：只标注失败，`text` / `reasoning` 原样留在投影里。
+      // `conversation_id` 一并留下（T-M7-04b）：首轮还没有会话 id 时，它是续读的
+      // 唯一线索（服务端在失败帧里回传，会话索引在前置检查里已经提交）。
+      return { ...p, settled: true, error: {
+        code: str(d.code) ?? 'unknown',
+        message: str(d.message) ?? '',
+        conversationId: str(d.conversation_id),
+      } }
     default:
       return p
   }
@@ -266,6 +332,15 @@ export function useAssistantStream({
    *  `submitInput` 的并发互斥之外的第二道防线（那一层在别的模块里，不该被本模块依赖）。 */
   const roundRef = useRef(0)
   const unsubRef = useRef<(() => void) | null>(null)
+  /** T-M7-04b：本会话的**续读游标**——`{会话 id, 已读到的事件序号}`。
+   *
+   *  内存态（不落盘）：断连续读是**同一次会话交互内**的补救，`after_seq` 起点不精确
+   *  只影响取多少行、不影响正确性（`recoveredMessages` 按轮裁剪，见那里的规则 ①）。
+   *  换会话（调用方给的 id 变了）即重置。
+   */
+  const cursorRef = useRef<{ conversationId: string | null; seq: number }>({
+    conversationId: null, seq: 0,
+  })
   /** 收尾回调每次渲染都是新函数（依赖 use-assistant 的卡状态）→ 取最新的那份。
    *  在 effect 里同步（不在渲染期写 ref——渲染期写会在并发渲染下留下被丢弃那次的
    *  值）；收尾只可能由桥事件或用户取消触发，都在 commit 之后。 */
@@ -283,8 +358,18 @@ export function useAssistantStream({
   // 卸载兜底退订（防事件打到已卸载的 hook）
   useEffect(() => unsubscribe, [unsubscribe])
 
-  /** 收尾（幂等的唯一入口）：退订 → 交投影 → 卸载气泡。 */
+  /** 收尾（幂等的唯一入口）：推进游标 → 退订 → 交投影 → 卸载气泡。
+   *
+   *  **游标**（T-M7-04b）在收尾时推进：`done` 带回服务端会话 id 与 `seq`（本轮结束
+   *  时的事件序号），它就是下一次断连时 `after_seq` 的起点。放在 `settle` 而不是
+   *  `done` 分支上，是因为取消 / 失败路径也不能把上一轮的游标弄丢。 */
   const settle = useCallback((final: AgentStreamProjection) => {
+    if (final.done) {
+      cursorRef.current = {
+        conversationId: final.done.conversation_id,
+        seq: typeof final.done.seq === 'number' ? final.done.seq : cursorRef.current.seq,
+      }
+    }
     settledRef.current = true
     unsubscribe()
     onSettledRef.current(final)
@@ -292,12 +377,63 @@ export function useAssistantStream({
     setProjection(null)
   }, [unsubscribe])
 
+  /**
+   * T-M7-04b：按游标**续读**服务端事件日志，返回要补的正文。
+   *
+   * 游标来自上一轮 `done.seq`；没有游标（首轮 / 老服务端 / 桥不支持）= 从头拉，
+   * 由 :func:`recoveredMessages` 按轮裁剪——结果一样，只是多取一些行。
+   *
+   * **任何失败都退化成「什么都不补」**：续读是补救，不该把中断提示本身也拖没
+   * （网络刚断过，这一次请求再失败是完全正常的）。
+   */
+  const catchUp = useCallback(async (
+    p: AgentStreamProjection,
+  ): Promise<RecoveredMessage[]> => {
+    const agentBridge = bridge as Partial<AgentStreamBridge>
+    const conversationId = cursorRef.current.conversationId ?? p.error?.conversationId ?? null
+    if (!conversationId || !agentBridge.fetchConversationEvents) return []
+    let events: AiConversationEventItem[]
+    try {
+      const response = await agentBridge.fetchConversationEvents(
+        conversationId, cursorRef.current.seq,
+      )
+      events = response.events
+    } catch {
+      return []
+    }
+    if (events.length > 0) {
+      // 游标跟着往前推：同一次断连被连续收尾两次（桥侧补发的 error）时不会重复拉。
+      cursorRef.current = {
+        conversationId,
+        seq: Math.max(...events.map(e => e.seq)),
+      }
+    }
+    return recoveredMessages(events, p.text)
+  }, [bridge])
+
+  /** 失败收尾：**先续读、再收尾**。续读是异步的，故这里另立一条路径——
+   *  `done` / 取消两条路径仍是同步的、当场收尾，不受影响。 */
+  const settleAfterRecovery = useCallback(async (
+    p: AgentStreamProjection, round: number,
+  ) => {
+    const recovered = await catchUp(p)
+    // 续读期间可能已经起了新一轮（`round` 变了）或用户按了停止（已收尾）——
+    // 那时这一轮的收尾已经与当前界面无关，交给那条路径负责。
+    if (roundRef.current !== round || settledRef.current) return
+    settle({ ...p, recovered })
+  }, [catchUp, settle])
+
   const start = useCallback(async (
     input: string, bookId: string, conversationId: string | null,
   ) => {
     const agentBridge = bridge as Partial<AgentStreamBridge>
     // 上一轮的兜底退订（正常收尾已退订；这里防「流未收尾就又起一轮」的残流）
     unsubscribe()
+    // 换了会话（含「从服务端会话切回本地会话」）→ 游标归零：`after_seq` 是**会话内**
+    // 的序号，跨会话复用会取到别人的尾巴（或者什么都取不到）。
+    if (conversationId !== cursorRef.current.conversationId) {
+      cursorRef.current = { conversationId, seq: 0 }
+    }
     const round = ++roundRef.current
     const initial = createStreamProjection()
     projectionRef.current = initial
@@ -311,7 +447,13 @@ export function useAssistantStream({
       const before = projectionRef.current ?? initial
       const next = applyStreamEvent(before, ev)
       projectionRef.current = next
-      if (next.settled) { settle(next); return }
+      if (next.settled) {
+        // T-M7-04b：**失败**收尾先续读服务端日志再收尾（断连期间落库的部分要补回来）；
+        // `done` / 取消两条路径当场收尾，行为与 03b 逐字相同。
+        if (next.error) { void settleAfterRecovery(next, round); return }
+        settle(next)
+        return
+      }
       // T-M7-03e：事件驱动的确认卡——`confirm` 帧当场转发（新累积的那一条）
       if (next.confirmProposals.length > before.confirmProposals.length) {
         const added = next.confirmProposals[next.confirmProposals.length - 1]
@@ -334,7 +476,7 @@ export function useAssistantStream({
     }
     // 命令是「立即返回 ack + 事件推送」的形态（架构 §8.2），所以这里**不退订**：
     // 本轮的结束以 done / error / 取消为准，那三条路径各自负责收尾。
-  }, [bridge, settle, unsubscribe])
+  }, [bridge, settle, settleAfterRecovery, unsubscribe])
 
   const cancel = useCallback(async () => {
     const agentBridge = bridge as Partial<AgentStreamBridge>

@@ -41,7 +41,9 @@
    预算用尽也照样回一条错误结果），且 id 一一对应；模型返回缺 id 的调用时由
    loop 补一个稳定 id（provider 层刻意放行空 id，见 ``provider._parse_tool_calls``）。
    取消与硬边界都**不在**一次工具批次中间生效，因此历史里永远不会出现悬空的
-   调用或结果。
+   调用或结果。**T-M7-04b：配对同时是「落库批」的边界**——带 ``tool_calls`` 的
+   assistant 消息与它的全部结果作为**一个批次**交给 ``sink``（见
+   :class:`MessageSink`），半截落库因此在结构上不可能发生。
 2. **中途输入进正确的下一步** —— :meth:`AgentLoop.submit` 入队，在**下一个
    Step 开始时**落进消息流（此时上一个 Step 的工具结果已经写完），不会错位到
    已完成的 Step。若输入恰好在「模型已经收口」的那一步到达，loop 会**再走一步**
@@ -70,8 +72,10 @@
 向用户说明「已完成 / 未完成」两部分（收尾请求不带工具；收尾请求自身失败或返回
 空文本时退回确定性兜底文案，保证优雅终止不依赖模型可用性）。
 
-本模块**不记录配额、不落库**（02f 的工作）。provider 抛 ``ProviderError`` 时不在
-本层吞掉——降级链（架构 §11.1）由调用方（02g 的 SSE 端点）决定。
+本模块**不记录配额**（02f 的工作，由调用方在轮末记），也**不直接落库**：写入经
+:class:`MessageSink` 通道外送（缺省不接 = 不落库，行为与 02d 逐字相同）。provider
+抛 ``ProviderError`` 时不在本层吞掉——降级链（架构 §11.1）由调用方（02g 的 SSE
+端点）决定。
 
 写路径（架构 §7.3 / §7.4，02e）
 ------------------------------
@@ -103,7 +107,7 @@ import re
 import uuid
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
-from datetime import date
+from datetime import UTC, date, datetime
 from enum import StrEnum
 from typing import TYPE_CHECKING, Any, Protocol
 
@@ -644,6 +648,42 @@ class ApprovalGate:
 
 
 # ---------------------------------------------------------------------------
+# 逐事件落库通道（04b）
+# ---------------------------------------------------------------------------
+
+#: 一条消息 + 它**产出**的时刻。时间由产生方给（不是写入方统一取「此刻」）：
+#: 一个批次里的 assistant 消息与它的工具结果之间隔着整段工具执行，共用一个
+#: 时间戳会把那段间隔抹掉。``conversation._insert_events`` 把它写进事件的
+#: ``time`` 列（与 ``created_at`` 的分工见 ``models/ai.py``）。
+MessageStamp = tuple[dict[str, Any], datetime]
+
+
+class MessageSink(Protocol):
+    """逐事件落库通道（T-M7-04b）。
+
+    loop 每产出一组消息就 ``await`` 一次本通道，调用方（02g 的流式端点）据此把
+    它们写进会话事件日志并**提交**——于是断连时已经产出的部分留在日志里，不再
+    是 P1 的「一轮跑完才落库、断连即什么都没有」。
+
+    **入参是「落库批」，不是「一条消息」**：带 ``tool_calls`` 的 assistant 消息
+    必须与它的全部 ``role="tool"`` 结果同批（不变式 1）——分两次交出去，第二
+    次之前断连就会在日志里留下悬空的调用，而那个形状会被模型 API 以 400 拒绝。
+    单条消息（用户输入、不带工具调用的回答、收尾文案）各自成批。
+
+    与 :class:`AgentObserver` 的两点不同，都是刻意的：**它是异步的**（要落库），
+    且**异常不被吞**——写失败必须让本轮以失败收场，静默丢事件等于谎报「存下来了」。
+
+    ``opens_turn``：这一批是**本轮的第一次写入**（= 用户输入那一批），调用方据此
+    给它分配**新的轮号**；其余各批挂在同一个轮号上。一轮可以写很多批（每个配对组
+    一批），但轮号只有一个——那正是 ``turn`` 列的语义（窗口截断与保留期的依据）。
+    """
+
+    async def __call__(
+        self, messages: Sequence[MessageStamp], *, opens_turn: bool = False,
+    ) -> None: ...
+
+
+# ---------------------------------------------------------------------------
 # 进度观察者（02g 的 SSE 层实现）
 # ---------------------------------------------------------------------------
 
@@ -720,6 +760,7 @@ class AgentLoop:
         approver: Approver | None = None,
         executor: ProposalExecutor | None = None,
         observer: AgentObserver | None = None,
+        sink: MessageSink | None = None,
     ) -> None:
         """
         ``today`` 由调用方按**用户本地时区**给出（服务端不猜用户在东八区还是
@@ -738,6 +779,10 @@ class AgentLoop:
 
         ``observer`` 是进度旁路（02g 的 SSE 层）：不接时行为与 02d 逐字相同，
         接了也只多几次同步调用——它拿不到控制权，抛异常也不会影响回合。
+
+        ``sink`` 是逐事件落库通道（04b）：不接时同样**一条都不写**（02d 的行为），
+        接了则由本模块在每个消息产出点把「落库批」交出去。它**不是**旁路——写失败
+        会穿透本模块，由调用方按「本轮失败」处理。
         """
         self._provider = provider
         self._ctx = ctx
@@ -754,6 +799,7 @@ class AgentLoop:
         self._approver = approver
         self._executor = executor
         self._observer = observer
+        self._sink = sink
 
         self._cancelled = False
         self._messages: list[dict[str, Any]] = []
@@ -804,7 +850,12 @@ class AgentLoop:
         ]
         self._delta_start = len(self._messages)
         self._entry_level = classify_reasoning(user_input)
-        self._append({"role": "user", "content": user_input})
+        # 本轮输入**先落库**再发第一次请求（04b）：断在模型请求里时，日志里至少
+        # 有用户的这句话——恢复后的下一轮因此知道刚才在问什么，而不是从零开始。
+        # 它是本轮的**第一次**写入，轮号在这里分配（后面各批挂在同一个轮号上）。
+        await self._emit(
+            [self._append({"role": "user", "content": user_input})], opens_turn=True,
+        )
 
         while await self.step():
             pass
@@ -835,7 +886,11 @@ class AgentLoop:
             self._stop = stop
             return False
 
-        self._drain_queue()
+        drained = self._drain_queue()
+        if drained:
+            # 中途输入与它所属的 Step 同批落库：它在下一次模型请求里就会被看见，
+            # 落在日志里也不该晚于那次请求。
+            await self._emit(drained)
         # 入口判浅、实际多步时在此升级：走到第 2 个 Step 就说明任务比入口判断的
         # 复杂（架构 §4.6），后续步骤一律「深」档，入口误判不再致命。
         level = ReasoningLevel.DEEP if self._steps >= 1 else self._entry_level
@@ -856,9 +911,10 @@ class AgentLoop:
         self._last_content = result.content
 
         calls = self._assistant_tool_calls(result)
-        self._append(self._assistant_message(result, calls))
+        assistant = self._append(self._assistant_message(result, calls))
 
         if not calls:
+            await self._emit([assistant])
             if self._queued:
                 # 「模型不再调工具」本该收尾，但用户中途又补了一句——它必须落到
                 # 一个真实的下一步上（不变式 2），不能因为「本轮看起来做完了」
@@ -870,7 +926,11 @@ class AgentLoop:
             )
             return False
 
-        outcomes = await self._run_tools(calls)
+        outcomes, tool_stamps = await self._run_tools(calls)
+        # **配对组一次落库**（不变式 1）：带 ``tool_calls`` 的 assistant 消息与它的
+        # 全部结果同批交出去，中间断连时整批一起回滚——日志里因此不会出现「有调用
+        # 没结果」的尾巴，而那正是恢复路径最不能有的形状（模型 API 会 400）。
+        await self._emit([assistant, *tool_stamps])
         # 「无进展」= 这一 Step 的工具调用全部返回错误码（模型没拿到任何新信息）。
         # 任何一次成功（result / proposal）都清零——它拿到了新信息。
         self._no_progress = (
@@ -906,13 +966,38 @@ class AgentLoop:
         )
         return {"role": "system", "content": prompt}
 
-    def _append(self, message: dict[str, Any]) -> None:
-        self._messages.append(message)
+    def _append(self, message: dict[str, Any]) -> MessageStamp:
+        """把一条消息放进消息流，返回它与它**产出**的时刻。
 
-    def _drain_queue(self) -> None:
+        时刻在**这里**取，不由落库方统一取「此刻」（T-M7-04b）：同一个落库批里的
+        assistant 消息与它的工具结果之间隔着整段工具执行，共用一个时间戳会把那段
+        间隔抹平——而「这条事件什么时候发生」正是日志 ``time`` 列要回答的问题。
+        """
+        self._messages.append(message)
+        return message, datetime.now(UTC)
+
+    def _drain_queue(self) -> list[MessageStamp]:
+        """把排队的中途输入移进消息流，返回这一批（供逐事件落库）。"""
+        drained: list[MessageStamp] = []
         for text in self._queued:
-            self._append({"role": "user", "content": text})
+            drained.append(self._append({"role": "user", "content": text}))
         self._queued.clear()
+        return drained
+
+    async def _emit(
+        self, stamps: Sequence[MessageStamp], *, opens_turn: bool = False,
+    ) -> None:
+        """把一个**落库批**交给 ``sink``（T-M7-04b）；缺省不接 = 一条都不写。
+
+        ``opens_turn`` 只在本轮的第一次写入（用户输入）时为真，见
+        :class:`MessageSink`。
+
+        **异常不吞**（与 :meth:`_notify` 正相反）：观察者是旁路，落库是正经产物——
+        写失败必须让本轮以失败收场，静默丢事件会把「这一轮已经存下来了」变成假话。
+        """
+        if self._sink is None or not stamps:
+            return
+        await self._sink(stamps, opens_turn=opens_turn)
 
     def _notify(self, hook: str, **kwargs: Any) -> None:
         """调用观察者的一个钩子，**异常一律吞掉**（见 ``AgentObserver``）。
@@ -1033,13 +1118,18 @@ class AgentLoop:
 
     async def _run_tools(
         self, calls: list[tuple[str, ToolCall]],
-    ) -> list[ToolOutcome]:
+    ) -> tuple[list[ToolOutcome], list[MessageStamp]]:
         """执行一个 Step 的全部工具调用，并逐条追加配对的 tool 消息。
 
         预算用尽时**不是跳过**，而是回一条错误结果——跳过会破坏不变式 1
         （模型看到孤立的调用），而错误结果既保住配对、又让模型知道该收尾了。
+
+        返回值是「每个调用的产物」与「它追加进消息流的那批 tool 消息（带产出
+        时刻）」两样：后者由 :meth:`step` 与那条带 ``tool_calls`` 的 assistant
+        消息合成**一个落库批**——配对的两个半边必须同进同出（T-M7-04b）。
         """
         outcomes: list[ToolOutcome] = []
+        stamps: list[MessageStamp] = []
         for call_id, call in calls:
             self._notify("tool_started", step=self._steps, name=call.name)
             outcome = await self._invoke(call)
@@ -1047,12 +1137,12 @@ class AgentLoop:
                 "tool_finished", step=self._steps, name=call.name, outcome=outcome,
             )
             outcomes.append(outcome)
-            self._append({
+            stamps.append(self._append({
                 "role": "tool",
                 "tool_call_id": call_id,
                 "content": _tool_result_content(outcome),
-            })
-        return outcomes
+            }))
+        return outcomes, stamps
 
     async def _invoke(self, call: ToolCall) -> ToolOutcome:
         tool = get_tool(call.name)
@@ -1272,9 +1362,10 @@ class AgentLoop:
         self._notify("delta", step=self._steps, text=content)
         # 收尾回答同样要带 reasoning_content 键（含空串）：它会被持久化进历史，
         # 而下一轮只要有一步走 thinking 模式，缺键的 assistant 消息就会 400。
-        self._append({
+        # 它自身成一批：收尾文案已经产出，与前面任何东西都不构成配对关系。
+        await self._emit([self._append({
             "role": "assistant", "content": content, "reasoning_content": reasoning,
-        })
+        })])
         return content
 
     def _fallback_summary(self, reason: str) -> str:

@@ -105,6 +105,10 @@ class AozoraBridgeConversationTest {
             "unavailable",
             bridge.dispatch("r-4", BridgeCommands.CONVERSATION_DELETE, JSONObject()).errorCode,
         )
+        assertEquals(
+            "unavailable",
+            bridge.dispatch("r-5", BridgeCommands.CONVERSATION_EVENTS, JSONObject()).errorCode,
+        )
     }
 
     @Test
@@ -124,6 +128,10 @@ class AozoraBridgeConversationTest {
         assertEquals(
             "invalid_input",
             bridge.dispatch("r-3", BridgeCommands.CONVERSATION_DELETE, JSONObject()).errorCode,
+        )
+        assertEquals(
+            "invalid_input",
+            bridge.dispatch("r-4", BridgeCommands.CONVERSATION_EVENTS, JSONObject()).errorCode,
         )
     }
 
@@ -196,6 +204,69 @@ class AozoraBridgeConversationTest {
 
         val response = newBridge(newClient()).dispatch(
             "r-1", BridgeCommands.CONVERSATION_DELETE, JSONObject().put("id", "c-gone"),
+        )
+
+        assertFalse(response.success)
+        assertEquals("not_found", response.errorCode)
+    }
+
+    // ─── T-M7-04b: 会话事件增量读取（断连重连的续读入口）───
+
+    @Test
+    fun conversationEvents_passesServerJsonThrough_withoutQueryWhenNoCursor(): Unit = runBlocking {
+        // 没有游标（首轮断连 / 老服务端不发 done.seq）→ 不带 after_seq，服务端从头给。
+        server.enqueue(MockResponse().setBody("""{"conversation_id":"c-1","events":[]}"""))
+
+        val response = newBridge(newClient()).dispatch(
+            "r-1", BridgeCommands.CONVERSATION_EVENTS, JSONObject().put("id", "c-1"),
+        )
+
+        assertTrue(response.success)
+        assertEquals("c-1", JSONObject(response.data!!).getString("conversation_id"))
+        val path = server.takeRequest().path!!
+        assertEquals("/api/v1/ai/conversations/c-1/events", path)
+        assertFalse(path.contains("after_seq"))
+    }
+
+    @Test
+    fun conversationEvents_carriesAfterSeq_andPassesEventsThrough(): Unit = runBlocking {
+        server.enqueue(MockResponse().setBody(
+            """{"conversation_id":"c-1","events":[{"seq":9,"turn":2,"type":"assistant"}]}"""
+        ))
+
+        val response = newBridge(newClient()).dispatch(
+            "r-1",
+            BridgeCommands.CONVERSATION_EVENTS,
+            JSONObject().put("id", "c-1").put("after_seq", 8),
+        )
+
+        assertTrue(response.success)
+        val events = JSONObject(response.data!!).getJSONArray("events")
+        assertEquals(9, events.getJSONObject(0).getInt("seq"))
+        assertEquals("/api/v1/ai/conversations/c-1/events?after_seq=8", server.takeRequest().path)
+    }
+
+    @Test
+    fun conversationEvents_zeroAfterSeqMeansNoCursor(): Unit = runBlocking {
+        // 0 与缺省同义（seq 从 1 起）：前端「还没有游标」时传下来的就是 0，
+        // 带上它会让服务端多一层无意义的判空 —— 统一在这里归一。
+        server.enqueue(MockResponse().setBody("""{"conversation_id":"c-1","events":[]}"""))
+
+        newBridge(newClient()).dispatch(
+            "r-1",
+            BridgeCommands.CONVERSATION_EVENTS,
+            JSONObject().put("id", "c-1").put("after_seq", 0),
+        )
+
+        assertFalse(server.takeRequest().path!!.contains("after_seq"))
+    }
+
+    @Test
+    fun conversationEvents_maps404ToNotFound(): Unit = runBlocking {
+        server.enqueue(MockResponse().setResponseCode(404).setBody("{}"))
+
+        val response = newBridge(newClient()).dispatch(
+            "r-1", BridgeCommands.CONVERSATION_EVENTS, JSONObject().put("id", "c-gone"),
         )
 
         assertFalse(response.success)

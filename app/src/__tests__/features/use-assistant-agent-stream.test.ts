@@ -34,6 +34,8 @@ const mockBridge = vi.hoisted(() => ({
   runAgent: vi.fn(),
   cancelAgent: vi.fn().mockResolvedValue({ cancelled: true }),
   onAiStream: vi.fn(),
+  // T-M7-04b：断连续读（默认**不装**——与真实能力探测同形，见文件末尾那组用例）
+  fetchConversationEvents: undefined as undefined | ReturnType<typeof vi.fn>,
   insertBook: vi.fn().mockResolvedValue({ id: 'new-book' }),
   isAvailable: vi.fn().mockReturnValue(true),
 }))
@@ -1138,5 +1140,167 @@ describe('use-assistant — 确认门四值（T-M7-03e）', () => {
     expect(result.current.activeProposal).toBeNull()
     expect(result.current.cardStatus).toBeNull()
     expect(result.current.interrupted).toBeNull()
+  })
+})
+
+/**
+ * T-M7-04b：**断连重连续跑**（客户端一半）。
+ *
+ * 服务端自本卡起**逐事件落库**（每个配对组一写一提交），所以断连不再等于「这一轮
+ * 什么都没留下」。客户端在失败收尾**之前**按游标（上一轮 `done.seq`）续读一次
+ * `conversation.events?after_seq=`，把补得到的正文落在中断提示之前。
+ *
+ * 三条边界各有用例：首轮没有游标（退回全量拉，用失败帧里的 `conversation_id`）、
+ * 桥不支持或续读失败（退化成「什么都不补」，中断提示照旧）、主动取消（不续读——
+ * 用户是自己走的，服务端那半边也没打算续）。
+ *
+ * 桥的 `fetchConversationEvents` **不在共享 mock 的默认能力里**（与真实能力探测
+ * 同形）：本组用例在自己的 `beforeEach` 里装它，因此其余用例覆盖的正是「桥没有这项
+ * 能力」这一支。
+ */
+describe('use-assistant — 断连续跑（T-M7-04b）', () => {
+  /** 本组装上的续读能力。共享 mock 上的那一项是**可选的**（与真实能力探测同形），
+   *  直接点会撞 TS18048，故在这里用局部变量持有那份 mock。 */
+  let fetchEvents: ReturnType<typeof vi.fn>
+
+  const ASSISTANT_EVENT_TURN2 = {
+    seq: 9, turn: 2, type: 'assistant',
+    data: { role: 'assistant', content: '这一步我查完了', reasoning_content: '' },
+    created_at: '2026-09-19T00:00:00Z',
+  }
+
+  beforeEach(() => {
+    vi.clearAllMocks()
+    listeners = []
+    mockBridge.onAiStream.mockImplementation((l: (ev: AgentStreamEvent) => void) => {
+      listeners.push(l)
+      return () => { listeners = listeners.filter(x => x !== l) }
+    })
+    mockBridge.runAgent.mockResolvedValue({ pending: true, streamId: STREAM_ID })
+    mockBridge.isAvailable.mockReturnValue(true)
+    mockBridge.interpretAI.mockResolvedValue(null)
+    vi.mocked(parseInput).mockReturnValue(chatProposal())
+    useAssistantChatStore.getState().clear()
+    fetchEvents = vi.fn().mockResolvedValue({ conversation_id: 'conv-1', events: [] })
+    mockBridge.fetchConversationEvents = fetchEvents
+  })
+
+  /** 跑一轮并让它正常收尾——游标（会话 id + seq）在这一轮之后才存在。 */
+  async function completeTurn(result: { current: { submitInput: (t: string) => Promise<void> } }, input: string) {
+    await act(async () => {
+      const p = result.current.submitInput(input)
+      await Promise.resolve()
+      emit('done', donePayload({ conversation_id: 'conv-1', seq: 7 }))
+      await p
+    })
+  }
+
+  /** 跑一轮、在中途断连。`extra` 可带 `conversation_id`（首轮断连时的唯一线索）。 */
+  async function interruptedTurn(
+    result: { current: { submitInput: (t: string) => Promise<void> } },
+    input: string,
+    extra: Record<string, unknown> = {},
+  ) {
+    await act(async () => {
+      const p = result.current.submitInput(input)
+      await Promise.resolve()
+      emitAll([['error', { code: 'ai_unavailable', message: '断了', ...extra }]])
+      await p
+    })
+  }
+
+  it('按上一轮 done.seq 续读，补记排在中断提示之前', async () => {
+    const { result } = setup()
+    await completeTurn(result, '第一句')
+    fetchEvents.mockResolvedValue({
+      conversation_id: 'conv-1', events: [ASSISTANT_EVENT_TURN2],
+    })
+
+    await interruptedTurn(result, '第二句')
+
+    // 游标就是上一轮 done.seq（严格大于：只取它之后落下的部分）
+    expect(fetchEvents).toHaveBeenCalledWith('conv-1', 7)
+    const texts = result.current.messages.map(m => m.text)
+    expect(texts[texts.length - 2]).toBe('这一步我查完了')
+    expect(texts[texts.length - 1]).toContain('连接中断')
+  })
+
+  it('首轮断连：没有游标 → 全量拉（after_seq=0），用失败帧里的 conversation_id', async () => {
+    const { result } = setup()
+    fetchEvents.mockResolvedValue({
+      conversation_id: 'conv-9',
+      events: [{
+        seq: 2, turn: 1, type: 'assistant',
+        data: { role: 'assistant', content: '完整回答：你好呀', reasoning_content: '' },
+        created_at: '2026-09-19T00:00:00Z',
+      }],
+    })
+
+    await interruptedTurn(result, '你好', { conversation_id: 'conv-9' })
+
+    expect(fetchEvents).toHaveBeenCalledWith('conv-9', 0)
+    // 服务端其实写完了这一轮、只是 done 帧没送到客户端——正文比半截气泡长，补回来
+    expect(result.current.messages.some(m => m.text === '完整回答：你好呀')).toBe(true)
+  })
+
+  it('补记不重复本地已有的正文（半截气泡是所有步骤 delta 的拼接）', async () => {
+    const { result } = setup()
+    fetchEvents.mockResolvedValue({
+      conversation_id: 'conv-1',
+      events: [{
+        seq: 1, turn: 1, type: 'assistant',
+        data: { role: 'assistant', content: '我先查一下。', reasoning_content: '' },
+        created_at: '2026-09-19T00:00:00Z',
+      }],
+    })
+
+    await act(async () => {
+      const p = result.current.submitInput('看看流水')
+      await Promise.resolve()
+      emit('delta', { text: '我先查一下。', channel: 'content', step: 1 })
+      emitAll([['error', { code: 'ai_unavailable', message: '断了', conversation_id: 'conv-1' }]])
+      await p
+    })
+
+    const assistants = result.current.messages.filter(m => m.role === 'assistant')
+    expect(assistants).toHaveLength(1)  // 只有半截 + 提示那一条，没有重影
+    expect(assistants[0].text).toBe('我先查一下。\n\n⚠️ 连接中断，本轮未完成')
+  })
+
+  it('续读失败 → 退化成「什么都不补」，中断提示照旧（补救不拖垮收尾）', async () => {
+    const { result } = setup()
+    await completeTurn(result, '第一句')
+    fetchEvents.mockRejectedValue(new Error('offline'))
+
+    await interruptedTurn(result, '第二句')
+
+    expect(result.current.interrupted).toEqual({ input: '第二句' })
+    expect(lastMsg(result).text).toContain('连接中断')
+  })
+
+  it('桥没有续读能力（旧 APK）→ 跳过续读，收尾照常', async () => {
+    const { result } = setup()
+    const saved = mockBridge.fetchConversationEvents
+    ;(mockBridge as unknown as Record<string, unknown>).fetchConversationEvents = undefined
+    try {
+      await interruptedTurn(result, '你好')
+
+      expect(result.current.interrupted).toEqual({ input: '你好' })
+      expect(lastMsg(result).text).toContain('连接中断')
+    } finally {
+      mockBridge.fetchConversationEvents = saved
+    }
+  })
+
+  it('主动取消**不续读**——用户是自己走的，那不是断连', async () => {
+    const { result } = setup()
+    await act(async () => {
+      void result.current.submitInput('你好')
+      await Promise.resolve()
+    })
+    await act(async () => { await result.current.cancelStream() })
+
+    expect(fetchEvents).not.toHaveBeenCalled()
+    expect(lastMsg(result).text).toContain('已取消')
   })
 })

@@ -307,3 +307,27 @@ class AIConversationEventsResponse(BaseModel):
 
     conversation_id: uuid.UUID
     events: list[AIConversationEventItem]
+
+
+# ─── T-M7-04b: 会话分叉 ───────────────────────────────────────────────
+
+class AIConversationForkRequest(BaseModel):
+    """``POST /ai/conversations/{id}/fork`` 的入参。
+
+    ``seq`` 是从事件读面拿到的序号——客户端挑一条说「从这里重说」。服务端把它
+    向下取整到最近的**完整配对组边界**（切在组中间会复制出一个悬空的
+    ``tool_calls``），并在响应里回报实际切点，客户端据此知道复制到哪儿。
+    """
+
+    seq: int = Field(ge=1)
+
+
+class AIConversationForkResponse(BaseModel):
+    """分叉的回执：新会话的摘要 + **实际**切点。
+
+    ``seq`` 不一定等于请求里给的那个（见 ``AIConversationForkRequest``）。它是
+    新会话里最后一条事件的序号——也就是这个分叉「记到哪儿为止」。
+    """
+
+    conversation: AIConversationSummary
+    seq: int

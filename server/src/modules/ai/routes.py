@@ -28,6 +28,8 @@ from .schemas import (
     AIAgentRequest,
     AIConversationEventItem,
     AIConversationEventsResponse,
+    AIConversationForkRequest,
+    AIConversationForkResponse,
     AIConversationListResponse,
     AIConversationRenameRequest,
     AIConversationSummary,
@@ -303,6 +305,39 @@ async def conversation_events(
     return AIConversationEventsResponse(
         conversation_id=conversation.id,
         events=[AIConversationEventItem.model_validate(e) for e in events],
+    )
+
+
+@router.post(
+    "/conversations/{conversation_id}/fork",
+    response_model=AIConversationForkResponse,
+)
+async def fork_conversation(
+    conversation_id: uuid.UUID,
+    body: AIConversationForkRequest,
+    current_user: Annotated[User, Depends(get_current_user)] = ...,
+    db: Annotated[AsyncSession, Depends(get_db_session)] = ...,
+):
+    """T-M7-04b: 从某个事件序号起分叉出新会话（原会话不动）。
+
+    架构 §6.2 的「可分叉——用户『回到某轮重说』不需要复制消息数组」：客户端只报
+    一个 ``seq``，前缀由服务端从事件日志里复制，**不要求也不接受**客户端把历史
+    传上来。
+
+    ``seq`` 向下取整到完整的配对组边界（响应里的 ``seq`` 是实际切点）：切在某条
+    ``assistant`` 与它的 ``tool`` 结果之间，复制出来的会话里会有一个悬空的
+    ``tool_calls``，下一轮模型请求直接 400（架构 §4.4 不变式 1）。
+
+    归属校验同其它会话端点：别人的 / 已删除的 / 不存在的 id 一律 404
+    ``conversation_not_found``，三者不可分辨。
+    """
+    _require_active(current_user)
+    service = ConversationService(db)
+    conversation = await service.load_owned(current_user, conversation_id)
+    forked, cut = await service.fork(conversation, body.seq)
+    return AIConversationForkResponse(
+        conversation=AIConversationSummary.from_conversation(forked),
+        seq=cut,
     )
 
 

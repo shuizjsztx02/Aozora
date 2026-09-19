@@ -196,6 +196,8 @@ class AozoraBridge(
             BridgeCommands.CONVERSATION_LIST -> handleConversationList(requestId)
             BridgeCommands.CONVERSATION_RENAME -> handleConversationRename(requestId, payload)
             BridgeCommands.CONVERSATION_DELETE -> handleConversationDelete(requestId, payload)
+            // T-M7-04b: 会话事件增量读取（断连重连的续读）
+            BridgeCommands.CONVERSATION_EVENTS -> handleConversationEvents(requestId, payload)
 
             // T-M4-04a: 权限管理
             BridgeCommands.PERMISSIONS_GET_STATUS -> handlePermissionsGetStatus(requestId)
@@ -1428,6 +1430,28 @@ class AozoraBridge(
         return conversationCall(requestId, "Conversation delete") {
             client.deleteConversation(id)
             JSONObject().put("success", true).toString()
+        }
+    }
+
+    /**
+     * `conversation.events` —— 需要 `id`；`after_seq` 可选（缺省 = 从头拉全量）。
+     *
+     * T-M7-04b：断连重连的**续读入口**。`after_seq` 是严格大于，客户端拿上一批
+     * 最后一条的 `seq` 再拉一次即可补齐，不会重复收到已有的（服务端口径见
+     * `conversation.ConversationService.events`）。
+     *
+     * 归属校验在服务端：别人的 / 已删除的 / 不存在的 id 一律 404 → `not_found`，
+     * 调用方按「这个 id 不是我的会话了」处理（与 `conversation.delete` 同口径）。
+     */
+    private suspend fun handleConversationEvents(requestId: String, p: JSONObject): BridgeResponse {
+        val client = aiGatewayClient
+            ?: return BridgeResponse.error(requestId, "unavailable", "AI gateway client not injected")
+        val id = p.optString("id", null)
+            ?: return BridgeResponse.error(requestId, "invalid_input", "Missing required field: id")
+        // 0 与缺省同义（seq 从 1 起）：两者都表示「我还没有游标，从头拉」。
+        val afterSeq = if (p.has("after_seq") && !p.isNull("after_seq")) p.optInt("after_seq") else null
+        return conversationCall(requestId, "Conversation events") {
+            client.fetchConversationEvents(id, afterSeq?.takeIf { it > 0 })
         }
     }
 

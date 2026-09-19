@@ -46,6 +46,7 @@ import {
   type AiStreamEvent,
   type AiConversationSummary,
   type AiConversationListResponse,
+  type AiConversationEventsResponse,
   type PermissionStatusData,
   type PermissionType,
   type PermissionResultEvent,
@@ -573,6 +574,22 @@ export class NativeBridge {
    */
   async deleteConversation(id: string): Promise<{ success: boolean }> {
     return this.call<{ success: boolean }>('conversation.delete', { id })
+  }
+
+  /**
+   * 读会话事件（T-M7-04b）——**断连重连的续读入口**。
+   *
+   * `afterSeq` 是严格大于的起点：传上一批最后一条的 `seq` 就只取新落下的部分。
+   * 省略（或 ≤ 0）= 从头拉全量——客户端还没有游标时的首次续读。404
+   * `not_found` 与 `conversation.delete` 同口径：调用方按「这个 id 不是我的会话了」
+   * 处理，不要弹错误。
+   */
+  async fetchConversationEvents(
+    id: string, afterSeq?: number | null,
+  ): Promise<AiConversationEventsResponse> {
+    const payload: Record<string, unknown> = { id }
+    if (afterSeq && afterSeq > 0) payload.after_seq = afterSeq
+    return this.call<AiConversationEventsResponse>('conversation.events', payload)
   }
 
   // ─── T-M4-04a: 权限管理 ───

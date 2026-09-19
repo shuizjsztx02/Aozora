@@ -115,11 +115,13 @@ object BridgeCommands {
     // T-M7-03a 的 `/ai/conversations` 端点。三个都是**请求-响应**（走 25 s 单发
     // 预算，不用 SSE 长连接）。**「新建会话」不需要命令**——服务端在首轮不带
     // conversation_id 时自建，done 帧回传 id（02f 口径），客户端只是切到本地桶。
-    // 第四条 `GET /{id}/events`（正文增量）**有意不加**：P2 不做会话正文跨设备
-    // 同步（归 P3 的 04e），加一条无人调用的桥命令只会扩大 APK 契约面。
+    // 第四条 `GET /{id}/events`（正文增量）03d 时**有意不加**（P2 不做会话正文跨
+    // 设备同步），**T-M7-04b 补上**：断连重连时要按 `after_seq` 续读日志补齐本地
+    // 投影落下的部分（计数 82→83），调用方是 `use-assistant-stream` 的 catchUp。
     const val CONVERSATION_LIST = "conversation.list"
     const val CONVERSATION_RENAME = "conversation.rename"
     const val CONVERSATION_DELETE = "conversation.delete"
+    const val CONVERSATION_EVENTS = "conversation.events"
 
     // T-M4-04a: 权限管理
     const val PERMISSIONS_GET_STATUS = "permissions.getStatus"
@@ -206,7 +208,7 @@ object BridgeCommands {
         AI_REPORT,
         AI_INTERPRET, AI_VALIDATE, AI_EXECUTE,
         AI_AGENT, AI_CANCEL,
-        CONVERSATION_LIST, CONVERSATION_RENAME, CONVERSATION_DELETE,
+        CONVERSATION_LIST, CONVERSATION_RENAME, CONVERSATION_DELETE, CONVERSATION_EVENTS,
         PERMISSIONS_GET_STATUS, PERMISSIONS_REQUEST, PERMISSIONS_OPEN_SETTINGS,
         VOICE_START_RECORDING, VOICE_STOP_RECORDING,
         IMAGE_PICK, IMAGE_DELETE,

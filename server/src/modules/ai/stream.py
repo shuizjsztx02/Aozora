@@ -38,6 +38,11 @@
 ``error``                 中途失败的安全枚举码（见下「失败收尾」）
 ========================  ================================================
 
+**下行 ``error`` 帧与日志里的 ``error`` 事件不是一回事**（T-M7-04a 起划清）：
+前者是协议帧（``EventType.ERROR``），后者是会话日志的一行（``conversation.EVENT_ERROR``，
+结构性的、不进模型上下文）。值同名而枚举不同——本模块在失败路径上**两样都产出**：
+帧给客户端看，事件留档说明「这一轮为什么停在半路」。见 :func:`_record_failure`。
+
 **确认卡走的是既有 v2 链路，不是流内回答**：本模块不接 ``AgentLoop`` 的
 ``approver`` 通道——02h 的桥命令里只有 ``ai.agent`` / ``ai.cancel``，没有
 「上行审批」，客户端在流内无从回答（架构 §8.2 也把确认归到普通 HTTP 上行）。
@@ -66,7 +71,8 @@
                  见上「delta 的粒度与两个通道」）、``step``
 ``done``         ``conversation_id``、``stop_reason``、``steps``、``tool_calls``、
                  ``writes``、``usage``{prompt_tokens, completion_tokens}、
-                 ``proposals``、``executions``、``pending_input``
+                 ``proposals``、``executions``、``pending_input``、
+                 ``seq``*（本轮结束时的事件序号，断连续读的游标，T-M7-04b）
 ``error``        ``code``（ai_unavailable / agent_failed）、``message``、
                  ``conversation_id``（会话索引已提交，失败轮也能接着用）
 ``device_request``  P1 无生产者（见上表）
@@ -130,8 +136,10 @@ Starlette 取消的是外层请求任务（anyio 的取消是作用域级的）�
   收尾全是同步操作（取消工作协程），不需要 await。
 
 工作协程被取消时**不再走 loop 的取消路径而直接中断**：用户已经走了，没有理由
-再等一次最多 20 s 的在途模型请求。中断时 session 未提交即关闭 = 回滚，因此
-半途的写操作不会落库（``execute_proposal`` 本身也是原子的）。
+再等一次最多 20 s 的在途模型请求。中断时**只回滚尚未提交的那一批**——已经提交的
+落库批留在日志里（T-M7-04b 的逐事件落库，这正是「断连后历史还在」的来源），正在
+跑的那一批整体丢弃，因此「半截落库」（有调用没结果）不会发生；``execute_proposal``
+本身也是原子的。
 """
 from __future__ import annotations
 
@@ -157,7 +165,11 @@ from .agent import (
     AgentResult,
     ServiceProposalExecutor,
 )
-from .conversation import ConversationService
+from .conversation import (
+    EVENT_ERROR,
+    ConversationService,
+    TurnWriter,
+)
 from .provider import ProviderError, ReasoningLevel, ToolCallingProvider
 from .service import AIService
 from .tools import ToolContext, ToolOutcome, load_tool_context
@@ -546,30 +558,34 @@ async def _execute_turn(
     user_input: str,
     today: date,
 ) -> None:
-    """一轮的全部工作：装载 → 跑 loop → 落库 → 发尾帧。
+    """一轮的全部工作：装载 → 跑 loop（**逐事件落库**）→ 记用量 → 发尾帧。
 
-    **落库时机**：正常结束时先 ``append_turn``（本轮消息进会话日志）+ 一次
-    ``record_turn``（一条用量行，会话级配额与 guest 日配额共用这张表），提交成功
-    后才发 ``done``——``done`` 因此意味着「这一轮已经存下来了」。
+    **落库时机（T-M7-04b 起是「边跑边落」）**：loop 每产出一个落库批就写一次、
+    提交一次（``conversation.TurnWriter``），批的边界就是配对组的边界——断连留下
+    的永远是完整的组。本轮消息因此**不再**在这里整批写：``done`` 之前只剩一次
+    ``record_turn``（用量行 + ``quota`` 事件）。
 
-    ``delta`` **不再享有这个保证**（T-M7-02g-2）：它是 loop 跑的过程中实时送出的
-    （这是流式的全部意义），所以「用户看完了答案但历史里什么都没有」的窗口从
-    「正文与落库几乎同时」变成「整段正文期间」——断连即如此。这是 P1 的已知代价
-    （02f 的一轮原子写入决定了不能在轮中途落库），真正的修法归 P3 的完整事件日志；
-    架构 §8.5 已把客户端侧的契约写死（保留半截文本 + 标注失败）。
+    这同时关掉了 P1 的两条挂账：**失败轮不落库**（现在失败轮已完成的步骤都在日志
+    里）与「**看到了但没落库**」的窗口（从「整轮跑完期间」缩到「当前这一批」）。
+    残余的窗口是**正在生成的那一段正文**——它还没产出，也就无从落库；客户端照
+    架构 §8.5 的契约保留半截文本并标注失败。
 
-    失败**不写事件、不写正文**（02f 的一轮原子写入决定：流式路径不能在轮中途
-    落库），但仍记一条用量行：已经发生的 provider 调用是计费的，不记就成了
-    「靠让请求失败来绕过配额」。
+    ``delta`` 仍是实时送出的：它是流式的全部意义，且不享有「已落库」这个保证。
+
+    失败**不写正文**这条仍成立（对失败的那一步而言），但**已经完成的步骤照常留在
+    日志里**——这正是本卡要的；另记一条 ``error`` 事件说明这一轮为什么停在半路，
+    以及一条用量行：已经发生的 provider 调用是计费的，不记就成了「靠让请求失败
+    绕过配额」。
     """
     conversations = ConversationService(session, cfg)
     conversation = await conversations.resolve(user, book_id, conversation_id)
     history = await conversations.history(conversation)
     ctx = await load_tool_context(session, user.id, book_id)
+    writer = TurnWriter(conversations, conversation)
 
     try:
         result = await _build_loop(
-            provider, ctx, cfg, observer, session, user, book_id,
+            provider, ctx, cfg, observer, session, user, book_id, writer,
             request_id=request_id, today=today,
         ).run(user_input, history=history)
     except Exception as exc:  # noqa: BLE001 — 运行期失败一律以 error 帧收尾
@@ -577,16 +593,17 @@ async def _execute_turn(
             "agent turn failed",
             extra={"error": type(exc).__name__, "outcome": "agent_turn_failed"},
         )
-        await _record_failure_usage(
-            session, conversations, user, conversation, provider, cfg, request_id,
-            observer,
+        await _record_failure(
+            session, conversations, writer, user, conversation, provider, cfg,
+            request_id, observer, exc,
         )
         queue.put_nowait((EventType.ERROR, _error_payload(exc, conversation_id)))
         return
 
     try:
-        await conversations.append_turn(conversation, result.messages)
-        # ``same_turn``：用量事件挂在本轮（消息刚写进去）——它不属于新的一轮。
+        # 消息已经在 loop 里逐事件落库了，这里只剩用量：一条 ``ai_usage`` 行
+        # （会话级配额与 guest 日配额共用这张表）+ 一条 ``quota`` 事件。
+        # ``same_turn``：它挂在本轮（消息刚写进去）——用量不属于新的一轮。
         await conversations.record_turn(
             user,
             conversation,
@@ -606,7 +623,9 @@ async def _execute_turn(
         queue.put_nowait((EventType.ERROR, _error_payload(exc, conversation_id)))
         return
 
-    queue.put_nowait((EventType.DONE, _done_payload(result, conversation)))
+    queue.put_nowait((EventType.DONE, _done_payload(
+        result, conversation, await conversations.max_seq(conversation),
+    )))
 
 
 def _build_loop(
@@ -617,15 +636,19 @@ def _build_loop(
     session: AsyncSession,
     user: User,
     book_id: uuid.UUID,
+    writer: TurnWriter,
     *,
     request_id: str,
     today: date,
 ) -> AgentLoop:
-    """组装 loop：注入观察者与**执行通道**，但不接审批通道。
+    """组装 loop：注入观察者、**执行通道**与**逐事件落库通道**，但不接审批通道。
 
     只给执行通道、不给审批通道是 02e 定义的两个可选通道的直接用法：单 Step 高
     置信的写入照既定策略自动执行（撤销窗在回执里），多步写入因无人可问而挂起
     → ``confirm`` 帧 + ``done.proposals`` → 客户端走既有 v2 卡链路。
+
+    ``writer``（T-M7-04b）是第三个通道：loop 每产出一个落库批就写一次并提交，
+    于是断连时已经跑完的步骤留在日志里（P1 的「整轮原子写入」是这里被换掉的）。
     """
     return AgentLoop(
         provider,
@@ -634,6 +657,7 @@ def _build_loop(
         timeout=cfg.ai_agent_step_timeout_seconds,
         today=today,
         observer=observer,
+        sink=writer,
         executor=ServiceProposalExecutor(
             AIService(session, provider, cfg),
             user=user, request_id=request_id, book_id=book_id,
@@ -641,7 +665,9 @@ def _build_loop(
     )
 
 
-def _done_payload(result: AgentResult, conversation: AIConversation) -> dict[str, Any]:
+def _done_payload(
+    result: AgentResult, conversation: AIConversation, seq: int,
+) -> dict[str, Any]:
     """``done`` 帧（架构 §8.1：结束标记含 usage）。
 
     除 usage 外带上调用方渲染所需的一切：会话 id（下一轮要用）、终止原因、计数、
@@ -649,9 +675,14 @@ def _done_payload(result: AgentResult, conversation: AIConversation) -> dict[str
     id）。``pending_input`` 一并交回——P1 的端点不接收中途输入，该字段因此恒为
     空；保留它是因为 02d 的约定要求调用方消费，客户端若收到非空值应把这些话重新
     发一次（另起一轮），不能当作没说过。
+
+    ``seq``（T-M7-04b）是这一轮**结束时**会话的最大事件序号，即「接着这里往下跑」
+    的游标：客户端存下它，断连重连时以它为 ``after_seq`` 起点增量续读，只取自己
+    落下的事件。纯增量字段，旧客户端忽略即可。
     """
     return {
         "conversation_id": str(conversation.id),
+        "seq": seq,
         "stop_reason": str(result.stop_reason),
         "steps": result.steps,
         "tool_calls": result.tool_calls,
@@ -674,11 +705,7 @@ def _error_payload(
     带上 ``conversation_id``：会话索引行在前置检查里已经提交，失败轮虽不写正文，
     但会话本身是有效的——客户端据此可以继续这一轮对话，不必重开会话。
     """
-    code = (
-        StreamErrorCode.AI_UNAVAILABLE
-        if isinstance(exc, ProviderError)
-        else StreamErrorCode.AGENT_FAILED
-    )
+    code = _error_code(exc)
     return {
         "code": str(code),
         "message": _ERROR_MESSAGES[code],
@@ -686,20 +713,59 @@ def _error_payload(
     }
 
 
-async def _record_failure_usage(
+def _error_code(exc: BaseException) -> StreamErrorCode:
+    """异常 → 安全枚举码（``error`` 帧与 ``error`` 事件共用同一次分类）。"""
+    return (
+        StreamErrorCode.AI_UNAVAILABLE
+        if isinstance(exc, ProviderError)
+        else StreamErrorCode.AGENT_FAILED
+    )
+
+
+async def _record_failure(
     session: AsyncSession,
     conversations: ConversationService,
+    writer: TurnWriter,
     user: User,
     conversation: AIConversation,
     provider: ToolCallingProvider,
     cfg: Settings,
     request_id: str,
     observer: QueueObserver,
+    exc: BaseException,
 ) -> None:
-    """失败轮的用量行。**尽力而为**：记不上也不能盖掉即将发出的 ``error`` 帧。"""
+    """失败轮的收尾落库：一条 ``error`` 事件 + 一条用量行。
+
+    **``error`` 事件的第一个生产者**（T-M7-04a 把它连同类型与写入口留给了 04b）。
+    它回答「这一轮为什么停在半路」——日志里已经有这一轮跑完的部分（逐事件落库），
+    缺的正是「它没跑完」这件事本身；没有这条留档，读日志的人（以及投影 B 的
+    UI）看到的是一轮**戛然而止**、看不出是失败还是还在跑。
+
+    载荷只有安全枚举码与固定文案——与 ``error`` 帧同一分类、同一张文案表，
+    **不回显异常正文**（可能含用户原话或库结构，security.md 的脱敏口径）。
+
+    **尽力而为**：记不上也不能盖掉即将发出的 ``error`` 帧（用户看到的结果不该
+    因为一次审计写入失败而改变）。
+    """
+    try:
+        await writer.structural(EVENT_ERROR, {
+            "code": str(_error_code(exc)),
+            "message": _ERROR_MESSAGES[_error_code(exc)],
+        })
+    except Exception as write_exc:  # noqa: BLE001 — 见 docstring
+        logger.warning(
+            "agent failure event not recorded",
+            extra={
+                "error": type(write_exc).__name__,
+                "outcome": "agent_error_event_failed",
+            },
+        )
+
     if not observer.prompt_tokens and not observer.completion_tokens:
         return
     try:
+        # ``same_turn=True``：本轮的消息已经逐事件写进日志了（至少那一条用户输入），
+        # 用量因此挂在本轮——另立轮号会在日志里留下一个「有轮号、没内容」的空轮。
         await conversations.record_turn(
             user,
             conversation,
@@ -708,12 +774,16 @@ async def _record_failure_usage(
             request_id=request_id,
             prompt_tokens=observer.prompt_tokens,
             completion_tokens=observer.completion_tokens,
+            same_turn=True,
         )
         await session.commit()
-    except Exception as exc:  # noqa: BLE001 — 审计行记不上不该改变用户看到的结果
+    except Exception as usage_exc:  # noqa: BLE001 — 审计行记不上不该改变用户看到的结果
         logger.warning(
             "agent failure usage row not recorded",
-            extra={"error": type(exc).__name__, "outcome": "agent_usage_failed"},
+            extra={
+                "error": type(usage_exc).__name__,
+                "outcome": "agent_usage_failed",
+            },
         )
 
 

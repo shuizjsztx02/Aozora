@@ -90,6 +90,11 @@ export const BridgeCommands = {
   CONVERSATION_LIST: 'conversation.list',
   CONVERSATION_RENAME: 'conversation.rename',
   CONVERSATION_DELETE: 'conversation.delete',
+  // T-M7-04b（桥计数 82→83）：会话事件增量读取 `GET /{id}/events?after_seq=`。
+  // 断连重连的**续读入口**——03d 时「不加密钥无人调用」的判断到此失效：服务端
+  // 改成逐事件落库后，客户端要按游标补齐自己落下的部分（见 use-assistant-stream
+  // 的 catchUp）。同样是请求-响应形态。
+  CONVERSATION_EVENTS: 'conversation.events',
 
   // T-M4-04a: 权限管理
   PERMISSIONS_GET_STATUS: 'permissions.getStatus',
@@ -596,6 +601,16 @@ export interface AiStreamDoneData {
    * 服务端载荷是 `list(result.pending_input)`，即**数组**（02i 交接的跨卡修正）。
    */
   pending_input: string[]
+  /**
+   * 本轮**结束时**会话的最大事件序号（T-M7-04b）——即「接着这里往下跑」的游标。
+   * 断连重连时以它为 `after_seq` 起点增量续读（`conversation.events`），只取自己
+   * 落下的事件。
+   *
+   * **可选**：04b 之前的服务端不发这个字段，缺省即「没有游标」——客户端会退回
+   * 全量拉取再按轮裁剪（见 `use-assistant-stream` 的 `catchUp`），结果一样，只是
+   * 多取一些行。
+   */
+  seq?: number
 }
 
 /**
@@ -642,6 +657,31 @@ export interface AiConversationSummary {
 /** `conversation.list` 的响应。 */
 export interface AiConversationListResponse {
   conversations: AiConversationSummary[]
+}
+
+/**
+ * 一条会话事件（服务端 `AIConversationEventItem`，T-M7-04b）。
+ *
+ * `data` 的形状**随 `type` 而定**：Surface 事件（`user` / `assistant` / `tool`）是
+ * 一条 API 消息字典（assistant 一定带 `reasoning_content` 键），结构性事件
+ * （`quota` / `error` / …）是留档载荷。调用方只投影自己认识的部分，其余原样留着。
+ *
+ * `turn` 是会话内的轮号；`seq` 是会话内单调递增的序号（**严格大于**的增量游标）。
+ * 保留期（04d）会删掉最早的整轮，因此 `seq` 可能不从 1 开始、也不再连续——它是
+ * 序号不是计数。
+ */
+export interface AiConversationEventItem {
+  seq: number
+  turn: number
+  type: string
+  data: Record<string, unknown>
+  created_at: string
+}
+
+/** `conversation.events` 的响应（`conversation_id` 一并回，便于并发拉多个会话）。 */
+export interface AiConversationEventsResponse {
+  conversation_id: string
+  events: AiConversationEventItem[]
 }
 
 export interface AiCategoryFact {
