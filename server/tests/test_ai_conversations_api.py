@@ -494,6 +494,10 @@ class TestConversationEvents:
         assert [e["turn"] for e in events] == [1, 1]
         assert events[0]["data"] == {"role": "user", "content": "午饭花了 12 块"}
         assert events[1]["data"]["content"] == "好的，记下了。"
+        # 客户端拿这些事件**重建投影**，所以形状就是契约：assistant 消息一定带
+        # ``reasoning_content`` 键（02f 的写入面硬约束在读取面上同样成立）——缺键
+        # 的消息会让下一次 thinking 请求整轮 400，客户端靠这个键把推理分流进折叠区。
+        assert events[1]["data"]["reasoning_content"] == ""
 
     async def test_after_seq_reads_incrementally(self, env: ConversationEnv):
         done = await env.turn("第一轮")
