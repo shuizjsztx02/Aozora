@@ -43,9 +43,30 @@ class AIConversation(Base, AuditMixin):
     换掉那个账本的名字对话，而系统提示已经换成新账本的名单——两者不一致。
     P1 客户端没有「会话进行中换账本」的入口，影响有限，故不做失效（复审 P3-3
     记下的残余）；P2 引入多会话/账本切换时要一并处理。
+
+    T-M7-03a 起它同时是**会话列表的数据源**（架构 §6.1「服务端持有会话摘要」），
+    因此补三列：
+
+    - ``title``——列表上的会话名。默认取**首轮第一条用户输入**截断
+      （``ConversationService.TITLE_MAX_CHARS``），用户可经 ``PATCH`` 改写。
+      新会话、以及一次都没说成的轮次，都可能是空串（客户端展示兜底文案）。
+    - ``last_active_at``——最后一次写入事件的时间。**列表按它倒序**。
+      不复用 ``updated_at``：那个字段会被重命名、软删、换账本一并改动，列表顺序
+      会因此莫名其妙地跳。新会话还没有轮次时为 ``NULL``，列表按 ``created_at`` 兜。
+    - ``archived_at``——软删标记（与 ``Category`` / ``SavingsGoal`` 的 ``archived_at``
+      同口径：「删除语义＝归档」）。``resolve`` / ``list_conversations`` 一律滤掉
+      已归档行，于是删除后旧 ``conversation_id`` 与跨用户 id 得到**同一个 404**，
+      不泄露它存在过。
     """
 
     __tablename__ = "ai_conversations"
+    __table_args__ = (
+        # T-M7-03a：列表查询的形状——本人的、未归档的、按活跃时间倒序。
+        Index(
+            "ix_ai_conversations_user_archived_active",
+            "user_id", "archived_at", "last_active_at",
+        ),
+    )
 
     id: Mapped[uuid.UUID] = mapped_column(
         UUID(as_uuid=True), primary_key=True, default=uuid.uuid4,
@@ -61,6 +82,15 @@ class AIConversation(Base, AuditMixin):
         nullable=True,
     )
     summary: Mapped[str] = mapped_column(Text, default="", server_default="", nullable=False)
+    title: Mapped[str] = mapped_column(
+        String(120), default="", server_default="", nullable=False,
+    )
+    last_active_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True,
+    )
+    archived_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True,
+    )
 
 
 class AIConversationEvent(Base):

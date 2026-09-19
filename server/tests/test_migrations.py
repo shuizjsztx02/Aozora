@@ -33,6 +33,7 @@ class TestMigrationConsistency:
             "0014_deletion_token_unique", "0015_feedback",
             "0016_cloud_entities", "0017_conversation_events",
             "0018_conversation_event_turns",
+            "0019_conversation_index",
         ):
             try:
                 m = importlib.import_module(f"src.migrations.versions.{rev}")
@@ -74,6 +75,7 @@ class TestMigrationConsistency:
             "0014_deletion_token_unique", "0015_feedback",
             "0016_cloud_entities", "0017_conversation_events",
             "0018_conversation_event_turns",
+            "0019_conversation_index",
         ):
             try:
                 m = importlib.import_module(f"src.migrations.versions.{rev}")
@@ -228,3 +230,32 @@ class TestMigrationConsistency:
         m18 = importlib.import_module("src.migrations.versions.0018_conversation_event_turns")
         assert m18.down_revision == m17.revision
         assert m18.revision == "0018_conversation_event_turns"
+
+    def test_conversation_index_migration_chains_onto_0018(self):
+        """T-M7-03a: 0019 must extend the chain (会话可列表：title / 活跃 / 软删)."""
+        m18 = importlib.import_module("src.migrations.versions.0018_conversation_event_turns")
+        m19 = importlib.import_module("src.migrations.versions.0019_conversation_index")
+        assert m19.down_revision == m18.revision
+        assert m19.revision == "0019_conversation_index"
+
+    def test_conversation_index_migration_adds_the_listing_columns(self):
+        """0019 的三列与列表索引必须在迁移里真的加上。
+
+        SQLite 测试面走 ``Base.metadata.create_all``、**不经本迁移**，所以「ORM
+        改了、迁移忘了」在测试里完全看不出来——这条把那段差距钉住（列名与索引名
+        都在 ``AIConversation`` 上声明，两边同一个源头）。
+        """
+        import inspect
+
+        from src.models.ai import AIConversation
+
+        m19 = importlib.import_module("src.migrations.versions.0019_conversation_index")
+        source = inspect.getsource(m19.upgrade)
+
+        for column in ("title", "last_active_at", "archived_at"):
+            assert column in AIConversation.__table__.columns, f"ORM 缺列 {column}"
+            assert f'"{column}"' in source, f"0019 没加列 {column}"
+
+        index_name = "ix_ai_conversations_user_archived_active"
+        assert index_name in {i.name for i in AIConversation.__table__.indexes}
+        assert index_name in source

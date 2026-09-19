@@ -3,9 +3,10 @@
 from __future__ import annotations
 
 import uuid
+from datetime import datetime
 from typing import Any, Literal
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 
 # Hard cap on user input keeps prompt costs bounded and limits abuse.
 # Static constant on purpose — Pydantic max_length needs a literal value,
@@ -228,3 +229,81 @@ class AIAgentRequest(BaseModel):
     input: str = Field(min_length=1, max_length=MAX_INPUT_CHARS)
     book_id: str = Field(min_length=1)
     conversation_id: str | None = None
+
+
+# ─── T-M7-03a: 会话列表 / 重命名 / 删除 / 事件读取 ─────────────────────────
+
+#: 会话标题的字符上限——与 ``ai_conversations.title`` 的列宽一致。**自动派生的
+#: 标题另有更短的上限**（``conversation.TITLE_MAX_CHARS``），两者不是一回事：
+#: 前者管用户输入，后者管列表上的观感。
+MAX_TITLE_CHARS = 120
+
+
+class AIConversationSummary(BaseModel):
+    """会话摘要——列表的一项，也是重命名的回执。
+
+    ``last_active_at`` 一定在场：还没写成过一轮的会话回 ``created_at``
+    （:meth:`from_conversation` 兜底），客户端因此不必自己处理 NULL。
+
+    ``book_id`` 只给 id 不给名字：账本名在客户端本地就有（Room 副本），会话
+    列表不必替它回显一份可能过期的。
+    """
+
+    id: uuid.UUID
+    title: str
+    book_id: uuid.UUID | None
+    created_at: datetime
+    last_active_at: datetime
+
+    @classmethod
+    def from_conversation(cls, conversation: Any) -> "AIConversationSummary":
+        return cls(
+            id=conversation.id,
+            title=conversation.title,
+            book_id=conversation.book_id,
+            created_at=conversation.created_at,
+            last_active_at=conversation.last_active_at or conversation.created_at,
+        )
+
+
+class AIConversationListResponse(BaseModel):
+    conversations: list[AIConversationSummary]
+
+
+class AIConversationRenameRequest(BaseModel):
+    title: str = Field(min_length=1, max_length=MAX_TITLE_CHARS)
+
+    @field_validator("title", mode="before")
+    @classmethod
+    def _strip_first(cls, v: object) -> object:
+        # mode="before" → 先 strip 再校验长度，纯空白因此被 min_length 挡住
+        # （与 auth 的 UpdateProfileRequest 同口径）。
+        return v.strip() if isinstance(v, str) else v
+
+
+class AIConversationEventItem(BaseModel):
+    """一条会话事件。``data`` 是 loop 的消息字典，**原样**（内部 ID 在 agent 侧
+    就被剥掉了，见 ``agent._tool_result_content``）。
+
+    ``turn`` 是会话内的轮号——客户端按它把事件分组成轮（与 ``history`` 的窗口
+    口径同一个）。
+    """
+
+    model_config = {"from_attributes": True}
+
+    seq: int
+    turn: int
+    type: str
+    data: dict[str, Any]
+    created_at: datetime
+
+
+class AIConversationEventsResponse(BaseModel):
+    """``GET /ai/conversations/{id}/events`` 的响应。
+
+    ``conversation_id`` 一并回：客户端并发拉多个会话的增量时，不必靠请求上下文
+    去猜这一批属于谁。
+    """
+
+    conversation_id: uuid.UUID
+    events: list[AIConversationEventItem]

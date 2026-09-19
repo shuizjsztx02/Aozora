@@ -5,7 +5,7 @@ from __future__ import annotations
 import uuid
 from typing import Annotated
 
-from fastapi import APIRouter, Depends, Request
+from fastapi import APIRouter, Depends, Query, Request
 from fastapi.responses import StreamingResponse
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -26,6 +26,11 @@ from .provider import (
 )
 from .schemas import (
     AIAgentRequest,
+    AIConversationEventItem,
+    AIConversationEventsResponse,
+    AIConversationListResponse,
+    AIConversationRenameRequest,
+    AIConversationSummary,
     AIExecuteProposalRequest,
     AIExecuteProposalResponse,
     AIInterpretRequest,
@@ -205,6 +210,99 @@ async def parse_image(
         request_id=request.state.request_id,
         attachment_id=body.attachment_id,
         book_id=book_uuid,
+    )
+
+
+@router.get("/conversations", response_model=AIConversationListResponse)
+async def list_conversations(
+    current_user: Annotated[User, Depends(get_current_user)] = ...,
+    db: Annotated[AsyncSession, Depends(get_db_session)] = ...,
+):
+    """T-M7-03a: 列出本人的会话（未归档，按活跃时间倒序）。
+
+    会话索引是**服务端权威**（架构 §6.1：客户端本地只是投影缓存），所以列表以
+    这里为准，客户端缓存对不上时按这份重建。只回本人的会话行——别人的会话既不在
+    列表里，也无法从响应中推断它存在（读取面的唯一防线，见 ``conversation.py``）。
+
+    不分页：一个账号的会话数由用户自己创建，且每个会话另有轮数上限，一次全给
+    客户端最简单（侧栏本来就要全量）。
+    """
+    _require_active(current_user)
+    conversations = await ConversationService(db).list_conversations(current_user)
+    return AIConversationListResponse(
+        conversations=[
+            AIConversationSummary.from_conversation(c) for c in conversations
+        ],
+    )
+
+
+@router.patch(
+    "/conversations/{conversation_id}", response_model=AIConversationSummary,
+)
+async def rename_conversation(
+    conversation_id: uuid.UUID,
+    body: AIConversationRenameRequest,
+    current_user: Annotated[User, Depends(get_current_user)] = ...,
+    db: Annotated[AsyncSession, Depends(get_db_session)] = ...,
+):
+    """T-M7-03a: 重命名会话。
+
+    别人的 / 已删除的 / 不存在的 id 一律 404 ``conversation_not_found``——
+    三者不可分辨。标题长度由 schema 校验（对齐列宽）。
+    """
+    _require_active(current_user)
+    service = ConversationService(db)
+    conversation = await service.load_owned(current_user, conversation_id)
+    await service.rename(conversation, body.title)
+    return AIConversationSummary.from_conversation(conversation)
+
+
+@router.delete("/conversations/{conversation_id}", status_code=204)
+async def delete_conversation(
+    conversation_id: uuid.UUID,
+    current_user: Annotated[User, Depends(get_current_user)] = ...,
+    db: Annotated[AsyncSession, Depends(get_db_session)] = ...,
+):
+    """T-M7-03a: 删除会话（行归档，正文事件随之清理）。
+
+    两半的理由见 ``conversation.py``：行留着是为了 ``ai_usage`` 的审计链与 P3
+    保留期的口径（04d 只删事件、不删会话行），正文没有留的理由。
+
+    **重试是安全的**：删除成功后旧 id 与别人的 id 拿到同一个 404，客户端把它当作
+    「这个 id 不是我的会话了」即可，不该当作错误弹给用户（P2 挂账 1 的降级契约）。
+    """
+    _require_active(current_user)
+    service = ConversationService(db)
+    conversation = await service.load_owned(current_user, conversation_id)
+    await service.delete(conversation)
+
+
+@router.get(
+    "/conversations/{conversation_id}/events",
+    response_model=AIConversationEventsResponse,
+)
+async def conversation_events(
+    conversation_id: uuid.UUID,
+    after_seq: Annotated[int | None, Query(ge=0)] = None,
+    current_user: Annotated[User, Depends(get_current_user)] = ...,
+    db: Annotated[AsyncSession, Depends(get_db_session)] = ...,
+):
+    """T-M7-03a: 读会话事件（``after_seq`` 增量读取）。
+
+    这是**客户端投影的重建源**：本地缓存丢了、或断线期间落了帧，客户端拿上一批
+    最后一条的 ``seq`` 再拉一次就能补齐（``after_seq`` 是严格大于，不重复）。
+
+    事件原样返回——不做 Surface 子集过滤、不补 ``ignorable``（完整事件日志是 P3
+    的 04a）。载荷与 ``/ai/agent`` 的模型上下文是同一个数据面：工具结果里的内部
+    ID 在 agent 侧就被剥掉了。
+    """
+    _require_active(current_user)
+    service = ConversationService(db)
+    conversation = await service.load_owned(current_user, conversation_id)
+    events = await service.events(conversation, after_seq)
+    return AIConversationEventsResponse(
+        conversation_id=conversation.id,
+        events=[AIConversationEventItem.model_validate(e) for e in events],
     )
 
 

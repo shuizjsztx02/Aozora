@@ -28,3 +28,20 @@ AI 只返回通过 JSON Schema 校验的 ActionProposal。金额、日期、权�
 - 未知字段必须拒绝；金额上限为 9007199254740991 分；出现 transactions 时必须非空。
 - bizDate 的 `format: date` 必须以断言模式验证完整公历日期，不能只检查正则或把 format 当注释。此为既有 v1 约束修复，不新增动作或改变合法提案字段。
 - `validateProposal(input)` 仅作结构校验；执行前传入 `ProposalValidationContext`（当前账本允许的 categoryIds/accountIds），拒绝未解析分类和未授权 ID。上下文来自可信 repository/API，不能取自模型输出。M2/M4 接线前不能把结构通过当作执行许可。
+
+## 会话管理端点（T-M7-03a）
+
+`/ai/agent` 的会话由**服务端持有**（`ai-agent-architecture.md` §6.3），P2 因此补四个管理端点：
+
+| 端点 | 作用 | 关键口径 |
+|---|---|---|
+| `GET /ai/conversations` | 本人的会话列表（未归档，按活跃时间倒序） | 只回本人；不分页；`last_active_at` 一定有值（还没发言的会话用 `created_at` 兜） |
+| `PATCH /ai/conversations/{id}` | 重命名 | **不动活跃时间**（改名字不该让会话在列表里跳位）；纯空白 / 超长 422 |
+| `DELETE /ai/conversations/{id}` | 删除 | 行归档（`archived_at`）、事件正文删除；重试安全 |
+| `GET /ai/conversations/{id}/events?after_seq=N` | 事件增量读取 | `seq` **严格大于** `after_seq`，按 `seq` 升序；原样返回（Surface 子集归 P3 的 04a） |
+
+**归属校验：** 别人的 id、已删除的 id、不存在的 id 一律 404 `conversation_not_found`，三者不可分辨（读取面的唯一防线）。
+
+**删除语义：** 会话行**归档**而不是物理删除（`ai_usage.conversation_id` 指着它，硬删会把审计行置空；P3 的保留期也只删事件、不删行），而事件正文**立即删除**——用户主动删除后服务端不该再持有它。
+
+**登出粒度（2026-09-19 结论，落地 P1 挂账 1）：** 登出仍按**用户**粒度清理该用户的全部会话，**不引入设备维度**。`ai_conversations` 没有设备列、`/ai/agent` 也不带 `device_id`，加一层设备维度等于同时改请求契约与客户端桥，而 P2 不做跨设备正文同步（归 P3 的 04e 决策门）。代价（已知并接受）：多设备下 A 机登出会让 B 机的服务端会话消失，B 机下一轮带旧 id 会拿到 404——**客户端必须把它当作「该 id 已不是我的会话」，丢弃并开新会话，不得作为错误呈现**；本地投影缓存仍在，历史依然可见。

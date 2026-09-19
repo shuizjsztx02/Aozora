@@ -41,6 +41,29 @@ Event         会话日志里的一行，即 loop 消息流里的一条消息（
 token」双限就是同一张表上的 ``COUNT(*)`` / ``SUM(tokens)`` 聚合——不引 Redis
 （生产单 worker，架构 §12.2 已定表第 3 项）。超限沿用快路径的 429
 ``ai_quota_exceeded``，客户端据此降级到本地规则 NLU。
+
+会话列表、重命名与删除（T-M7-03a）
+---------------------------------
+
+列表只回**本人的、未归档的**会话，按 ``last_active_at`` 倒序（还没写过轮次的
+用 ``created_at`` 兜）。``title`` 由首轮用户输入派生（:data:`TITLE_MAX_CHARS`
+截断），用户可经 :meth:`ConversationService.rename` 改写；重命名**不动**活跃
+时间——列表顺序不该因为改个名字就跳。
+
+**删除 = 归档行 + 删事件正文**，两半各有各的理由：行留着（``archived_at`` 置位）
+是因为 ``ai_usage.conversation_id`` 指着它，硬删会把审计行置空；且 P3 的保留期
+（04d）本就只删事件、不删会话行，两处同构。正文则没有留的理由——用户主动删除
+后服务端不该再持有它。删除后旧 ``conversation_id`` 与跨用户 id 拿到**同一个
+404**，客户端把它当作「已经不是我的会话」（网络重试因此安全，见下）。
+
+**登出粒度——P1 挂账 1 的结论（2026-09-19，P2 复核）：保持按用户粒度清，不引入
+设备维度。** 会话是**用户级**资产：服务端列表对同一账号的每台设备是同一份，而
+``ai_conversations`` 没有设备列、``/ai/agent`` 也不带 ``device_id``——为它加一层
+设备维度等于同时改请求契约与客户端桥（02h 已冻结），而 P2 并不做跨设备正文同步
+（正文同步是 P3 的 04e 决策门）。代价是多设备下 A 机登出会让 B 机的服务端会话
+消失：B 机下一轮带旧 id 会拿到 404 ``conversation_not_found``，**客户端的降级
+契约是「丢弃该 id、开新会话」，不得把它当错误呈现**（交 03b / 03d 落地）；本地
+投影缓存仍在，历史依然可见。真正按设备清理要等 04e 的决策门。
 """
 
 from __future__ import annotations
@@ -49,6 +72,7 @@ import json
 import logging
 import uuid
 from collections.abc import Mapping, Sequence
+from datetime import UTC, datetime
 from typing import Any
 
 from sqlalchemy import delete, func, insert, select
@@ -70,6 +94,11 @@ EVENT_USER = "user"
 EVENT_ASSISTANT = "assistant"
 EVENT_TOOL = "tool"
 EVENT_TYPES = frozenset({EVENT_USER, EVENT_ASSISTANT, EVENT_TOOL})
+
+#: 自动标题的字符上限（**不含**截断处的省略号）。一行的长度就够——它在侧栏 /
+#: 抽屉里占一行，长了也只能截断显示。用户重命名不受这个数字约束（那是
+#: ``schemas.AIConversationRenameRequest`` 的事，上限对齐列宽）。
+TITLE_MAX_CHARS = 40
 
 #: 会话 id 本身是内部 ID，**不进历史正文**，只作为请求参数出现。
 ERR_INVALID_CONVERSATION_ID = "invalid_conversation_id"
@@ -110,6 +139,21 @@ class ConversationService:
             await self._db.flush()
             return conversation
 
+        conversation = await self.load_owned(user, conversation_id)
+        if conversation.book_id != book_id:
+            conversation.book_id = book_id
+            await self._db.flush()
+        return conversation
+
+    async def load_owned(
+        self, user: User, conversation_id: str | uuid.UUID,
+    ) -> AIConversation:
+        """按 id 取**本人的、未归档的**会话；此外一律 404。
+
+        三种情况共用一个码，不可分辨：不存在、是别人的、已被归档（删除）。
+        对客户端而言第三种只意味着「这个 id 不是我的会话了」——网络重试删除 /
+        重发一轮因此都是安全的（P2 挂账 1 的降级契约，见模块 docstring）。
+        """
         try:
             conv_uuid = uuid.UUID(str(conversation_id))
         except ValueError:
@@ -121,15 +165,13 @@ class ConversationService:
             select(AIConversation).where(
                 AIConversation.id == conv_uuid,
                 AIConversation.user_id == user.id,
+                AIConversation.archived_at.is_(None),
             )
         )
         if conversation is None:
             raise AppException(
                 404, ERR_CONVERSATION_NOT_FOUND, "Conversation not found",
             )
-        if conversation.book_id != book_id:
-            conversation.book_id = book_id
-            await self._db.flush()
         return conversation
 
     async def _verify_book(self, user: User, book_id: uuid.UUID) -> None:
@@ -148,6 +190,73 @@ class ConversationService:
         )
         if owned is None:
             raise AppException(404, "not_found", "Book not found")
+
+    # -- 会话列表与生命周期 -----------------------------------------------
+
+    async def list_conversations(self, user: User) -> list[AIConversation]:
+        """本人的未归档会话，按活跃时间倒序。
+
+        ``last_active_at`` 还是 NULL 的会话（建了行、一轮都没写成的）用
+        ``created_at`` 兜底——先后必须确定，否则客户端列表会在两次拉取之间抖动。
+        ``id`` 是最后的 tie-breaker：同一时刻建的两个会话（测试里是常态）也要
+        有稳定次序。
+        """
+        return list(await self._db.scalars(
+            select(AIConversation)
+            .where(
+                AIConversation.user_id == user.id,
+                AIConversation.archived_at.is_(None),
+            )
+            .order_by(
+                func.coalesce(
+                    AIConversation.last_active_at, AIConversation.created_at,
+                ).desc(),
+                AIConversation.created_at.desc(),
+                AIConversation.id.desc(),
+            )
+        ))
+
+    async def rename(self, conversation: AIConversation, title: str) -> None:
+        """改写标题。**不动 ``last_active_at``**——改个名字不该让会话在列表里跳位。"""
+        conversation.title = title.strip()
+        await self._db.flush()
+
+    async def delete(self, conversation: AIConversation) -> None:
+        """归档会话并清掉它的事件正文。
+
+        行留下、正文删掉，两半的理由见模块 docstring。事件**显式删而不靠级联**
+        ——与 :meth:`purge_user` 同口径：测试环境（SQLite）不强制外键，靠级联的
+        清理在测试里看不出效果，而生产上它必须真的干净。
+
+        幂等性由 :meth:`load_owned` 保证：归档之后它就取不到这一行，再删一次
+        是同一个 404（客户端重试因此安全）。
+        """
+        await self._db.execute(
+            delete(AIConversationEvent).where(
+                AIConversationEvent.conversation_id == conversation.id,
+            )
+        )
+        conversation.archived_at = datetime.now(UTC)
+        await self._db.flush()
+
+    async def events(
+        self, conversation: AIConversation, after_seq: int | None = None,
+    ) -> list[AIConversationEvent]:
+        """按 ``seq`` 升序读会话事件；给了 ``after_seq`` 就只取其后（增量读取）。
+
+        **原样读出** ``type`` 与 ``data``——不过滤、不改写（完整事件日志的
+        ``ignorable`` / Surface 子集归 P3 的 04a）。``data`` 与 :meth:`history`
+        是同一个数据面：工具结果里的内部 ID 在 ``agent`` 侧就被剥掉了。
+
+        ``after_seq`` 的语义是**严格大于**：客户端拿上一批最后一条的 ``seq``
+        再拉一次，不会重复收到它（断线重连的续读就靠这条）。
+        """
+        stmt = select(AIConversationEvent).where(
+            AIConversationEvent.conversation_id == conversation.id,
+        )
+        if after_seq is not None:
+            stmt = stmt.where(AIConversationEvent.seq > after_seq)
+        return list(await self._db.scalars(stmt.order_by(AIConversationEvent.seq)))
 
     # -- 上下文窗口 -------------------------------------------------------
 
@@ -210,6 +319,9 @@ class ConversationService:
         错误，不是可降级的业务错误；loop 自身产出的 delta 结构上不可能触发）。
 
         返回写入的事件条数。
+
+        写成功后顺手更新会话索引（:meth:`_note_activity`）：标题在空的时候由首轮
+        输入派生一次，活跃时间每次刷新——列表的排序与标题因此不用另开一条写路径。
         """
         prepared = _prepare_events(messages)
         if not prepared:
@@ -249,9 +361,23 @@ class ConversationService:
                     },
                 )
                 continue
+            self._note_activity(conversation, messages)
+            await self._db.flush()
             return len(prepared)
 
         raise AssertionError("unreachable: retry loop always returns or raises")
+
+    def _note_activity(
+        self, conversation: AIConversation, messages: Sequence[Mapping[str, Any]],
+    ) -> None:
+        """会话索引跟进这一轮：派生标题（只在还空着时）+ 刷新活跃时间。
+
+        标题**只派生一次**——用户改过名之后，后面的轮次不该把名字覆盖回去
+        （``rename`` 的结果会被吃掉）。活跃时间每次都刷，它就是列表的排序键。
+        """
+        if not conversation.title:
+            conversation.title = _derive_title(messages)
+        conversation.last_active_at = datetime.now(UTC)
 
     async def _next_position(self, conversation: AIConversation) -> tuple[int, int]:
         """下一个 ``(seq, turn)``——都在会话内单调递增，从 1 开始。"""
@@ -398,3 +524,18 @@ def _window_chars(window: Sequence[Sequence[dict[str, Any]]]) -> int:
         for turn in window
         for message in turn
     )
+
+
+def _derive_title(messages: Sequence[Mapping[str, Any]]) -> str:
+    """首轮消息 → 会话标题：第一条 user 消息压成单行，截断到 :data:`TITLE_MAX_CHARS`。
+
+    压单行是 ``" ".join(text.split())`` ——换行与连续空白一起收拾掉，标题在列表里
+    只占一行。取不到 user 消息时返回空串：列表用兜底文案渲染，不编一个假标题。
+    """
+    for message in messages:
+        if str(message.get("role", "")) != EVENT_USER:
+            continue
+        text = " ".join(str(message.get("content") or "").split())
+        if text:
+            return text[:TITLE_MAX_CHARS] + ("…" if len(text) > TITLE_MAX_CHARS else "")
+    return ""
