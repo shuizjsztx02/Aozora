@@ -512,7 +512,7 @@ export function useAssistant({
    *  与只读历史卡都挂在消息上，`editProposal` / `commitProposalInternal` 也按
    *  `proposalId` 匹配消息——队列里的第二张顶上时若没有这条消息，写入虽然照成，
    *  用户却看不到回执、历史里也没有它。文本先用提案自带的 `message` 兜底，
-   *  收尾拿到正文后由 `settleStream` 更新。 */
+   *  收尾时 `settleStream` 再带正文调一次本函数把它换掉。 */
   const showPendingApproval = useCallback((text?: string) => {
     const head = approvalsRef.current[0]
     if (!head) return
