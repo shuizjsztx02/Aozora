@@ -13,7 +13,7 @@
 | 卡 | 内容 | 状态 | 完成日 | 提交 | 备注 |
 |---|---|---|---|---|---|
 | **04a** | 事件日志完整化与 Surface 子集 | ✅ 完成 | 2026-09-19 | `e9203b0` | 批次 1；P3 基座。Surface 子集已落为单一来源常量，`history()` 只投它 |
-| **04b** | 会话恢复与分叉（含轮中途落库） | ⏳ 未开始 | | | 批次 2 |
+| **04b** | 会话恢复与分叉（含轮中途落库） | ✅ 完成 | 2026-09-19 | `c44b723` | 批次 2；写入粒度改**逐事件**（批＝配对组，故「半截落库」在结构上不可能）；恢复＝同 `conversation_id` 再跑一轮 + 客户端按 `after_seq` 续读；分叉端点；`CANCELLED` 复审：loop 层可达、生产入口不可达（刻意） |
 | **04c** | 摘要压缩与预算（`replace`） | ⏳ 未开始 | | | 批次 3 |
 | **04d** | 保留期与隐私边界落地 | ✅ 完成 | 2026-09-19 | `06dedfc` | 批次 2；窗口 **30 天**、按**整轮**物理删除（不变式 1 不破）；只删事件行，会话行与 `ai_usage` 不动；读取面审计结论＝不新增记录；四端点归属校验复审通过 |
 | **04e** | 跨设备会话同步（决策门） | ⏳ 未开始 | | | 批次 3 |
@@ -141,6 +141,9 @@ cd app && npx tsc --noEmit                       # 0 错
 | 8 | **摘要压缩触发条件**（轮数 vs token vs 时间，架构 §12.2 未决 #3） | 架构 §12.2 | **04c** |
 | 9 | **会话事件日志的保留期具体值**（边界已定，见架构 §12.2 已定表第 7 项） | 架构 §12.2 | **04d** |
 | 10 | **R-PROD-19 的恢复侧**——断连重试 + 按 `conversation_id` 恢复状态（P2 只做提示与重连入口） | P2 计划 §五 | **04b** |
+| 11 | **审批两类事件仍无生产者**——04a 把 `approval_request` / `approval_result` 的**生产者**记在 04b 名下（「恢复需要它们重建卡片」），04b **判定不接**：见下「04b 中间结果」的开放风险。归属改为「谁要做『从日志重建待确认卡片』谁接」 | 04a §六 | **未指派**（P4 收口时若无需求则关闭） |
+
+> **本表只记「谁承接」**——条目是否闭环看 §一 状态看板与 §六 各卡的中间结果记录。
 
 ---
 
@@ -229,6 +232,107 @@ cd app && npx tsc --noEmit                       # 0 错
 下一项未阻塞任务：**04b**（会话恢复与分叉，含轮中途落库）与 **04d**（保留期与
 隐私边界）可并行开工（批次 2）。04b 的直接输入：Surface 子集常量、事件表新列、
 以及本卡记录的「time 与 created_at 的分工」。
+```
+
+### T-M7-04b 会话恢复与分叉（含轮中途落库）（2026-09-19，`c44b723`）
+
+```text
+任务编号：T-M7-04b（P3 批次 2）
+
+完成范围 / 明确未做：
+  完成——写入粒度由「一轮原子」改为**逐事件**（落库批的边界＝配对组的边界，逐批
+  提交）；恢复（同 conversation_id 再跑一轮即续跑 + 客户端按 after_seq 续读，
+  done 帧新增 seq 作为游标）；会话分叉端点；error 事件接上生产者；StopReason.
+  CANCELLED 可达性复审。
+  **明确未做**（守职责边界）：不做压缩（04c）、不做保留期（04d，由并行会话交付）；
+  **不改审批语义与写路径的安全门**（02e 的组装 / 校验 / 审批 / 执行一行未动）；
+  **不接 approval_request / approval_result 的生产者**；不做分叉的客户端 UI 入口。
+
+修改的文档、契约与代码：
+  文档（先行）：architecture §4.4 增「不变式 1 的四道防线」、§6.2 补「写入粒度」
+    行与恢复 / 分叉的落地形态、§6.2 事件类型表的生产者列（user/assistant/tool/
+    error）、§8.1 的 done 载荷（+seq）、§8.3 的取消复审结论、§8.5 的半截文本契约。
+  服务端：agent.py（MessageSink 通道 + MessageStamp 逐事件时间 + 五个产出点按批
+    外送）、conversation.py（TurnWriter / max_seq / commit / fork /
+    _paired_prefix_len / history 尾部保证干净 / append_turn·_insert_events 接受
+    逐条 times）、stream.py（注入 sink、去掉整批 append_turn、_record_failure 写
+    error 事件、done 带 seq）、routes.py + schemas.py（POST /ai/conversations/{id}/
+    fork）、models/ai.py（两处过期措辞）。
+  客户端：桥新增 conversation.events（**计数 82→83**，Kotlin BridgeCommands.ALL +
+    SecurityConfigTest 计数守卫 + bridge-types.ts + native-bridge.test.ts 四处同步）；
+    use-assistant-stream.ts（游标 + 失败收尾前续读 + recoveredMessages 三条裁剪规则）；
+    use-assistant.ts（补记落在中断提示之前）。
+  测试：新 server/tests/test_ai_conversation_resume.py（16 例）；test_ai_
+    conversations_api.py 增 TestForkConversation（6 例）；test_agent_stream.py 的
+    3 条 P1 契约用例**改写**为新契约（断连不再「什么都不留」、失败轮留 error 事件）；
+    客户端 assistant-stream-projection.test.ts（+6）、use-assistant-agent-stream.
+    test.ts（+6，含桥能力缺席与续读失败两支）。
+
+验证命令与结果：
+  cd server && python -m pytest tests/ -q
+    → 1172 passed / 37 skipped（**并发会话下的全量数字不作本卡基线**；本卡增量＝
+      test_ai_conversation_resume 16 例 + 分叉 6 例＝22 例）
+  cd server && python -m ruff check src/ tests/ → All checks passed
+  ./gradlew :app:testDebugUnitTest --rerun-tasks → BUILD SUCCESSFUL（423 tests）
+  ./gradlew :app:compileDebugAndroidTestKotlin --rerun-tasks → BUILD SUCCESSFUL
+    （守则 §3.3：改主源码后必须显式编译 androidTest 源码集）
+  cd app && npx vitest run → 1249 passed（04a 基线 1237 + 本卡 12）
+  cd app && npx tsc --noEmit → 0 错
+  **反向验证**（守则 §3.2，9 处变异全部命中预期用例后才恢复）：
+    服务端 5 处——① TurnWriter 不提交 → 逐事件落库用例红；② 配对组拆成两批 →
+      5 例红（写在真实可达路径上）；③ _paired_prefix_len 恒返回全长 → 4 例红
+      （含分叉取整与读侧裁剪）；④ history 不裁尾巴 → 读侧兜底用例红；⑤ fork 顺手
+      动原会话的 last_active_at → 「原会话不动」用例红。
+    客户端 4 处——① 失败收尾不退化成直接 settle → 续读 2 例红；② 补记不落进消息流
+      → 同 2 例红；③ 不按轮裁剪 → 规则①用例红；④ 不去重 → 2 例红。
+  自洽性：`git show HEAD:...` 复核 HEAD 里不引用任何未提交产物（04d 在
+    conversation.py 留的 6 行已摘出本提交，工作区已还原）。
+
+数据/同步/AI/安全影响：
+  · **数据**：同一会话的事件行由「一轮一批」变成「一批一组」，条数不变、seq 语义
+    不变；`time` 现在逐条给（同一批内 assistant 与工具结果不再共用时间戳）。
+    04d 的保留期按 turn 分组取 max(time) 删整轮，与该变化兼容（已在那边注明）。
+  · **AI 成本**：无新增模型调用；断连不再让已完成的步骤白跑（下一轮带着它们继续）。
+  · **安全**：新增 `error` 事件落日志，载荷只有安全枚举码与固定文案（与 error 帧
+    同一张表），**不回显异常正文**；分叉走与其它会话端点完全相同的归属校验
+    （别人的 / 已删除的 / 不存在的 一律 404，三者不可分辨）。会话日志仍是
+    security.md 有条件例外的适用范围，保留期（04d）对分叉出的新会话同样适用。
+  · **同步**：不进 sync 协议（正文跨设备同步是 04e 的决策门）。
+
+兼容与回退方式：
+  兼容：`done` 新增 `seq` 是纯增量字段（旧客户端忽略即可）；`conversation.events`
+  是新桥命令（旧 APK 没有它 → 客户端能力探测跳过续读，中断提示照旧）；
+  `append_turn` / `_insert_events` 的新参数一律关键字可选，老调用点行为不变；
+  事件表与迁移**零改动**（不需要迁移）。
+  契约变更：**失败轮从「一条都不写」变成「写已完成的部分 + 一条 error 事件」**——
+  这是本卡的目的，不是回归；三条 P1 契约用例随之改写（未放宽断言，改的是期望的
+  行为）。
+  回退 = 把 sink 从 AgentLoop 里摘掉（`sink=None` 即 02d 行为）+ 恢复
+  `_execute_turn` 里的整批 `append_turn`；HTTP 面删 fork 端点与 `done.seq`；
+  客户端撤 conversation.events 与 catchUp。
+
+开放风险与责任人：
+  · **审批两类事件仍无生产者**（04a 记在 04b 名下）。04b **判定不接**，理由三条：
+    ① 卡面「不改审批语义与写路径的安全门」——而「从日志重建一张待确认卡片」是要
+    与 03e 的收敛口径相冲突的另一套语义（03e 定案：失败 / 断连时挂起提案按
+    `unavailable` 收敛、**零写**，卡不留）；② 它需要**成对**接上 `approval_result`
+    （审批四值的留档），那要动写路径的门；③ 当下没有消费者——卡的实时信号是
+    `confirm` 帧、权威清单是 done.proposals，两者都在流内给完。**已入 §五 挂账表
+    第 11 项**（改为「谁要做『从日志重建待确认卡片』谁接」，P4 收口时若无需求则关闭）。
+  · **正在生成的那一段正文仍不在日志里**（残余窗口）。它还没产出，无从落库；客户端
+    照架构 §8.5 保留半截并标错。§五 第 3 项按此口径判为**已关闭**：窗口从「整轮
+    跑完期间」回到「当前这一批」，且失败轮已完成的步骤不再丢。
+  · **断连的「续跑」是语义续跑，不是服务端把这一轮接着跑完**：工作协程仍随断连
+    取消（不保留前台服务、不续跑在途请求，R-PROD-19 的既定立场）。若将来要真续跑，
+    需要的是服务端可观测的取消/重连信号，那要动已冻结的桥命令表。
+  · **客户端续读的游标是内存态**：换设备 / 重开 App 后没有游标 → 退回全量拉取，
+    由 `recoveredMessages` 按轮裁剪保证不重影（只是多取一些行）。**责任人：04e**
+    （跨设备正文同步的决策门会决定要不要把它落盘）。
+  · **真机断连走查仍待做**（P3 收口，与 R-PROD-19 的残余项合并）。
+
+下一项未阻塞任务：**04c**（摘要压缩与预算，批次 3）与 **04e**（跨设备会话同步，
+决策门）可并行开工。04c 的直接输入：本卡定型的写路径（每次写入都是一个新的
+`replace` 事件的挂载点）与 `history()` 的窗口裁剪点。
 ```
 
 ### T-M7-04d 保留期与隐私边界落地（2026-09-19，`06dedfc`）
