@@ -506,15 +506,38 @@ export function useAssistant({
 
   /** 展示队头的挂起提案（卡随即出现；**动作在收尾后启用**，见页面的 `approvalBusy`）。
    *  卡在流式期间就出现是**事件驱动**的那一半——用户越早看到 agent 想做什么越好
-   *  （架构 §7.4：审批卡同时是安全门与纠偏点）。 */
-  const showPendingApproval = useCallback(() => {
+   *  （架构 §7.4：审批卡同时是安全门与纠偏点）。
+   *
+   *  同时保证它在**消息流里有一条记录**（已存在则不动）：回执文案（「已记录 N 笔交易」）
+   *  与只读历史卡都挂在消息上，`editProposal` / `commitProposalInternal` 也按
+   *  `proposalId` 匹配消息——队列里的第二张顶上时若没有这条消息，写入虽然照成，
+   *  用户却看不到回执、历史里也没有它。文本先用提案自带的 `message` 兜底，
+   *  收尾拿到正文后由 `settleStream` 更新。 */
+  const showPendingApproval = useCallback((text?: string) => {
     const head = approvalsRef.current[0]
     if (!head) return
+    const pid = head.proposal.proposalId
+    // 文本：收尾拿到正文就用正文；流式期间（还没有正文）先用提案自带的 `message` 兜底
+    const display = text || head.proposal.message
     isPendingConfirmRef.current = true
-    shownApprovalIdRef.current = head.proposal.proposalId
+    shownApprovalIdRef.current = pid
     setActiveProposal(head.proposal)
     setCardStatus('pending-confirm')
-  }, [])
+    setMessages(prev => {
+      const i = prev.findIndex(m => m.proposal?.proposalId === pid)
+      if (i < 0) {
+        return [...prev, {
+          id: 'msg_' + Date.now() + '_assistant',
+          role: 'assistant' as const,
+          text: display,
+          proposal: head.proposal,
+          proposalStatus: 'pending' as const,
+        }]
+      }
+      // 已有这条（流式期间随 `confirm` 帧建过）→ 把兜底文案换成收尾后的正文，其余不动
+      return text ? prev.map((m, k) => (k === i ? { ...m, text } : m)) : prev
+    })
+  }, [setMessages])
 
   /** 丢弃符合条件的挂起提案且**零写**，返回丢弃条数（调用方据此决定要不要提示用户）。
    *  丢弃的 id 一并记进已处置集合——否则服务端随后到的帧能让它们再成一张卡。 */
@@ -926,16 +949,11 @@ export function useAssistant({
 
     const head = approvalsRef.current[0]
     if (head) {
-      setMessages(prev => [...prev, {
-        id: 'msg_' + Date.now() + '_assistant',
-        role: 'assistant' as const,
-        text: text || head.proposal.message,
-        proposal: head.proposal,
-        proposalStatus: 'pending' as const,
-      }])
       // 挂起的提案 requiresConfirmation 恒为 True（T-M7-02e 决策 2），一律过确认门；
       // 用户点卡内「确认」后由 editProposal 的待确认分支接管首次写入。
-      showPendingApproval()
+      // 消息流的落点交给 `showPendingApproval`（建消息 / 用正文替换兜底文案），
+      // 它同时管「队列里第二张顶上时也要有一条消息」——回执与历史卡都挂在消息上。
+      showPendingApproval(text)
       return
     }
 

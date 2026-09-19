@@ -1025,6 +1025,35 @@ describe('use-assistant — 确认门四值（T-M7-03e）', () => {
     expect(mockBridge.runAgent).toHaveBeenLastCalledWith('帮我记一笔午饭12块', 'book-1', null)
   })
 
+  it('多提案：第二张顶上时**消息流里也有它**（回执与历史卡都挂在消息上）', async () => {
+    const p1 = pendingProposal()
+    const p2 = { ...pendingProposal(), proposalId: 'agent-def456', message: '再记一笔打车' }
+    const { result } = setup()
+
+    await act(async () => {
+      const p = result.current.submitInput('两个改动')
+      await Promise.resolve()
+      emit('confirm', { step: 2, proposal: p1 as unknown as Record<string, unknown> })
+      emit('confirm', { step: 3, proposal: p2 as unknown as Record<string, unknown> })
+      emit('done', donePayload({
+        proposals: [p1, p2] as unknown as Array<Record<string, unknown>>,
+      }))
+      await p
+    })
+
+    await act(async () => { await result.current.editProposal(p1) })
+    await waitFor(() => expect(result.current.activeProposal?.proposalId).toBe('agent-def456'))
+
+    // 第二张在消息流里也有一条——否则写入照成、用户却看不到回执，历史卡也没有它
+    expect(result.current.messages.some(m => m.proposal?.proposalId === 'agent-def456')).toBe(true)
+
+    await act(async () => { await result.current.editProposal(p2) })
+
+    const m2 = result.current.messages.find(m => m.proposal?.proposalId === 'agent-def456')
+    expect(m2?.text).toBe('已记录 1 笔交易')
+    expect(m2?.proposalStatus).toBe('committed')
+  })
+
   it('多提案队列：确认第一张后第二张顶上（一轮可以挂起多笔写）', async () => {
     const p1 = pendingProposal()
     const p2 = { ...pendingProposal(), proposalId: 'agent-def456', message: '再记一笔打车' }
