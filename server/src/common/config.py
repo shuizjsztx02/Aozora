@@ -274,6 +274,31 @@ class Settings(BaseSettings):
         ),
     )
 
+    # --- AI 会话日志保留期 (T-M7-04d) ---
+    # 事件正文的保留窗口（天）。security.md 的有条件例外要求「保留期对齐
+    # D-PROD-08」——D-PROD-08 的 7 天是**账号删除的宽限期**，不是内容保留期；
+    # 对齐的是保证形态（有界、到点物理删除），数值取 30 天：覆盖会话被重新拾起
+    # 的现实窗口，同时把服务端持有的正文量钉死在「活跃用户 × 最近 30 天」。
+    # 与 §6.3 的窗口 N、会话级双限同口径——**初始值**，真实使用分布出来后校准。
+    ai_conversation_retention_days: int = Field(
+        default=30,
+        gt=0,
+        validation_alias=AliasChoices(
+            "AI_CONVERSATION_RETENTION_DAYS", "ai_conversation_retention_days",
+        ),
+    )
+    # 保留期任务的开关。**默认关闭**，由部署侧显式开启（同 RETENTION_JOB_ENABLED
+    # 的口径：`docker-compose.staging.yml` / `docker-compose.prod.yml` 已置 true）。
+    # 关闭意味着 security.md 的第一条约束不成立——那是部署缺陷，不是配置选项；
+    # 默认值取 false 只是因为测试进程不该起后台任务（同 RETENTION_JOB_ENABLED 的
+    # 理由），**不**意味着生产可以不开。
+    ai_conversation_retention_enabled: bool = Field(
+        default=False,
+        validation_alias=AliasChoices(
+            "AI_CONVERSATION_RETENTION_ENABLED", "ai_conversation_retention_enabled",
+        ),
+    )
+
     # --- AI agent SSE 端点 (T-M7-02g) ---
     # 灰度开关（架构 §11.3 的双层开关：本项是服务端层，客户端层在 02i 的
     # ``submitInput`` 上）。**默认关闭**——关闭时 ``POST /ai/agent`` 按 404 处理，

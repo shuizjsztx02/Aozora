@@ -62,6 +62,9 @@ services:
       # T-M5-05b follow-up: enable in-process daily D1/D7 retention job.
       # Writes the business_d1/d7 Grafana gauges once per UTC day.
       RETENTION_JOB_ENABLED: "true"
+      # T-M7-04d: 会话事件日志保留期（security.md 的隐私义务，默认关闭 +
+      # 部署侧显式开启）。窗口默认 30 天，见 config.py。
+      AI_CONVERSATION_RETENTION_ENABLED: "true"
     depends_on:
       db:
         condition: service_healthy

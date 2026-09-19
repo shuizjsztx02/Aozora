@@ -44,6 +44,10 @@ x-api-env: &api-env
   # 本文件不部署 OTel Collector，关闭埋点导出避免后台重试噪音；
   # 上 observability 栈时再改回 true（见 RUNBOOK 第 7 节）
   ENABLE_TELEMETRY: "false"
+  # T-M7-04d：会话事件日志的保留期任务。**刻意独立于 ENABLE_TELEMETRY**——
+  # security.md 的会话日志例外要求「保留期对齐 D-PROD-08」，那是隐私义务，
+  # 不能被上面那个埋点开关顺带关掉。两个实例都开；窗口默认 30 天（config.py）。
+  AI_CONVERSATION_RETENTION_ENABLED: "true"
 
 services:
   api-test:

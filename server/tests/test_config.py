@@ -70,6 +70,26 @@ class TestDefaults:
         s = Settings(database_url="sqlite+aiosqlite:///test.db")
         assert s.retention_job_enabled is False
 
+    # T-M7-04d: 会话日志保留期的开关同理——默认关闭只是「测试进程不起后台
+    # 任务」，部署侧（staging / prod compose）必须显式开启，否则 security.md
+    # 的第一条约束不成立。
+    def test_ai_conversation_retention_default_disabled(self):
+        s = Settings(database_url="sqlite+aiosqlite:///test.db")
+        assert s.ai_conversation_retention_enabled is False
+
+    def test_ai_conversation_retention_days_default(self):
+        s = Settings(database_url="sqlite+aiosqlite:///test.db")
+        assert s.ai_conversation_retention_days == 30
+
+    @pytest.mark.parametrize("days", [0, -1])
+    def test_ai_conversation_retention_days_must_be_positive(self, days):
+        # 0 会让「到期」退化成「删光」，负数是配置错误——两者都拒绝。
+        with pytest.raises(ValidationError):
+            Settings(
+                database_url="sqlite+aiosqlite:///test.db",
+                ai_conversation_retention_days=days,
+            )
+
     def test_secret_key_default(self):
         s = Settings(database_url="sqlite+aiosqlite:///test.db")
         assert s.secret_key == "dev-secret-do-not-use-in-production"

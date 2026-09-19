@@ -104,6 +104,18 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
             retention_loop(get_session_factory()),
             name="retention-loop",
         )
+    # T-M7-04d: 会话事件日志的保留期任务。**刻意不挂 enable_telemetry**——
+    # ``security.md`` 的保留期是一条隐私义务，不能被埋点开关（prod compose 当前
+    # 就是关的）顺带关掉。默认关闭 + 部署侧显式开启，口径同 RETENTION_JOB_ENABLED。
+    conversation_retention_task: asyncio.Task | None = None
+    if cfg.ai_conversation_retention_enabled:
+        from src.common.database import get_session_factory
+        from src.modules.ai.retention import retention_loop as conversation_retention_loop
+
+        conversation_retention_task = asyncio.create_task(
+            conversation_retention_loop(get_session_factory()),
+            name="conversation-retention-loop",
+        )
     yield
     from src.common.database import get_engine
 
@@ -111,6 +123,11 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         retention_task.cancel()
         with contextlib.suppress(asyncio.CancelledError):
             await retention_task
+
+    if conversation_retention_task is not None:
+        conversation_retention_task.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await conversation_retention_task
 
     # P1#1: close the pooled AI provider HTTP client before disposing the engine.
     from src.modules.ai.provider import close_llm_provider
