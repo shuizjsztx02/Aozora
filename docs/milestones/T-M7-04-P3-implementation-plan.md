@@ -179,15 +179,15 @@ cd app && npx tsc --noEmit                       # 0 错
     `purge_expired_summaries` + sweep 接线，**并删掉一段 `return` 之后的死代码**——
     04d 的编辑残留，与本卡新增的两行日志同处一个函数，留着会误导下一位读者）、
     `models/ai.py`（summary 列 docstring）、`.env.example`。
-  测试：新 `tests/test_ai_conversation_summary.py`（31 例）；
+  测试：新 `tests/test_ai_conversation_summary.py`（32 例）；
     `test_agent_stream.py` +5（`TestCompression`）；`test_ai_conversation_retention.py`
     两条返回契约断言随 `cleared_summaries` 更新（不是放宽断言）。
 
 验证命令与结果：
   **干净 HEAD + 仅本卡文件**（临时 worktree `git worktree add --detach HEAD` @1333c1d，
   铺入本卡 11 个文件后跑）：
-    python -m pytest tests/ -q → **1211 passed / 37 skipped / 0 failed**
-    HEAD 基线同法实测 **1175 passed / 37 skipped** → 本卡 **+36 例、零减少**
+    python -m pytest tests/ -q → **1212 passed / 37 skipped / 0 failed**
+    HEAD 基线同法实测 **1175 passed / 37 skipped** → 本卡 **+37 例、零减少**
     python -m ruff check src/ tests/ → All checks passed
   四板（工作区）：pytest **1211**、vitest **1266 passed**、tsc **0 错**、JVM
     `testDebugUnitTest` **424 tests / 0 failures / 1 skipped**。

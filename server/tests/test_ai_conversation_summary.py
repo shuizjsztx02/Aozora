@@ -115,6 +115,24 @@ class _LoopProvider:
         yield StreamChunk(result=result)
 
 
+def _assert_pairs(messages: list[dict[str, Any]]) -> None:
+    """配对组完整性：每个 ``tool_calls`` 的 id 都有配对的 ``tool`` 结果。
+
+    与 ``test_ai_conversation.py`` 的同名断言同一口径（不变式 1）——压缩不该让
+    窗口里的配对关系变样。
+    """
+    pending: set[str] = set()
+    for message in messages:
+        role = message.get("role")
+        if role == "assistant":
+            calls = message.get("tool_calls") or []
+            pending = {str(c["id"]) for c in calls} if calls else set()
+        elif role == "tool":
+            assert message.get("tool_call_id") in pending
+            pending.discard(str(message.get("tool_call_id")))
+    assert not pending
+
+
 def _msg(role: str, content: str, **extra: Any) -> dict[str, Any]:
     return {"role": role, "content": content, **extra}
 
@@ -560,6 +578,28 @@ class TestSummaryInContext:
         assert json.dumps(before_provider.calls[0], ensure_ascii=False, sort_keys=True) == (
             json.dumps(after_provider.calls[0], ensure_ascii=False, sort_keys=True)
         )
+
+    async def test_clarification_context_survives_compression(
+        self, db_session, sample_data,
+    ):
+        """多轮澄清在压缩后仍成立：**窗口（最近几轮原文）+ 摘要（更早的）**同时在。
+
+        P3 验收列的「多轮澄清用例在压缩后仍正确」在服务端侧的落点就是这一条：
+        压缩不夺走任何一侧——窗口照旧（含完整的工具配对组），更早的轮次进摘要提示。
+        """
+        db, user, book = db_session, sample_data["user"], sample_data["book"]
+        service = ConversationService(db, _cfg(ai_agent_history_turns=2))
+        conversation = await _seed(service, user, book, 4, factory=_tool_turn)
+        provider = _SummaryProvider("用户在问预算，助手已经答复过两次。")
+
+        await service.summarize_overflow(conversation, provider)
+
+        history = await service.history(conversation)
+        _assert_pairs(history)
+        assert history[0]["content"] == "第3轮问题"     # 窗口起点没有被压缩挪动
+        assert "第1轮问题" in provider.prompt           # 更早的轮次确实被带下去了
+        assert "第2轮问题" in provider.prompt
+        assert conversation.summary == "用户在问预算，助手已经答复过两次。"
 
     async def test_overflowing_turns_are_fed_into_the_summary_prompt(
         self, db_session, sample_data,
