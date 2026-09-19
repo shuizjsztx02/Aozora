@@ -132,10 +132,10 @@ cd app && npx tsc --noEmit                       # 0 错
 | # | 挂账 | 落卡 | 处理方式 |
 |---|---|---|---|
 | 1 | **登出按用户粒度清会话**（02f 决策 7）——多设备场景下会误伤另一台设备的会话，且影响 `purge_user` 的粒度 | **03a** | 本卡给出结论并落地（保持 / 改粒度 / 引入设备维度）。P1 时客户端单会话、无跨设备正文同步，影响面有限；P2 引入会话归属维度后必须重审。**已落地（985ee2d，2026-09-19）：保持按用户粒度清、不引入设备维度**——`ai_conversations` 无设备列、`/ai/agent` 也不带 `device_id`，加设备维度要同时改请求契约与 02h 已冻结的桥，而跨设备正文同步归 04e 的决策门。代价（多设备下另一台机器的服务端会话消失）已知并接受；**客户端的 404 降级契约（丢弃该 id、开新会话）落 03b / 03d**，详见 §六 03a 记录 |
-| 2 | **快档 + 直接调工具时这一步没有任何 `delta`**（02g-2 探针 P1：0 帧） | **03b / 03c** | 渲染**不能假设「每条回复都从 `delta` 开始」**；「有反应」在该形态下靠 `tool_call` / `tool_result` |
+| 2 | **快档 + 直接调工具时这一步没有任何 `delta`**（02g-2 探针 P1：0 帧） | **03b / 03c** | 渲染**不能假设「每条回复都从 `delta` 开始」**；「有反应」在该形态下靠 `tool_call` / `tool_result`。**已落地（03c，`98ac17f`）**：步骤区本就不依赖正文——0 帧 `delta` 的一轮里步骤区照常在场、正文走「思考中…」占位，有用例钉住 |
 | 3 | **`StopReason.CANCELLED` 在 P1 不可达**——断连走的是连接取消（不发帧），审批通道也未接 | **03e** | P2 把取消做成主动交互后，须重新定义「取消」的服务端可观测形态，并让客户端收敛到一致状态 |
 | 4 | **客户端层灰度开关未落地**（02g 决策 6）——责任人原为 02i | — | **已由 02i 落地**（`AI_AGENT_CLIENT_ENABLED`，`use-assistant.ts:171`，默认 false）；P2 各卡不得改动其默认值 |
-| 5 | **合并窗两个参数是初值**（100 ms 与「同通道 + 同 Step」分组键）——真实分布要等 02h / 02i 接通后统计 | **03c / 收口** | 步骤卡与流式渲染落地后按真实帧分布复核；责任人原为「收口」 |
+| 5 | **合并窗两个参数是初值**（100 ms 与「同通道 + 同 Step」分组键）——真实分布要等 02h / 02i 接通后统计 | **03c / 收口** | 步骤卡与流式渲染落地后按真实帧分布复核；责任人原为「收口」。**渲染面已落地（03c）**；**复核动作仍未做**——它要的是**真机真实帧分布统计**（单测层拿不到），随批次 4 收口的真机走查一并做。**责任人：M7 收口** |
 | 6 | **R-PROD-19（SSE 弱网 / 后台中断）**——客户端明确提示中断状态 | **03e**（提示）+ **P3 的 04b**（恢复） | P2 只做提示与重连入口；按 `conversation_id` 续跑归 P3 |
 
 ---
@@ -197,7 +197,13 @@ cd app && npx tsc --noEmit                       # 0 错
 | `cd app && npx tsc --noEmit` | **0 错** |
 | `cd app && npm run lint` | exit 0；本卡新增的 5 个文件**零告警**（既有告警集合不变） |
 | `bash ./gradlew :app:testDebugUnitTest --rerun-tasks` | **418 tests / 0 failures / 1 skipped**（基线 406 → +12，即两个新 Kotlin 测试文件） |
+| `bash ./gradlew :app:lintDebug :app:assembleDebug :app:assembleDebugAndroidTest` | **BUILD SUCCESSFUL**；其中 `compileDebugAndroidTestKotlin` **确实执行**（非 UP-TO-DATE）——本卡动了主源码的 `AiError` 与 `executeAuthorized` 签名，**androidTest 源集能编译**是本仓踩过的坑（本地 JVM 单测绿 ≠ androidTest 能编译） |
+| `cd app && npm run typecheck` | exit 0（`tsc --noEmit` + `tsc -p tsconfig.node.json`，即 CI Client 作业的口径） |
+| `cd app && npm audit --audit-level=high` | 0 vulnerabilities |
 | `cd server && python -m pytest tests/ -q` | **1075 passed / 37 skipped**（与 03a 基线逐字一致；本卡未触碰任何 Python 文件） |
+
+> **远端 CI：本轮按要求未确认**（推送已完成，未等待 / 未查看远端结果）——按「不得写成通过」的口径，此处记「未确认」而非「通过」。本卡所有结论以上表的**本地 CI 等价命令**为准。
+> `dependencyCheckAnalyze` 未跑：本卡**未新增任何依赖**（`package.json` / `build.gradle.kts` 一行未动），该任务是长耗时且依赖 NVD 库下载的网络任务。
 
 **回退实验（5 处变异，逐条回退后实测）：5/5 变红** —— Kotlin 2 处：同步路径 404 分支去掉
 （`conversationEndpoints_map404ToNotFound` 红）、SSE 路径 404 分支改回 `Network`
@@ -284,7 +290,11 @@ UI 区域不重叠（确认卡在卡片区 + 输入区，本卡在顶栏抽屉�
 | `cd app && npx tsc --noEmit` | **0 错** |
 | `cd app && npm run lint` | exit 0；本卡新增文件**零告警**（既有告警集合不变） |
 | `bash ./gradlew :app:testDebugUnitTest --rerun-tasks` | 本卡未触碰 Kotlin（该行数字由 03d 的交付记录给出） |
+| `cd app && npm run typecheck` | exit 0（含 `tsconfig.node.json` 一份，即 CI Client 作业的口径；比单跑 `tsc --noEmit` 更严） |
+| `cd app && npm audit --audit-level=high` | 0 vulnerabilities |
 | `cd server && python -m pytest tests/ -q` | 本卡未触碰 Python（同上） |
+
+> **远端 CI：本轮按要求未确认**（推送已完成，未等待 / 未查看远端结果）——按「不得写成通过」的口径记「未确认」。Kotlin 侧（`lintDebug` / `assembleDebug` / `assembleDebugAndroidTest`）由 03d 的同一批验证覆盖，本卡未新增主源码改动。
 
 **新增用例分布（`assistant-step-cards.test.tsx`，13 例）：** 三态齐全（含失败态）/ 未知
 失败码走兜底且不透传服务端原文 / 简单任务无步骤区 / 只有 thinking 的步不成行 /
