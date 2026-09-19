@@ -517,6 +517,56 @@ class TestRetentionDriver:
 
 
 # ---------------------------------------------------------------------------
+# 与 04b 的交汇面：分叉复制的前缀带**父会话原 time**
+# ---------------------------------------------------------------------------
+
+class TestForkInteraction:
+    """04b 的 `fork` 按原值复制前缀（含 ``time``），因此保留期对分叉**无需特判**：
+
+    已过期的那部分前缀，在新会话里同样过期，随下一次清扫一起消失。**这是刻意的**——
+    若复制时盖成 ``now``，分叉就成了「把 30 天前的正文洗成新的」的绕过手段，保留期
+    承诺（服务端最多持有 30 天正文）会当场失效。代价写进 security.md 的口径：分叉的
+    实际可用历史＝保留期窗口内那部分，对已过期的会话分叉得到的是「有标题、无正文」的
+    会话（模型侧无上下文）。
+    """
+
+    async def test_fork_keeps_original_times_so_old_prefix_expires_too(
+        self, db_session, sample_data,
+    ):
+        conv = await _conversation(db_session, sample_data)
+        await _turn(db_session, conv, turn=1, at=LONG_AGO)   # seq 10/11，已过期
+        await _turn(db_session, conv, turn=2, at=RECENT)     # seq 20/21，未过期
+        service = ConversationService(db_session, _cfg())
+
+        whole_fork, _ = await service.fork(conv, upto_seq=21)   # 前缀含两轮
+        old_fork, _ = await service.fork(conv, upto_seq=11)     # 前缀只有已过期那轮
+
+        await _sweep(db_session)
+
+        # 连「整段都分叉」的那个也只留下窗口内的那一轮——前缀的原时间戳生效
+        assert [e.turn for e in await _events(db_session, whole_fork)] == [2, 2]
+        assert await _events(db_session, old_fork) == []
+        # 保留期只删事件：两个分叉的**会话行**都还在（父会话也一样）
+        for forked in (whole_fork, old_fork, conv):
+            assert (await service.load_owned(sample_data["user"], forked.id)).id == forked.id
+        # 模型上下文同理：过期前缀不进窗口
+        assert [m["role"] for m in await service.history(whole_fork)] == ["user", "assistant"]
+
+    async def test_a_fresh_fork_prefix_survives_intact(self, db_session, sample_data):
+        """窗口内的前缀一分不少——分叉在保留期内是完整的。"""
+        conv = await _conversation(db_session, sample_data)
+        await _turn(db_session, conv, turn=1, at=RECENT)
+        service = ConversationService(db_session, _cfg())
+
+        forked, cut_seq = await service.fork(conv, upto_seq=11)
+
+        await _sweep(db_session)
+
+        assert cut_seq == 11
+        assert [e.turn for e in await _events(db_session, forked)] == [1, 1]
+
+
+# ---------------------------------------------------------------------------
 # 归属校验复审（03a 四个端点）
 # ---------------------------------------------------------------------------
 
