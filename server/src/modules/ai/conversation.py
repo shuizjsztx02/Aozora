@@ -3,8 +3,7 @@
 服务端持有会话状态（架构 §6.3）——客户端只传 ``conversation_id`` + 本轮输入，
 历史由本模块读出并投影成下一次 ``AgentLoop.run(history=…)`` 的输入。P1 只做了
 「够多轮上下文」的最小形态；P3 在此之上补齐**完整事件日志与 Surface 子集**
-（04a）、**逐事件落库、恢复与分叉**（04b）。**仍不做压缩**——超窗轮次的 ``replace``
-归 04c，本卡（04b）只保证「原文都在日志里、按 ``seq`` 取得到」。
+（04a）、**逐事件落库、恢复与分叉**（04b）、**摘要压缩与预算**（04c）。
 
 三个概念，先分清
 ----------------
@@ -18,8 +17,8 @@ Turn          一次用户输入跑完整个 loop。**配额与窗口都以它�
               轮切成两半，窗口起点落在轮中间时用户最初的提问就丢了（复审 P2-1，
               见 ``models/ai.py`` 的 ``turn`` 列）。
 Event         会话日志里的一行，带轮号 ``turn``。
-窗口          最近 N 轮原文 + 字符双限（架构 §6.4）。超窗轮次**直接丢**——
-              P1 不生成摘要，原文仍在日志里（P3 才做 ``replace`` 压缩）。
+窗口          最近 N 轮原文 + 字符双限（架构 §6.4）。**窗口之外的轮次由摘要
+              承载**（04c）——原文仍在日志里，只是不再进模型上下文。
 ============  ==================================================================
 
 事件分两档（T-M7-04a，架构 §6.2）
@@ -125,12 +124,32 @@ assistant 消息与它的全部 ``role="tool"`` 结果同批同提交。于是�
 ``tool_calls``，那正是本卡要保住的不变式。新会话是**独立**的——它有自己的 ``seq``
 空间与生命周期，父会话被删除或到期清理都不影响它（代价是前缀存了两份；换来的是
 04d 的保留期对分叉无需特判）。
+
+摘要压缩（T-M7-04c）
+--------------------
+
+**触发条件是「窗口溢出」，不与 token / 时间并列**（架构 §12.2 未决 #3 的结论，
+理由见 :meth:`ConversationService.summarize_overflow`）：窗口本身就是按轮数裁的，
+「有轮次落在窗口之外」就是「需要摘要」的定义本身。压缩的产物是一条 ``replace``
+事件（**原文一行不删**，仍可按 ``seq`` 取到、仍进投影 B / C）加上
+``AIConversation.summary`` 列。
+
+**摘要怎么进上下文**：不在 ``history()`` 的返回值里，而是经
+``AgentLoop.run(summary=…)`` 拼进**系统提示**的一段。两个理由：① 它不对应日志里
+的任何一条 Surface 事件，塞进 messages 数组等于让窗口里多出一条无来源的消息；
+② ``[system] + history`` 这个数组形状是 02d 以来被真实链路验过的，不动它就不会
+多出「两条 system」这类只在真实 provider 上才暴露的问题。
+
+**摘要的读取面**：``summary`` 列是**投影**，权威仍在日志——:meth:`fork` 因此从
+新会话自己的前缀里重新派生它，而不是复制父会话的列。保留期（04d）删掉正文之后
+摘要也必须跟着消失，那条判定在 ``retention.purge_expired_summaries``。
 """
 
 from __future__ import annotations
 
 import json
 import logging
+import re
 import uuid
 from collections.abc import Mapping, Sequence
 from datetime import UTC, datetime
@@ -146,12 +165,17 @@ from src.models.ai import AIConversation, AIConversationEvent, AIUsage
 from src.models.ledger import Book
 from src.models.user import User
 
+from .prompts import CONVERSATION_SUMMARY
 from .service import build_usage_row
 
 if TYPE_CHECKING:
     # 只为标注：`agent` 是 loop 那一层，本模块不在运行期依赖它（`MessageStamp`
     # 的形状即「消息字典 + 产出时刻」，见 `agent.MessageStamp`）。
     from .agent import MessageStamp
+
+    # 同上：摘要生成只用到 `complete` 这一条通路，`DeepSeekProvider` 同时满足
+    # `LLMProvider` 与 `ToolCallingProvider`，这里按前者标注（04c）。
+    from .provider import LLMProvider
 
 logger = logging.getLogger(__name__)
 
@@ -192,6 +216,19 @@ EVENT_TYPES = SURFACE_EVENT_TYPES | STRUCTURAL_EVENT_TYPES
 #: 抽屉里占一行，长了也只能截断显示。用户重命名不受这个数字约束（那是
 #: ``schemas.AIConversationRenameRequest`` 的事，上限对齐列宽）。
 TITLE_MAX_CHARS = 40
+
+#: UUID 形状的内部 ID。摘要里出现任何一个都违反架构 §6.3 的反幻觉约束
+#: （「历史与摘要只含自然语言，不得出现 UUID / 内部 ID」）。口径与
+#: ``tests/test_ai_conversation.py`` 的窗口用例同一条正则——**同一个形状，
+#: 两处断言**：那边管窗口，这边管摘要。
+_INTERNAL_ID_RE = re.compile(
+    r"[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}"
+)
+
+#: 送进摘要提示时每条消息的截断上限。用户输入本身就受单轮 500 字符的约束
+#: （架构 §6.4），会超的是助手的长回答——摘要是要**压缩**它，不是复述它，
+#: 单条给几百字符足够模型抓到结论。
+_SUMMARY_MESSAGE_CHARS = 400
 
 #: 会话 id 本身是内部 ID，**不进历史正文**，只作为请求参数出现。
 ERR_INVALID_CONVERSATION_ID = "invalid_conversation_id"
@@ -324,6 +361,10 @@ class ConversationService:
         ——与 :meth:`purge_user` 同口径：测试环境（SQLite）不强制外键，靠级联的
         清理在测试里看不出效果，而生产上它必须真的干净。
 
+        **摘要一并清空**（04c）：``summary`` 是那些被删轮次的压缩，正文都没了还
+        留着它，等于给「用户删掉的对话」开了一扇后门——它仍会进下一轮的系统提示。
+        保留期那条路径上的同一判定在 ``retention.purge_expired_summaries``。
+
         幂等性由 :meth:`load_owned` 保证：归档之后它就取不到这一行，再删一次
         是同一个 404（客户端重试因此安全）。
         """
@@ -332,6 +373,7 @@ class ConversationService:
                 AIConversationEvent.conversation_id == conversation.id,
             )
         )
+        conversation.summary = ""
         conversation.archived_at = datetime.now(UTC)
         await self._db.flush()
 
@@ -390,6 +432,30 @@ class ConversationService:
         模型上下文里出现孤立的 ``tool_calls`` 会被 API 以 400 拒绝，这条底线不该
         只靠「写路径写得对」。
         """
+        turns = await self._surface_turns(conversation)
+        window = self._window(conversation, turns)
+        return [message for turn, messages in window for message in messages]
+
+    async def _surface_turns(
+        self, conversation: AIConversation,
+    ) -> list[tuple[int, list[dict[str, Any]]]]:
+        """读 **Surface 事件**并按 ``turn`` 分组，返回 ``[(turn, messages), …]``。
+
+        **两个消费方共用**（T-M7-04c）：:meth:`history` 投影上下文窗口，
+        :meth:`summarize_overflow` 决定哪些轮次要进摘要。共用是刻意的——压缩要
+        覆盖的正是「模型看不见的那部分」，两处若各算各的分组，迟早漂移成
+        「窗口外」与「摘要覆盖」两张对不上的表。
+
+        白名单下推到 SQL（04a）：结构性事件根本不取出来，它们没有上限（每轮一条
+        quota、将来每个提案一条审批），取出来只为丢掉是纯浪费。
+
+        尾部裁到配对组边界（:func:`_paired_prefix_len`）也在这里做：日志末尾若停在
+        配对组中间，只取到上一个安全点。正常写入路径下这是空转——落库批的边界就是
+        配对组的边界（:class:`TurnWriter`），尾巴不可能半截；它防的是**别的写入
+        方**：分叉的前缀切点、并发写同一会话的交叉、以及将来任何绕过 sink 的写
+        路径。模型上下文里出现孤立的 ``tool_calls`` 会被 API 以 400 拒绝，这条
+        底线不该只靠「写路径写得对」。
+        """
         rows = (await self._db.scalars(
             select(AIConversationEvent)
             .where(
@@ -412,30 +478,170 @@ class ConversationService:
                 },
             )
             rows = rows[:paired]
-        if not rows:
-            return []
 
-        turns: list[list[dict[str, Any]]] = []
-        current_turn: int | None = None
+        turns: list[tuple[int, list[dict[str, Any]]]] = []
         for row in rows:
-            if row.turn != current_turn:
-                turns.append([])
-                current_turn = row.turn
-            turns[-1].append(dict(row.data))
+            if not turns or turns[-1][0] != row.turn:
+                turns.append((row.turn, []))
+            turns[-1][1].append(dict(row.data))
+        return turns
 
-        window = turns[-self._cfg.ai_agent_history_turns:]
-        while len(window) > 1 and _window_chars(window) > self._cfg.ai_agent_history_chars:
+    def _window(
+        self,
+        conversation: AIConversation,
+        turns: Sequence[tuple[int, list[dict[str, Any]]]],
+    ) -> list[tuple[int, list[dict[str, Any]]]]:
+        """窗口选择：最近 N 轮 + 字符双限（架构 §6.4），返回 ``(turn, messages)``。
+
+        带上轮号是 04c 的需要：压缩问的是「哪些轮次落在窗口之外」，只有消息列表
+        答不了这个问题。
+        """
+        window = list(turns[-self._cfg.ai_agent_history_turns:])
+        while len(window) > 1 and _window_chars(
+            [messages for _, messages in window]
+        ) > self._cfg.ai_agent_history_chars:
             dropped = window.pop(0)
             logger.info(
                 "agent history window truncated by char budget",
                 extra={
                     "conversation_id": str(conversation.id),
-                    "dropped_messages": len(dropped),
+                    "dropped_messages": len(dropped[1]),
                     "outcome": "history_char_limit",
                 },
             )
+        return window
 
-        return [message for turn in window for message in turn]
+    # -- 摘要压缩（04c）---------------------------------------------------
+
+    async def summarize_overflow(
+        self, conversation: AIConversation, provider: LLMProvider,
+    ) -> bool:
+        """把**已经落在窗口之外**的轮次压缩进摘要，写一条 ``replace`` 事件。
+
+        返回是否真的产出了新摘要（供调用方记日志）；**任何失败都返回 False 且不
+        抛**。
+
+        **触发条件就是「窗口溢出」，不另立 token / 时间尺子**（架构 §12.2 未决 #3
+        的结论）。三条理由：① 窗口本身就按轮数裁，「有轮次落在窗口之外」就是
+        「需要摘要」的定义本身，另立一把尺子只会让触发点与窗口脱节；② token 在
+        **写入侧拿不到**（要 provider 返回 usage 才知道），按它触发意味着压缩永远
+        滞后一轮，而那正是窗口最挤的时候；③ 时间更没有依据——会话可能一周才被
+        拾起一次，按时间触发会把刚说过的话摘要掉。
+
+        **覆盖范围由窗口算出来，不由调用方给**：``_window`` 正是 :meth:`history`
+        用的那一个，所以「摘要覆盖的」与「模型看不见的」是同一件事，不是两处各
+        自维护的近似。
+
+        **增量**：上一次压缩覆盖到 ``upto_turn``（从最后一条 ``replace`` 事件读，
+        **不从列读**——列是投影），本次只摘要它之后、窗口之前的轮次，并把上一版
+        摘要一并交给模型合并。摘要因此始终是「第 1 轮到窗口起点」的一整段。
+
+        **原文一行不删**：压缩只是**新增**一条事件，被摘要的 ``user`` /
+        ``assistant`` / ``tool`` 行原样留在日志里，``GET /ai/conversations/{id}/
+        events`` 仍读得到（审计用例钉死这一点）。这是架构 §6.2「压缩无损」的定义。
+
+        ``same_turn=True``：压缩是**本轮的收尾维护**，不占新轮号——另立一个只含
+        ``replace`` 的轮次会在日志里留下一个没有对话内容的轮号。
+        """
+        turns = await self._surface_turns(conversation)
+        if not turns:
+            return False
+        window = self._window(conversation, turns)
+        if not window:
+            return False
+
+        covered = await self._covered_turn(conversation)
+        window_start = window[0][0]
+        overflow = [
+            (turn, messages) for turn, messages in turns
+            if covered < turn < window_start
+        ]
+        if not overflow:
+            return False
+
+        try:
+            summary = await self._generate_summary(
+                provider, conversation.summary, overflow,
+            )
+        except Exception as exc:  # noqa: BLE001 — 摘要失败不阻塞本轮
+            logger.warning(
+                "conversation summary generation failed",
+                extra={
+                    "conversation_id": str(conversation.id),
+                    "error": type(exc).__name__,
+                    "outcome": "summary_generation_failed",
+                },
+            )
+            return False
+        if summary is None:
+            logger.warning(
+                "conversation summary rejected",
+                extra={
+                    "conversation_id": str(conversation.id),
+                    "limit": self._cfg.ai_agent_summary_chars,
+                    "outcome": "summary_rejected",
+                },
+            )
+            return False
+
+        await self.append_events(conversation, [(
+            EVENT_REPLACE,
+            {
+                "summary": summary,
+                "upto_turn": overflow[-1][0],
+                "turns": len(overflow),
+            },
+        )], same_turn=True)
+        conversation.summary = summary
+        await self._db.flush()
+        logger.info(
+            "conversation history compressed into summary",
+            extra={
+                "conversation_id": str(conversation.id),
+                "upto_turn": overflow[-1][0],
+                "turns": len(overflow),
+                "outcome": "history_summarized",
+            },
+        )
+        return True
+
+    async def _covered_turn(self, conversation: AIConversation) -> int:
+        """上一次压缩覆盖到的轮号（一条 ``replace`` 事件都没有时为 0）。"""
+        data = await self._db.scalar(
+            select(AIConversationEvent.data)
+            .where(
+                AIConversationEvent.conversation_id == conversation.id,
+                AIConversationEvent.type == EVENT_REPLACE,
+            )
+            .order_by(AIConversationEvent.seq.desc())
+            .limit(1)
+        )
+        return _upto_turn(data)
+
+    async def _generate_summary(
+        self,
+        provider: LLMProvider,
+        previous: str,
+        overflow: Sequence[tuple[int, list[dict[str, Any]]]],
+    ) -> str | None:
+        """调一次 provider 产摘要；**不可用返回 None**（调用方什么都不写）。
+
+        超时用单步超时（``ai_agent_step_timeout_seconds``）：这是一次单发补全，
+        与 loop 里的一次模型请求同类，没有理由另设一个数字。
+        """
+        result = await provider.complete(
+            [
+                {"role": "system", "content": CONVERSATION_SUMMARY.system_prompt},
+                {
+                    "role": "user",
+                    "content": _render_summary_input(previous, overflow),
+                },
+            ],
+            model=self._cfg.ai_agent_provider_model,
+            max_tokens=CONVERSATION_SUMMARY.max_tokens,
+            timeout=self._cfg.ai_agent_step_timeout_seconds,
+        )
+        return _usable_summary(result.content, self._cfg.ai_agent_summary_chars)
 
     # -- 恢复与分叉（04b）-------------------------------------------------
 
@@ -500,6 +706,11 @@ class ConversationService:
             user_id=conversation.user_id,
             book_id=conversation.book_id,
             title=conversation.title,
+            # 摘要从**新会话自己的前缀**重新派生，而不是复制父会话的列（04c）：
+            # 切点可能落在父会话最后一条 ``replace`` 之前，那时复制列会让新会话
+            # 带着一段「描述它没有的历史」的摘要。派生则天然一致——前缀里有
+            # 哪条 ``replace``，摘要就停在哪一轮。
+            summary=_replace_summary_in(prefix[:cut]),
         )
         self._db.add(forked)
         await self._db.flush()
@@ -982,6 +1193,98 @@ def _window_chars(window: Sequence[Sequence[dict[str, Any]]]) -> int:
         for turn in window
         for message in turn
     )
+
+
+def _upto_turn(data: object) -> int:
+    """``replace`` 事件载荷里的覆盖轮号；形状不对一律当 0（＝没覆盖过）。
+
+    **从事件读、不从列读**：``AIConversation.summary`` 是投影，日志才是权威
+    （模块 docstring）。形状校验按「宁可重做一次摘要，不可漏摘要一批轮次」——
+    把坏载荷当 0 的代价是多摘要几轮，不校验就会永久跳过它们。
+    """
+    if isinstance(data, Mapping):
+        value = data.get("upto_turn")
+        if isinstance(value, int) and not isinstance(value, bool):
+            return value
+    return 0
+
+
+def _replace_summary_in(events: Sequence[AIConversationEvent]) -> str:
+    """一段事件前缀里最后一条 ``replace`` 的摘要文本（没有则为空串）。
+
+    分叉用它给新会话定摘要：前缀复制到哪儿，摘要就覆盖到哪儿（04c）。形状不对
+    的载荷当没有——与 :func:`_upto_turn` 同一条口径：「宁可重做一次摘要，不可
+    漏摘要一批轮次」。
+    """
+    for event in reversed(events):
+        if event.type != EVENT_REPLACE:
+            continue
+        data = event.data
+        if isinstance(data, Mapping) and isinstance(data.get("summary"), str):
+            return str(data["summary"])
+        return ""
+    return ""
+
+
+def _usable_summary(text: str, limit: int) -> str | None:
+    """摘要的可用性校验：非空、不超字符上限、不含内部 ID。
+
+    三条各自对应一条硬约束——空摘要等于没压缩；``limit`` 是架构 §6.4 的摘要预算
+    （``Settings.ai_agent_summary_chars``）；UUID 是 §6.3 的反幻觉约束（「历史与
+    摘要只含自然语言，不得出现 UUID / 内部 ID」）。
+
+    **任一不过整条退回**（返回 ``None``），调用方的动作是「什么都不写、沿用上一版
+    摘要」——这正是 §6.4 写的降级方式（「超限 → 使用上一版摘要」）。不截断也不
+    修补：半句摘要会被下一轮当成事实，比没有摘要更糟；改写模型的话只会引入新的
+    事实错误。首次压缩就没有上一版——那种情况下降级为「不压缩」，即回到 P1 的
+    行为（超窗轮次直接丢），本轮照常跑完。
+    """
+    summary = " ".join(str(text or "").split())
+    if not summary or len(summary) > limit:
+        return None
+    if _INTERNAL_ID_RE.search(summary):
+        return None
+    return summary
+
+
+def _clip_summary_text(raw: object) -> str:
+    """压成单行并截断——摘要提示里每条消息的字符上限（:data:`_SUMMARY_MESSAGE_CHARS`）。"""
+    text = " ".join(str(raw or "").split())
+    if len(text) > _SUMMARY_MESSAGE_CHARS:
+        return text[:_SUMMARY_MESSAGE_CHARS] + "…"
+    return text
+
+
+def _render_summary_input(
+    previous: str,
+    overflow: Sequence[tuple[int, list[dict[str, Any]]]],
+) -> str:
+    """摘要提示的 user 段：上一版摘要（若有）+ 新增的对话轮次。
+
+    **只渲染 ``user`` 与 ``assistant`` 的正文**：``tool`` 消息整条跳过，正文为空的
+    ``assistant``（只有 ``tool_calls`` 的那种）也不出现。这是「摘要不含内部 ID」
+    在**输入侧**的落点——工具消息是日志里唯一可能带 id 的地方（写工具的提案草案
+    含服务端解析出的 id），不让它进提示，模型就没有可复述的来源；工具调用的过程
+    本来也不该进摘要（模板规则 2：只记结论）。输出侧另有一道校验
+    （:func:`_usable_summary`）——两侧都要在，输入侧的干净是设计，不是证明。
+    """
+    parts: list[str] = []
+    if previous:
+        parts.append(f"【已有摘要】\n{previous}")
+
+    lines: list[str] = []
+    for turn, messages in overflow:
+        lines.append(f"（第 {turn} 轮）")
+        for message in messages:
+            role = str(message.get("role", ""))
+            if role not in SURFACE_EVENT_TYPES or role == EVENT_TOOL:
+                continue
+            content = _clip_summary_text(message.get("content"))
+            if not content:
+                continue
+            lines.append(f"{'用户' if role == EVENT_USER else '助手'}：{content}")
+    parts.append("【新增对话】\n" + "\n".join(lines))
+    return "\n\n".join(parts)
 
 
 def _derive_title(messages: Sequence[Mapping[str, Any]]) -> str:

@@ -35,8 +35,12 @@ class AIConversation(Base, AuditMixin):
     模型上下文由那些事件**投影**出来（架构 §6.2：会话不是聊天记录，而是
     append-only 事件日志 + 派生投影）。
 
-    ``summary`` 字段保留给 P3 的 ``replace`` 压缩（把超窗轮次替换为摘要，
-    原文仍留在日志里）。**P1 不生成摘要，该列保持空串**。
+    ``summary`` 是**窗口之外那段历史的压缩**（T-M7-04c）：被挤出窗口的轮次由
+    ``replace`` 事件替换为它，原文仍留在日志里。它是**投影**——权威是日志里最后
+    一条 ``replace`` 事件（``conversation._upto_turn`` 读的就是它），本列只是省一次
+    查询。三处写它：压缩产出时（``summarize_overflow``）、分叉时按新会话自己的
+    前缀重新派生（``fork``）、以及**正文被删时清空**（``delete`` 与
+    ``retention.purge_expired_summaries`` 两条路径——留在那里等于给保留期开后门）。
 
     ``book_id`` 是会话绑定的账本——系统提示里的「现有对象」名单由它决定。
     ``ConversationService.resolve`` 在请求带的账本与索引不一致时**更新索引**

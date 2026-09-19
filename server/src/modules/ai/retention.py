@@ -26,19 +26,29 @@
    可匹配对象了），因此不需要日期簿记，进程重启也随时可以立刻补跑。
 3. **不写 OTel 指标**，只落一条结构化日志。可见性由日志的 ``outcome`` 承担；
    要接仪表盘时再单独评估，别顺手发明一套指标名。
+
+摘要是保留期的一部分（T-M7-04c）
+--------------------------------
+
+本模块因此多了一条 :func:`purge_expired_summaries`：``AIConversation.summary``
+是窗口之外那段正文的压缩，正文删了它还留着，正文的保留期就被从后门绕过去了。
+判定口径与理由见该函数。**两条清扫的顺序不能反**（先删事件、再判摘要）。
 """
 
 from __future__ import annotations
 
 import asyncio
 import logging
+import uuid
 from datetime import UTC, datetime, timedelta
 
-from sqlalchemy import delete, func, select, tuple_
+from sqlalchemy import delete, func, select, tuple_, update
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from src.common.config import Settings, get_config
-from src.models.ai import AIConversationEvent
+from src.models.ai import AIConversation, AIConversationEvent
+
+from .conversation import EVENT_REPLACE, _upto_turn
 
 logger = logging.getLogger(__name__)
 
@@ -80,16 +90,75 @@ async def purge_expired_events(db: AsyncSession, cutoff: datetime) -> int:
     return result.rowcount or 0
 
 
+async def purge_expired_summaries(db: AsyncSession) -> int:
+    """清掉**摘要覆盖的轮次已经不在日志里**的会话的 ``summary``，返回清空的行数。
+
+    ``AIConversation.summary`` 是窗口之外那段正文的压缩（T-M7-04c）。正文到期被
+    物理删掉之后摘要若继续留着，它仍会经系统提示进下一轮的上下文——**正文的保留期
+    就从后门被绕过去了**。摘要是 04c 引入的产物，这条判定因此必须一起落地。
+
+    **判定口径**：取该会话最后一条 ``replace`` 事件覆盖到的轮号 ``upto_turn``，
+    这一轮在日志里**一条事件都不剩**时，摘要整条清空。三点理由：
+
+    1. 与到期判定同一把尺子——:func:`purge_expired_events` 按
+       (``conversation_id``, ``turn``) 分组删整轮，所以「``upto_turn`` 轮还在不在」
+       就是「摘要覆盖的内容还在不在」。
+    2. 偏保守的方向与「跨线轮整轮保留」一致：摘要活到它所覆盖的**最后一轮**到期
+       为止；覆盖范围中段先到期的轮次，其内容最多多留一个保留窗口。反向（删掉
+       会话里任何一行就清空摘要）会让活跃长会话在第一次到期清扫时就丢掉整段
+       早期背景，代价与收益不成比例。
+    3. 用户主动删除会话（``ConversationService.delete``）时事件也全没了，这条判定
+       顺手覆盖那种情况——两条路径的结论因此一致，不必各写一套。
+
+    **幂等**：清过的会话摘要已是空串，`WHERE summary != ''` 让第二次跑更新 0 行。
+    **不 commit**——事务边界归调用方。
+    """
+    covered: dict[uuid.UUID, int] = {}
+    for conversation_id, data in (await db.execute(
+        select(AIConversationEvent.conversation_id, AIConversationEvent.data)
+        .where(AIConversationEvent.type == EVENT_REPLACE)
+        .order_by(AIConversationEvent.seq)
+    )).all():
+        # 一个会话可能有多条 ``replace``（每次窗口溢出写一条）。按 ``seq`` 升序
+        # 覆盖，留下的是**最后一条**——摘要的覆盖范围只增不减。
+        upto = _upto_turn(data)
+        if upto:
+            covered[conversation_id] = upto
+    if not covered:
+        return 0
+
+    surviving = set(await db.scalars(
+        select(AIConversationEvent.conversation_id).where(
+            tuple_(
+                AIConversationEvent.conversation_id, AIConversationEvent.turn,
+            ).in_(list(covered.items())),
+        )
+    ))
+    expired = [conversation_id for conversation_id in covered if conversation_id not in surviving]
+    if not expired:
+        return 0
+
+    result = await db.execute(
+        update(AIConversation)
+        .where(AIConversation.id.in_(expired), AIConversation.summary != "")
+        .values(summary="")
+    )
+    await db.flush()
+    return result.rowcount or 0
+
+
 async def run_retention_sweep(
     db: AsyncSession,
     *,
     now: datetime | None = None,
     cfg: Settings | None = None,
 ) -> dict[str, int]:
-    """跑一次到期清理：删除 ``now - retention_days`` 之前的整轮事件。
+    """跑一次到期清理：删除 ``now - retention_days`` 之前的整轮事件，并清掉因此
+    失去依据的摘要。
 
-    返回 ``{"retention_days": n, "deleted_events": m}``（供日志与测试断言用）。
-    **不 commit**——由调用方决定事务边界（:func:`retention_loop` 在成功后台提交）。
+    返回 ``{"retention_days": n, "deleted_events": m, "cleared_summaries": k}``
+    （供日志与测试断言用）。**不 commit**——由调用方决定事务边界
+    （:func:`retention_loop` 在成功后台提交）。
     """
     cfg = cfg or get_config()
     if now is None:
@@ -98,28 +167,24 @@ async def run_retention_sweep(
     cutoff = now - timedelta(days=days)
 
     deleted = await purge_expired_events(db, cutoff)
+    # 顺序不能反：摘要的判定看的是「那一轮还在不在」，先删事件才判得准。
+    cleared = await purge_expired_summaries(db)
     logger.info(
-        "Conversation retention sweep: %d event(s) expired",
-        deleted,
+        "Conversation retention sweep: %d event(s) expired, %d summary(ies) cleared",
+        deleted, cleared,
         extra={
             "retention_days": days,
             "cutoff": cutoff.isoformat(),
             "deleted_events": deleted,
+            "cleared_summaries": cleared,
             "outcome": "conversation_retention_sweep",
         },
     )
-    return {"retention_days": days, "deleted_events": deleted}
-    logger.info(
-        "Conversation retention sweep: %d event(s) expired",
-        deleted,
-        extra={
-            "retention_days": days,
-            "cutoff": cutoff.isoformat(),
-            "deleted_events": deleted,
-            "outcome": "conversation_retention_sweep",
-        },
-    )
-    return {"retention_days": days, "deleted_events": deleted}
+    return {
+        "retention_days": days,
+        "deleted_events": deleted,
+        "cleared_summaries": cleared,
+    }
 
 
 async def retention_loop(

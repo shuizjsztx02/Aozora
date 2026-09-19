@@ -215,7 +215,45 @@ IMAGE_RECEIPT_PARSE = PromptTemplate(
     max_tokens=2048,
 )
 
-REGISTRY: dict[str, PromptTemplate] = {t.task_id: t for t in (LEDGER_PARSE, REPORT, IMAGE_RECEIPT_PARSE)}
+# ── T-M7-04c: 会话历史摘要（replace 压缩）────────────────────────────────
+#
+# 被挤出窗口的轮次由这条模板产出的摘要替换（架构 §6.3）。产出的文本有**两个
+# 去处**，且只有这两个：写进 ``AIConversation.summary``，以及作为系统提示里的
+# 一段进下一轮的上下文。**没有任何结构化消费方**——所以 ``output_format`` 是
+# ``text`` 而不是 JSON：让模型去凑一个没人解析的 JSON 只会多一类坏形状。
+#
+# 上限 800 字符（架构 §6.4）由调用方校验（``conversation.ConversationService``）：
+# 超限或含内部 ID 一律**整条退回**，不截断、不修补——半句摘要比没有摘要更误导。
+# ``max_tokens`` 取 1024 是给 800 个汉字留的余量（DeepSeek 中文约 1 token ≈ 1.5
+# 字），它**不是**字符上限的落点，两者的单位与执行者都不同。
+CONVERSATION_SUMMARY = PromptTemplate(
+    task_id="conversation_summary",
+    system_prompt=(
+        "你是记账助手的会话记忆整理器。把「早前对话」压缩成一段摘要，"
+        "供助手在后续对话中接着用。\n\n"
+        "只保留对后续对话有用的信息：\n"
+        "1. 用户的目标、偏好与约束（在攒什么钱、习惯怎么记账、明确说过的忌讳）。\n"
+        "2. 已经确认的事实：金额、日期、分类名、账户名、账本名——以对话里出现的"
+        "名称为准。\n"
+        "3. 尚未完成的事项，以及助手已经问过、用户还没回答的问题。\n"
+        "4. 用户表达过的异议或改正。\n\n"
+        "规则：\n"
+        "1. **绝不输出任何编号、ID 或形如 UUID 的字符串**。指代对象一律用对话里"
+        "出现过的名称。\n"
+        "2. 不要记录工具调用的过程（调了哪些工具、返回了什么），只记结论。\n"
+        "3. 不要编造对话里没有的信息；不确定的一律不写。\n"
+        "4. 输出纯文本，一段连贯的中文，不要标题、不要分点符号、不要换行分段。\n"
+        "5. 不超过 800 字。\n"
+        "6. 给了「已有摘要」时，把它与「新增对话」合并成**一段**新摘要，"
+        "已有摘要里仍然有效的部分不要丢。"
+    ),
+    output_format="text",
+    max_tokens=1024,
+)
+
+REGISTRY: dict[str, PromptTemplate] = {
+    t.task_id: t for t in (LEDGER_PARSE, REPORT, IMAGE_RECEIPT_PARSE, CONVERSATION_SUMMARY)
+}
 
 # v1 public endpoint maps to exactly one task.
 INTERPRET_TASK = "ledger_parse"

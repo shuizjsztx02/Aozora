@@ -323,6 +323,16 @@ _AGENT_SYSTEM_PROMPT = """\
 """
 
 
+#: 摘要段在系统提示里的抬头（T-M7-04c）。措辞按「模型读了会怎么做」写：① 声明
+#: 这是**已经发生过**的对话，不是用户刚说的话；② 明确**不要复述**——不复述的话
+#: 用户会被一段莫名其妙的总结糊脸。摘要正文由 ``conversation`` 侧产出并校验
+#: （不含内部 ID、≤800 字符），本模块只负责把它摆在提示里的正确位置。
+_SUMMARY_SECTION_HEADER = (
+    "以下是本次会话早前内容的摘要。把它当作已经发生过的对话来用，"
+    "不要向用户复述这段摘要：\n"
+)
+
+
 def _clip_name(name: str) -> str:
     name = " ".join(str(name).split())
     if len(name) > _MAX_PROMPT_NAME_CHARS:
@@ -817,6 +827,7 @@ class AgentLoop:
         self._last_content = ""
         self._prompt_tokens = 0
         self._completion_tokens = 0
+        self._summary = ""
 
     # -- 外部控制 -------------------------------------------------------
 
@@ -836,15 +847,25 @@ class AgentLoop:
     # -- 主循环 ---------------------------------------------------------
 
     async def run(
-        self, user_input: str, *, history: Sequence[Mapping[str, Any]] = (),
+        self,
+        user_input: str,
+        *,
+        history: Sequence[Mapping[str, Any]] = (),
+        summary: str = "",
     ) -> AgentResult:
         """跑完一个 Turn。
 
         ``history`` 是服务端持有的会话历史（02f）；本方法**不修改**它——副本
         进消息流，同一段历史可以喂给多个 loop 实例（可分叉）。返回值里的
         ``messages`` 是本轮新增部分，接在 ``history`` 之后即新的历史。
+
+        ``summary`` 是**窗口之外那段历史的摘要**（T-M7-04c），拼进系统提示而
+        **不进消息流**：它不对应日志里的任何一条 Surface 事件，塞进 messages 等于
+        让窗口里多出一条无来源的消息；而 ``[system] + history`` 这个数组形状是被
+        真实链路验过的，多一条 system 会引入只在真实 provider 上才暴露的问题。
         """
         self._reset()
+        self._summary = summary.strip()
         self._messages = [self._system_message()] + [
             _normalize_history(message) for message in history
         ]
@@ -956,6 +977,7 @@ class AgentLoop:
         self._last_content = ""
         self._prompt_tokens = 0
         self._completion_tokens = 0
+        self._summary = ""
 
     def _system_message(self) -> dict[str, Any]:
         prompt = (
@@ -964,6 +986,8 @@ class AgentLoop:
             "用户说「今天」「昨天」「上周」时按这一天换算成具体日期。\n\n"
             f"{_render_object_section(self._ctx)}"
         )
+        if self._summary:
+            prompt += f"\n\n{_SUMMARY_SECTION_HEADER}{self._summary}"
         return {"role": "system", "content": prompt}
 
     def _append(self, message: dict[str, Any]) -> MessageStamp:

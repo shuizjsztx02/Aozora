@@ -256,6 +256,17 @@ class Settings(BaseSettings):
             "AI_AGENT_HISTORY_CHARS", "ai_agent_history_chars",
         ),
     )
+    # 摘要的字符上限（架构 §6.4「摘要 800 字符」）。**超限的摘要是整条退回**，
+    # 不截断——见 `conversation.ConversationService.summarize_overflow`。它是
+    # 窗口之外那部分历史的**唯一**载具，与 `ai_agent_history_chars`（窗口内
+    # 原文的预算）量的是两件事，不是同一个上限的两种写法。
+    ai_agent_summary_chars: int = Field(
+        default=800,
+        gt=0,
+        validation_alias=AliasChoices(
+            "AI_AGENT_SUMMARY_CHARS", "ai_agent_summary_chars",
+        ),
+    )
     # 会话级双限（R-PROD-15；§12.2 未决 #8：数值由 P1 实测确定，此处取初始值）。
     # 轮数按 02d 实测「单轮多步 ≈ 8.2k prompt tokens」估算：50 轮 ≈ 500k tokens，
     # 故 token 上限取与之同量级的 500000。两者都是**上限哨兵**，不是成本目标。

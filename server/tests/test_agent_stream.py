@@ -134,11 +134,16 @@ class ScriptedProvider:
         self.calls: list[dict[str, Any]] = []
         #: 被取消的次数——断连用例据此断言「在途请求真的被中断了」。
         self.cancelled = 0
+        #: 摘要通路（``complete``）收到的请求与固定答复（T-M7-04c）。**刻意不走
+        #: ``_resolve``**：那会消耗 loop 的脚本项，把两个通路的序号搅在一起。
+        self.summaries: list[list[dict[str, str]]] = []
+        self.summary_reply: Any = "用户此前问过几笔账。"
 
     def reset(self, script: list[Any]) -> None:
         self.script = list(script)
         self.calls = []
         self.cancelled = 0
+        self.summaries = []
 
     async def _resolve(self, messages: list[dict], **record: Any) -> Any:
         """取第 n 个脚本项：记录调用，处理可调用 / 可等待 / 异常项。"""
@@ -209,6 +214,27 @@ class ScriptedProvider:
     def sent(self, index: int = 0) -> str:
         """第 index 次请求的全部消息文本（用于「载荷里有没有某内容」类断言）。"""
         return json.dumps(self.calls[index]["messages"], ensure_ascii=False)
+
+    async def complete(
+        self,
+        messages: list[dict[str, str]],
+        *,
+        model: str,
+        max_tokens: int,
+        timeout: float,
+    ) -> ProviderResult:
+        """摘要通路（T-M7-04c）：真实 provider 的 ``complete`` 是同一条补全接口。
+
+        默认给一段形状合法的短摘要——所以**跑够轮次的用例会顺手触发一次真实压缩**，
+        而不是在日志里留下一串「provider 没有 complete」的告警。要断言压缩行为
+        （或它的降级）的用例换掉 ``summary_reply``（异常实例即「provider 报错」）。
+        """
+        self.summaries.append(deepcopy(messages))
+        if isinstance(self.summary_reply, Exception):
+            raise self.summary_reply
+        return ProviderResult(
+            content=str(self.summary_reply), prompt_tokens=3, completion_tokens=5,
+        )
 
 
 class StreamScript:
@@ -1324,3 +1350,136 @@ class TestFailure:
         rows = await _rows(stream_env, AIUsage, user_id=stream_env.user_id)
         assert len(rows) == 1
         assert rows[0].tokens == 12  # 第 1 步的 prompt 5 + completion 7
+
+
+# ── 10. 摘要压缩（T-M7-04c） ─────────────────────────────────────────────
+
+
+class TestCompression:
+    """窗口之外的轮次在 ``done`` 之后被压成摘要，写一条 ``replace`` 事件。
+
+    窗口在用例里调到 1（``stream_env.cfg`` 就是 ``set_config`` 的那个对象，
+    改它即改全局配置），免得为了触发一次压缩跑满 9 轮。
+    """
+
+    async def test_overflowing_conversation_is_compressed_after_done(
+        self, stream_env: StreamEnv,
+    ):
+        stream_env.cfg.ai_agent_history_turns = 1
+        stream_env.provider.reset([_text("记好了。")])
+
+        _, first = await stream_env.turn("第一轮")
+        conversation_id = payload_of(first, "done")["conversation_id"]
+        _, body = await stream_env.turn("第二轮", conversation_id=conversation_id)
+
+        # 压缩**不产生任何帧**：它在 done 之后跑，协议面一行未变。
+        assert event_names(body)[-1] == "done"
+        assert "error" not in event_names(body)
+
+        events = await _rows(stream_env, AIConversationEvent,
+                             conversation_id=uuid.UUID(conversation_id))
+        replaces = [e for e in events if e.type == "replace"]
+        assert len(replaces) == 1
+        assert replaces[0].data["upto_turn"] == 1
+        assert replaces[0].data["summary"] == "用户此前问过几笔账。"
+        assert replaces[0].ignorable is True
+        # 原文仍在日志里（压缩是新增一条事件，不是覆写）
+        assert [e.type for e in events][:2] == ["user", "assistant"]
+
+        conversation = (await _rows(stream_env, AIConversation,
+                                    id=uuid.UUID(conversation_id)))[0]
+        assert conversation.summary == "用户此前问过几笔账。"
+
+    async def test_summary_reaches_the_next_turn_request(self, stream_env: StreamEnv):
+        """摘要经**系统提示**进下一轮——不是 messages 里的一条。"""
+        stream_env.cfg.ai_agent_history_turns = 1
+        stream_env.provider.reset([_text("记好了。")])
+        stream_env.provider.summary_reply = "用户此前问过一笔午饭。"
+
+        _, first = await stream_env.turn("第一轮")
+        conversation_id = payload_of(first, "done")["conversation_id"]
+        # 第二轮跑完才产生第一次压缩（那时才有一轮落在窗口外）。
+        await stream_env.turn("第二轮", conversation_id=conversation_id)
+        stream_env.provider.reset([_text("好。")])
+        await stream_env.turn("第三轮", conversation_id=conversation_id)
+
+        payload = stream_env.provider.calls[0]["messages"]
+        assert payload[0]["role"] == "system"
+        assert "用户此前问过一笔午饭。" in payload[0]["content"]
+        assert all(
+            "用户此前问过一笔午饭。" not in json.dumps(m)
+            for m in payload[1:]
+        )
+
+    async def test_compression_failure_does_not_break_the_turn(
+        self, stream_env: StreamEnv,
+    ):
+        """摘要生成失败 → 这一轮照常交付；**不再发帧**（done 已经发过）。"""
+        stream_env.cfg.ai_agent_history_turns = 1
+        stream_env.provider.reset([_text("记好了。")])
+        _, first = await stream_env.turn("第一轮")
+        conversation_id = payload_of(first, "done")["conversation_id"]
+
+        stream_env.provider.summary_reply = ProviderError(
+            status=503, retryable=True, reason="transport",
+        )
+        response, body = await stream_env.turn("第二轮", conversation_id=conversation_id)
+
+        assert response.status_code == 200
+        assert event_names(body)[-1] == "done"
+        assert "error" not in event_names(body)
+        events = await _rows(stream_env, AIConversationEvent,
+                             conversation_id=uuid.UUID(conversation_id))
+        assert [e.type for e in events if e.type == "replace"] == []
+        conversation = (await _rows(stream_env, AIConversation,
+                                    id=uuid.UUID(conversation_id)))[0]
+        assert conversation.summary == ""
+
+    async def test_compression_crash_does_not_break_the_turn(
+        self, stream_env: StreamEnv, monkeypatch,
+    ):
+        """第二道防线：压缩**自身**抛异常（不是 provider 报错）也不能影响这一轮。
+
+        上一条打的是 provider 失败——那一支在 ``summarize_overflow`` 内部就被吞掉了，
+        走不到这里。这一条打的是它之后的事（写事件、提交）出错：``done`` 已经发出去
+        了，此时**任何帧都是协议违规**，所以那一层 try 必须在。
+        """
+        from src.modules.ai.conversation import ConversationService
+
+        async def boom(self, conversation, provider):
+            raise RuntimeError("compression exploded")
+
+        monkeypatch.setattr(ConversationService, "summarize_overflow", boom)
+        stream_env.cfg.ai_agent_history_turns = 1
+        stream_env.provider.reset([_text("记好了。")])
+
+        _, first = await stream_env.turn("第一轮")
+        response, body = await stream_env.turn(
+            "第二轮", conversation_id=payload_of(first, "done")["conversation_id"],
+        )
+
+        assert response.status_code == 200
+        assert event_names(body)[-1] == "done"
+        assert "error" not in event_names(body)
+
+    async def test_interrupted_step_usage_is_not_estimated(self, stream_env: StreamEnv):
+        """失败那一步的 token **不估算**——P1 挂账 4 的最终结论（T-M7-04c）。
+
+        脚本项「已经吐出正文、然后断流」：正文有，usage 一个也没有（真实链路的
+        usage 在尾块）。记账口径因此是**已完成步骤之和**，一行不估、一行不补——
+        估算值混进 ``ai_usage.tokens`` 会污染配额基座（那是「轮数 + token」双限的
+        计数表），而缺的这部分只在 provider 中途失败这一支出现。
+        """
+        stream_env.provider.reset([
+            _tool_turn(_call("budget_list", _budget_args())),
+            StreamScript(
+                _text("说到一半"),
+                error=ProviderError(status=None, retryable=False, reason="interrupted"),
+            ),
+        ])
+        _, body = await stream_env.turn("看看预算")
+
+        assert payload_of(body, "error")["code"] == "ai_unavailable"
+        rows = await _rows(stream_env, AIUsage, user_id=stream_env.user_id)
+        assert len(rows) == 1
+        assert rows[0].tokens == 12  # 只有第 1 步（5 + 7）；失败那一步零

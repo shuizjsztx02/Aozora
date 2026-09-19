@@ -138,7 +138,9 @@ class TestPurgeExpiredEvents:
 
         remaining = await _events(db_session, conv)
         assert [e.turn for e in remaining] == [2, 2]
-        assert result == {"retention_days": DAYS, "deleted_events": 2}
+        assert result == {
+            "retention_days": DAYS, "deleted_events": 2, "cleared_summaries": 0,
+        }
 
     async def test_whole_conversation_expires_leaving_the_row(
         self, db_session, sample_data,
@@ -299,7 +301,9 @@ class TestPurgeExpiredEvents:
 
         result = await _sweep(db_session, _cfg(ai_conversation_retention_days=365))
 
-        assert result == {"retention_days": 365, "deleted_events": 0}
+        assert result == {
+            "retention_days": 365, "deleted_events": 0, "cleared_summaries": 0,
+        }
         assert len(await _events(db_session, conv)) == 2
 
 

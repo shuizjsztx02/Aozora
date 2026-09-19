@@ -587,7 +587,7 @@ async def _execute_turn(
         result = await _build_loop(
             provider, ctx, cfg, observer, session, user, book_id, writer,
             request_id=request_id, today=today,
-        ).run(user_input, history=history)
+        ).run(user_input, history=history, summary=conversation.summary)
     except Exception as exc:  # noqa: BLE001 — 运行期失败一律以 error 帧收尾
         logger.warning(
             "agent turn failed",
@@ -626,6 +626,31 @@ async def _execute_turn(
     queue.put_nowait((EventType.DONE, _done_payload(
         result, conversation, await conversations.max_seq(conversation),
     )))
+
+    # 窗口之外的历史压成摘要（T-M7-04c）——**放在 ``done`` 之后**。
+    #
+    # 时机是这张卡的核心取舍：摘要生成是一次模型调用（秒级），而用户此刻已经
+    # 拿到了本轮的答案。放在 ``done`` 之前，这份开销会出现在他的等待里，换来的
+    # 只是「下一轮更早用上新摘要」；放在之后，用户完全感觉不到它。
+    #
+    # 代价是**这里不能再发帧**：``done`` 已经发过，之后的任何 ``error`` 帧都是
+    # 协议违规。异常一律吞掉并记日志——压缩失败的正确结果是「这一轮照常结束、
+    # 摘要沿用上一版」，不是「用户看到一个失败」。
+    #
+    # 本轮用的是**上一版**摘要（``run`` 那次读的 ``conversation.summary``）；
+    # 新摘要从下一轮开始生效。这是必然的：本轮的历史窗口在读历史那一刻就定了。
+    try:
+        await conversations.summarize_overflow(conversation, provider)
+        await session.commit()
+    except Exception as exc:  # noqa: BLE001 — 见上：压缩失败不改变已交付的这一轮
+        logger.warning(
+            "conversation compression skipped",
+            extra={
+                "conversation_id": str(conversation_id),
+                "error": type(exc).__name__,
+                "outcome": "conversation_compression_failed",
+            },
+        )
 
 
 def _build_loop(
