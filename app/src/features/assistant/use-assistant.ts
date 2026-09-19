@@ -69,7 +69,9 @@ import { META_KEY_DEFAULT_ACCOUNT_ID, META_KEY_DEFAULT_BOOK_ID } from '../../dom
 import type {
   AccountData, BookData, BudgetData, CategoryData, SavingsGoalData, TransactionData,
 } from '../../platform/bridge/bridge-types'
-import type { AiInterpretContext, AiValidateVerdict } from '../../platform/bridge/bridge-types'
+import type {
+  AiInterpretContext, AiStreamDoneData, AiStreamEvent, AiValidateVerdict,
+} from '../../platform/bridge/bridge-types'
 import type { Category } from '../../domain/types'
 
 export interface AssistantMessage {
@@ -170,17 +172,16 @@ export interface PendingConfig {
 export const AI_AGENT_CLIENT_ENABLED = false
 
 /**
- * T-M7-02i：agent 流式通道的客户端桥契约（**由 T-M7-02h 实现**）。
+ * T-M7-02i：agent 流式通道的客户端桥契约（**实现见 T-M7-02h**）。
  *
- * **为什么本文件自带一份、而不是 import `bridge-types.ts`**：本卡与 02h 并行推进，交付时
- * 桥的实现**尚未提交**——若 import 它的类型，HEAD 就处于「引用了尚不存在的符号」的不自洽
- * 状态（实测：远端 CI 的 typecheck 直接红）。所以这里用**结构化窄接口 + 运行时能力探测**：
- * 桥未落地时探测为假（整条回落单发链路，也顺带兜住「旧 APK 无这两条命令」），桥落地后
- * 自动接通。字段与 02h 的实现**逐一对齐**：`runAgent` 立即返回 `{pending, streamId}`
- * （「命令返回 pending + 事件推送结果」，同 `requestPermission`），事件带 `streamId`。
+ * 本卡实施时 02h 尚未提交，若 import 它的类型，HEAD 就处于「引用了尚不存在的符号」的
+ * 不自洽状态（实测：远端 CI 的 typecheck 直接红）。所以这里用**结构化窄接口 + 运行时
+ * 能力探测**：桥未落地时探测为假（整条回落单发链路，也顺带兜住「旧 APK 无这两条命令」），
+ * 桥落地后自动接通。
  *
- * **待 02h 提交后，这两处定义应合并到 `bridge-types.ts`**（那里才是契约类型的唯一源）——
- * 已登记为开放风险，别让它长期存在两份。
+ * **T-M7-02h 已提交（`55923b0`）后的收口**：事件与 `done` 的载荷类型已并入
+ * `bridge-types.ts`（那里是契约类型的唯一源），下面两个名字退化为**别名**。
+ * 窄接口本身保留——它表达的是「桥可能不具备流式能力」，与契约类型不是一回事。
  */
 export interface AgentStreamBridge {
   runAgent(
@@ -189,22 +190,15 @@ export interface AgentStreamBridge {
   onAiStream(listener: (event: AgentStreamEvent) => void): () => void
 }
 
-/** T-M7-02i：agent 流的下行事件（服务端 `stream.EventType` 的八类，02h 原样转发）。 */
-export interface AgentStreamEvent {
-  streamId: string
-  event: 'phase' | 'tool_call' | 'tool_result' | 'confirm' | 'device_request' | 'delta' | 'done' | 'error'
-  data: Record<string, unknown>
-}
+/** T-M7-02i：agent 流的下行事件 —— **契约源在 `bridge-types.ts`**（T-M7-02h 已提交，
+ *  本卡原先自带的那份已删）。别名保留只是为了不动既有 import 面。 */
+export type AgentStreamEvent = AiStreamEvent
 
-/** T-M7-02i：`done` 帧里本卡消费的字段（其余如 `usage` / `steps` / `pending_input` 不读）。
+/** T-M7-02i：`done` 帧的载荷 —— 同上，契约源在 `bridge-types.ts`。
  *  `proposals` 是**仍待确认**的提案、`executions` 是**已执行**的回执，两者互斥
- *  （T-M7-02e 决策 2）。 */
-export interface AgentStreamDone {
-  conversation_id: string
-  stop_reason: string
-  proposals: Array<Record<string, unknown>>
-  executions: Array<Record<string, unknown>>
-}
+ *  （T-M7-02e 决策 2）；本卡只消费其中四个字段（`steps` / `usage` / `pending_input`
+ *  等留给 P2）。 */
+export type AgentStreamDone = AiStreamDoneData
 
 /** T-M7-02i：流式期间的内存态气泡（**不落 messages store**）。
  *
