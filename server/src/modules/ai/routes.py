@@ -18,6 +18,7 @@ from src.modules.auth.frozen import require_active as _require_active
 
 from .context import load_validation_context
 from .conversation import ConversationService
+from .devices import DeviceOutcome, device_channel
 from .provider import (
     LLMProvider,
     ToolCallingProvider,
@@ -33,6 +34,8 @@ from .schemas import (
     AIConversationListResponse,
     AIConversationRenameRequest,
     AIConversationSummary,
+    AIDeviceResultRequest,
+    AIDeviceResultResponse,
     AIExecuteProposalRequest,
     AIExecuteProposalResponse,
     AIInterpretRequest,
@@ -339,6 +342,41 @@ async def fork_conversation(
         conversation=AIConversationSummary.from_conversation(forked),
         seq=cut,
     )
+
+
+@router.post("/device-result", response_model=AIDeviceResultResponse)
+async def device_result(
+    body: AIDeviceResultRequest,
+    current_user: Annotated[User, Depends(get_current_user)] = ...,
+    db: Annotated[AsyncSession, Depends(get_db_session)] = ...,
+):
+    """T-M7-05e: 设备能力通道的**上行回传**——唤醒挂起中的那一轮。
+
+    单向指令（触感 / 刷新小组件 / 分享）不走这里：它们不回传。**需结果**类
+    （权限 / 选图 / 语音）在服务端 loop 里挂起，客户端执行完后把结局投到这里，
+    loop 拿它当作那次工具调用的结果继续往下跑（ADR-010）。
+
+    **四种「回不去」的情形一律 404** ``device_request_not_found``：没有这条请求、
+    已经回过（重复回传）、已经超时注销、请求属于别人。三者（四者）不可分辨是
+    刻意的——①重试安全：客户端在弱网下重发一次不该被当作错误弹给用户（与 03a
+    的删除端点同口径）；②不泄漏存在性：别人的 request_id 与不存在的 request_id
+    得到同一个答案。
+
+    ``db`` 只用于鉴权（``get_current_user``）；挂起表是**进程内的**
+    （``devices.DeviceChannel``，单 worker 前提，见 ADR-010 决策 2）。
+    """
+    _require_active(current_user)
+    accepted = device_channel().deliver(
+        body.request_id,
+        user_id=current_user.id,
+        outcome=DeviceOutcome(status=body.status, data=body.data or {}),
+    )
+    if not accepted:
+        raise AppException(
+            404, "device_request_not_found",
+            "No pending device request for this id",
+        )
+    return AIDeviceResultResponse()
 
 
 @router.post("/agent", response_class=StreamingResponse)

@@ -741,8 +741,11 @@ class TestStreamEvents:
         assert payload_of(body, "done")["stop_reason"] == "empty_response"
 
     async def test_device_request_has_no_p1_producer(self, stream_env: StreamEnv):
-        """八类事件里的 ``device_request`` 在 P1 没有生产者（无设备类工具），
-        这条用例把这个事实钉住：协议支持它，但正常回合里不该出现。"""
+        """八类事件里的 ``device_request`` 在 P1 形态下没有生产者。
+
+        这条用例把这个事实钉住：协议支持它，但**闸门关闭时**（``stream_env`` 的
+        默认配置，即 05f 落地前的生产形态）正常回合里不该出现。设备通道打开后的
+        形状见 :class:`TestDeviceChannel`。"""
         stream_env.provider.reset([
             _tool_turn(_call("budget_list", _budget_args())),
             _text("没有预算。"),
@@ -750,6 +753,113 @@ class TestStreamEvents:
         _, body = await stream_env.turn("看看预算")
 
         assert "device_request" not in event_names(body)
+
+
+# ── 2.4 设备能力通道（05e）──────────────────────────────────────────────
+
+
+class TestDeviceChannel:
+    """T-M7-05e：``device_request`` 的生产者与上行回传（ADR-010）。
+
+    帧级的一条端到端：**需结果类**的挂起 → 客户端上行 ``POST /ai/device-result``
+    → loop 恢复 → 这一轮跑完。loop 级的两类分法与收敛（超时 / 取消 / 归属）在
+    ``tests/test_ai_device_channel.py``，这里只证明**它在真实 SSE 链路上成立**
+    （``_build_loop`` 的接线 + 帧的形状 + 挂起期间心跳不绝）。
+    """
+
+    @pytest_asyncio.fixture(autouse=True)
+    async def _channel_on(self, stream_env: StreamEnv):
+        """本类把设备通道打开（其余用例保持默认的 P1 形态）。
+
+        单例要在 ``set_config`` **之后**清掉：timeout 是建表那一刻从配置取的
+        （``devices.device_channel``），不清就会带上一个用例的配置。
+        """
+        from src.modules.ai import devices as D
+
+        set_config(stream_env.cfg.model_copy(update={
+            "ai_device_channel_enabled": True,
+            "ai_device_timeout_seconds": 5.0,
+        }))
+        D._channel = None
+        try:
+            yield
+        finally:
+            set_config(stream_env.cfg)
+            D._channel = None
+
+    async def test_result_class_pauses_then_resumes_via_uplink(
+        self, stream_env: StreamEnv,
+    ):
+        stream_env.provider.reset([
+            _tool_turn(_call("device_pick_image", {"source": "gallery"})),
+            _text("看到小票了，帮你记一下。"),
+        ])
+        stream = open_direct_stream(
+            stream_env.app,
+            path="/ai/agent",
+            payload={"input": "拍一下这张小票", "book_id": stream_env.book_id},
+            token=stream_env.auth_headers["Authorization"].removeprefix("Bearer "),
+        )
+        # 挂起：帧已下发（含回传凭据），这一轮停在这里
+        await stream.wait_for("device_request")
+        frame = payload_of(stream.body, "device_request")
+        assert frame["kind"] == "result"
+        assert frame["capability"] == "image.pick"
+        assert frame["payload"] == {"source": "gallery"}
+        assert frame["step"] == 1
+        assert frame["timeout_seconds"] == 5.0
+        assert frame["request_id"].startswith("dev-")
+        assert "done" not in event_names(stream.body)   # ← 真的还挂着
+
+        # 挂起期间连接照常活着：帧泵在没有事件可发时发心跳（fixture 的 0.05 s）
+        await asyncio.sleep(0.2)
+        assert ": ping" in stream.body
+
+        response = await stream_env.client.post(
+            "/ai/device-result",
+            json={
+                "request_id": frame["request_id"], "status": "ok",
+                "data": {"mimeType": "image/jpeg"},
+            },
+            headers=stream_env.auth_headers,
+        )
+        assert response.status_code == 200, response.text
+
+        await stream.wait_done()
+        assert event_names(stream.body)[-1] == "done"
+        # 设备回传的数据进了下一次模型请求（内部 id 已在 agent 侧剥掉——铁律 1）
+        assert "image/jpeg" in stream_env.provider.sent(1)
+        assert "attachmentId" not in stream_env.provider.sent(1)
+
+    async def test_one_way_does_not_wait_for_anything(self, stream_env: StreamEnv):
+        """单向指令：发出即继续，**不产生任何上行**（没有回传凭据要用）。"""
+        stream_env.provider.reset([
+            _tool_turn(_call("device_haptic", {"kind": "success"})),
+            _text("记好了。"),
+        ])
+        _, body = await stream_env.turn("记一笔午饭 12 块")
+
+        frame = payload_of(body, "device_request")
+        assert frame["kind"] == "one_way"
+        assert "timeout_seconds" not in frame
+        assert event_names(body)[-1] == "done"
+        # 同一个 step 上：先在东西下发，随后工具结果把卡片标成完成
+        assert payload_of(body, "done")["stop_reason"] == "completed"
+
+    async def test_device_frame_is_gated_off_by_default(self, stream_env: StreamEnv):
+        """闸门关闭时模型**看不到**设备能力——调用它只会拿到 tool_unavailable。"""
+        from src.modules.ai import devices as D
+
+        set_config(stream_env.cfg)      # 关掉本类的开关，回到默认形态
+        D._channel = None
+        stream_env.provider.reset([
+            _tool_turn(_call("device_pick_image", {"source": "gallery"})),
+            _text("这个我做不了。"),
+        ])
+        _, body = await stream_env.turn("拍一下小票")
+
+        assert "device_request" not in event_names(body)
+        assert payload_of(body, "done")["stop_reason"] == "completed"
 
 
 # ── 2.5 增量：两个通道、合并窗、中途断流（02g-2）────────────────────────

@@ -331,3 +331,30 @@ class AIConversationForkResponse(BaseModel):
 
     conversation: AIConversationSummary
     seq: int
+
+
+# ─── T-M7-05e: 设备能力通道的上行回传 ─────────────────────────────────────
+
+class AIDeviceResultRequest(BaseModel):
+    """``POST /ai/device-result`` 的入参：一次**需结果**设备请求的结局。
+
+    客户端收到 ``device_request`` 帧（``kind="result"``）后，在设备上执行，再
+    把结局回传到这里——服务端据此唤醒挂起的那一轮（ADR-010）。
+
+    ``request_id`` 原样带回帧里给的那个（**不解析、不入库**，只作为挂起表的键）。
+    ``data`` 的形状由能力自己的实现决定，服务端不校验（payload 的所有权在能力
+    侧，与 v2 契约同口径）：它是随后回喂模型的那条工具结果。
+    """
+
+    request_id: str = Field(min_length=1, max_length=64)
+    #: ``ok`` / ``denied`` / ``unavailable`` / ``failed``。**没有 ``timeout``**：
+    #: 那个结局只能由服务端产生（挂起期满），客户端报它没有意义。
+    status: Literal["ok", "denied", "unavailable", "failed"]
+    data: dict[str, Any] | None = None
+
+
+class AIDeviceResultResponse(BaseModel):
+    """回传的回执。``accepted`` 恒为 true——回不去的四种情形都是 404，
+    不是 200 + false（重试安全，见 ``routes.device_result``）。"""
+
+    accepted: bool = True

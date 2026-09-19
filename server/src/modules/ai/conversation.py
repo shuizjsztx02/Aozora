@@ -192,7 +192,7 @@ SURFACE_EVENT_TYPES = frozenset({EVENT_USER, EVENT_ASSISTANT, EVENT_TOOL})
 #: 各类型的生产者状态见架构 §6.2 的表；方括号里是当前的真实生产者。
 EVENT_APPROVAL_REQUEST = "approval_request"  # [待接] 审批请求（确认卡留档）
 EVENT_APPROVAL_RESULT = "approval_result"    # [待接] 审批结果（写操作回执）
-EVENT_DEVICE_REQUEST = "device_request"      # [无] 设备指令；通道归 P4
+EVENT_DEVICE_REQUEST = "device_request"      # [不接] 设备指令：由配对的 tool 结果留档（ADR-010 决策 5）
 EVENT_ERROR = "error"                        # [stream._record_failure] 04b
 EVENT_REPLACE = "replace"                    # [04c] 长历史被摘要替换（原文保留）
 EVENT_QUOTA = "quota"                        # [record_turn] 每轮用量，与消息同轮

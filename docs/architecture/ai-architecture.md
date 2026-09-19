@@ -161,6 +161,63 @@ v1 是**固定 action 集**（`add_tx` / `add_tx_batch` / `query` / `report` / `
 
 只有 **`reminder_set`** 两头都沾——它写的是用户的提醒配置（因此要过审批门，进注册表），执行体在设备上（因此 05f 接客户端执行器）。op 的执行位置由**客户端按 op 分派**（05f 的分派表），不写进信封。
 
+### 设备能力通道协议（T-M7-05e）
+
+**服务端侧自 05e 起已就位**（决策全文见 `docs/adr/ADR-010-device-capability-channel.md`），客户端执行器归 05f。
+
+**两类协议**（架构 §4.3 的分法，判据是「结果有没有下游消费者」）：
+
+| 类 | `kind` | 例子 | 流程 |
+|---|---|---|---|
+| 单向指令 | `one_way` | 触感反馈、刷新小组件、分享文本 | loop 下发即继续，**不回传** |
+| 需结果 | `result` | 权限申请、语音转写、图片选择 | loop **挂起** → 客户端执行 → **HTTP 上行回传** → loop 继续 |
+
+**下行：`device_request` 帧**（八类事件之一，其余七类的载荷见 `server/src/modules/ai/stream.py`）：
+
+```json
+{
+  "request_id": "dev-<uuid4>",   // 需结果类的回传凭据；单向也给（去重与留档）
+  "step": 3,                      // 1 起的 Step 序号，与其它事件的 step 同源
+  "kind": "one_way" | "result",
+  "capability": "image.pick",     // 协议层能力名（见下）
+  "payload": { "source": "gallery" },
+  "timeout_seconds": 120          // 仅 result 类
+}
+```
+
+**上行：`POST /ai/device-result`**（普通 HTTP，与那条 SSE 长连接无关）：
+
+```json
+{ "request_id": "dev-…", "status": "ok|denied|unavailable|failed", "data": { … } }
+→ { "accepted": true }
+```
+
+| 环节 | 口径 |
+|---|---|
+| **404 覆盖四种情形** | 没有这条请求 / 已经回过（重复回传）/ 已超时注销 / 请求属于别人 —— 一律 `device_request_not_found`，**三者不可分辨**。重试因此是安全的，也不泄漏「这个 id 是否存在」 |
+| **归属** | 按挂起时记下的 `user_id` 校验；别人的请求 id 拿到的也是 404，**不是 403** |
+| `timeout` 不在 `status` 里 | 那个结局只能由服务端产生（挂起期满），客户端报它没有意义（schema 挡在 422） |
+| **挂起态** | **进程内**（`devices.DeviceChannel`，单 worker 前提，架构 §8.4），随 Turn 生随 Turn 灭；不建表、不入库（代价见 R-PROD-32） |
+| **超时与失败** | 都是**工具级结果**（安全枚举码回喂模型），**不新增 `StopReason`**：模型据此向用户解释，回合照常往下走 |
+| **取消 / 断连** | 沿用连接级取消；`DeviceChannel.wait` 的 `finally` 注销条目——**不留悬挂请求** |
+
+**能力名（`capability`）与工具名（`name`）是两套**：工具名走 provider，必须下划线（点号会让 provider 直接 400，02c 实测）；`capability` 只出现在帧与回传里，用点号。**能力名 → 桥命令的映射在客户端**（05f 的分派表），可能是一对多——`voice.transcribe` 在桥上是一对（`voice.startRecording` → 用户停止 → `voice.stopRecording` 回文本）。服务端因此不需要知道客户端命令表的形状。
+
+**服务端能力目录**（`server/src/modules/ai/devices.py`，6 个能力，与架构 §4.3 的例子一一对应）：
+
+| 工具名 | `capability` | 类 |
+|---|---|---|
+| `device_haptic` | `haptic.feedback` | 单向 |
+| `device_widget_refresh` | `widget.refresh` | 单向 |
+| `device_share_text` | `share.text` | 单向 |
+| `device_request_permission` | `permissions.request` | 需结果 |
+| `device_pick_image` | `image.pick` | 需结果 |
+| `device_transcribe_voice` | `voice.transcribe` | 需结果 |
+
+**闸门：** `AI_DEVICE_CHANNEL_ENABLED`（默认 **false**）。关闭时 loop **不注入**设备工具（模型看不到它们，行为与 P1 逐字相同）——设备能力要有人执行，客户端执行器（05f）就位前打开它只会让回合白等一个超时窗。提醒（`reminder.*`）不在本目录：它是写工具（进注册表、过审批门），执行体在设备上属于**执行位置**的分派问题（05f）。
+
+**不是注册表工具：** 设备能力没有 DB handler、执行体在客户端、执行语义分两类，因此单列目录而不是进 `tools.py` 的注册表；`payload` 的形状由能力自己的实现负责，服务端不校验（与 v2 契约「payload 的所有权在 op 侧」同一取舍）。
+
 ### 三条铁律在 v2 下的落点（不放松）
 
 1. **模型永不输出 UUID** —— payload 里出现的 id 是**服务端确定性解析的产物**，不是模型输出；回喂给模型前必须剥掉（02c 边界不变）。

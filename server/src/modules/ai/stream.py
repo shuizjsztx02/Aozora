@@ -18,21 +18,26 @@
 ``data`` 只有一行：``json.dumps`` 会把换行转义成 ``\\n``，因此载荷文本里即便
 含换行也不会破坏帧边界。
 
-八类事件与 P1 的生产者
-----------------------
+八类事件与生产者
+----------------
 架构 §8.1 的八类事件全部由 :class:`EventType` 定义、由 :func:`format_frame`
-格式化（各有用例），但 P1 的 loop **只产出其中六类**：
+格式化（各有用例），但 loop 实际产出几类**取决于闸门**：P1 形态下是六类
+（``device_request`` 无生产者、``routing`` 属域路由），05e 打开设备通道
+（``ai_device_channel_enabled``）后多出 ``device_request`` 一类。
 
 ========================  ================================================
-事件                      P1 生产者
+事件                      生产者
 ========================  ================================================
 ``phase``                 loop 的 Step 入口（``thinking``）与工具批次入口
                           （``tool_calling``）。``routing`` 属域路由，P4 才有
 ``tool_call``             工具批次里每个调用**执行前**（名字 + 人类可读文案）
 ``tool_result``           同一次调用结束后（**摘要，不含原始数据**）
 ``confirm``               写提案**挂起**时（02e 决策 2），载荷为完整提案
-``device_request``        **无生产者**——P1 没有设备类工具（域只有记账 / 预算 /
-                          账户账本三个），设备能力通道归 P2（架构 §4.3）
+``device_request``        设备指令（05e，ADR-010）：单向（下发即继续）与需结果
+                          （loop 挂起 → HTTP 上行回传 → 恢复）两类共用这一个帧，
+                          载荷里的 ``kind`` 区分。**生产者受
+                          ``ai_device_channel_enabled`` 闸门控制**——默认关闭时
+                          与 P1 一样没有生产者（客户端执行器归 05f）
 ``delta``                 助手正文与推理的增量，见下「delta 的粒度与两个通道」
 ``done``                  收尾（含 usage、stop_reason、提案与执行回执）
 ``error``                 中途失败的安全枚举码（见下「失败收尾」）
@@ -50,6 +55,14 @@
 照 02i 的既定设计在那之后走既有卡链路（``/ai/validate`` → ``/ai/execute``）。
 ``confirm`` 是**实时信号**，``done.proposals`` 是**权威清单**，按 ``proposalId``
 去重即可。
+
+**设备指令不走确认卡**（T-M7-05e，ADR-010）：``device_request`` 是「任务里的设备
+动作」（触感 / 分享 / 权限 / 选图 / 语音），不是待审批的写库。需结果类的回传走
+**独立的上行端点** ``POST /ai/device-result``，与这条长连接无关——客户端在设备上
+执行完后自己发一次普通 HTTP，loop 侧只是挂着等。挂起期间流上照常发心跳
+（:data:`HEARTBEAT_FRAME`），等待因此不会把连接掐断；服务端等满
+``ai_device_timeout_seconds`` 就收敛成一条「没等到结果」的工具结果回喂模型
+（不终结回合，ADR-010 决策 4）。
 
 各事件的载荷（02h / 02i 的编码依据）
 ------------------------------------
@@ -75,7 +88,11 @@
                  ``seq``*（本轮结束时的事件序号，断连续读的游标，T-M7-04b）
 ``error``        ``code``（ai_unavailable / agent_failed）、``message``、
                  ``conversation_id``（会话索引已提交，失败轮也能接着用）
-``device_request``  P1 无生产者（见上表）
+``device_request``  ``request_id``（回传凭据）、``kind``（one_way / result）、
+                 ``capability``（协议层能力名，如 ``image.pick``；到桥命令的映射
+                 在客户端）、``payload``（已过 schema 校验的参数）、
+                 ``timeout_seconds``（**仅 result 类**，客户端据此提醒用户，服务端
+                 按同一值收敛——见 ``devices.DeviceChannel``）
 ===============  ============================================================
 
 ``stop_reason`` 取 ``agent.StopReason`` 的枚举值（``completed`` /
@@ -170,6 +187,7 @@ from .conversation import (
     ConversationService,
     TurnWriter,
 )
+from .devices import DEVICE_TOOLS, device_channel
 from .provider import ProviderError, ReasoningLevel, ToolCallingProvider
 from .service import AIService
 from .tools import ToolContext, ToolOutcome, load_tool_context
@@ -287,12 +305,19 @@ TOOL_PROGRESS: dict[str, str] = {
     "category_list": "正在查询分类…",
 }
 
+#: 设备能力的步骤卡文案（T-M7-05e）。与 ``TOOL_PROGRESS`` 是同一件事的两半：
+#: 设备能力不是注册表工具（执行体在客户端），文案随能力定义本身走
+#: （``devices.DeviceTool.message``），因此从这里取而不是在上表里抄一份。
+DEVICE_PROGRESS: dict[str, str] = {
+    tool.name: tool.message for tool in DEVICE_TOOLS
+}
+
 #: 认不出工具名时的兜底（例如注册表加了新工具而文案表忘了跟）。
 _FALLBACK_PROGRESS = "正在处理…"
 
 
 def tool_progress(name: str) -> str:
-    return TOOL_PROGRESS.get(name, _FALLBACK_PROGRESS)
+    return TOOL_PROGRESS.get(name) or DEVICE_PROGRESS.get(name, _FALLBACK_PROGRESS)
 
 
 def summarize_outcome(outcome: ToolOutcome) -> dict[str, Any]:
@@ -383,6 +408,18 @@ class QueueObserver:
         self._queue.put_nowait((EventType.DELTA, {
             "text": text, "channel": DeltaChannel.REASONING, "step": step,
         }))
+
+    def device_request(self, *, step: int, payload: Mapping[str, Any]) -> None:
+        """一条设备指令（T-M7-05e）。
+
+        ``payload`` 是 loop 组装好的帧载荷（``devices.DeviceRequest.to_payload``），
+        这里只补 ``step``——它与其它事件的 ``step`` 同源，客户端据此把这条指令
+        归到同一张步骤卡上。
+
+        **需结果类在这里不产生任何等待**：loop 会在本回调返回后挂起
+        （``DeviceChannel.wait``），帧泵照常发心跳。观察者不参与暂停语义。
+        """
+        self._queue.put_nowait((EventType.DEVICE_REQUEST, {"step": step, **payload}))
 
 
 # ---------------------------------------------------------------------------
@@ -674,6 +711,11 @@ def _build_loop(
 
     ``writer``（T-M7-04b）是第三个通道：loop 每产出一个落库批就写一次并提交，
     于是断连时已经跑完的步骤留在日志里（P1 的「整轮原子写入」是这里被换掉的）。
+
+    ``device``（T-M7-05e）是第四个，**受闸门控制**：``ai_device_channel_enabled``
+    关闭时传 ``None``——loop 因此不注入设备能力、不产出 ``device_request`` 帧，
+    行为与 P1 逐字相同。开启时用**进程内单例**：上行端点靠 ``request_id`` 找回
+    挂起的那一轮，两处必须是同一张表（``devices.device_channel``）。
     """
     return AgentLoop(
         provider,
@@ -683,6 +725,7 @@ def _build_loop(
         today=today,
         observer=observer,
         sink=writer,
+        device=device_channel() if cfg.ai_device_channel_enabled else None,
         executor=ServiceProposalExecutor(
             AIService(session, provider, cfg),
             user=user, request_id=request_id, book_id=book_id,

@@ -96,6 +96,18 @@
 审批四值只有 ``allowed-once`` 放行；``rejected`` / ``unavailable`` / ``cancelled``
 **一次都不执行**，且授权不落到任何持久位置——一次授权只对它自己那份提案有效
 （见 :class:`ApprovalGate`）。
+
+设备通道（T-M7-05e，ADR-010）
+----------------------------
+架构 §4.3 的两类设备指令在 :meth:`AgentLoop._device_call` 分流：**单向**（触感 /
+刷新小组件 / 分享）下发即继续，**需结果**（权限 / 图片 / 语音）**挂起**等上行回传。
+设备能力不是 ``tools.py`` 的注册表工具（没有 DB handler、执行体在客户端），单列在
+``devices.py`` 的能力目录里，且**只在注入了 :class:`DeviceChannel` 时才注入模型**
+（没通道就没有执行者，把能力摆在模型面前只会换来一次白等的超时）。
+
+挂起**发生在一次工具批次内部**，因此与取消的关系与 02d 的既定口径一致：取消的
+检查点在 Step 入口，不会切断批次（不变式 1）；客户端断连时被取消的是整个工作
+协程，``DeviceChannel.wait`` 的 ``finally`` 注销挂起条目——**不留悬挂请求**。
 """
 
 from __future__ import annotations
@@ -112,6 +124,23 @@ from enum import StrEnum
 from typing import TYPE_CHECKING, Any, Protocol
 
 from .context import ProposalValidationContext
+from .devices import (
+    NEEDS_RESULT,
+    ONE_WAY,
+    STATUS_DENIED,
+    STATUS_FAILED,
+    STATUS_OK,
+    STATUS_TIMEOUT,
+    STATUS_UNAVAILABLE,
+    DeviceChannel,
+    DeviceOutcome,
+    DeviceTool,
+    build_request,
+    device_tools,
+    get_device_tool,
+    validate_arguments,
+)
+from .devices import to_openai_tools as device_to_openai_tools
 from .provider import (
     ProviderError,
     ProviderResult,
@@ -162,6 +191,13 @@ ERR_APPROVAL_UNAVAILABLE = "approval_unavailable"
 ERR_APPROVAL_CANCELLED = "approval_cancelled"
 ERR_EXECUTION_FAILED = "execution_failed"
 
+#: 设备通道（05e）的错误码。四种结局都是**工具级结果**——不新增 ``StopReason``
+#: （ADR-010 决策 4）：模型拿到码之后该做的是向用户解释，不是终结这一轮。
+ERR_DEVICE_DENIED = "device_denied"
+ERR_DEVICE_UNAVAILABLE = "device_unavailable"
+ERR_DEVICE_FAILED = "device_failed"
+ERR_DEVICE_TIMEOUT = "device_timeout"
+
 _LOOP_ERROR_MESSAGES: dict[str, str] = {
     ERR_TOOL_UNAVAILABLE: "这个工具本轮不可用，请改用工具清单里的工具。",
     ERR_TOOL_BUDGET: "本轮工具调用次数已达上限，本次调用未执行。请直接回答用户并说明未完成的部分。",
@@ -174,6 +210,17 @@ _LOOP_ERROR_MESSAGES: dict[str, str] = {
     ),
     ERR_APPROVAL_CANCELLED: "用户中止了本次任务，后续步骤不再执行。",
     ERR_EXECUTION_FAILED: "写入执行失败，本次没有写入。不要重复提交同一提案，先向用户说明。",
+    ERR_DEVICE_DENIED: (
+        "用户拒绝或取消了这个设备操作，本次没有完成。不要重复发起同一个操作，先向用户说明。"
+    ),
+    ERR_DEVICE_UNAVAILABLE: (
+        "用户设备上这个能力当前不可用（权限被永久拒绝或设备不支持），本次没有完成。"
+        "不要重试，先向用户说明。"
+    ),
+    ERR_DEVICE_FAILED: "设备操作执行失败，本次没有完成。可以换一种做法，或向用户说明。",
+    ERR_DEVICE_TIMEOUT: (
+        "用户没有在限时内完成这个设备操作，本次没有拿到结果。不要重复发起，先向用户说明。"
+    ),
 }
 
 _WEEKDAYS = ("周一", "周二", "周三", "周四", "周五", "周六", "周日")
@@ -422,6 +469,32 @@ def _failure_outcome(code: str, **extra: Any) -> ToolOutcome:
     }
     data.update(extra)
     return ToolOutcome(kind="error", data=data)
+
+
+#: 设备结局 → 回喂模型的错误码（ADR-010 决策 4）。``timeout`` 也在这张表里：
+#: 它与客户端回的三个失败结局**对模型是同一类事**（没拿到结果），只是说法不同。
+_DEVICE_FAILURE_CODES: dict[str, str] = {
+    STATUS_DENIED: ERR_DEVICE_DENIED,
+    STATUS_UNAVAILABLE: ERR_DEVICE_UNAVAILABLE,
+    STATUS_FAILED: ERR_DEVICE_FAILED,
+    STATUS_TIMEOUT: ERR_DEVICE_TIMEOUT,
+}
+
+
+def _device_outcome(tool: DeviceTool, outcome: DeviceOutcome) -> ToolOutcome:
+    """一次设备请求的结局 → 回喂模型的 tool 结果（05e）。
+
+    ``ok`` 的 ``data`` **原样**并进结果：形状由能力自己的实现决定（服务端不校验，
+    ADR-010 决策 1），并在 ``_tool_result_content`` 里统一剥掉内部 id。
+    """
+    if outcome.status == STATUS_OK:
+        return ToolOutcome.result({
+            "status": "ok", "capability": tool.capability, **dict(outcome.data),
+        })
+    return _failure_outcome(
+        _DEVICE_FAILURE_CODES.get(outcome.status, ERR_DEVICE_FAILED),
+        capability=tool.capability,
+    )
 
 
 def _normalize_history(message: Mapping[str, Any]) -> dict[str, Any]:
@@ -744,6 +817,19 @@ class AgentObserver(Protocol):
         全程 524 字符推理对 0 字符正文，只送正文的话最需要反馈的一步仍然静默。
         """
 
+    def device_request(self, *, step: int, payload: Mapping[str, Any]) -> None:
+        """一条设备指令（T-M7-05e，架构 §8.1 的第八类事件）。
+
+        ``payload`` 已经是**帧载荷**（``devices.DeviceRequest.to_payload`` 的产物：
+        ``request_id`` / ``kind`` / ``capability`` / ``payload``，需结果类还有
+        ``timeout_seconds``）；``step`` 另给，与其它事件的 ``step`` 同源。
+
+        **两类共用这一个钩子**——载荷里的 ``kind`` 区分单向与需结果，客户端据此
+        决定要不要上行回传。需结果类在这一步之后 loop 会**挂起**，但挂起发生在
+        loop 的 ``await`` 上（``DeviceChannel.wait``），不在观察者里：本钩子仍是
+        同步的，与其它五个一样不引入 await 点、不成为取消点。
+        """
+
 
 # ---------------------------------------------------------------------------
 # Loop
@@ -771,6 +857,7 @@ class AgentLoop:
         executor: ProposalExecutor | None = None,
         observer: AgentObserver | None = None,
         sink: MessageSink | None = None,
+        device: DeviceChannel | None = None,
     ) -> None:
         """
         ``today`` 由调用方按**用户本地时区**给出（服务端不猜用户在东八区还是
@@ -793,6 +880,11 @@ class AgentLoop:
         ``sink`` 是逐事件落库通道（04b）：不接时同样**一条都不写**（02d 的行为），
         接了则由本模块在每个消息产出点把「落库批」交出去。它**不是**旁路——写失败
         会穿透本模块，由调用方按「本轮失败」处理。
+
+        ``device`` 是设备能力通道（05e）。**缺省不接 = 设备能力不注入**（模型看不到
+        它们，行为与 P1 逐字相同）：能力要在用户设备上执行，没有执行者时把它摆在
+        模型面前只会换来一次白等的超时（ADR-010 决策 7）。接了则由本模块把设备工具
+        一并注入，并在需结果类上**挂起**等上行回传。
         """
         self._provider = provider
         self._ctx = ctx
@@ -800,11 +892,24 @@ class AgentLoop:
         self._timeout = timeout
         self._today = today
         self._max_tokens = max_tokens
-        self._tools = list(tools) if tools is not None else tools_for_domains(DOMAINS)
+        self._device = device
+        #: 显式给出 ``tools`` 时**只**用给出的清单（P4 域路由的入口，05g）；缺省 =
+        #: 三个服务端域 + （通道在位时的）设备能力。
+        self._tools: list[Tool | DeviceTool] = (
+            list(tools) if tools is not None
+            else [*tools_for_domains(DOMAINS), *(device_tools() if device else [])]
+        )
         #: 只有被注入的工具才可执行——模型幻觉出一个存在于注册表但本轮没注入的
         #: 工具名时，必须拒绝（P4 的域路由一旦开启，这就是隔离边界）。
         self._advertised = {tool.name for tool in self._tools}
-        self._openai_tools = to_openai_tools(self._tools)
+        #: 两份清单各生成各的（设备能力不是 ``Tool``：没有 handler、没有
+        #: proposal_action），形状由 ``devices.to_openai_tools`` 的用例钉住一致。
+        self._openai_tools = [
+            *to_openai_tools([t for t in self._tools if not isinstance(t, DeviceTool)]),
+            *device_to_openai_tools(
+                [t for t in self._tools if isinstance(t, DeviceTool)]
+            ),
+        ]
         self._limits = limits or AgentLimits()
         self._approver = approver
         self._executor = executor
@@ -1170,15 +1275,20 @@ class AgentLoop:
 
     async def _invoke(self, call: ToolCall) -> ToolOutcome:
         tool = get_tool(call.name)
-        if tool is None:
+        # 设备能力与注册表工具**不同名也不可能同名**（``device_`` 前缀），但解析
+        # 仍是「先注册表、再设备」：注册表是服务端直连 DB 的那一套，优先它。
+        device = get_device_tool(call.name) if tool is None else None
+        if tool is None and device is None:
             # 名字不存在：沿用 02c 的降级契约（同一个安全枚举码与提示）。
             return ToolOutcome.failure(ERR_UNKNOWN_TOOL, argument=call.name)
         if call.name not in self._advertised:
-            # 名字存在但本轮没注入（P4 域路由的隔离边界）。
+            # 名字存在但本轮没注入（P4 域路由的隔离边界；设备通道未接时也走这里）。
             return _failure_outcome(ERR_TOOL_UNAVAILABLE, argument=call.name)
         if self._tool_calls >= self._limits.max_tool_calls:
             return _failure_outcome(ERR_TOOL_BUDGET, argument=call.name)
-        if tool.kind == "write" and self._writes >= self._limits.max_writes:
+        # 设备工具**不占写预算**：它执行的是设备动作，不是写库（写腿在设备侧，
+        # 例如提醒配置，走的是它自己的注册表工具与审批门）。
+        if tool is not None and tool.kind == "write" and self._writes >= self._limits.max_writes:
             return _failure_outcome(ERR_WRITE_BUDGET, argument=call.name)
 
         self._tool_calls += 1
@@ -1189,6 +1299,9 @@ class AgentLoop:
             # 故障——回一条可纠正的错误结果，不要掀掉整轮对话。
             return ToolOutcome.failure(ERR_INVALID_ARGUMENTS, argument=call.name)
 
+        if device is not None:
+            return await self._device_call(device, params)
+
         outcome = await self._call_handler(call, params)
         if outcome.kind == "proposal":
             # 一个提案 = 一次写操作（02d 决策 2）：草案一产出就计数，与它最终被
@@ -1196,6 +1309,48 @@ class AgentLoop:
             self._writes += 1
             return await self._handle_proposal(outcome.data)
         return outcome
+
+    async def _device_call(
+        self, tool: DeviceTool, params: dict[str, Any],
+    ) -> ToolOutcome:
+        """一次设备工具调用：下发指令，需结果类**挂起**等上行回传（05e）。
+
+        两类协议在这里分岔，形状其余部分完全相同::
+
+            单向    → 发帧 → 立即回一条结果给模型（结果不影响后续推理）
+            需结果  → 发帧 → 挂起（``DeviceChannel.wait``）→ 回传（或超时）→ 回结果
+
+        **顺序是「先发帧、再登记」**：回传只可能由「已经收到帧的客户端」发起，
+        先登记因此没有「回传先于登记」的竞态窗口；两者之间没有 await，帧泵也不可能
+        抢在登记之前把帧发出去（帧还在 asyncio 队列里）。
+
+        ``payload`` 原样透传——值域由能力自己的实现（客户端执行器，05f）负责，
+        与 v2 契约「payload 的所有权在 op 侧」同一取舍（ADR-010 决策 1）。回传的
+        ``data`` 随后作为配对的 tool 结果回喂模型，同样过 ``_without_ids``。
+        """
+        channel = self._device
+        if channel is None:  # 到不了：没有通道时设备能力不注入，见 __init__
+            return _failure_outcome(ERR_DEVICE_UNAVAILABLE, argument=tool.name)
+
+        paths = validate_arguments(tool, params)
+        if paths:
+            # 与 ``tools.py`` 同口径：参数不合 schema 只回错误结果（含字段路径，
+            # 不含取值）让模型自己改，不掀掉整轮对话。
+            return ToolOutcome.failure(
+                ERR_INVALID_ARGUMENTS, argument=tool.name, paths=paths,
+            )
+
+        request = build_request(tool, params, step=self._steps)
+        self._notify("device_request", step=self._steps, payload=request.to_payload(
+            timeout_seconds=channel.timeout_seconds if tool.kind == NEEDS_RESULT else None,
+        ))
+        if tool.kind == ONE_WAY:
+            return ToolOutcome.result({
+                "status": "sent", "capability": tool.capability,
+            })
+
+        channel.register(request, user_id=self._ctx.user_id)
+        return _device_outcome(tool, await channel.wait(request.request_id))
 
     async def _call_handler(
         self, call: ToolCall, params: dict[str, Any],

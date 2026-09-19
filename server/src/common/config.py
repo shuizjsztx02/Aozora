@@ -348,6 +348,30 @@ class Settings(BaseSettings):
         ),
     )
 
+    # --- 设备能力通道 (T-M7-05e) ---
+    # 通道开关（ADR-010 决策 7）。**默认关闭**——开启前 loop 不注入设备工具
+    # （模型看不到它们，行为与 P1 逐字相同）。设备能力要在用户设备上执行，得有
+    # 客户端执行器（05f）；在那之前让模型调用一个没人应答的能力，只会让回合
+    # 白等一个超时窗。与 ``ai_agent_enabled`` 同一取向。
+    ai_device_channel_enabled: bool = Field(
+        default=False,
+        validation_alias=AliasChoices(
+            "AI_DEVICE_CHANNEL_ENABLED", "ai_device_channel_enabled",
+        ),
+    )
+    # 一次**需结果**设备请求的挂起上限（秒）。客户端执行的是人的动作（系统权限
+    # 对话框、选图、录音），所以它比 ``ai_agent_step_timeout_seconds`` 宽松得多：
+    # 挂起期间流上有心跳（``ai_agent_heartbeat_seconds``），连接不会因为这个时长
+    # 被掐断。到期仍未回传即收敛成一条「没等到结果」的失败结果回喂模型
+    # （ADR-010 决策 4），回合照常往下走。
+    ai_device_timeout_seconds: float = Field(
+        default=120.0,
+        gt=0,
+        validation_alias=AliasChoices(
+            "AI_DEVICE_TIMEOUT_SECONDS", "ai_device_timeout_seconds",
+        ),
+    )
+
     @property
     def is_production(self) -> bool:
         return self.env == "production"

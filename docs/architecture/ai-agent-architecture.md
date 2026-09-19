@@ -168,6 +168,12 @@ App 共 25 个页面、约 70 个 bridge 命令。按域整理：
 
 这条通道让「对话完成全部功能」在服务端 loop 架构下成为可能——包括那些永远无法上云的能力。
 
+**落地状态（2026-09-19，T-M7-05e）：** **服务端侧已就位**——`device_request` 有了首个生产者，两类协议按上表落地（`server/src/modules/ai/devices.py` 的能力目录 + `agent.py` 的挂起/恢复 + `routes.py` 的上行端点 `POST /ai/device-result`）。协议细节见 `ai-architecture.md`「设备能力通道协议」；取舍（挂起态进程内、404 覆盖四种回不去的情形、超时是工具级结果而非 `StopReason`）见 `ADR-010`。
+
+**闸门：** `AI_DEVICE_CHANNEL_ENABLED` 默认 **false**——客户端执行器（05f）就位前不注入设备能力（否则模型会调用一个没人应答的能力，白等一个超时窗）。**客户端执行器与「能力名 → 桥命令」的分派表归 05f**。
+
+**服务端目录（6 个能力）：** 单向 `haptic.feedback` / `widget.refresh` / `share.text`；需结果 `permissions.request` / `image.pick` / `voice.transcribe`。**提醒（`reminder.*`）不在其中**——它是写工具（写用户的提醒配置、要过审批门，进 `tools.py` 的注册表），执行体在设备上属于**执行位置**的分派问题（05f），不是本通道的「设备指令」。
+
 ### 4.4 Loop 结构
 
 **Turn / Step 两层**（借鉴 DSH `ReactLoopAgent` 的已验证结构）：
@@ -303,7 +309,7 @@ SessionEvent 日志（事实来源，append-only）
 | 工具结果 | `tool` | ✅ | 同上。**与它对应的那条 `assistant` 同批落库**（批＝配对组） |
 | 审批请求 | `approval_request` | ❌ | 待接（04a 只给写入口） |
 | 审批结果 | `approval_result` | ❌ | 待接 |
-| 设备指令 | `device_request` | ❌ | 无生产者（与 §8.1 同名 SSE 事件同状态，通道归 P4） |
+| 设备指令 | `device_request` | ❌ | **不接生产者（05e 决策，`ADR-010` 决策 5）**：设备指令的下发与结果由 Surface 事件留档——模型的那次 `tool_call` 与配对的 tool 结果消息（`{"status":"sent"}` / `{"status":"ok",…}` / 错误码）都在日志里，再写一条结构性事件是把同一件事记两遍，且没有任何消费方 |
 | 错误 | `error` | ❌ | `stream._record_failure`（04b）——失败轮收尾：一条事件说明这一轮为什么停在半路，载荷只有安全枚举码与固定文案 |
 | 摘要替换 | `replace` | ❌ | `ConversationService.summarize_overflow`（04c）——窗口之外那段历史的压缩；载荷 `summary` / `upto_turn` / `turns`，**原文一行不删** |
 | 配额 | `quota` | ❌ | `record_turn`——每轮一条用量事件，**与消息同轮** |
@@ -417,7 +423,7 @@ SSE 下行事件（`text/event-stream`）：
 | `tool_call` | 工具名 + 人类可读描述（"正在查询预算…"） | 显示步骤卡片 |
 | `tool_result` | 摘要（不含原始数据） | 更新步骤卡片为完成 |
 | `confirm` | 提案摘要（ActionProposal 预览） | 渲染确认卡 |
-| `device_request` | 设备指令（需结果类） | 执行并上行回传 |
+| `device_request` | 设备指令：`request_id`（需结果类的回传凭据）、`kind`（one_way / result）、`capability`、`payload`、`timeout_seconds`（仅 result）。**两类共用这一个帧**——客户端按 `kind` 决定要不要上行回传（T-M7-05e，字段表见 `ai-architecture.md` 与 `stream.py`） | 单向：执行；需结果：执行并 `POST /ai/device-result` 上行回传 |
 | `delta` | 助手回复增量文本（**含推理通道**，见 §8.5） | 流式渲染 |
 | `done` | 结束标记（含 usage、`conversation_id`、`stop_reason`、提案与执行回执、**`seq`**＝本轮结束时的事件序号——断连续读的游标，T-M7-04b） | 收尾 |
 | `error` | 错误码（安全枚举） | 按降级契约处理 |
@@ -465,7 +471,7 @@ WebView (JS)  ←─桥事件推送─  Kotlin 层  ←──SSE──  服务�
 | **DB session 生命周期** | 现有端点统一用 `Depends(get_db_session)`（请求作用域，响应返回后即关闭） | 流式响应的生成器在响应头返回后仍在运行，**必须改用 `get_session_factory()` 自行管理**，否则 session 提前关闭 |
 | **Android 后台存活** | `AndroidManifest.xml` 无 `FOREGROUND_SERVICE`；`AozoraBridge.scope` 为 `Dispatchers.Main` | App 切后台时 SSE 长连接可能被系统回收（R-PROD-19）。P1 接受"断开 + 按 `conversation_id` 重连"，**不引入前台服务**（通知成本高于收益）；若实测体验不可接受，再单独评估 |
 
-另注：生产为**单 worker** 部署（`server/Dockerfile:52` 无 `--workers`），会话状态可用进程内 + DB 持久化；现有内存限流字典（`service.py:64`）同样是单实例假设，其注释已声明多实例须换 Redis。
+另注：生产为**单 worker** 部署（`server/Dockerfile:52` 无 `--workers`），会话状态可用进程内 + DB 持久化；现有内存限流字典（`service.py:64`）同样是单实例假设，其注释已声明多实例须换 Redis。**设备通道的挂起表同属这一族**（`devices.DeviceChannel`，T-M7-05e）：需结果类的挂起态生命期就是一次 Turn，因此放进程内；多 worker 时上行回传可能落到另一个进程（挂起请求等满超时窗才收敛，不会错写数据），进程重启则直接丢掉挂起请求（客户端拿到 404，按「这次设备操作作废」处理）。见 `ADR-010` 决策 2 与 R-PROD-34。
 
 ### 8.5 增量粒度与推理通道（2026-09-19 补充）
 
@@ -628,7 +634,7 @@ Aozora 对应设计：
 1. **推理三档的触发规则与阈值**（哪些句式/关键词判为「中」「深」）——P1 需实测调优；因有 Step 升级兜底，入口误判不致命，故可先粗后精。**（P1 未闭环，随 M7 收口按真实分布校准）**
 2. ~~历史窗口 N 的具体取值（初始 8，需实测调优）~~ **已闭环（2026-09-19，T-M7-04c）：维持 8 / 8000。** 复核实测（`_window_chars` 口径，2026-09-19）：一轮**简单问答**的序列化字符量约 149（8 轮 ≈ 1.2k），一轮**工具任务**（含一次查询的三条结果）约 596（8 轮 ≈ 4.8k）——两者都在 8000 以内，字符限真正兜底的是「单轮工具结果特别大」的会话（那时它先于轮数触发，这正是双限的意义）。**残余**：真实的超窗频率与摘要收益要等生产中统计（与 §12.2 未决 #8 同批校准）。
 3. ~~摘要压缩触发条件（轮数 vs token vs 时间，归 P3）~~ **已闭环（2026-09-19，T-M7-04c）：窗口溢出**，见已定表第 10 项。
-4. 设备工具「需结果」类的最小集合（哪些必须回传，归 P4）。**（→ 05e / 05f）**
+4. ~~设备工具「需结果」类的最小集合（哪些必须回传，归 P4）~~ **已闭环（2026-09-19，T-M7-05e）：6 个能力按 §4.3 的两类分法定稿**（单向 `haptic.feedback` / `widget.refresh` / `share.text`；需结果 `permissions.request` / `image.pick` / `voice.transcribe`），目录在 `server/src/modules/ai/devices.py`。**残余**：客户端执行器与「能力名 → 桥命令」的分派表归 05f；「提醒」被判定为写工具而非设备指令（见 §4.3 的落地状态）。
 5. ~~会话事件日志的**保留期**具体值~~ **已闭环（2026-09-19，T-M7-04d）：30 天**，见已定表第 9 项与 `security.md`。
 6. ~~会话正文是否跨设备同步（摘要已定同步，正文待定，归 P3）~~ **已闭环（2026-09-19，T-M7-04e）：正文按需重建、不做同步实体**，见已定表第 11 项与 `ADR-008`。同时否决「仅摘要同步」——摘要无生产者（归 04c），且它只覆盖超窗轮次，本就不回答「打开旧会话看见什么」。
 7. 是否需要 PTC（程序化工具调用）范式的部分特性（DSH 四种模式之一）。**（未指派卡；若 P4 收口时仍无需求，直接关闭）**
