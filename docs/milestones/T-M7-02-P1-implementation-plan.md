@@ -1272,6 +1272,23 @@ cd app && npx tsc --noEmit / npx vitest run                        # 0 错 / 110
 > 照样能通过。已把用例改成 `monkeypatch` 把窗调到 1.0 s、分片间隔给 0.3 s：此时**唯一**能把分片并
 > 起来的机制就是合并窗本身（M9 随即变红）。
 
+**远端 CI（run `35408601530`，覆盖本卡全部四个提交 `afc91b3` → `38f1091`）：** Client Lint &
+Test ✅ / Server Lint & Test ✅ / Android Compile & JVM Test —— **代码步骤全绿**（第 8 步
+`lintDebug + testDebugUnitTest + assembleDebug + assembleDebugAndroidTest` ✅，**第 10 步 connected
+Android tests 也真的跑过了** ✅），仅第 12 步 `dependencyCheckAnalyze` 仍在跑（即 02g 记录在案的
+「NVD 库下载吃光 40 分钟预算」，与本卡无关）。
+
+**同一份客户端代码在前一个 run（`35407978552`）里 Android 是 ❌** —— 这两个 run 只差文档提交，
+客户端字节相同。这是本卡新遇到的一个**间歇性环境失败**，定位如下（留档，免得下次重新查）：
+
+| 项 | 内容 |
+|---|---|
+| **失败步骤** | 第 8 步——**不是**此前记录在案的 `dependencyCheckAnalyze` 超时：第 8 步一挂，第 12 步就是 `skipped`，两者不会同时出现 |
+| **报错** | `TokenStoreTest > saveTokensThenClear_dropsTokens_butKeepsDeviceId FAILED`，栈为 `MavenArtifactFetcher.java:129` → `ExecutionException` → `FileNotFoundException at HttpURLConnection` |
+| **根因** | **Robolectric 在 runner 上拉 `android-all` 依赖失败**——测试挂在**依赖下载层**，与测试内容无关（`TokenStoreTest` 与本卡毫无关系） |
+| **判为环境的证据** | ①本卡未动客户端代码；②同一批测试本地 **394 / 0 failures**；③02g 的 run `35337146185` 第 8 步全绿；④**同一份客户端代码在新 run 里第 8 步通过**（最强的证据）；⑤异常发生在依赖下载层而非断言层 |
+| **附带教训** | `ci.yml` 设了 `concurrency.cancel-in-progress: true`——**想看重跑结论就别在同一时间推新提交**（本次重跑即被新推送取消，改为看覆盖全部提交的新 run） |
+
 **数据 / 同步 / AI / 安全影响：**
 
 - **数据与同步：零影响**——无模型改动、无迁移、不进 sync 协议。
