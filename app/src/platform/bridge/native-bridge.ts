@@ -65,6 +65,9 @@ import {
   type AuthLoginResult,
   type MeData,
 } from './bridge-types'
+// T-M7-03d 收口：`ai.agent` 的 `conversation_id` 只认服务端 id，而会话桶的键空间
+// （本地会话 `local:*` / `__local__` vs 服务端会话）由 store 定义——单一事实源。
+import { toServerConversationId } from '../store/assistant-chat-store'
 
 // Re-export BridgeError for consumers (e.g. MePage)
 export { BridgeError }
@@ -494,10 +497,17 @@ export class NativeBridge {
    * 时长上限由服务端步骤边界与用户的 `cancelAgent()` 兜底（架构 §8.3）。
    *
    * @param conversationId 上一轮 `done.conversation_id`；首轮省略。
+   *
+   * T-M7-03d 收口：**只下发服务端 id**——本地键（`local:*` / `__local__`）一律省略，
+   * 服务端据此开新会话。这条闸放在**请求组装处**（同 Kotlin 的 `buildAgentRequest`），
+   * 任何调用方都不可能绕过：会话桶的键空间属 `assistant-chat-store`，那边的「本地会话」
+   * 与「服务端会话」是两种东西，而 `/ai/agent` 只认后者（发上去会撞服务端的 UUID
+   * 校验，得到 422 而不是一条新会话）。
    */
   async runAgent(input: string, bookId: string, conversationId?: string | null): Promise<AiAgentAck> {
     const payload: Record<string, unknown> = { input, book_id: bookId }
-    if (conversationId) payload.conversation_id = conversationId
+    const serverId = toServerConversationId(conversationId ?? null)
+    if (serverId) payload.conversation_id = serverId
     return this.call<AiAgentAck>('ai.agent', payload)
   }
 

@@ -167,6 +167,71 @@ describe('AssistantPage — 会话列表（T-M7-03d）', () => {
     expect(useAssistantChatStore.getState().projections['c-1']).toHaveLength(1)
   })
 
+  it('新建（当前是本地会话且桶内有内容）：真的开新会话，旧内容留在列表里可切回', async () => {
+    mockBridge.listConversations.mockResolvedValue({ conversations: [] })
+    useAssistantChatStore.setState({
+      activeConversationId: null,
+      messages: [msg('l1', '离线记的一笔')],
+    })
+
+    renderPage()
+    await openDrawer()
+    await userEvent.click(screen.getByTestId('conversation-new'))
+
+    // 活动槽换成空的本地槽——早先这里是 `switchConversation(null)`，`from === to`
+    // 直接返回，按下去没任何反应
+    expect(useAssistantChatStore.getState().activeConversationId).toBeNull()
+    expect(useAssistantChatStore.getState().messages).toEqual([])
+
+    // 旧内容既不丢也不凭空消失：它以一条「本机 · 未同步」的本地会话留在列表里
+    await openDrawer()
+    const title = await screen.findByText('离线记的一笔')
+    const row = title.closest('[data-testid^="conversation-row-"]') as HTMLElement
+    expect(row).toHaveTextContent('本机 · 未同步')
+    // 本地会话没有服务端行 → 不给重命名 / 删除入口
+    expect(row.querySelector('[data-testid^="conversation-rename-"]')).toBeNull()
+    expect(row.querySelector('[data-testid^="conversation-delete-"]')).toBeNull()
+
+    // 可切回，内容原样
+    await userEvent.click(title)
+    await waitFor(() =>
+      expect(useAssistantChatStore.getState().messages.map(m => m.id)).toEqual(['l1']))
+  })
+
+  it('在线列表也列本机未固化的会话（不列就再也切不回去）', async () => {
+    mockBridge.listConversations.mockResolvedValue({
+      conversations: [serverConversation('c-1', '服务端会话')],
+    })
+    useAssistantChatStore.setState({
+      activeConversationId: 'c-1',
+      messages: [msg('s1', '服务端会话的消息')],
+      projections: { 'local:abc': [msg('n1', '本机老会话')] },
+    })
+
+    renderPage()
+    await openDrawer()
+
+    expect(await screen.findByTestId('conversation-row-c-1')).toHaveTextContent('服务端会话')
+    expect(await screen.findByText('本机老会话')).toBeInTheDocument()
+
+    await userEvent.click(screen.getByText('本机老会话'))
+    await waitFor(() =>
+      expect(useAssistantChatStore.getState().messages.map(m => m.id)).toEqual(['n1']))
+  })
+
+  it('本地槽为空时不成行（空桶不是一条会话）', async () => {
+    mockBridge.listConversations.mockResolvedValue({
+      conversations: [serverConversation('c-1', '服务端会话')],
+    })
+
+    renderPage()
+    await openDrawer()
+
+    expect(await screen.findByTestId('conversation-row-c-1')).toBeInTheDocument()
+    expect(screen.queryByTestId('conversation-row-local')).toBeNull()
+    expect(screen.queryByText('本机会话')).toBeNull()
+  })
+
   it('切换：两会话消息互不串扰', async () => {
     mockBridge.listConversations.mockResolvedValue({
       conversations: [serverConversation('c-1', '会话一'), serverConversation('c-2', '会话二')],

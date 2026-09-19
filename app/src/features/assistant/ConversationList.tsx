@@ -11,6 +11,10 @@
  *     口径）；服务端的删除是软删 + 清正文，不可撤销；
  *   - **两态提示**：降级（离线 / 未登录 / 旧版本）与流式进行中，各自一行说明——
  *     禁用而不解释等于坏掉，用户会以为是 bug。
+ *
+ * T-M7-03d 收口：列表里可能有**本机未固化**的会话（`row.serverId === null`，
+ * 离线轮 / 失败轮留下的、或「新建」让位下来的那几条）。它们没有服务端行，因此
+ * **不给 ✎ / 🗑 入口**（行内用「本机 · 未同步」说明），但可以点开切换。
  */
 
 import { useState } from 'react'
@@ -29,7 +33,9 @@ export interface ConversationListProps {
   /** 一次操作失败的可关闭提示 */
   error: string | null
   onCreate: () => void
+  /** `id` = 行的 id（本地槽是 null） */
   onSelect: (id: string | null) => void
+  /** `id` = **服务端会话 id**（本地会话不给这两个入口） */
   onRename: (id: string, title: string) => void
   onDelete: (id: string) => void
   onDismissError: () => void
@@ -48,10 +54,11 @@ export function ConversationList({
     : degraded ? DEGRADED_HINT[degraded] : null
   const writable = !busy && !degraded
 
+  // 重命名 / 删除都以**服务端会话 id** 为准（本地会话没有服务端行，见下）
   const startRename = (row: ConversationRow) => {
-    if (row.id === null) return
+    if (row.serverId === null) return
     setConfirmingId(null)
-    setEditingId(row.id)
+    setEditingId(row.serverId)
     setEditText(row.title)
   }
 
@@ -59,7 +66,7 @@ export function ConversationList({
     if (editingId === null) return
     const text = editText.trim()
     setEditingId(null)
-    if (text && text !== rows.find(r => r.id === editingId)?.title) {
+    if (text && text !== rows.find(r => r.serverId === editingId)?.title) {
       onRename(editingId, text)
     }
   }
@@ -172,8 +179,8 @@ export function ConversationList({
 
               {rows.map(row => {
                 const key = row.id ?? 'local'
-                const editing = editingId !== null && editingId === row.id
-                const confirming = confirmingId !== null && confirmingId === row.id
+                const editing = editingId !== null && editingId === row.serverId
+                const confirming = confirmingId !== null && confirmingId === row.serverId
                 return (
                   <div
                     key={key}
@@ -239,8 +246,9 @@ export function ConversationList({
                             </div>
                           )}
                         </button>
-                        {/* 本地会话桶没有服务端 id，重命名 / 删除都无从谈起 */}
-                        {row.id !== null && (
+                        {/* 本机未固化的会话没有服务端 id，重命名 / 删除都无从谈起
+                            （行内副标题已写明「本机 · 未同步」） */}
+                        {row.serverId !== null && (
                           <>
                             <button
                               type="button"
@@ -255,7 +263,7 @@ export function ConversationList({
                             </button>
                             <button
                               type="button"
-                              onClick={() => { setEditingId(null); setConfirmingId(row.id) }}
+                              onClick={() => { setEditingId(null); setConfirmingId(row.serverId) }}
                               disabled={!writable}
                               aria-label={`删除 ${row.title}`}
                               className="text-xs px-1 shrink-0 disabled:opacity-40"
@@ -286,7 +294,7 @@ export function ConversationList({
                           </button>
                           <button
                             type="button"
-                            onClick={() => { setConfirmingId(null); onDelete(row.id!) }}
+                            onClick={() => { setConfirmingId(null); onDelete(row.serverId!) }}
                             style={{ color: 'var(--expense)' }}
                             data-testid={`conversation-delete-confirm-button-${key}`}
                           >

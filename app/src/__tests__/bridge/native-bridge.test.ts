@@ -1131,6 +1131,20 @@ describe('NativeBridge — agent 流式通道（T-M7-02h）', () => {
     })
   })
 
+  it('runAgent 丢掉本地会话键（T-M7-03d 收口：本地会话 = 服务端开新会话）', async () => {
+    mockNative.call.mockImplementation((_v: number, requestId: string) => {
+      ackAgent(requestId, { pending: true, streamId: requestId })
+    })
+    // `local:*`（让位下来的本机会话）与 `__local__`（本地槽）都不是服务端 id——
+    // 发上去会撞服务端的 UUID 校验（422），而不是开一条新会话
+    await bridge.runAgent('记一笔 12 块', 'book-1', 'local:6f1c0f2e')
+    await bridge.runAgent('记一笔 12 块', 'book-1', '__local__')
+
+    for (const call of mockNative.call.mock.calls) {
+      expect(JSON.parse(call[3])).toEqual({ input: '记一笔 12 块', book_id: 'book-1' })
+    }
+  })
+
   it('cancelAgent 发送 ai.cancel 并回传 cancelled', async () => {
     mockNative.call.mockImplementation((_v: number, requestId: string) => {
       ackAgent(requestId, { cancelled: true })

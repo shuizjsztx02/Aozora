@@ -21,10 +21,18 @@
  * 「当前会话的投影」就存在顶层 `messages`（不是 `projections` 里的一条）：
  * 读当前会话因此仍是一次属性访问，`setState({ messages })` 这类既有写法照常成立；
  * `projections` 只放**非活动**会话，由 `switchConversation` 在两处之间搬运。
+ *
+ * T-M7-03d 收口：**本地会话要有稳定的桶键**。`newConversation` 是「新会话」的唯一
+ * 入口——它把当前本地桶（以及缓存里那条本地桶）**铸成 `local:<uuid>`** 留在
+ * `projections` 里，再换一个空桶上来。此前「新会话」走 `switchConversation(null)`，
+ * 在活动桶已是本地桶时是空操作、在缓存里还压着本地内容时会把旧内容顶上来——
+ * 按下去既不新、又可能显示别的会话。`local:*` 键**不是服务端 id**，一律不得出现在
+ * `/ai/agent` 的 `conversation_id` 上（见 `toServerConversationId`）。
  */
 
 import { create } from 'zustand'
 import { persist, createJSONStorage, type StateStorage } from 'zustand/middleware'
+import { newUuid } from '../uuid'
 import type { AssistantMessage } from '../../features/assistant/use-assistant'
 
 /** 历史上限：超出弃旧保新（REQ-42 决策 #7）。按**每个会话**各自计。 */
@@ -33,6 +41,25 @@ export const MAX_ASSISTANT_MESSAGES = 200
 /** 尚未拿到服务端会话 id 时的桶键：首轮 `done` 之前（或全程离线）的消息都归这里。
  *  `adoptConversation` 会把这一桶「改名」成服务端交回的 id。 */
 export const LOCAL_CONVERSATION_KEY = '__local__'
+
+/** 本地会话（已从活动桶上让位、但从未固化到服务端）的桶键前缀。 */
+export const LOCAL_ID_PREFIX = 'local:'
+
+/**
+ * 桶键 → 服务端会话 id：**本地键一律 null**。
+ *
+ * `/ai/agent` 的 `conversation_id` 只认服务端 id——把 `local:*` / `__local__` 发上去
+ * 会撞服务端的 UUID 校验（422），而不是「开新会话」。
+ */
+export function toServerConversationId(id: string | null): string | null {
+  if (!id || id === LOCAL_CONVERSATION_KEY || id.startsWith(LOCAL_ID_PREFIX)) return null
+  return id
+}
+
+/** 桶键是否本地（未固化到服务端）。会话列表据此决定要不要给重命名 / 删除入口。 */
+export function isLocalConversationKey(id: string | null): boolean {
+  return toServerConversationId(id) === null
+}
 
 /** localStorage 在隐私模式/quota 满时读写抛错——包一层静默失败的 storage（决策 #7） */
 const safeStorage: StateStorage = {
@@ -71,6 +98,21 @@ interface AssistantChatState {
   setMessages: (next: AssistantChatSetter) => void
   /** 切换活动会话（03d 的会话列表调它）。当前会话先入缓存、目标会话出缓存 */
   switchConversation: (id: string | null) => void
+  /**
+   * T-M7-03d 收口：**开一条新会话**——「新会话」按钮的唯一入口。
+   *
+   * 不能拿 `switchConversation(null)` 顶替：活动桶**已经是**本地桶时它是空操作
+   * （按了没反应），而缓存里还压着一条本地桶时它会把那份旧内容顶上来（「新会话」
+   * 显示成别的会话）。本动作两头都堵上：
+   *
+   * - 当前会话先落袋（与服务端会话的切换同口径，有内容才存）；
+   * - 缓存里那条本地桶也**铸成 `local:<uuid>` 单独留一条**——它马上要变成活动桶，
+   *   而活动会话不留副本（`switchConversation` 维护的不变式）。
+   *
+   * **全程零删除**：旧内容只是换了个桶键，仍可在会话列表里切回——这正是它与
+   * 「清空并新建」的分野（后者不可撤销，不该由一个按钮默默执行）。
+   */
+  newConversation: () => void
   /** 首轮 `done.conversation_id` 交回时把当前会话「改名」——投影不搬家，只换键 */
   adoptConversation: (id: string) => void
   /**
@@ -116,6 +158,24 @@ export const useAssistantChatStore = create<AssistantChatState>()(
           const next = projections[to] ?? []
           delete projections[to] // 不变式：活动会话不留副本
           return { activeConversationId: id, messages: cap(next), projections }
+        }),
+      newConversation: () =>
+        set((s) => {
+          const projections = { ...s.projections }
+          // 当前会话先落袋——与服务端会话的切换同口径（有内容才存，空表存了也是空）
+          if (s.activeConversationId !== null) {
+            if (s.messages.length > 0) projections[s.activeConversationId] = cap(s.messages)
+          } else if (s.messages.length > 0) {
+            // 未固化的本地会话：铸一个本地键留下，别让它被下一次输入顶掉
+            projections[LOCAL_ID_PREFIX + newUuid()] = cap(s.messages)
+          }
+          // 缓存里那条本地桶同样要让位：它马上就是活动桶
+          const cachedLocal = projections[LOCAL_CONVERSATION_KEY]
+          if (cachedLocal && cachedLocal.length > 0) {
+            projections[LOCAL_ID_PREFIX + newUuid()] = cap(cachedLocal)
+          }
+          delete projections[LOCAL_CONVERSATION_KEY]
+          return { activeConversationId: null, messages: [], projections }
         }),
       adoptConversation: (id) =>
         set((s) => {

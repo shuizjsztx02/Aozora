@@ -20,12 +20,23 @@
  * **流式期间禁止切换**（`busy`）：一轮的输出落在活动会话桶上（`setMessages` 是
  * 扁平的），流中切换会让这一轮的消息落到「切过去之后」的会话里。根治要把一轮绑到
  * 发起时的会话（十几处调用点），那属于后续卡；本卡用「禁止切换」把不变量守住。
+ *
+ * T-M7-03d 收口——**本机未固化的会话也是列表的一部分**：
+ *
+ * - 在线列表 = 服务端会话（权威）**＋ 本机未固化的那几条**。后者不在服务端列表里，
+ *   不列出来就再也切不回去（离线轮 / 失败轮留下的历史会变成不可达的死数据）。
+ *   它们没有 `serverId`，因此不给重命名 / 删除入口。
+ * - 「新建」走 store 的 `newConversation`（把当前那条本地会话铸成 `local:<uuid>`
+ *   留在列表里，再换一个空槽上来）。早先它用 `switchConversation(null)`：活动桶
+ *   已经是本地槽时 `from === to` 直接返回（**按了没反应**），而缓存里还压着一条
+ *   本地桶时会把那份旧内容顶上来（「新会话」显示成别的会话）——两种都不是「新建」。
+ * - 降级态（离线 / 未登录 / 旧 APK）仍只读本机缓存，且**禁用新建**（卡面口径）。
  */
 
 import { useCallback, useEffect, useRef, useState } from 'react'
 import type { AiConversationListResponse, AiConversationSummary } from '../../platform/bridge/bridge-types'
 import { useBridge } from '../../platform/hooks/use-bridge'
-import { useAssistantChatStore, LOCAL_CONVERSATION_KEY } from '../../platform/store/assistant-chat-store'
+import { useAssistantChatStore, LOCAL_CONVERSATION_KEY, isLocalConversationKey, toServerConversationId } from '../../platform/store/assistant-chat-store'
 import type { AssistantMessage } from './use-assistant'
 
 /**
@@ -38,14 +49,20 @@ interface ConversationBridge {
   deleteConversation(id: string): Promise<{ success: boolean }>
 }
 
-/** 列表的一行（已归一化：服务端会话与本机缓存都渲染成它）。 */
+/** 列表的一行（已归一化：服务端会话与本机未固化的会话都渲染成它）。 */
 export interface ConversationRow {
-  /** 服务端会话 id；`null` = 本地会话桶（尚未拿到 id 或全程离线的那条） */
+  /** store 的桶键：服务端 id 或本地键（`local:*`）；`null` = 当前那个本地槽 */
   id: string | null
+  /** **服务端**会话 id；`null` = 本机尚未固化的会话——没有服务端行，重命名 / 删除
+   *  都无从谈起（那两个动作要打端点）。UI 据此决定给不给这两个入口。 */
+  serverId: string | null
   title: string
   subtitle: string
   active: boolean
 }
+
+/** 本机未固化的会话的副标题：它不在服务端列表里，说明一下为什么没有 ✎ / 🗑。 */
+const LOCAL_SUBTITLE = '本机 · 未同步'
 
 /** 降级原因（null = 正常）。三种原因的用户说法在 `DEGRADED_HINT`。 */
 export type DegradedReason = 'offline' | 'unauthenticated' | 'unsupported'
@@ -88,12 +105,16 @@ export interface UseConversationsResult {
   error: string | null
   /** 流式进行中：UI 据此禁用切换 / 新建 / 重命名 / 删除 */
   busy: boolean
-  /** 当前活动会话 id（null = 本地会话桶）。消息区据此区分「新会话」与
-   *  「这条服务端会话的消息不在本机」（正文跨设备同步归 P3 的 04e） */
+  /** 当前活动会话的桶键（null = 本地槽）。消息区据此区分「新会话」与「这条服务端
+   *  会话的消息不在本机」（正文跨设备同步归 P3 的 04e） */
   activeConversationId: string | null
+  /** 开一条新会话（当前那条本地会话让位、内容保留，见 store 的 `newConversation`） */
   createConversation: () => void
+  /** 切换活动会话；`id` 是**行的 id**（本地槽是 null） */
   selectConversation: (id: string | null) => void
+  /** 重命名 —— `id` 必须是**服务端会话 id**（`row.serverId`）：本地会话没有服务端行 */
   renameConversation: (id: string, title: string) => Promise<void>
+  /** 删除 —— 同上，`id` 是服务端会话 id */
   deleteConversation: (id: string) => Promise<void>
   dismissError: () => void
 }
@@ -117,6 +138,7 @@ export function useConversations({
   const messages = useAssistantChatStore(s => s.messages)
   const projections = useAssistantChatStore(s => s.projections)
   const switchConversation = useAssistantChatStore(s => s.switchConversation)
+  const newConversation = useAssistantChatStore(s => s.newConversation)
   const removeConversation = useAssistantChatStore(s => s.removeConversation)
 
   const [items, setItems] = useState<AiConversationSummary[]>([])
@@ -172,24 +194,36 @@ export function useConversations({
   // 降级态下不会去拉取，也就没有「正在加载」可言
   const loading = open && !loaded && degraded === null
 
+  /** 活动桶的**键**：`activeConversationId` 为 null 时它就是本地槽（`__local__`）。
+   *  行的 key / id 与它比对——行的 id 经 `rowId` 归一（本地槽在 UI 上是 null）。 */
+  const activeKey = activeConversationId ?? LOCAL_CONVERSATION_KEY
+
   const rows: ConversationRow[] = degraded
-    ? localRows(activeConversationId, messages, projections)
-    : items.map(c => ({
-        id: c.id,
-        // 存量会话升级后服务端 title 为空串（0019 不回溯派生）→ 客户端兜底文案
-        title: c.title?.trim() || '未命名会话',
-        subtitle: shortTime(c.last_active_at || c.created_at),
-        active: c.id === activeConversationId,
-      }))
+    ? degradedRows(activeKey, messages, projections)
+    : [
+        // 本机未固化的会话**在线时也要列**：它们不在服务端列表里，不列就再也切不回去
+        // ——离线轮 / 失败轮留下的历史会变成不可达的死数据（「新建」正是让当前这条
+        // 本地会话让位给新会话的动作，见 store 的 `newConversation`）。
+        ...localOnlyRows(activeKey, messages, projections),
+        ...items.map(c => ({
+          id: c.id,
+          serverId: c.id,
+          // 存量会话升级后服务端 title 为空串（0019 不回溯派生）→ 客户端兜底文案
+          title: c.title?.trim() || '未命名会话',
+          subtitle: shortTime(c.last_active_at || c.created_at),
+          active: c.id === activeKey,
+        })),
+      ]
 
   const createConversation = useCallback(() => {
     if (degraded || streaming) return
     setError(null)
-    // 「新建」= 切回本地会话桶：服务端会在首轮不带 conversation_id 时建会话
-    // （02f 口径）。若非破坏性优先——本地桶里若有内容（离线轮 / 失败轮留下的一屏），
-    // 用户看到的是它，而不是被静默清空。
-    switchConversation(null)
-  }, [degraded, streaming, switchConversation])
+    // 「新建」= 开一条新会话（store 的 `newConversation`）：服务端在首轮不带
+    // conversation_id 时自建（02f 口径），客户端只需把活动桶换成空的本地槽。
+    // 当前这条本地会话（若有内容）**铸一个本地键留在列表里**——既不静默清空，
+    // 也不像早先的 `switchConversation(null)` 那样在本地槽上退化成空操作。
+    newConversation()
+  }, [degraded, streaming, newConversation])
 
   const selectConversation = useCallback((id: string | null) => {
     if (streaming) return
@@ -243,30 +277,58 @@ export function useConversations({
   }
 }
 
-/** 降级态的行：本机投影缓存的那些桶（活动桶 + `projections` 的条目）。 */
-function localRows(
-  activeId: string | null,
+/** 降级态的行：**全部**本机缓存（服务端列表拿不到，这里是唯一的读取面）。 */
+function degradedRows(
+  activeKey: string,
+  messages: AssistantMessage[],
+  projections: Record<string, AssistantMessage[]>,
+): ConversationRow[] {
+  const rows = [makeRow(activeKey, messages, activeKey, '')]
+  for (const [key, msgs] of Object.entries(projections)) {
+    if (key === activeKey) continue
+    rows.push(makeRow(key, msgs, activeKey, ''))
+  }
+  return rows
+}
+
+/**
+ * 本机**未固化到服务端**的会话：当前那条（有内容才算一条会话）+ 缓存里的本地桶。
+ *
+ * 服务端会话不在这里出——在线时权威列表在服务端（`items`），离线时走
+ * `degradedRows`（服务端列表拿不到，只能读本机缓存）。
+ */
+function localOnlyRows(
+  activeKey: string,
   messages: AssistantMessage[],
   projections: Record<string, AssistantMessage[]>,
 ): ConversationRow[] {
   const rows: ConversationRow[] = []
-  // 活动桶在最前（它就是用户此刻看的那条）
-  rows.push({
-    id: activeId,
-    title: titleFromMessages(messages),
-    subtitle: '',
-    active: true,
-  })
-  for (const [id, msgs] of Object.entries(projections)) {
-    if (id === activeId) continue
-    rows.push({
-      id: id === LOCAL_CONVERSATION_KEY ? null : id,
-      title: titleFromMessages(msgs),
-      subtitle: '',
-      active: false,
-    })
+  if (isLocalConversationKey(activeKey) && messages.length > 0) {
+    rows.push(makeRow(activeKey, messages, activeKey, LOCAL_SUBTITLE))
+  }
+  for (const [key, msgs] of Object.entries(projections)) {
+    if (key === activeKey || msgs.length === 0) continue
+    if (!isLocalConversationKey(key)) continue
+    rows.push(makeRow(key, msgs, activeKey, LOCAL_SUBTITLE))
   }
   return rows
+}
+
+/** 桶键 → 列表行的 id：本地槽（`__local__`）在 UI 上就是 `null`（开它就是
+ *  `switchConversation(null)`）。 */
+const rowId = (key: string) => (key === LOCAL_CONVERSATION_KEY ? null : key)
+
+/** 一个桶 → 一行。`serverId` 由键空间推得——本地键没有服务端行。 */
+function makeRow(
+  key: string, msgs: AssistantMessage[], activeKey: string, subtitle: string,
+): ConversationRow {
+  return {
+    id: rowId(key),
+    serverId: toServerConversationId(key),
+    title: titleFromMessages(msgs),
+    subtitle,
+    active: key === activeKey,
+  }
 }
 
 function codeOf(e: unknown): string {

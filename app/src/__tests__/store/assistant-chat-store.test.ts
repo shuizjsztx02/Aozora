@@ -6,10 +6,14 @@
  *
  * T-M7-03b（P2）：多会话分桶——`switchConversation` 互不串扰、`adoptConversation`
  * 把本地会话固化到服务端 id、`clear` 清全部桶、**v1 落盘数据迁移**（version bump）。
+ *
+ * T-M7-03d 收口：`newConversation`（「新会话」）——本地会话让位时铸 `local:<uuid>`
+ * 留下、`toServerConversationId` 把本地键翻成 null（不发上服务端）。
  */
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
 import {
   useAssistantChatStore, MAX_ASSISTANT_MESSAGES, LOCAL_CONVERSATION_KEY,
+  LOCAL_ID_PREFIX, toServerConversationId,
 } from '../../platform/store/assistant-chat-store'
 import type { AssistantMessage } from '../../features/assistant/use-assistant'
 
@@ -244,5 +248,69 @@ describe('assistant-chat-store — 多会话分桶（T-M7-03b）', () => {
     const { messages } = mod.useAssistantChatStore.getState()
     expect(messages).toHaveLength(MAX_ASSISTANT_MESSAGES)
     expect(messages.at(-1)!.id).toBe('m-259')
+  })
+})
+
+/**
+ * T-M7-03d 收口：「新会话」不能拿 `switchConversation(null)` 顶替——活动桶已经是
+ * 本地槽时它是空操作（按了没反应），缓存里还压着一条本地桶时它把旧内容顶上来
+ * （「新会话」显示成别的会话）。`newConversation` 把两头都堵上，且**零删除**：
+ * 让位的本地会话铸成 `local:<uuid>` 留在缓存里，仍可在列表里切回。
+ */
+describe('assistant-chat-store — 新会话（T-M7-03d 收口）', () => {
+  const localKeys = (p: Record<string, unknown>) =>
+    Object.keys(p).filter(k => k.startsWith(LOCAL_ID_PREFIX))
+
+  it('从服务端会话新建：旧会话入缓存，活动槽换成空表', () => {
+    s().switchConversation('conv-A')
+    s().setMessages(many(3))
+
+    s().newConversation()
+
+    expect(s().activeConversationId).toBeNull()
+    expect(s().messages).toEqual([])
+    expect(s().projections['conv-A'].map(m => m.id)).toEqual(['m-0', 'm-1', 'm-2'])
+  })
+
+  it('本地槽有内容：铸一个本地键留在缓存（不静默清空），活动槽换成空表', () => {
+    s().setMessages(many(2))
+
+    s().newConversation()
+
+    expect(s().activeConversationId).toBeNull()
+    expect(s().messages).toEqual([])
+    const keys = localKeys(s().projections)
+    expect(keys).toHaveLength(1)
+    expect(s().projections[keys[0]].map(m => m.id)).toEqual(['m-0', 'm-1'])
+  })
+
+  it('缓存里压着的那条本地会话也让位（不被顶掉、不与当前那条混起来）', () => {
+    s().setMessages(many(2))                    // 本地槽：m-0 / m-1
+    s().switchConversation('conv-A')            // 让位 → projections.__local__
+    s().setMessages(many(1, 10))                // conv-A：m-10
+
+    s().newConversation()
+
+    expect(s().projections['conv-A'].map(m => m.id)).toEqual(['m-10'])
+    expect(s().projections[LOCAL_CONVERSATION_KEY]).toBeUndefined()
+    const keys = localKeys(s().projections)
+    expect(keys).toHaveLength(1)
+    expect(s().projections[keys[0]].map(m => m.id)).toEqual(['m-0', 'm-1'])
+  })
+
+  it('空槽上新建：不产生任何缓存条目（没有东西需要保下来）', () => {
+    s().newConversation()
+
+    expect(s().activeConversationId).toBeNull()
+    expect(s().messages).toEqual([])
+    expect(s().projections).toEqual({})
+  })
+
+  it('本地键一律不是服务端 id（`/ai/agent` 靠它开新会话）', () => {
+    expect(toServerConversationId(null)).toBeNull()
+    expect(toServerConversationId(LOCAL_CONVERSATION_KEY)).toBeNull()
+    expect(toServerConversationId(LOCAL_ID_PREFIX + 'x')).toBeNull()
+    expect(toServerConversationId('6f1c0f2e-0000-4000-8000-000000000001'))
+      .toBe('6f1c0f2e-0000-4000-8000-000000000001')
   })
 })
