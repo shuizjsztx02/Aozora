@@ -192,6 +192,11 @@ class AozoraBridge(
             BridgeCommands.AI_AGENT -> handleAiAgent(requestId, payload)
             BridgeCommands.AI_CANCEL -> handleAiCancel(requestId)
 
+            // T-M7-03d: 会话索引（ADR-003 通道，请求-响应）
+            BridgeCommands.CONVERSATION_LIST -> handleConversationList(requestId)
+            BridgeCommands.CONVERSATION_RENAME -> handleConversationRename(requestId, payload)
+            BridgeCommands.CONVERSATION_DELETE -> handleConversationDelete(requestId, payload)
+
             // T-M4-04a: 权限管理
             BridgeCommands.PERMISSIONS_GET_STATUS -> handlePermissionsGetStatus(requestId)
             BridgeCommands.PERMISSIONS_REQUEST -> handlePermissionsRequest(requestId, payload)
@@ -1344,6 +1349,9 @@ class AozoraBridge(
             is AiGatewayClient.AiError.RateLimited -> "429" to "AI rate limit exceeded"
             is AiGatewayClient.AiError.Unavailable -> "503" to "AI service unavailable"
             is AiGatewayClient.AiError.AuthLost -> "auth_lost" to "Authentication required"
+            // T-M7-03d: 本轮带的 conversation_id 已失效（服务端开流前回 404）。
+            // 单列成码，前端据此丢弃该 id 并开新会话——不是一次可重试的网络故障。
+            is AiGatewayClient.AiError.NotFound -> "not_found" to "Conversation not found"
             is AiGatewayClient.AiError.Network -> "network" to "Network error"
         }
         return localStreamError(code, message)
@@ -1351,6 +1359,77 @@ class AozoraBridge(
 
     private fun localStreamError(code: String, message: String): String =
         JSONObject().put("code", code).put("message", message).toString()
+
+    // ─── T-M7-03d: 会话索引 handlers ───
+
+    /**
+     * 会话索引三命令共用的失败映射。
+     *
+     * 与 `handleAi*` 的逐 catch 写法同构（同一套 [AiGatewayClient.AiError] → 桥错误码
+     * 口径），只是三个 handler 的分支完全一致，故收成一个私有函数——**新增代码的
+     * 内部复用，既有 handler 的形态不动**。
+     *
+     * [AiGatewayClient.AiError.NotFound] 单列成 `not_found`：会话端点对「别人的 /
+     * 已删除的 / 不存在的 id」一律 404（03a 口径），客户端要据此**幂等处理**
+     * （删除重试当成功、丢弃陈旧的 conversation_id 并开新会话），而不是提示网络错误。
+     */
+    private suspend fun conversationCall(
+        requestId: String,
+        label: String,
+        call: suspend () -> String,
+    ): BridgeResponse = try {
+        BridgeResponse.success(requestId, call())
+    } catch (e: AiGatewayClient.AiError.Timeout) {
+        BridgeResponse.error(requestId, "timeout", "$label timed out")
+    } catch (e: AiGatewayClient.AiError.NotFound) {
+        BridgeResponse.error(requestId, "not_found", "Conversation not found")
+    } catch (e: AiGatewayClient.AiError.Network) {
+        BridgeResponse.error(requestId, "network", e.message ?: "Network error")
+    } catch (e: AiGatewayClient.AiError.RateLimited) {
+        BridgeResponse.error(requestId, "429", "AI rate limit exceeded")
+    } catch (e: AiGatewayClient.AiError.Unavailable) {
+        BridgeResponse.error(requestId, "503", "AI service unavailable")
+    } catch (e: AiGatewayClient.AiError.AuthLost) {
+        BridgeResponse.error(requestId, "auth_lost", "Authentication required")
+    }
+
+    /** `conversation.list` —— 本人的会话索引，响应体原样透传。 */
+    private suspend fun handleConversationList(requestId: String): BridgeResponse {
+        val client = aiGatewayClient
+            ?: return BridgeResponse.error(requestId, "unavailable", "AI gateway client not injected")
+        return conversationCall(requestId, "Conversation list") { client.listConversations() }
+    }
+
+    /** `conversation.rename` —— 需要 `id` 与 `title`。 */
+    private suspend fun handleConversationRename(requestId: String, p: JSONObject): BridgeResponse {
+        val client = aiGatewayClient
+            ?: return BridgeResponse.error(requestId, "unavailable", "AI gateway client not injected")
+        val id = p.optString("id", null)
+            ?: return BridgeResponse.error(requestId, "invalid_input", "Missing required field: id")
+        val title = p.optString("title", null)
+            ?: return BridgeResponse.error(requestId, "invalid_input", "Missing required field: title")
+        return conversationCall(requestId, "Conversation rename") {
+            client.renameConversation(id, title)
+        }
+    }
+
+    /**
+     * `conversation.delete` —— 需要 `id`。
+     *
+     * 服务端回 **204 无响应体**，而桥的 `data` 是要嵌进信封的 JSON 串——空串会让
+     * `BridgeResponse.toJson` 的 `JSONTokener` 直接抛，前端也 `JSON.parse` 不到，
+     * 调用会一直挂到超时。故这里回一个确定的成功形状 `{success:true}`。
+     */
+    private suspend fun handleConversationDelete(requestId: String, p: JSONObject): BridgeResponse {
+        val client = aiGatewayClient
+            ?: return BridgeResponse.error(requestId, "unavailable", "AI gateway client not injected")
+        val id = p.optString("id", null)
+            ?: return BridgeResponse.error(requestId, "invalid_input", "Missing required field: id")
+        return conversationCall(requestId, "Conversation delete") {
+            client.deleteConversation(id)
+            JSONObject().put("success", true).toString()
+        }
+    }
 
     // ─── 响应发送 ───
 

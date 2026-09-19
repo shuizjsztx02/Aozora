@@ -111,6 +111,16 @@ object BridgeCommands {
     const val AI_AGENT = "ai.agent"
     const val AI_CANCEL = "ai.cancel"
 
+    // T-M7-03d（决策 #1：桥计数本轮唯一变更点 79→82）：会话索引三命令，对接
+    // T-M7-03a 的 `/ai/conversations` 端点。三个都是**请求-响应**（走 25 s 单发
+    // 预算，不用 SSE 长连接）。**「新建会话」不需要命令**——服务端在首轮不带
+    // conversation_id 时自建，done 帧回传 id（02f 口径），客户端只是切到本地桶。
+    // 第四条 `GET /{id}/events`（正文增量）**有意不加**：P2 不做会话正文跨设备
+    // 同步（归 P3 的 04e），加一条无人调用的桥命令只会扩大 APK 契约面。
+    const val CONVERSATION_LIST = "conversation.list"
+    const val CONVERSATION_RENAME = "conversation.rename"
+    const val CONVERSATION_DELETE = "conversation.delete"
+
     // T-M4-04a: 权限管理
     const val PERMISSIONS_GET_STATUS = "permissions.getStatus"
     const val PERMISSIONS_REQUEST = "permissions.request"
@@ -196,6 +206,7 @@ object BridgeCommands {
         AI_REPORT,
         AI_INTERPRET, AI_VALIDATE, AI_EXECUTE,
         AI_AGENT, AI_CANCEL,
+        CONVERSATION_LIST, CONVERSATION_RENAME, CONVERSATION_DELETE,
         PERMISSIONS_GET_STATUS, PERMISSIONS_REQUEST, PERMISSIONS_OPEN_SETTINGS,
         VOICE_START_RECORDING, VOICE_STOP_RECORDING,
         IMAGE_PICK, IMAGE_DELETE,

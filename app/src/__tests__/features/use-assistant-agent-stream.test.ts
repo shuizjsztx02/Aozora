@@ -795,3 +795,73 @@ describe('useAssistantStream — 轮次归属（T-M7-03b 收口）', () => {
     expect(settled).toHaveLength(1)
   })
 })
+/**
+ * T-M7-03d：**陈旧 `conversation_id` 的 404 降级**（03a 交办、03b 记录在案的缺口）。
+ *
+ * 服务端对「别人的 / 已删除的 / 不存在的 id」一律 404，且是在 `POST /ai/agent`
+ * **开流之前**抛出——桥把它译成一帧 `error{code:'not_found'}`（03d 新增的映射，
+ * 此前它与普通网络故障不可分辨）。终态是 03b 交接的那一条：**丢弃这个 id，
+ * 下一轮开新会话**，而不是让用户对着一句「请重试」永远重试同一个死 id。
+ */
+describe('use-assistant — 陈旧 conversation_id 的 404 降级（T-M7-03d）', () => {
+  beforeEach(() => {
+    vi.clearAllMocks()
+    listeners = []
+    mockBridge.onAiStream.mockImplementation((l: (ev: AgentStreamEvent) => void) => {
+      listeners.push(l)
+      return () => { listeners = listeners.filter(x => x !== l) }
+    })
+    mockBridge.runAgent.mockResolvedValue({ pending: true, streamId: STREAM_ID })
+    mockBridge.isAvailable.mockReturnValue(true)
+    mockBridge.interpretAI.mockResolvedValue(null)
+    vi.mocked(parseInput).mockReturnValue(chatProposal())
+    useAssistantChatStore.getState().clear()
+  })
+
+  it('not_found 帧：丢弃陈旧 id、这一屏消息原地保留、下一轮不带 id', async () => {
+    // 上一轮留下的会话 id（服务端已经没有了：别的设备删了 / 换了账号登录）
+    useAssistantChatStore.setState({
+      activeConversationId: 'c-stale',
+      messages: [{ id: 'u0', role: 'user', text: '上一条消息' }],
+    })
+    const { result } = setup()
+
+    await act(async () => {
+      const p = result.current.submitInput('帮我记一笔午饭12块')
+      await Promise.resolve()
+      emitAll([
+        ['delta', { text: '我先看看', channel: 'content', step: 1 }],
+        ['error', { code: 'not_found', message: 'Conversation not found' }],
+      ])
+      await p
+    })
+
+    // ① id 丢掉 —— 下一轮不带它，服务端因此开新会话
+    expect(useAssistantChatStore.getState().activeConversationId).toBeNull()
+    // ② 半截文本保留 + 一句明确的失效说明（不是泛泛的「请重试」）
+    const last = lastMsg(result).text
+    expect(last).toContain('我先看看')
+    expect(last).toContain('已切回本地会话')
+    // ③ 之前那一屏的消息一条不丢
+    expect(result.current.messages.some(m => m.text === '上一条消息')).toBe(true)
+
+    // ④ 下一轮确实没带 id
+    await act(async () => { await result.current.submitInput('再来一次') })
+    expect(mockBridge.runAgent).toHaveBeenLastCalledWith('再来一次', 'book-1', null)
+  })
+
+  it('普通失败（network）不走这条降级：id 留着，用户重试同一会话', async () => {
+    useAssistantChatStore.setState({ activeConversationId: 'c-ok', messages: [] })
+    const { result } = setup()
+
+    await act(async () => {
+      const p = result.current.submitInput('帮我记一笔午饭12块')
+      await Promise.resolve()
+      emitAll([['error', { code: 'network', message: 'Network error' }]])
+      await p
+    })
+
+    expect(useAssistantChatStore.getState().activeConversationId).toBe('c-ok')
+    expect(lastMsg(result).text).toContain('本轮未完成')
+  })
+})

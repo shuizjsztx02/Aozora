@@ -21,6 +21,8 @@ import { usePermissions } from '../../platform/hooks/use-permissions'
 import { useVoice } from '../../platform/hooks/use-voice'
 import { useAssistant, type AssistantMessage, type CardStatus } from './use-assistant'
 import { StepCardStream } from './StepCardStream'
+import { ConversationList } from './ConversationList'
+import { useConversations } from './use-conversations'
 import { ConfirmationCard } from './ConfirmationCard'
 import { OpPreviewCard } from './OpPreviewCard'
 import { buildAiCategoryNames } from '../../domain/ai-proposal-builder'
@@ -279,6 +281,15 @@ export function AssistantPage() {
     timezone: Intl.DateTimeFormat().resolvedOptions().timeZone || 'Asia/Shanghai',
   })
 
+  // T-M7-03d：多会话抽屉——数据面（列表 / 降级 / 删除回退）在 use-conversations。
+  // `streaming` 非空即「本轮进行中」：切换与写操作一律禁用（一轮仍绑定在当前会话上，
+  // 见 use-conversations 文件头）。
+  const [conversationListOpen, setConversationListOpen] = useState(false)
+  const conversations = useConversations({
+    open: conversationListOpen,
+    streaming: streaming !== null,
+  })
+
   // ─── T9-8（REQ-16 / 决策 #11）：聊天图片上传——页面级小状态机 ───
   // idle → picking（选图+上传）→ parsing（AI 解析）→ review（批量卡）→ 确认后 idle。
   // 与文本单卡链路互不干扰：activeProposal 各自独立，批量卡期间文本输入不禁用。
@@ -497,25 +508,42 @@ export function AssistantPage() {
         back
         title={activePersona?.name}
         right={
-          // T13-6（REQ-49）：文字钮 → 24px 当前角色头像圆钮（CategoryIcon 现成
-          // emoji/base64 双形态渲染；无头像/未选角色 → 👤 兜底），点击仍进角色管理。
-          <button
-            type="button"
-            onClick={() => navigate('/settings/personas')}
-            className="flex items-center justify-center rounded-full shrink-0"
-            style={{
-              width: 24, height: 24, fontSize: 15, overflow: 'hidden',
-              border: '1px solid var(--accent)',
-            }}
-            data-testid="persona-manage-button"
-            aria-label="角色管理"
-          >
-            <CategoryIcon
-              icon={activePersona?.avatar}
-              name={activePersona?.name ?? '角色'}
-              fallback="👤"
-            />
-          </button>
+          <div className="flex items-center gap-2">
+            {/* T-M7-03d（架构 §9.2 会话管理）：会话列表抽屉入口 */}
+            <button
+              type="button"
+              onClick={() => setConversationListOpen(true)}
+              className="flex items-center justify-center rounded-full shrink-0"
+              style={{
+                width: 24, height: 24, fontSize: 13,
+                color: 'var(--ink2)',
+                border: '1px solid var(--glass-border)',
+              }}
+              data-testid="conversation-list-button"
+              aria-label="会话列表"
+            >
+              ☰
+            </button>
+            {/* T13-6（REQ-49）：文字钮 → 24px 当前角色头像圆钮（CategoryIcon 现成
+                emoji/base64 双形态渲染；无头像/未选角色 → 👤 兜底），点击仍进角色管理。 */}
+            <button
+              type="button"
+              onClick={() => navigate('/settings/personas')}
+              className="flex items-center justify-center rounded-full shrink-0"
+              style={{
+                width: 24, height: 24, fontSize: 15, overflow: 'hidden',
+                border: '1px solid var(--accent)',
+              }}
+              data-testid="persona-manage-button"
+              aria-label="角色管理"
+            >
+              <CategoryIcon
+                icon={activePersona?.avatar}
+                name={activePersona?.name ?? '角色'}
+                fallback="👤"
+              />
+            </button>
+          </div>
         }
       />
 
@@ -529,7 +557,11 @@ export function AssistantPage() {
             <div className="text-center">
               <div className="text-4xl mb-3">💬</div>
               <p className="text-sm" style={{ color: 'var(--ink2)' }}>
-                输入记账短句，如「午饭 12.5」
+                {/* T-M7-03d：切到一条服务端会话而本机没有它的消息时，别假装是新会话
+                    （正文跨设备同步归 P3 的 04e） */}
+                {conversations.activeConversationId
+                  ? '这条会话的消息不在这台设备上（跨设备同步将在后续版本支持）'
+                  : '输入记账短句，如「午饭 12.5」'}
               </p>
             </div>
           </div>
@@ -911,6 +943,22 @@ export function AssistantPage() {
           </button>
         </div>
       </div>
+
+      {/* T-M7-03d：会话列表抽屉（数据与动作见 use-conversations） */}
+      <ConversationList
+        open={conversationListOpen}
+        onClose={() => setConversationListOpen(false)}
+        rows={conversations.rows}
+        loading={conversations.loading}
+        degraded={conversations.degraded}
+        busy={conversations.busy}
+        error={conversations.error}
+        onCreate={conversations.createConversation}
+        onSelect={conversations.selectConversation}
+        onRename={(id, title) => { void conversations.renameConversation(id, title) }}
+        onDelete={id => { void conversations.deleteConversation(id) }}
+        onDismissError={conversations.dismissError}
+      />
     </div>
   )
 }

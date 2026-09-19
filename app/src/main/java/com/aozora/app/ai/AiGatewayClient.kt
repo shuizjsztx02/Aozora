@@ -80,6 +80,17 @@ class AiGatewayClient(
             AiError("AI service unavailable: HTTP $httpCode")
         class AuthLost(cause: Throwable? = null) :
             AiError("Authentication lost", cause)
+        /**
+         * T-M7-03d: HTTP 404。
+         *
+         * 单独成类而不是并进 [Network]，因为服务端对它有一层**确定的语义**：会话
+         * 端点对「别人的 / 已删除的 / 不存在的 id」一律同一个 404
+         * `conversation_not_found`（`routes.py`），即「这个 id 不是我的会话了」。
+         * 客户端据此幂等处理（删除重试、丢弃陈旧 `conversation_id` 开新会话），
+         * 而不是当成一次网络故障让用户重试。
+         */
+        class NotFound(cause: Throwable? = null) :
+            AiError("Resource not found (HTTP 404)", cause)
     }
 
     /** POST /ai/interpret — 自然语言 → ActionProposal.
@@ -111,6 +122,37 @@ class AiGatewayClient(
             buildParseImageRequest(attachmentId, bookId),
             timeoutSeconds = IMAGE_PARSE_TIMEOUT_SECONDS,
         )
+
+    /**
+     * T-M7-03d: `GET /ai/conversations` —— 本人的会话索引（按活跃时间倒序）。
+     *
+     * 返回体原样透传（`{conversations:[{id,title,book_id,created_at,last_active_at}]}`），
+     * 与其它 `/ai/` 调用同口径：这一层不认识业务字段。
+     */
+    suspend fun listConversations(): String =
+        executeAuthorized("$baseUrl/ai/conversations", method = "GET")
+
+    /**
+     * T-M7-03d: `PATCH /ai/conversations/{id}` —— 重命名。
+     *
+     * 404（别人的 / 已删除的 / 不存在的 id）→ [AiError.NotFound]，调用方按
+     * 「这个 id 不是我的会话了」处理。
+     */
+    suspend fun renameConversation(conversationId: String, title: String): String =
+        executeAuthorized(
+            "$baseUrl/ai/conversations/$conversationId",
+            buildRenameConversationRequest(title),
+            method = "PATCH",
+        )
+
+    /**
+     * T-M7-03d: `DELETE /ai/conversations/{id}` —— 删除（服务端 204，无响应体）。
+     *
+     * **重试安全**：删除成功后旧 id 与别人的 id 拿到同一个 404，[AiError.NotFound]
+     * 在调用方等价于成功（「已经不是我的会话了」）。
+     */
+    suspend fun deleteConversation(conversationId: String): String =
+        executeAuthorized("$baseUrl/ai/conversations/$conversationId", method = "DELETE")
 
     /**
      * T-M7-02h: POST /ai/agent —— 一轮 agent 回合的 SSE 流。
@@ -185,6 +227,10 @@ class AiGatewayClient(
         return body.toString()
     }
 
+    /** T-M7-03d: PATCH 的请求体（服务端 `AIConversationRenameRequest`：1–120 字，先 strip）。 */
+    private fun buildRenameConversationRequest(title: String): String =
+        JSONObject().put("title", title).toString()
+
     /** 取一个有效 access token；认证失效统一翻成 [AiError.AuthLost]。 */
     private suspend fun authorize(): String = withContext(Dispatchers.IO) {
         try {
@@ -194,16 +240,24 @@ class AiGatewayClient(
         }
     }
 
+    /**
+     * 带鉴权的请求；`method` 与 `bodyJson` 决定请求形态。
+     *
+     * T-M7-03d 起支持 GET / PATCH / DELETE（会话索引端点），故 `bodyJson` 可为 null
+     * ——OkHttp 的 `method(name, body)` 要求 GET 必须不带体。既有 POST 调用点一律
+     * 走默认值，签名与行为不变。
+     */
     private suspend fun executeAuthorized(
         url: String,
-        bodyJson: String,
+        bodyJson: String? = null,
         timeoutSeconds: Long = CALL_TIMEOUT_SECONDS,
+        method: String = "POST",
     ): String {
         val token = authorize()
 
         val request = Request.Builder()
             .url(url)
-            .post(bodyJson.toRequestBody(JSON))
+            .method(method, bodyJson?.toRequestBody(JSON))
             .header("Authorization", "Bearer $token")
             .header("Content-Type", "application/json")
             .header("X-Request-Id", UUID.randomUUID().toString())
@@ -248,6 +302,10 @@ class AiGatewayClient(
                                 // rejection, so it falls through to the 4xx branch below.
                                 resp.code == 401 -> throw AiError.AuthLost()
                                 resp.code == 503 -> throw AiError.Unavailable(resp.code)
+                                // T-M7-03d: 404 有自己的语义（会话端点：别人的 / 已删的 /
+                                // 不存在的 id 全是它），不能被折叠成一次网络故障——客户端
+                                // 要据此幂等收敛（删除重试、丢弃陈旧的 conversation_id）。
+                                resp.code == 404 -> throw AiError.NotFound()
                                 // P2#4: keep the server's structured error message
                                 // (ErrorResponse{code,message} from our own gateway —
                                 // never raw provider content) instead of dropping the body.
@@ -321,6 +379,10 @@ class AiGatewayClient(
                 401 -> AiError.AuthLost()
                 429 -> AiError.RateLimited()
                 503 -> AiError.Unavailable(code)
+                // T-M7-03d: `POST /ai/agent` 带一个已失效的 conversation_id 时，服务端在
+                // **开流之前**就回 404（`conversation.py:load_owned`）。它必须与普通链路
+                // 故障分开——客户端要丢弃这个 id 并开新会话，而不是提示用户重试。
+                404 -> AiError.NotFound()
                 else -> AiError.Network("Server error: HTTP $code")
             }
         }

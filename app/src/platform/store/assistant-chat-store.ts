@@ -73,6 +73,24 @@ interface AssistantChatState {
   switchConversation: (id: string | null) => void
   /** 首轮 `done.conversation_id` 交回时把当前会话「改名」——投影不搬家，只换键 */
   adoptConversation: (id: string) => void
+  /**
+   * T-M7-03d：**丢弃已失效的会话 id**（服务端对它的 404 —— 别人的 / 已删除的 /
+   * 不存在的一律同码）。
+   *
+   * 与 `switchConversation(null)` 的区别：**不动消息**。当前这一屏的消息继续显示
+   * （它们是用户刚看见的内容），只是不再挂在那个 id 上——于是下一轮不带
+   * `conversation_id`，服务端开一个新会话（03b 交接的降级契约的终态）。
+   * 若走切换，本地桶的旧内容会把这屏消息顶掉，用户会看到「内容凭空变了」。
+   */
+  forgetConversation: () => void
+  /**
+   * T-M7-03d：删除会话后的本地清理。**回退目标是调用方定的确定性目标**
+   * （列表里剩下的第一条，或 null = 本地会话），store 只负责执行。
+   *
+   * - 删的不是当前会话 → 只清它的投影缓存，当前视图不动；
+   * - 删的是当前会话 → 丢它的消息，切到 `fallbackId`（null = 本地会话桶）。
+   */
+  removeConversation: (id: string, fallbackId: string | null) => void
   /** 登出挂钩（SecurityPage.doLogout）：清空**全部**会话与缓存 */
   clear: () => void
 }
@@ -112,6 +130,30 @@ export const useAssistantChatStore = create<AssistantChatState>()(
           return { activeConversationId: id, projections }
         }),
       clear: () => set({ activeConversationId: null, messages: [], projections: {} }),
+      forgetConversation: () =>
+        set((s) => {
+          const key = s.activeConversationId
+          if (key === null) return s
+          const projections = { ...s.projections }
+          delete projections[key]
+          // 本地桶此刻成为活动桶：按不变式（活动会话不留副本）清掉它的缓存，
+          // 否则「切回来」会复活一份与当前这屏不一致的旧内容
+          delete projections[LOCAL_CONVERSATION_KEY]
+          // **messages 原地不动**——见接口注释：这一屏是用户刚看到的内容
+          return { activeConversationId: null, projections }
+        }),
+      removeConversation: (id, fallbackId) =>
+        set((s) => {
+          const projections = { ...s.projections }
+          delete projections[id]
+          if (s.activeConversationId !== id) return { projections }
+          // 删的是当前会话：它的消息一并丢弃（会话已经不存在了，留着就是幽灵），
+          // 切到调用方定好的回退目标——null 即本地会话桶
+          const to = fallbackId ?? LOCAL_CONVERSATION_KEY
+          const next = projections[to] ?? []
+          delete projections[to]
+          return { activeConversationId: fallbackId, messages: cap(next), projections }
+        }),
     }),
     {
       name: 'aozora-assistant-chat',

@@ -44,6 +44,8 @@ import {
   type AiExecuteResponse,
   type AiAgentAck,
   type AiStreamEvent,
+  type AiConversationSummary,
+  type AiConversationListResponse,
   type PermissionStatusData,
   type PermissionType,
   type PermissionResultEvent,
@@ -533,6 +535,34 @@ export class NativeBridge {
         ;(window as any).__aozoraAiStream__ = prev
       }
     }
+  }
+
+  // ─── T-M7-03d: 会话索引 ───
+
+  /**
+   * 本人的会话索引（服务端按活跃时间倒序；列表不分页，03a 口径）。
+   *
+   * 失败码：`auth_lost`（未登录 / 登录失效）、`network`、`timeout`、`429`、`503`、
+   * `unavailable`（桥未注入 AI 客户端）。**未登录与断网都走这里**——调用方据此
+   * 降级为「只读本地投影缓存」。
+   */
+  async listConversations(): Promise<AiConversationListResponse> {
+    return this.call<AiConversationListResponse>('conversation.list')
+  }
+
+  /** 重命名会话（标题 1–120 字，服务端先 strip）。404 → `code === 'not_found'`。 */
+  async renameConversation(id: string, title: string): Promise<AiConversationSummary> {
+    return this.call<AiConversationSummary>('conversation.rename', { id, title })
+  }
+
+  /**
+   * 删除会话（服务端 204）。
+   *
+   * **重试安全**：已删除 / 别人的 / 不存在的 id 一律 404 `not_found`——调用方应把它
+   * 与成功同等对待（「这个 id 不是我的会话了」），不要弹错误。
+   */
+  async deleteConversation(id: string): Promise<{ success: boolean }> {
+    return this.call<{ success: boolean }>('conversation.delete', { id })
   }
 
   // ─── T-M4-04a: 权限管理 ───

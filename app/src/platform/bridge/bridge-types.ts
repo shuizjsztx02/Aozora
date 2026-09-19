@@ -84,6 +84,13 @@ export const BridgeCommands = {
   AI_AGENT: 'ai.agent',
   AI_CANCEL: 'ai.cancel',
 
+  // T-M7-03d（桥计数 79→82）：会话索引三命令，对接 /ai/conversations。
+  // 请求-响应形态（走 25 s 单发预算）。「新建会话」不需要命令——服务端在首轮
+  // 不带 conversation_id 时自建（02f 口径），客户端只是切到本地会话桶。
+  CONVERSATION_LIST: 'conversation.list',
+  CONVERSATION_RENAME: 'conversation.rename',
+  CONVERSATION_DELETE: 'conversation.delete',
+
   // T-M4-04a: 权限管理
   PERMISSIONS_GET_STATUS: 'permissions.getStatus',
   PERMISSIONS_REQUEST: 'permissions.request',
@@ -594,7 +601,11 @@ export interface AiStreamDoneData {
 /**
  * `error` 帧载荷。`code` 有两族：服务端安全枚举（`ai_unavailable` /
  * `agent_failed`）与桥侧本地失败（`timeout` / `network` / `auth_lost` /
- * `429` / `503` / `stream_ended`）。
+ * `429` / `503` / `stream_ended` / `not_found`）。
+ *
+ * `not_found`（T-M7-03d）：本轮带的 `conversation_id` 已失效——服务端在**开流之前**
+ * 就回 404（别人的 / 已删除的 / 不存在的 id 同一个码）。客户端据此丢弃该 id 并开新
+ * 会话，而不是提示用户重试。
  */
 export interface AiStreamErrorData {
   code: string
@@ -607,6 +618,30 @@ export interface AiStreamEvent {
   streamId: string
   event: AiStreamEventName
   data: Record<string, unknown>
+}
+
+// ─── T-M7-03d: 会话索引（/ai/conversations） ───
+
+/**
+ * 会话索引项（服务端 `AIConversationSummary`）。
+ *
+ * 字段**原样 snake_case**——本仓没有 snakeToCamel 转换层，`/ai/*` 的响应类型一律
+ * 按服务端拼写声明（同 `AiExecuteResponse.transaction_ids`）。
+ */
+export interface AiConversationSummary {
+  id: string
+  /** 服务端按首轮输入派生的标题；**存量会话升级后为空串**（客户端兜底文案渲染） */
+  title: string
+  /** 建会话时落点的账本；**只作展示与归属记录，不驱动客户端的记账账本**（03d 规则） */
+  book_id: string | null
+  created_at: string
+  /** 列表排序键（服务端保证非 null：未写入时回退 `created_at`） */
+  last_active_at: string
+}
+
+/** `conversation.list` 的响应。 */
+export interface AiConversationListResponse {
+  conversations: AiConversationSummary[]
 }
 
 export interface AiCategoryFact {

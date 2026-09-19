@@ -355,6 +355,8 @@ export function useAssistant({
   // T-M7-03b：`done.conversation_id` 交回时把当前会话固化到该 id（P1 里这只是个内存
   // ref，切页 remount 即丢，重进就开新会话）
   const adoptConversation = useAssistantChatStore(s => s.adoptConversation)
+  // T-M7-03d：陈旧 conversation_id 的降级（服务端 404 → 桥的 `not_found` 帧）
+  const forgetConversation = useAssistantChatStore(s => s.forgetConversation)
   const [phase, setPhase] = useState<AssistantPhase>('idle')
   const [activeProposal, setActiveProposal] = useState<ActionProposal | null>(null)
   const [cardStatus, setCardStatus] = useState<CardStatus | null>(null)
@@ -712,6 +714,17 @@ export function useAssistant({
 
     const done = p.done
     if (!done) {
+      // T-M7-03d：**这一轮带的 conversation_id 已失效**（服务端在开流之前回 404，
+      // 桥把它译成 `not_found` 帧）。终态是 03b 交接的降级契约：丢弃这个 id，
+      // 下一轮不带它 → 服务端开新会话。当前这一屏消息**不动**（forgetConversation
+      // 的语义），用户重发一次即可继续，不需要去别处找会话。
+      if (p.error?.code === 'not_found') {
+        forgetConversation()
+        appendAssistantMessage(text
+          ? `${text}\n\n⚠️ 这条会话已失效（可能已在其它设备删除），已切回本地会话，重发即可继续`
+          : '⚠️ 这条会话已失效（可能已在其它设备删除），已切回本地会话，重发即可继续')
+        return
+      }
       appendAssistantMessage(text ? `${text}\n\n⚠️ 本轮未完成，请重试` : '⚠️ 本轮未完成，请重试')
       return
     }
@@ -757,7 +770,7 @@ export function useAssistant({
     appendAssistantMessage(text || (done.stop_reason === 'empty_response'
       ? '这次没想出合适的回答，换个说法再试试？'
       : '本轮没能得出结论，换个说法再试试？'))
-  }, [adoptConversation, appendAssistantMessage, bridge, finishProcessing, setMessages])
+  }, [adoptConversation, appendAssistantMessage, bridge, finishProcessing, forgetConversation, setMessages])
 
   /**
    * T-M7-02i / T-M7-03b：agent 流的收发（订阅、`streamId` 归属、收尾幂等、取消）
