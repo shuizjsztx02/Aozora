@@ -21,6 +21,11 @@
  *      文本留在投影里，由上层定型成消息；
  *   ③ **不假设「每条回复都从 `delta` 开始」**——快档直调工具那一步 0 帧 `delta`
  *      （02g-2 探针），「有反应」靠 `tool_call` / `tool_result` 的步骤可见性。
+ *
+ * T-M7-03e：`confirm` 帧由「只留最近一条」改为一**队**（按 `proposalId` 去重累积），
+ * 并新增 `onConfirm` 在帧到达时**实时转发**给上层——确认卡因此能事件驱动地出现，
+ * 而不是等 `done` 之后按产物分发（P1 的时序）。本 hook 仍不碰业务状态：转发的是
+ * 「又有了一张挂起提案」这件事本身；可不可执行由 `done.proposals`（权威清单）决定。
  */
 
 import { useCallback, useEffect, useRef, useState } from 'react'
