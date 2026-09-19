@@ -1275,8 +1275,11 @@ cd app && npx tsc --noEmit / npx vitest run                        # 0 错 / 110
 **远端 CI（run `35408601530`，覆盖本卡全部四个提交 `afc91b3` → `38f1091`）：** Client Lint &
 Test ✅ / Server Lint & Test ✅ / Android Compile & JVM Test —— **代码步骤全绿**（第 8 步
 `lintDebug + testDebugUnitTest + assembleDebug + assembleDebugAndroidTest` ✅，**第 10 步 connected
-Android tests 也真的跑过了** ✅），仅第 12 步 `dependencyCheckAnalyze` 仍在跑（即 02g 记录在案的
-「NVD 库下载吃光 40 分钟预算」，与本卡无关）。
+Android tests 也真的跑过了** ✅），第 12 步 `dependencyCheckAnalyze` 再次被作业的 `timeout-minutes: 40`
+**截断**（作业整体 cancelled，1–11 全 success）——与 02g 记录的形态**逐字一致**。值得记一笔的是：
+**换了新的 run 重跑，这一步依然没能拿到结论**；它的毛病不是「失败」而是「跑不完」（NVD 库下载吃光
+全部预算）。02d / 02g 已两次建议把它移出主 CI（独立定时工作流）或给作业加时，本卡第三次确认。
+**责任人：M7 收口 / CI 维护者。**
 
 **同一份客户端代码在前一个 run（`35407978552`）里 Android 是 ❌** —— 这两个 run 只差文档提交，
 客户端字节相同。这是本卡新遇到的一个**间歇性环境失败**，定位如下（留档，免得下次重新查）：
