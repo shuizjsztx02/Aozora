@@ -59,7 +59,7 @@ function proposal(categoryId = 'cat-lunch', note = '午饭'): ActionProposal {
 }
 
 const renderCard = (over: {
-  status?: 'executing' | 'committed' | 'error' | 'pending-category',
+  status?: 'executing' | 'committed' | 'error' | 'pending-category' | 'pending-confirm',
   onEditCommit?: Mock,
   onUndo?: Mock,
   categoryId?: string,
@@ -540,5 +540,34 @@ describe('ConfirmationCard — 待选分类态（T12-8 + T16-3 融合）', () =>
     expect(screen.getByTestId('card-cat-label').textContent).toBe('未分类')
     expect(screen.getByTestId('card-pending-hint').textContent).toContain('尚未记账')
     expect(screen.getByTestId('card-status').textContent).toBe('⚠️ 待选分类')
+  })
+})
+
+describe('ConfirmationCard — 待确认态（T-M7-02i）', () => {
+  it('编辑 UI 预选打开 + 「待确认」徽标 + 未记账提示', () => {
+    renderCard({ status: 'pending-confirm' })
+    // 预选打开编辑态：卡内「确认」是唯一的写入入口，开在编辑态才有那个按钮
+    expect(screen.getByTestId('card-amount')).toBeInTheDocument()
+    expect(screen.getByTestId('card-status').textContent).toBe('⏳ 待确认')
+    // 预选打开的是编辑态，所以这条是编辑态的引导语（展示态那条在点「取消」后可见）
+    expect(screen.getByTestId('card-pending-hint').textContent).toBe('确认无误后点「确认」记录（尚未记账）')
+  })
+
+  it('字段一字未改，点「确认」也调 onEditCommit——首写的触发条件是点头本身', () => {
+    const { onEditCommit } = renderCard({ status: 'pending-confirm' })
+    fireEvent.click(screen.getByTestId('card-done'))
+    fireEvent.click(screen.getByTestId('card-compare-confirm'))
+    expect(onEditCommit).toHaveBeenCalledTimes(1)
+    const [edited] = onEditCommit.mock.calls[0]
+    expect(edited.transactions[0].categoryId).toBe('cat-lunch')
+    expect(edited.transactions[0].amountCents).toBe(4500)
+  })
+
+  it('对照组：committed 态同样一字未改点「确认」→ 不写库（同值守卫未被本卡改动波及）', () => {
+    const { onEditCommit } = renderCard({ status: 'committed' })
+    fireEvent.click(screen.getByTestId('card-edit'))
+    fireEvent.click(screen.getByTestId('card-done'))
+    fireEvent.click(screen.getByTestId('card-compare-confirm'))
+    expect(onEditCommit).not.toHaveBeenCalled()
   })
 })

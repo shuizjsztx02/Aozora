@@ -98,7 +98,11 @@ function ConfirmationCardBody({
     bookId: bookId ?? '',
     includeInBudget: true, // 聊天路径不传 → native 默认计入（REQ-17 口径）
   }
-  const [editing, setEditing] = useState(!readonly && status === 'pending-category') // T12-8：待选分类态编辑 UI 预选打开（T16-2：只读卡不开）
+  const [editing, setEditing] = useState(
+    // T12-8：待选分类态编辑 UI 预选打开（T16-2：只读卡不开）
+    // T-M7-02i：待确认态同理——卡内「确认」是写入的唯一入口，开在编辑态才有那个按钮
+    !readonly && (status === 'pending-category' || status === 'pending-confirm'),
+  )
   const [amountYuan, setAmountYuan] = useState((tx.amountCents / 100).toFixed(2))
   const [categoryId, setCategoryId] = useState(tx.categoryId || '')
   const [bizDate, setBizDate] = useState(tx.bizDate)
@@ -172,11 +176,15 @@ function ConfirmationCardBody({
     setAmountError(cents === null ? '金额必须大于 0' : null)
   }
 
-  /** T16-3（REQ-59）：对照区「确认」——草稿无变更则不写；有变更才调上层替换写。 */
+  /** T16-3（REQ-59）：对照区「确认」——草稿无变更则不写；有变更才调上层替换写。
+   *  T-M7-02i：`pending-confirm`（agent 挂起提案）是例外——那张卡**本来就还没落库**，
+   *  「确认」本身就是写入的触发条件，所以无变更也要写（`pending-category` 靠「补上
+   *  分类」制造差异，这里没有可制造的差异）。 */
   const handleConfirmEdit = () => {
     if (status === 'executing') return // 保存中不接受新提交
     const next = draft
-    if (!sameSnapshot(next, committed)) {
+    const isFirstWrite = status === 'pending-confirm'
+    if (!sameSnapshot(next, committed) || isFirstWrite) {
       const editedTx: TransactionItem = {
         ...tx,
         type: next.type,
@@ -402,6 +410,11 @@ function ConfirmationCardBody({
             {readonly ? '未识别到分类，尚未记账' : '未识别到分类，点「编辑」选一个后保存（尚未记账）'}
           </div>
         )}
+        {status === 'pending-confirm' && (
+          <div className="text-xs mt-1" style={{ color: 'var(--warning-text, #856404)' }} data-testid="card-pending-hint">
+            {readonly ? '待确认，尚未记账' : '点「确认」后才会记账'}
+          </div>
+        )}
         {proposal.warnings.length > 0 && (
           <div className="mt-1 text-[10px] truncate" style={{ color: 'var(--warning-text, #856404)' }}>
             ⚠️ {proposal.warnings.join('；')}
@@ -478,6 +491,12 @@ function ConfirmationCardBody({
       {status === 'pending-category' && !amountError && (
         <div className="text-xs mt-1" style={{ color: 'var(--warning-text, #856404)' }} data-testid="card-pending-hint">
           未识别到分类，请选一个后保存
+        </div>
+      )}
+      {/* T-M7-02i：待确认引导——agent 挂起的提案（多步写入强制确认，T-M7-02e 决策 3） */}
+      {status === 'pending-confirm' && !amountError && (
+        <div className="text-xs mt-1" style={{ color: 'var(--warning-text, #856404)' }} data-testid="card-pending-hint">
+          确认无误后点「确认」记录（尚未记账）
         </div>
       )}
       {/* 卡内展开的分类宫格（T12-6 共享组件；每页 10 格 2×5，>10 类横滑翻页） */}
@@ -798,6 +817,7 @@ function StatusBadge({ status, readonly = false }: { status: CardStatus | 'undon
         : status === 'undone' ? '已撤销'
         : status === 'committed' ? '✓ 已记录'
         : status === 'pending-category' ? '⚠️ 待选分类'
+        : status === 'pending-confirm' ? '⏳ 待确认'
         : readonly ? '⚠️ 记账失败' : '⚠️ 保存失败'}
     </span>
   )

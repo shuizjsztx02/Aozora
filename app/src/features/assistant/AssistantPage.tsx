@@ -248,6 +248,7 @@ export function AssistantPage() {
     isSlow,
     pendingOp,
     pendingConfig,
+    streaming,
     submitInput,
     editProposal,
     undoExecution,
@@ -593,6 +594,45 @@ export function AssistantPage() {
           )
         })}
 
+        {/* T-M7-02i：agent 流式气泡——正文按**追加**渲染（一轮会收到多帧 delta，
+            不假设「一轮一帧」）；推理走灰字折叠区（架构 §8.5），绝不混进正文。
+            流式期间只出气泡：v2 intent 在流式中无法预知，卡与操作预览等 done 之后
+            由 hook 按产物分发（用户感知为「思考完毕展开卡」）。 */}
+        {streaming && (
+          <div className="flex items-start gap-2 mb-3">
+            <MessageAvatar
+              role="assistant"
+              icon={activePersona?.avatar}
+              name={activePersona?.name ?? '角色'}
+            />
+            <div
+              className="max-w-[80%] px-3 py-2 rounded-xl text-sm"
+              style={{
+                background: 'var(--glass)',
+                color: 'var(--ink)',
+                border: '1px solid var(--glass-border)',
+              }}
+              data-testid="streaming-bubble"
+            >
+              {streaming.reasoning && (
+                <details className="mb-1">
+                  <summary
+                    className="text-xs cursor-pointer select-none"
+                    style={{ color: 'var(--ink3)' }}
+                    data-testid="streaming-reasoning"
+                  >
+                    深度思考
+                  </summary>
+                  <div className="text-xs mt-1 whitespace-pre-wrap" style={{ color: 'var(--ink3)' }}>
+                    {streaming.reasoning}
+                  </div>
+                </details>
+              )}
+              <div className="whitespace-pre-wrap">{streaming.text || '思考中…'}</div>
+            </div>
+          </div>
+        )}
+
         {/* 慢速提示 */}
         {isSlow && phase === 'processing' && (
           <div className="flex justify-start mb-3">
@@ -609,8 +649,8 @@ export function AssistantPage() {
           </div>
         )}
 
-        {/* 处理中动画 */}
-        {phase === 'processing' && !isSlow && (
+        {/* 处理中动画（T-M7-02i：流式气泡自带「思考中…」，两者不同时出现） */}
+        {phase === 'processing' && !isSlow && !streaming && (
           <div className="flex justify-start mb-3">
             <div
               className="px-3 py-2 rounded-xl text-sm"

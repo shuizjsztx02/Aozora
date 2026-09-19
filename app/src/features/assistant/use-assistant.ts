@@ -35,6 +35,19 @@
  *   filter 侧指代不明 → 引导语不开卡（绝不回落当前账本盲猜）；命中他账本 → 跨账本
  *   取数圈定；set 侧匹配不到 → 该字段剔除不回写 + 引导语（宁缺勿错）。confirmOp
  *   把 accounts/books 名单下传 buildEditUpdates（type/账户/账本全字段消费）。
+ *
+ * T-M7-02i（P1 客户端消费最小形态）：needsAI 的输入在**开关开启且桥具备流式能力**时
+ *   改走 ai.agent（服务端 agent loop 的 SSE 通道）——流式期间只渲染文本气泡，done 到达
+ *   后按既有 v2 分发矩阵走原有卡路径（用户感知为「思考完毕展开卡」）。
+ *   - **v2 intent 在流式中无法预知**（chat/query/edit/delete/config 的 UI 形态互异），
+ *     所以流的中间态不做 intent 判定，只有 done 的产物决定落点（架构 §9.1：复杂度对
+ *     用户不可见）。
+ *   - **职责边界：** 不做步骤卡片流、不做多会话、不做模式选择（归 P2 / T-M7-03）。
+ *     三个互斥瞬时态（activeProposal / pendingOp / pendingConfig）的约束不变。
+ *   - **桥命令由 T-M7-02h 提供，本卡只消费**：`bridge.runAgent` / `bridge.cancelAgent`
+ *     与 `bridge.onAiStream`（事件类型 `AiStreamEvent` / `AiStreamDoneData`——契约源在
+ *     `platform/bridge/bridge-types.ts`，本卡不重复定义，避免两处漂移）。
+ *   - 开关关闭 → 整条回落既有 ai.interpret 单发链路，12 s / 25 s 体验不变。
  */
 
 import { useState, useCallback, useRef, useEffect } from 'react'
@@ -55,7 +68,9 @@ import { META_KEY_DEFAULT_ACCOUNT_ID, META_KEY_DEFAULT_BOOK_ID } from '../../dom
 import type {
   AccountData, BookData, BudgetData, CategoryData, SavingsGoalData, TransactionData,
 } from '../../platform/bridge/bridge-types'
-import type { AiInterpretContext, AiValidateVerdict } from '../../platform/bridge/bridge-types'
+import type {
+  AiInterpretContext, AiValidateVerdict, AiStreamEvent, AiStreamDoneData,
+} from '../../platform/bridge/bridge-types'
 import type { Category } from '../../domain/types'
 
 export interface AssistantMessage {
@@ -94,8 +109,12 @@ function withResolvedAccounts(proposal: ActionProposal, written: WrittenTx[]): A
 }
 
 /** 常驻编辑卡的展示状态（error 态下卡片仍可编辑，改动即重试保存）。
- *  T12-8（REQ-30 / 决策 #7）：pending-category = 提案缺分类，未写库，卡内选定后接管首次写入。 */
-export type CardStatus = 'executing' | 'committed' | 'error' | 'pending-category'
+ *  T12-8（REQ-30 / 决策 #7）：pending-category = 提案缺分类，未写库，卡内选定后接管首次写入。
+ *  T-M7-02i：pending-confirm = agent 路径的**挂起提案**（服务端 requiresConfirmation），
+ *  未写库，卡内确认后才触发首次写入。与 pending-category 同为「未写库」态，差别在
+ *  触发写入的条件：前者要补分类，后者只需用户点头（契约见 ConfirmationCard 的
+ *  handleConfirmEdit：pending-confirm 态下无变更也执行写入）。 */
+export type CardStatus = 'executing' | 'committed' | 'error' | 'pending-category' | 'pending-confirm'
 
 /**
  * T12-9（REQ-35）：聊天卡编辑态卡内「账本/预算」chip 的带外覆盖。
@@ -135,6 +154,36 @@ export interface PendingConfig {
   preview: { title: string; rows: Array<{ label: string; value: string }> }
 }
 
+// ───────────────────────────────────────────────────────────────────────────
+// T-M7-02i：agent 流式通道的消费契约
+// ───────────────────────────────────────────────────────────────────────────
+
+/**
+ * T-M7-02i：客户端层灰度开关（T-M7-02g 决策 6 交办给本卡落地）。
+ *
+ * 架构 §11.3 的双层灰度 = 服务端 `ai_agent_enabled` + 本开关。关闭时整条回落既有
+ * `ai.interpret` 单发链路（12 s 慢速提示 / 25 s 取消的体验逐字不变）。
+ *
+ * **默认关闭**：与服务端同口径的灰度默认值。开启前须确认服务端开关已开、且本机
+ * APK 是带 `ai.agent` / `ai.cancel` 命令的版本——桥命令表里没有这两条时，
+ * `runAgent` 会以桥错误 reject，本轮直接按失败收尾（不会静默回落）。
+ */
+export const AI_AGENT_CLIENT_ENABLED = false
+
+/** T-M7-02i：流式期间的内存态气泡（**不落 messages store**）。
+ *
+ *  瞬时态不落盘与 T14-4 决策 #7 同口径（processing / pendingOp 等本就不进 store）；
+ *  两个实际理由：① 一轮几十上百帧增量，逐帧写 localStorage 的序列化开销与帧数同阶；
+ *  ② 架构 §8.5 明确「本轮不落库，重新打开会话时这半截文本不在历史里」——落盘会让
+ *  用户重开 App 看到半截文本且没有失败标注。done / error 时定型成正式消息。 */
+export interface StreamingBubble {
+  /** 正文增量拼接（`delta.data.channel === 'content'`） */
+  text: string
+  /** 推理增量拼接（`delta.data.channel === 'reasoning'`；渲染为灰字折叠区，
+   *  绝不混进正文——架构 §8.5） */
+  reasoning: string
+}
+
 interface UseAssistantOptions {
   categories: CategoryData[]
   bookId: string | null
@@ -166,6 +215,10 @@ interface UseAssistantOptions {
    *  下一轮点名/避重（活体发现：建账本成功后名单快照不刷新，"把默认账本设成
    *  旅行" 被拒）。取消/失败不触发（无写入，名单无需变）。 */
   onConfigApplied?: () => void
+  /** T-M7-02i：agent 流式通道开关（02g 决策 6 的客户端层灰度）。缺省取
+   *  `AI_AGENT_CLIENT_ENABLED`（默认关闭）。**开启也未必走成流式**——桥必须具备
+   *  流式能力（见 AgentStreamBridge 的能力探测），否则静默回落单发链路。 */
+  agentStream?: boolean
 }
 
 interface UseAssistantReturn {
@@ -179,6 +232,9 @@ interface UseAssistantReturn {
   pendingOp: PendingOp | null
   /** T13-5：config 意图解析成功后的待确认设置操作（null=无）。 */
   pendingConfig: PendingConfig | null
+  /** T-M7-02i：agent 流式期间的气泡（null=不在流式中）。**内存态**，不进 messages
+   *  store——流式期间由页面渲染，done/error 时定型成正式消息后置回 null。 */
+  streaming: StreamingBubble | null
   submitInput: (text: string) => Promise<void>
   /** 卡片编辑保存：softDelete 旧笔 + insert 新（编辑 = 替换写）。
    *  T12-9（REQ-35）：overrides = 卡内账本/预算 chip 覆盖（首提与替换写均生效）。 */
@@ -265,6 +321,7 @@ export function useAssistant({
   budgets = [],
   goals = [],
   onConfigApplied,
+  agentStream,
 }: UseAssistantOptions): UseAssistantReturn {
   const bridge = useBridge()
   // T14-4（REQ-42 / 决策 #7）：messages 外置到 zustand persist store——切页 remount
@@ -281,6 +338,8 @@ export function useAssistant({
   const [pendingOp, setPendingOp] = useState<PendingOp | null>(null)
   // T13-5（REQ-48）：config 意图的待确认设置卡
   const [pendingConfig, setPendingConfig] = useState<PendingConfig | null>(null)
+  // T-M7-02i：agent 流式气泡（内存态，见 StreamingBubble 的说明）
+  const [streaming, setStreaming] = useState<StreamingBubble | null>(null)
   const slowTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
   // C-B3 fix: 并发提交互斥
   const isSubmittingRef = useRef(false)
@@ -290,14 +349,40 @@ export function useAssistant({
   const activeTxIdsRef = useRef<string[]>([])
   // T12-8（REQ-30 ①）：当前卡是否处于待选分类态（尚未写库；editProposal 据此接管首提）
   const isPendingCategoryRef = useRef(false)
+  // T-M7-02i：当前卡是否处于待确认态（agent 挂起提案，尚未写库；语义同上一行）
+  const isPendingConfirmRef = useRef(false)
   // T12-8（REQ-30 ② / 决策 #9）：云端失败轻提示会话级只弹一次，不轰炸
   const aiNoticeShownRef = useRef(false)
+  // T-M7-02i：agent 会话 id（done 帧交回，下一轮必须带上，否则每轮都开新会话）
+  const conversationIdRef = useRef<string | null>(null)
+  // T-M7-02i：流式增量的累积缓冲——逐帧 setState 会拿到陈旧闭包，且高频重建对象；
+  // 缓冲在 ref 里累积、每批一次性渲染（服务端已按 100 ms 合并窗把帧数降了一个数量级）
+  const streamBufRef = useRef({ text: '', reasoning: '' })
+  // T-M7-02i：本轮是否已收尾——done 与 error 只认先到的那个（桥命令的 resolve 也可能
+  // 在事件之后到达，收尾必须幂等）
+  const streamSettledRef = useRef(false)
+  // T-M7-02i：当前流的退订函数（卸载/新提交时兜底退订，防事件打到已结束的轮次）
+  const streamUnsubRef = useRef<(() => void) | null>(null)
 
   // C-C2 fix: 组件卸载时清理所有 timer
   useEffect(() => {
     return () => {
       if (slowTimerRef.current) clearTimeout(slowTimerRef.current)
+      streamUnsubRef.current?.()
+      streamUnsubRef.current = null
     }
+  }, [])
+
+  /** T-M7-02i：收尾的公共部分（清慢速提示 + 回 idle + 解除并发互斥）。
+   *  原先内联在 submitInput 里，agent 流式路径也要用，故提为 hook 级。 */
+  const finishProcessing = useCallback(() => {
+    if (slowTimerRef.current) {
+      clearTimeout(slowTimerRef.current)
+      slowTimerRef.current = null
+    }
+    setIsSlow(false)
+    setPhase('idle')
+    isSubmittingRef.current = false
   }, [])
 
   const buildParseContext = useCallback((): ParseContext => {
@@ -582,6 +667,139 @@ export function useAssistant({
     books, accounts, goals, categories, bookId,
   ])
 
+  /**
+   * T-M7-02i：一轮 agent 流的收尾——卸载气泡，把产物落到既有链路上。
+   *
+   * `done === null` 表示本轮失败（`error` 帧或桥层异常）：**保留已渲染的半截文本并
+   * 标注失败，不清空**（架构 §8.5——内容突然消失比「看到一半 + 一句失败提示」更糟）。
+   * 失败轮服务端不落库（02f 的一轮原子写入），所以这半截文本只活在本地消息里，
+   * 重开会话即不在；断连恢复归 P3。
+   *
+   * 成功轮的落点按 `done` 的产物三选一，顺序即优先级：
+   *   ① `executions` 非空 → 服务端已执行（单 Step 高置信），落回执 + 记事务 id 供撤销；
+   *   ② `proposals` 非空 → 挂起的提案（多步写入强制确认，T-M7-02e 决策 3），
+   *      进 `pending-confirm` 卡态等用户点头——**不自动写库**；
+   *   ③ 都没有 → 纯文本答复（chat / query），气泡定型成正式消息。
+   * `proposals` 与 `executions` 互斥（T-M7-02e 决策 2），所以①②不会同时命中。
+   */
+  const settleStream = useCallback(async (done: AiStreamDoneData | null) => {
+    const { text } = streamBufRef.current
+    streamUnsubRef.current?.()
+    streamUnsubRef.current = null
+    setStreaming(null)
+    finishProcessing()
+
+    if (!done) {
+      appendAssistantMessage(text ? `${text}\n\n⚠️ 本轮未完成，请重试` : '⚠️ 本轮未完成，请重试')
+      return
+    }
+
+    // 会话 id 必须留存：下一轮不带就会一直开新会话（02f 的会话索引靠它接续）
+    conversationIdRef.current = done.conversation_id
+
+    if (done.executions.length > 0) {
+      const ids = done.executions.flatMap(e => (e.transaction_ids as string[] | undefined) ?? [])
+      activeTxIdsRef.current = ids
+      // 回执消息带上事务 id：撤销后消息要能翻成「已撤销」（undoExecution 按它匹配）。
+      // 已执行那笔拿不到提案正文（服务端只在**挂起**时发 confirm 帧，自动执行走
+      // tool_result 摘要），所以这里不渲染 ConfirmationCard——撤销入口因此只有
+      // activeTxIdsRef 这条内存态通道（切页即失效，与 T16-2 的历史卡同口径）。
+      setMessages(prev => [...prev, {
+        id: 'msg_' + Date.now() + '_assistant',
+        role: 'assistant' as const,
+        text: `${text ? text + '\n\n' : ''}已记录 ${ids.length} 笔交易`,
+        proposalStatus: 'committed' as const,
+        transactionIds: ids,
+      }])
+      try { await bridge.triggerSync() } catch { /* ignore */ }
+      return
+    }
+
+    const proposal = done.proposals[0] as unknown as ActionProposal | undefined
+    if (proposal) {
+      setMessages(prev => [...prev, {
+        id: 'msg_' + Date.now() + '_assistant',
+        role: 'assistant' as const,
+        text: text || proposal.message,
+        proposal,
+        proposalStatus: 'pending' as const,
+      }])
+      setActiveProposal(proposal)
+      // 挂起的提案 requiresConfirmation 恒为 True（T-M7-02e 决策 2），一律过确认门；
+      // 用户点卡内「确认」后由 editProposal 的待确认分支接管首次写入。
+      isPendingConfirmRef.current = true
+      setCardStatus('pending-confirm')
+      return
+    }
+
+    appendAssistantMessage(text || (done.stop_reason === 'empty_response'
+      ? '这次没想出合适的回答，换个说法再试试？'
+      : '本轮没能得出结论，换个说法再试试？'))
+  }, [appendAssistantMessage, bridge, finishProcessing, setMessages])
+
+  /**
+   * T-M7-02i：agent 流式一轮（**开关开启时才走到这里**）。
+   *
+   * 只做消费：上行交给桥（T-M7-02h 的 `runAgent`），下行事件按类型分流，收尾统一走
+   * settleStream。流的中间态**不做 intent 判定**——v2 intent 在流式中无法预知
+   * （chat/query/edit/delete/config 的 UI 形态互异），只有 `done` 的产物决定落点
+   * （架构 §9.1：复杂度对用户不可见）。
+   */
+  const runAgentTurn = useCallback(async (text: string) => {
+    streamBufRef.current = { text: '', reasoning: '' }
+    streamSettledRef.current = false
+    setStreaming({ text: '', reasoning: '' })
+
+    // 本轮流的归属 id（`runAgent` 的 ack 里给；事件里的 streamId 与它相等）。
+    // ack 到达之前到达的事件按单流处理——submitInput 的并发互斥保证了 P1 同时只有一条流。
+    let streamId: string | null = null
+
+    const onEvent = (ev: AiStreamEvent) => {
+      if (streamSettledRef.current) return
+      if (streamId && ev.streamId !== streamId) return
+      if (ev.event === 'delta') {
+        const d = ev.data as { text?: unknown; channel?: unknown }
+        if (typeof d.text !== 'string') return
+        // 两个通道分流：reasoning 进灰字折叠区，绝不混进正文（架构 §8.5）
+        if (d.channel === 'reasoning') streamBufRef.current.reasoning += d.text
+        else streamBufRef.current.text += d.text
+        setStreaming({ ...streamBufRef.current })
+        return
+      }
+      if (ev.event === 'done') {
+        streamSettledRef.current = true
+        void settleStream(ev.data as unknown as AiStreamDoneData)
+        return
+      }
+      if (ev.event === 'error') {
+        // 服务端安全枚举与桥侧本地失败（timeout / network / auth_lost / …）对用户是
+        // 同一件事——本轮没做成。文案不透传（安全口径），统一走失败收尾。
+        streamSettledRef.current = true
+        void settleStream(null)
+        return
+      }
+      // phase / tool_call / tool_result / confirm / device_request：P1 最小形态不渲染
+      // （步骤卡片流归 P2）。confirm 的提案不进 UI——done.proposals 才是权威清单，
+      // 按 proposalId 去重是收敛后的形态，中途那一帧只是实时信号。
+    }
+
+    streamUnsubRef.current?.()
+    streamUnsubRef.current = bridge.onAiStream(onEvent)
+
+    try {
+      const ack = await bridge.runAgent(text, bookId!, conversationIdRef.current)
+      streamId = ack.streamId
+    } catch {
+      // 桥层失败（旧 APK 无该命令 / 链路建不起来）：同样按本轮失败收尾
+      if (!streamSettledRef.current) {
+        streamSettledRef.current = true
+        await settleStream(null)
+      }
+    }
+    // 命令是「立即返回 ack + 事件推送」的形态（架构 §8.2），所以这里**不退订**：
+    // 本轮的结束以 done / error 为准，那两个分支各自负责退订。
+  }, [bridge, bookId, settleStream])
+
   const submitInput = useCallback(async (text: string) => {
     if (!text.trim()) return
     // C-B3 fix: 并发提交互斥 — 非 idle 阶段拒绝新提交
@@ -605,16 +823,6 @@ export function useAssistant({
     // 12s 慢速提示
     if (slowTimerRef.current) clearTimeout(slowTimerRef.current)
     slowTimerRef.current = setTimeout(() => setIsSlow(true), SLOW_THRESHOLD_MS)
-
-    const finishProcessing = () => {
-      if (slowTimerRef.current) {
-        clearTimeout(slowTimerRef.current)
-        slowTimerRef.current = null
-      }
-      setIsSlow(false)
-      setPhase('idle')
-      isSubmittingRef.current = false
-    }
 
     // 1. 本地 NLU
     const parseCtx = buildParseContext()
@@ -640,6 +848,13 @@ export function useAssistant({
     //    v2 输出按 intent 分发（bookkeeping 现链路 / chat+query 文本气泡 /
     //    edit+delete 预览确认卡）。aiConsumed=意图已被非提案链路消化，直接收尾。
     if (needsAI && isOnline() && bridge.isAvailable()) {
+      // T-M7-02i：agent 流式通道优先（架构 §11.3 的双层灰度：服务端开关 + 客户端开关）。
+      // 关闭时整条走下面的既有单发链路，行为与 02i 之前逐字相同。
+      if (agentStream ?? AI_AGENT_CLIENT_ENABLED) {
+        // 收尾由 settleStream 负责（含 finishProcessing），这里直接交棒
+        await runAgentTurn(text.trim())
+        return
+      }
       // T11-6/T11-7（决策 #7）：画像/人设任一非空才拼对应段。
       // T12-11（REQ-37）：today 与 categories 常驻注入——相对日期换算与分类白名单
       // 是 prompt v2 全部 intent 的公共前提（桥侧 context 整包透传，服务端缺段零影响）。
@@ -779,8 +994,8 @@ export function useAssistant({
     isSubmittingRef.current = false
   }, [
     bridge, categories, bookId, timezone, profile, persona, aiCategories,
-    books, accounts, budgets, goals,
-    buildParseContext, commitProposalInternal,
+    books, accounts, budgets, goals, agentStream,
+    buildParseContext, commitProposalInternal, finishProcessing, runAgentTurn,
     appendAssistantMessage, answerTextIntent, openOpPreview, openConfigPreview,
   ])
 
@@ -799,6 +1014,18 @@ export function useAssistant({
       ))
       if ((edited.transactions ?? []).some(t => !t.categoryId)) return
       isPendingCategoryRef.current = false
+      await commitProposalInternal(edited, overrides)
+      return
+    }
+    // T-M7-02i：待确认态（agent 挂起的提案）——用户点了卡内「确认」即接管首次写入。
+    // 与上一段同构，差别只在触发条件：这里不要求补齐任何字段，因为服务端已经组装并
+    // 校验过提案，用户点头就是唯一前置（T-M7-02e 决策 3：多步写入一律强制确认）。
+    if (isPendingConfirmRef.current) {
+      isPendingConfirmRef.current = false
+      setActiveProposal(edited)
+      setMessages(prev => prev.map(m =>
+        m.proposal?.proposalId === edited.proposalId ? { ...m, proposal: edited } : m
+      ))
       await commitProposalInternal(edited, overrides)
       return
     }
@@ -1033,6 +1260,7 @@ export function useAssistant({
 
   return {
     messages, phase, activeProposal, cardStatus, isSlow, pendingOp, pendingConfig,
+    streaming,
     submitInput, editProposal, undoExecution, confirmOp, cancelOp,
     confirmConfig, cancelConfig,
     appendAssistantMessage,
