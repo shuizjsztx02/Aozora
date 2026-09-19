@@ -35,6 +35,7 @@
 | **只删什么** | 只删 `ai_conversation_events` 的行。**不动 `ai_conversations` 行**（会话索引：标题 / 活跃时间）与 **`ai_usage` 行**（配额基座） |
 | **为什么不动会话行** | 删会话行会让 `ai_usage.conversation_id` 按 `ON DELETE SET NULL` 置空，**会话级「轮数 + token」双限被清空**——用户只要等满一个保留期就能把会话配额刷回满额。这是 02f 用 `SET NULL` 防住的配额绕过，保留期不得把它重新打开。副产物：到期会话仍留在列表里（正文与模型上下文已无内容） |
 | **为什么不动标题** | `title` 是用户自己首轮输入的 ≤40 字标签（列表上的会话名），不是「完整对话内容」；正文本体才是本例外允许存储、也受保留期约束的东西 |
+| **与分叉的关系** | 会话分叉（04b 的 `fork`）按**原值**复制前缀，`time` 也在内，因此保留期对分叉**无需任何特判**：已过期的那段前缀在新会话里同样过期，随下一次清扫一起消失。**刻意如此**——复制时若把时间盖成「现在」，分叉就成了「把 30 天前的正文洗成新的」的绕过手段，本节承诺当场失效。代价说明白：**分叉的实际可用历史 = 保留期窗口内那部分**；对一个已过期的会话分叉，得到的是「有标题、无正文」的会话（模型侧因此无上下文，客户端本地投影仍可见）。用例钉死在 `tests/test_ai_conversation_retention.py::TestForkInteraction` |
 | **开关** | `AI_CONVERSATION_RETENTION_ENABLED`，**默认关闭**，由部署侧显式开启（同 `RETENTION_JOB_ENABLED` 的口径）：`docker-compose.staging.yml` 与 `docker-compose.prod.yml` 均已置 `true`。**关闭即该约束不成立**——属部署缺陷，不是配置选项 |
 | **运行形态** | 进程内任务（`server/src/modules/ai/retention.py` 的 `retention_loop`，随 API 生命周期启停），**不依赖 cron**；与遥测的 retention 任务不同，它**不**受 `ENABLE_TELEMETRY` 约束（隐私义务不该被埋点开关关掉） |
 
@@ -49,3 +50,4 @@
 **已知残余（登记于 `docs/risk-register.md`）：**
 ① `docs/legal/privacy-policy-v1.md` §3.3 写的是「账号存续期间：数据持续保留」，**尚未 carve out 会话正文的保留期**；该文档是版本化 + 与 `UserConsent` 绑定的一致同意面，修订等于发布新版本，须由账户所有者决策，不在本卡范围。
 ② `D-PROD-08` 自己的清理脚本（`infra/cleanup/account-deletion.py` 的 7 天物理删除）在生产**没有调度接线**（`infra/cleanup/__init__.py` 只写了「建议 cron」，`docker-compose.prod.yml` / `RUNBOOK.md` / `a-deploy.sh` 均无 cron 或 systemd timer）。本次保留期改用进程内任务正是为绕开这个缺口；account-deletion 本身的调度仍缺。
+③ **可选的后续（不是缺陷）**：对「切点已过期」的会话分叉（上一表的最后一行），目前的行为是**静默产生一个无正文的分叉**。更显式的做法是拒绝并回 422（「这段历史已过保留期，无法分叉」），但那是 04b 的分叉语义面 + 客户端新错误码，归后续卡 / M7 收口评估。

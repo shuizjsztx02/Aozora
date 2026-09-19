@@ -85,6 +85,15 @@ token」双限就是同一张表上的 ``COUNT(*)`` / ``SUM(tokens)`` 聚合—�
 契约是「丢弃该 id、开新会话」，不得把它当错误呈现**（交 03b / 03d 落地）；本地
 投影缓存仍在，历史依然可见。真正按设备清理要等 04e 的决策门。
 
+保留期（T-M7-04d）
+------------------
+
+事件正文的保留期**不在本模块**——口径（按整轮删、只删事件、不动会话行与
+``ai_usage``）、参数与调度都在 ``modules/ai/retention.py``，边界依据是
+``security.md``「会话事件日志的保留期」。这里只留一句指针，免得下游读者以为
+「谁删事件」的答案只有 :meth:`ConversationService.delete` 与
+:meth:`ConversationService.purge_user`。
+
 逐事件落库、恢复与分叉（T-M7-04b）
 ----------------------------------
 
@@ -163,7 +172,7 @@ EVENT_DEVICE_REQUEST = "device_request"      # [无] 设备指令；通道归 P4
 EVENT_ERROR = "error"                        # [stream._record_failure] 04b
 EVENT_REPLACE = "replace"                    # [04c] 长历史被摘要替换（原文保留）
 EVENT_QUOTA = "quota"                        # [record_turn] 每轮用量，与消息同轮
-EVENT_SECURITY = "security"                  # [待接] 结论归 04d 的访问面审计
+EVENT_SECURITY = "security"                  # [不接] 访问面审计结论：见 security.md（04d）
 STRUCTURAL_EVENT_TYPES = frozenset({
     EVENT_APPROVAL_REQUEST,
     EVENT_APPROVAL_RESULT,
