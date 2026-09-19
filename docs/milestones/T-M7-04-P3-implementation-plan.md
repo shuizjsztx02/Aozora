@@ -274,6 +274,21 @@ cd app && npx tsc --noEmit                       # 0 错
 `.scratch/m7-04-closure/`（不入库）。**P3 的五张子卡（04a–04e）与批次 4 收口至此全部完成**，
 `production-execution-plan.md` 的 T-M7-04 状态与 `AGENTS.md` 的当前阶段已同步为完成。
 
+**远端 CI：未能确认（环境侧故障，非本次改动）。** 推送后三个 job（Client / Android / Server）
+**全部在 5–6 秒内失败，一行测试都没跑**，注解原文是 GitHub Actions 的账户计费层拒绝：
+
+```text
+The job was not started because recent account payments have failed or your
+spending limit needs to be increased. Please check the 'Billing & plans'
+section in your settings
+```
+
+`gh run rerun` 重跑一次**同样如此**（6 秒、同一注解）——与 04c 登记的「三次尝试均遇环境侧
+故障」（`f1b7065`）**同源且持续**。**判据：** 失败发生在 job 启动**之前**的账户计费层，
+工作流本身（`ci.yml`）未被执行；且本次提交是**纯文档**，不含任何代码改动。故本次的验证
+依据是**四板在本机的实测**（安静环境、逐条记录在上表）+ 真机走查，**远端 CI 记为「未能确认」
+而非「通过」**。责任人：账户所有者（恢复 Actions 计费/额度后重跑 `35434551195` 即可复认）。
+
 ### T-M7-04c 摘要压缩与预算（`replace`）（2026-09-19，`6026646`）
 
 ```text
