@@ -102,12 +102,13 @@ export const useAssistantChatStore = create<AssistantChatState>()(
       adoptConversation: (id) =>
         set((s) => {
           if (s.activeConversationId === id) return s
+          // **只在「本地会话刚拿到服务端 id」时采纳**——已经切到别的会话时（03d 的
+          // 会话列表允许在流式期间被点），这一轮的归属已不在当前链上：此时改 id 会把
+          // 用户**拽回**旧会话，还会顺手删掉目标会话的缓存。这种情况不动任何状态。
+          if (s.activeConversationId !== null) return s
           const projections = { ...s.projections }
-          // 旧键（本地键）的内容已由顶层 messages 承接为 id 的投影，留副本会让它
-          // 在切回来时复活；id 只可能是服务端新建的（首轮不带 conversation_id 才会
-          // 新建），故也不存在需要保留的历史
-          delete projections[s.activeConversationId ?? LOCAL_CONVERSATION_KEY]
-          delete projections[id]
+          // 不变式修复：本地键此时不该还在缓存里（切回本地会话时已被消费掉）
+          delete projections[LOCAL_CONVERSATION_KEY]
           return { activeConversationId: id, projections }
         }),
       clear: () => set({ activeConversationId: null, messages: [], projections: {} }),

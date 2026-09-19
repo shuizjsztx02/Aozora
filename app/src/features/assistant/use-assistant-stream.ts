@@ -240,6 +240,10 @@ export function useAssistantStream({
   /** 本轮流 id（`runAgent` 的 ack 里给）；ack 到达前的事件按单流处理
    *  （`submitInput` 的并发互斥保证同时只有一条流） */
   const streamIdRef = useRef<string | null>(null)
+  /** 本轮序号（`start` 每次自增）。让**迟到的失败认得出自己还是不是当前轮**——
+   *  否则「流未收尾就又起一轮」时，上一轮迟到的桥层 reject 会把**新一轮**收尾掉。
+   *  `submitInput` 的并发互斥之外的第二道防线（那一层在别的模块里，不该被本模块依赖）。 */
+  const roundRef = useRef(0)
   const unsubRef = useRef<(() => void) | null>(null)
   /** 收尾回调每次渲染都是新函数（依赖 use-assistant 的卡状态）→ 取最新的那份。
    *  在 effect 里同步（不在渲染期写 ref——渲染期写会在并发渲染下留下被丢弃那次的
@@ -270,6 +274,7 @@ export function useAssistantStream({
     const agentBridge = bridge as Partial<AgentStreamBridge>
     // 上一轮的兜底退订（正常收尾已退订；这里防「流未收尾就又起一轮」的残流）
     unsubscribe()
+    const round = ++roundRef.current
     const initial = createStreamProjection()
     projectionRef.current = initial
     settledRef.current = false
@@ -277,7 +282,7 @@ export function useAssistantStream({
     setProjection(initial)
 
     const onEvent = (ev: AgentStreamEvent) => {
-      if (settledRef.current) return
+      if (settledRef.current || roundRef.current !== round) return
       if (streamIdRef.current && ev.streamId !== streamIdRef.current) return
       const next = applyStreamEvent(projectionRef.current ?? initial, ev)
       projectionRef.current = next
@@ -292,7 +297,8 @@ export function useAssistantStream({
     } catch {
       // 桥层失败（旧 APK 无该命令 / 链路建不起来）：同样按本轮失败收尾。
       // **不静默回落单发**——用户看得见失败，而不是被悄悄换一条链路。
-      if (!settledRef.current) {
+      // `roundRef` 比对：这一轮已经被新一轮顶替时，本次失败不该收尾别人。
+      if (roundRef.current === round && !settledRef.current) {
         settle({ ...(projectionRef.current ?? initial), settled: true })
       }
     }

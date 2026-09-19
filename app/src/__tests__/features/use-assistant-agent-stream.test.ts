@@ -15,6 +15,9 @@ import { renderHook, act, waitFor } from '@testing-library/react'
 import {
   useAssistant, type AgentStreamEvent, type AssistantMessage,
 } from '../../features/assistant/use-assistant'
+import {
+  useAssistantStream, type AgentStreamProjection,
+} from '../../features/assistant/use-assistant-stream'
 import { useAssistantChatStore } from '../../platform/store/assistant-chat-store'
 import { parseInput } from '../../domain/nlu/parser'
 import type { ActionProposal } from '../../domain/action-proposal'
@@ -598,6 +601,31 @@ describe('use-assistant — 流式消费重构（T-M7-03b）', () => {
       .toEqual(['会话B的消息', '本轮没能得出结论，换个说法再试试？'])
   })
 
+  it('**流式期间**切走会话：迟到的 done 不把用户拽回旧会话（03d 的列表会允许这么做）', async () => {
+    const { result } = setup()
+    let release!: () => void
+    mockBridge.runAgent.mockImplementationOnce(() => new Promise<void>(r => { release = r }))
+
+    let submitting!: Promise<void>
+    await act(async () => {
+      submitting = result.current.submitInput('会话A的消息')
+      await Promise.resolve()
+    })
+
+    // 流式还没结束就切到另一个会话
+    act(() => { useAssistantChatStore.getState().switchConversation('conv-B') })
+    expect(result.current.messages).toEqual([])
+
+    await act(async () => {
+      emit('done', donePayload({ conversation_id: 'conv-A' }))
+      release()
+    })
+    await act(async () => { await submitting })
+
+    // 本轮交回的 id 属于「已被切走」的会话——不采纳，用户仍在 conv-B
+    expect(useAssistantChatStore.getState().activeConversationId).toBe('conv-B')
+  })
+
   // ─── 取消（ai.cancel 接线）───
 
   it('取消（有活动流）→ 气泡卸载、三态收敛为空、零写、半截文本保留', async () => {
@@ -696,5 +724,74 @@ describe('use-assistant — 流式消费重构（T-M7-03b）', () => {
 
     expect(result.current.pendingConfig).toBeNull()
     expect(mockBridge.insertBook).not.toHaveBeenCalled()
+  })
+})
+
+describe('useAssistantStream — 轮次归属（T-M7-03b 收口）', () => {
+  it('上一轮迟到的桥层失败不收尾新一轮', async () => {
+    // 直接在 hook 层构造「流未收尾就又起一轮」：useAssistant 的并发互斥挡住了这条路，
+    // 但那是**另一个模块**的假设，本模块不该依赖它。
+    let listeners: Array<(ev: AgentStreamEvent) => void> = []
+    let rejectFirst!: (e: unknown) => void
+    const bridge = {
+      runAgent: vi.fn()
+        .mockImplementationOnce(() => new Promise((_, rej) => { rejectFirst = rej }))
+        .mockResolvedValue({ pending: true, streamId: 's-2' }),
+      onAiStream: (l: (ev: AgentStreamEvent) => void) => {
+        listeners.push(l)
+        return () => { listeners = listeners.filter(x => x !== l) }
+      },
+    }
+    const settled: AgentStreamProjection[] = []
+    const { result } = renderHook(() => useAssistantStream({
+      bridge, onSettled: p => settled.push(p),
+    }))
+
+    let first!: Promise<void>
+    await act(async () => {
+      first = result.current.start('第一轮', 'book-1', null)
+      await Promise.resolve()
+    })
+    expect(result.current.projection).not.toBeNull()
+
+    // 第二轮顶替第一轮（第一轮的 runAgent 还挂着）
+    await act(async () => { await result.current.start('第二轮', 'book-1', null) })
+
+    // 第一轮此时才失败——不该把第二轮收尾掉
+    await act(async () => { rejectFirst(new Error('boom')); await first })
+
+    expect(settled).toHaveLength(0)
+    expect(result.current.projection).not.toBeNull()
+    expect(result.current.projection?.settled).toBe(false)
+  })
+
+  it('取消只收尾当前轮，且只收尾一次', async () => {
+    let listeners: Array<(ev: AgentStreamEvent) => void> = []
+    const bridge = {
+      runAgent: vi.fn().mockResolvedValue({ pending: true, streamId: 's-1' }),
+      onAiStream: (l: (ev: AgentStreamEvent) => void) => {
+        listeners.push(l)
+        return () => { listeners = listeners.filter(x => x !== l) }
+      },
+      cancelAgent: vi.fn().mockResolvedValue({ cancelled: true }),
+    }
+    const settled: AgentStreamProjection[] = []
+    const { result } = renderHook(() => useAssistantStream({
+      bridge, onSettled: p => settled.push(p),
+    }))
+
+    await act(async () => { await result.current.start('你好', 'book-1', null) })
+    await act(async () => {
+      for (const l of [...listeners]) l({ streamId: 's-1', event: 'delta', data: { text: '半句', channel: 'content', step: 1 } })
+    })
+
+    await act(async () => { await result.current.cancel() })
+    expect(settled).toHaveLength(1)
+    expect(settled[0]).toMatchObject({ canceled: true, settled: true, text: '半句' })
+    expect(result.current.projection).toBeNull()
+
+    // 再取消一次：没有活动流，不产生第二次收尾
+    await act(async () => { await result.current.cancel() })
+    expect(settled).toHaveLength(1)
   })
 })

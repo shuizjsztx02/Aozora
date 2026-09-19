@@ -160,6 +160,20 @@ describe('assistant-chat-store — 多会话分桶（T-M7-03b）', () => {
     expect(s().messages).toHaveLength(1)
   })
 
+  it('adoptConversation：已经切到别的会话时不采纳（不拽回、不删目标会话的缓存）', () => {
+    s().setMessages(many(2))                     // 本地会话：m-0 / m-1
+    s().switchConversation('conv-A')             // 切走（本地会话入缓存）
+    s().setMessages(many(1, 10))                 // conv-A：m-10
+
+    // 上一轮迟到的 done 交回一个新 id —— 此时用户在 conv-A，不该被拽走
+    s().adoptConversation('conv-X')
+
+    expect(s().activeConversationId).toBe('conv-A')
+    expect(s().messages.map(m => m.id)).toEqual(['m-10'])
+    expect(s().projections[LOCAL_CONVERSATION_KEY].map(m => m.id)).toEqual(['m-0', 'm-1'])
+    expect(s().projections['conv-A']).toBeUndefined()
+  })
+
   it('clear（登出挂钩）清空全部会话与缓存', () => {
     s().setMessages(many(2))
     s().switchConversation('conv-A')
