@@ -19,6 +19,7 @@
 | P3 | 确认设备网络可用（Wi-Fi + 移动数据各一次） | 请求成功 | ⏭ 需真机 | OkHttp 网络栈已实现 |
 | P4 | 打开 Logcat 过滤 `Aozora/`，准备抓日志 | 能过滤 | ✅ 代码通过 | TAG 常量在各模块已定义 |
 | P5 | 准备测试账号 A（主设备）与测试账号 B（第二设备，用于 8.7） | 两个干净账号 | ⏭ 需真机 | 服务端 /auth/guest 支持自动注册 |
+| P6 | **（模拟器专用）** 确认网络为 `VALIDATED`，否则 sync 永不触发 | 能同步 | — | **2026-09-19 T-M7-02 收口实测坑**：模拟器网络常有 `INTERNET` 但缺 `VALIDATED`（captive portal 探针不可达）→ WorkManager 反复 `Constraints not met` 取消作业，表现为 UI 显示「已同步」而本地 mutation 一条都没推（`pending_mutations` 全是 `pending`）。修法：宿主机起一个返回 **204** 的探针（`python -c` 起 `HTTPServer` 即可），`adb shell settings put global captive_portal_http_url/https_url` 指向 `http://10.0.2.2:<port>/generate_204`，再 `svc wifi disable/enable` 重启网络；用 `dumpsys connectivity \| grep Capabilities` 确认出现 `VALIDATED`。**guest 账号另注**：同一 `device_id` 重复注册会得到**不同** user，故 guest 模式下做不了「换机 bootstrap」（新设备回不到同一账号）。 |
 
 ---
 

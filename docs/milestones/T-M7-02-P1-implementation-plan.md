@@ -21,7 +21,7 @@
 | **02g-2** | token 级 delta（含推理增量） | ✅ 完成 | 2026-09-19 | `afc91b3` | 批次 4.5；协议细化（不改 §8.1 的八类事件）；实测合并窗 24×，12/12 回退实验变红，详见 §五 |
 | **02h** | 客户端桥通道 | ✅ 完成 | 2026-09-19 | `55923b0` | 批次 5；okhttp-sse + `ai.agent`/`ai.cancel`（命令 77→79）+ 事件转发 + 取消；12 用例 + 5 回退实验（1 处断言强度不足当场补强），详见 §五 |
 | **02i** | 客户端消费（最小形态） | ✅ 完成 | 2026-09-19 | `ecd85d4` | 批次 5；流式气泡 + done 三选一分发 + 确认门，详见 §五 |
-| **收口** | P1 四板 + T-M7-01 真机复认 | ⏳ 未开始 | | | 批次 6 |
+| **收口** | P1 四板 + T-M7-01 真机复认 | ✅ 完成 | 2026-09-19 | —（模拟器端到端实测，无代码改动） | 批次 6；**四板全绿 + 端到端三态全部跑通**；T-M7-01 换机 bootstrap 因 guest 不可复用未复认，详见 §五 |
 
 **状态取值：** ⏳ 未开始 / 🔄 进行中 / ✅ 完成 / ⛔ 阻塞（阻塞须在本表备注列写明原因与解除条件）
 
@@ -1656,6 +1656,87 @@ cd app && npx tsc --noEmit                       # 0 错
 
 **下一项未阻塞任务：** **批次 6 收口**——四板全绿、T-M7-01 遗留的真机双设备换机 bootstrap 复认，
 以及上面那条**端到端真机路径**（02h + 02i 的共同残余）。
+
+---
+
+### 收口（批次 6）（✅ 2026-09-19）
+
+**任务编号：** T-M7-02 收口　**提交：** —（实测与文档，无生产代码改动）
+
+**完成范围 / 明确未做：**
+
+- **① 四板全绿（2026-09-19 实测）：** 服务端 **1075 passed / 37 skipped**；JVM **418 tests /
+  0 failures / 1 skipped**；vitest **1214 passed**（82 files）；tsc **0 错**。
+  相对 02g-2 记录的 1029 / 394 / 1107 的增量来自 P2 各卡与并发会话的在途改动，**非本卡引入**。
+- **② 端到端真机路径（02h + 02i 的共同残余）—— 三态全部跑通。** 环境：Pixel_7_API_36 模拟器 +
+  本机 dev 服务端（`AI_AGENT_ENABLED=true`）+ DeepSeek 真实调用；客户端 `AI_AGENT_CLIENT_ENABLED`
+  **临时置 `true`**，验后已还原为 `false`。驱动器走 CDP（`webview_devtools_remote` +
+  `Runtime.evaluate` / `Input.dispatchMouseEvent`），事件用链式包装 `window.__aozoraAiStream__` 捕获。
+  - **多步任务**（「这个月餐饮花了多少」）：`phase`×7 + `tool_call`×6 + `tool_result`×6 +
+    `delta(reasoning)`×6 + `done`（`steps=7 / tool_calls=7 / writes=0`，
+    `usage={prompt 31248, completion 1021}`）；UI 渲染出完整答复并如实指出「当前账本没有记录，
+    另有一个『总账本』」——**推理通道确有增量**（02g-2 的合并窗在真实链路上产出多帧 tp）。
+  - **挂起提案**（「先查这个月餐饮…超过 20 元就再记一笔 50 元交通费」）：`confirm` 帧在 **step 2**
+    到达 —— 02e 的「多步强制确认」在真实链路上生效；`done.proposals` 1 条、`executions` **空**
+    （挂起而非执行）；**确认卡在 UI 渲染**（⏳ 待确认 +「确认无误后点『确认』记录（尚未记账）」
+    + 拒绝 / 确认修改）。提案治理字段由服务端覆写生效（`proposalId=agent-…`、`confidence=1`、
+    `requiresConfirmation=true`），且 `categoryId` 是**服务端解析**的 UUID（模型未输出 id，铁律 1 成立）。
+  - **失败收尾**：链路故障时气泡**保留半截文本** + 「⚠️ 连接中断，本轮未完成」+ 底部「重发」入口
+    （02i 追加约束 ② + 03e 的重连入口），未清空气泡。
+  - **同轮顺带验证的 P2 契约**：`not_found` 帧到达后客户端 `forgetConversation()`、提示
+    「已切回本地会话，重发即可继续」且**不作为错误呈现**（03d 的降级契约在真机上首次触发）。
+- **③ T-M7-01 三实体上云 + sync 全链路（模拟器）：** 本地 25 个 mutation（book 2 / category 13 /
+  chat_persona 5 / transaction 5）**全部推送成功并落库**，服务端核对 personas 5 / categories 13 /
+  books 2。**换机 bootstrap 未复认**——实测 guest 注册按 `device_id` **不复用**（同一 device_id
+  两次注册得到不同 user），清数据后无法回到同一账号，「设备 B 拉全量」在 guest 模式下不可达；
+  按用户指示留给真机 / 正式账号后续补做。
+- **明确未做：** 经真实 nginx 的 SSE 端到端确认（R-PROD-22 残余，本机无 nginx）；`ai_daily_quota_guest`
+  保持 `100000`（**用户明确指示**，仍用于人工联测，02f 的挂账项继续有效）。
+
+**本次收口发现（已登记，未在本轮修改）：**
+
+1. **桥把任意 404 译成固定文案，掩盖真实原因** —— `AozoraBridge.kt:1354/1385` 将
+   `AiError.NotFound` 一律映射成 `not_found` + 硬编码 `"Conversation not found"`；而服务端
+   `conversation.py:_verify_book` 抛的是 **404 `"Book not found"`**（账本不存在 / 非本人）。
+   客户端于是按 03d 的**会话失效**契约处理：提示「这条会话已失效…重发即可继续」，但**重发永远失败**
+   （账本始终不在服务端）。**误导性文案 + 无法自愈**，且 404 的真实语义被丢弃。责任人：P2 / 后续卡。
+2. **模拟器下 WorkManager 永不调度 sync**（环境坑，非产品缺陷）—— 网络有 `INTERNET` 但缺
+   `VALIDATED`（captive portal 探针不可达），`WM-GreedyScheduler: Constraints not met` 反复取消作业，
+   表现为「已同步」但本地 mutation 一条都没推。本轮实测有效的修法：宿主机起一个返回 **204** 的探针，
+   `settings put global captive_portal_http_url/https_url` 指向它，再重启 wifi → 网络转为 `VALIDATED`，
+   sync 立即执行。**建议写入 `docs/testing/android-device-functional-test.md` 的前置说明。**
+3. **观察（非缺陷）：模型可在 Step 1 并行发出「查询 + 写入」两个 tool_call** —— 此时提案产出时
+   `step=1`，按 02e 定型口径自动执行。02e 的隐含假设「Step 1 就写出提案 = 模型无需先查任何东西」
+   在**并行调用**形态下不成立（实测：「先看看这个月餐饮花了多少，再记一笔午饭 25」两个 tool_call
+   都在 step 1，`writes=1 / proposals=[]`）。**风险的天然边界**：写操作若依赖查询结果，模型必须等结果
+   → 自然落到 Step 2 → 强制确认正常触发（本轮用条件式任务复现：`confirm` 在 step 2 到达）。
+   建议 P4 的域路由 / 审批策略评估时一并复盘该形态。
+
+**验证命令与结果：**
+
+```
+cd server && python -m pytest tests/ -q                    # 1075 passed, 37 skipped
+./gradlew :app:testDebugUnitTest --rerun-tasks             # 418 tests / 0 failures / 1 skipped
+cd app && npx vitest run                                   # 1214 passed (82 files)
+cd app && npx tsc --noEmit                                 # 0 错
+```
+
+**数据/同步/AI/安全影响：** 无生产代码改动；模拟器侧临时开关（`AI_AGENT_CLIENT_ENABLED`）与
+服务端 `.env` 的 `AI_AGENT_ENABLED=true` 均为本地联调配置，**未进仓库**；DeepSeek 真实调用产生
+少量 token 费用（单轮 11k–31k prompt tokens）。
+
+**兼容与回退方式：** 收口本身零改动，无回退面。灰度仍由双层开关控制（服务端 `ai_agent_enabled`
+默认 false + 客户端 `AI_AGENT_CLIENT_ENABLED` 默认 false），关闭时行为与 02i 之前逐字相同。
+
+**开放风险与责任人：**
+
+- **端到端只在模拟器验证过**，真机（弱网、后台回收、真实 nginx）仍未覆盖 —— R-PROD-19 / R-PROD-22
+  的残余不变。责任人：后续真机轮次。
+- **上述发现 1（404 文案）未修** —— 它会让真实的「账本不存在」被误报成「会话失效」，用户按提示
+  重发也无法恢复。责任人：P2 / 后续卡。
+- **`readTimeout = 25 s`**（02h 的初值）在模拟器上未出现误判，真实弱网下仍需校准。责任人：后续真机轮次。
+
+**下一项未阻塞任务：** **P2（T-M7-03）**——03a–03e 已在途 / 交付；P3、P4 见各自实施推进计划。
 
 ---
 
