@@ -138,6 +138,48 @@ function withResolvedAccounts(proposal: ActionProposal, written: WrittenTx[]): A
 export type CardStatus = 'executing' | 'committed' | 'error' | 'pending-category' | 'pending-confirm'
 
 /**
+ * T-M7-03e：确认卡上的**审批四值**（架构 §7.4）在客户端的落点。
+ *
+ * 服务端 loop 只产出「挂起提案」（02e 的 `AgentResult.proposals`），审批回答落在这里——
+ * 客户端没有上行审批通道（02g 决策 2：桥只有 `ai.agent` / `ai.cancel`），所以四值表达的是
+ * **用户对这张卡的处置**：
+ *
+ * | 值 | 触发 | 效果 |
+ * |---|---|---|
+ * | `allowed-once` | 卡上点「确认」 | 执行写入；执行后即失效（不产生长期授权） |
+ * | `rejected` | 卡上点「拒绝」 | **零写**；这一项不改，任务不因此中止 |
+ * | `cancelled` | 输入区「停止生成」/ 语音打断 | **零写**；整个任务中止（架构 §4.4 不变式 3：收敛到一致状态） |
+ * | `unavailable` | 本轮以失败 / 断连收尾时仍挂着未回答的提案 | **视为拒绝**、零写（架构 §7.4：不确定时倾向拒绝） |
+ *
+ * 「取消」是用户主动、`unavailable` 是被动——两者在 UI 上是两种说法（**不合并成
+ * 一个状态**），恢复路径也不同：前者用户自己按的、后者要给重连入口（R-PROD-19）。
+ */
+export type ApprovalOutcome = 'allowed-once' | 'rejected' | 'cancelled' | 'unavailable'
+
+/**
+ * T-M7-03e：一张挂起的写提案（确认门的队列元素）。
+ *
+ * `step` = 服务端产出它时所在的 Step 序号（1 起，`confirm` 帧载荷），仅作记录——
+ * 审批策略（单 Step 自动 / 多步强制）是**服务端**的判定，客户端不重算。
+ */
+export interface PendingApproval {
+  proposal: ActionProposal
+  step: number | null
+}
+
+/**
+ * T-M7-03e：中断状态（R-PROD-19）——agent 轮以失败 / 断连收尾时的**重连入口**数据。
+ *
+ * P2 只做「提示 + 入口」：`input` 是本轮的用户输入，用户点「重发」即原样再发一次。
+ * 按 `conversation_id` + `seq` 的续跑归 P3 的 04b（架构 §8.3）。
+ * **瞬时态**，不落盘（与 processing / pendingOp 同口径）。
+ */
+export interface InterruptedTurn {
+  /** 本轮的用户输入（重发用） */
+  input: string
+}
+
+/**
  * T12-9（REQ-35）：聊天卡编辑态卡内「账本/预算」chip 的带外覆盖。
  * ActionProposal 契约（contracts/action-proposal/schema.json）不含这两个字段，
  * 写库时才注入——bookId 缺省用 hook 层账本；includeInBudget 缺省不传 →
@@ -256,8 +298,18 @@ interface UseAssistantReturn {
   submitInput: (text: string) => Promise<void>
   /** T-M7-03b：取消当前 agent 流（`ai.cancel` 接线）。**零写**；取消后
    *  `activeProposal` / `pendingOp` / `pendingConfig` 一律收敛为空——
-   *  用户按下停止，就不该再留一张待确认的卡（03e 接「停止生成」按钮）。 */
+   *  用户按下停止，就不该再留一张待确认的卡（03e 的「停止生成」按钮接它）。
+   *  T-M7-03e：它是审批四值的 `cancelled`——主动中止整个任务，与失败/断连（被动）
+   *  是两种状态，故不合并。 */
   cancelStream: () => Promise<void>
+  /** T-M7-03e：确认门上的「拒绝」（审批四值 `rejected`）——**零写**，任务不中止。
+   *  没有挂在确认门上的卡时是空操作。 */
+  rejectApproval: () => void
+  /** T-M7-03e：中断态（失败 / 断连收尾）——null = 无中断。页面据此渲染提示与
+   *  重连入口（R-PROD-19）。**与取消分开**：取消是用户按的，中断是被动的。 */
+  interrupted: InterruptedTurn | null
+  /** T-M7-03e：重连入口——把中断那一轮的输入原样重发（P2 的恢复手段；按 seq 续跑归 P3）。 */
+  retryInterrupted: () => void
   /** 卡片编辑保存：softDelete 旧笔 + insert 新（编辑 = 替换写）。
    *  T12-9（REQ-35）：overrides = 卡内账本/预算 chip 覆盖（首提与替换写均生效）。 */
   editProposal: (edited: ActionProposal, overrides?: ProposalWriteOverrides) => Promise<void>
@@ -365,6 +417,23 @@ export function useAssistant({
   const [pendingOp, setPendingOp] = useState<PendingOp | null>(null)
   // T13-5（REQ-48）：config 意图的待确认设置卡
   const [pendingConfig, setPendingConfig] = useState<PendingConfig | null>(null)
+  // T-M7-03e：中断态（失败 / 断连）——页面据此渲染提示与重连入口（R-PROD-19）
+  const [interrupted, setInterrupted] = useState<InterruptedTurn | null>(null)
+  /**
+   * T-M7-03e：挂起提案的队列（未处置的那些，含正在展示的那张）。
+   *
+   * **不入 state**：队列本身的增减不直接渲染（渲染读 `activeProposal`），每次迁移都伴随
+   * 一次 `setActiveProposal` / `setMessages`，靠它们触发重渲染即可。
+   */
+  const approvalsRef = useRef<PendingApproval[]>([])
+  /** 已按四值处置过的提案 id（确认 / 拒绝 / 取消 / 未授权）——收尾核对与重复的
+   *  `confirm` 帧都跳过它，否则已确认的卡会在 `done` 到达时「复活」出第二张。 */
+  const handledApprovalsRef = useRef<Set<string>>(new Set())
+  /** 确认门**当前展示**的是哪张提案（null = 卡不是确认门的卡）。收敛时要判断
+   *  「被作废的那张是不是正挂在屏幕上」，不能一律清卡——那会连常驻卡一起清掉。 */
+  const shownApprovalIdRef = useRef<string | null>(null)
+  /** 本轮的用户输入（中断后「重发」用）。只由 agent 轮记录——快路径有既有降级链路。 */
+  const lastTurnInputRef = useRef('')
   const slowTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
   // C-B3 fix: 并发提交互斥
   const isSubmittingRef = useRef(false)
@@ -398,6 +467,54 @@ export function useAssistant({
     setPhase('idle')
     isSubmittingRef.current = false
   }, [])
+
+  // ───────────────────────────────────────────────────────────────────────────
+  // T-M7-03e：确认门（挂起提案的四值处置）
+  // ───────────────────────────────────────────────────────────────────────────
+
+  /** 把一张挂起提案放进确认门队列。重复的 / 已处置的 → false（不成第二张卡）。 */
+  const enqueueApproval = useCallback((proposal: ActionProposal, step: number | null): boolean => {
+    const id = proposal.proposalId
+    if (!id) return false
+    if (handledApprovalsRef.current.has(id)) return false
+    if (approvalsRef.current.some(a => a.proposal.proposalId === id)) return false
+    approvalsRef.current = [...approvalsRef.current, { proposal, step }]
+    return true
+  }, [])
+
+  /** 撤下确认门的卡（**只撤确认门那张**——不碰上一轮已落库的常驻卡）。 */
+  const clearApprovalCard = useCallback(() => {
+    isPendingConfirmRef.current = false
+    shownApprovalIdRef.current = null
+    setActiveProposal(null)
+    setCardStatus(null)
+  }, [])
+
+  /** 展示队头的挂起提案（卡随即出现；**动作在收尾后启用**，见页面的 `approvalBusy`）。
+   *  卡在流式期间就出现是**事件驱动**的那一半——用户越早看到 agent 想做什么越好
+   *  （架构 §7.4：审批卡同时是安全门与纠偏点）。 */
+  const showPendingApproval = useCallback(() => {
+    const head = approvalsRef.current[0]
+    if (!head) return
+    isPendingConfirmRef.current = true
+    shownApprovalIdRef.current = head.proposal.proposalId
+    setActiveProposal(head.proposal)
+    setCardStatus('pending-confirm')
+  }, [])
+
+  /** 丢弃符合条件的挂起提案且**零写**，返回丢弃条数（调用方据此决定要不要提示用户）。
+   *  丢弃的 id 一并记进已处置集合——否则服务端随后到的帧能让它们再成一张卡。 */
+  const dropApprovals = useCallback((pred: (a: PendingApproval) => boolean): number => {
+    const dropped = approvalsRef.current.filter(pred)
+    if (dropped.length === 0) return 0
+    for (const a of dropped) {
+      if (a.proposal.proposalId) handledApprovalsRef.current.add(a.proposal.proposalId)
+    }
+    approvalsRef.current = approvalsRef.current.filter(a => !pred(a))
+    const shown = shownApprovalIdRef.current
+    if (shown && dropped.some(a => a.proposal.proposalId === shown)) clearApprovalCard()
+    return dropped.length
+  }, [clearApprovalCard])
 
   const buildParseContext = useCallback((): ParseContext => {
     const cats: Category[] = categories.map(c => ({
@@ -480,11 +597,13 @@ export function useAssistant({
   }, [])
 
   /** 首次本地提交（解析成功后自动触发，无确认按钮）。
-   *  T12-9：overrides.bookId 存在时视为卡内已选账本，hook 层 bookId 缺失也可写。 */
+   *  T12-9：overrides.bookId 存在时视为卡内已选账本，hook 层 bookId 缺失也可写。
+   *  T-M7-03e：返回**是否真的写进去了**——确认门据此决定要不要把队列里的下一张顶上来
+   *  （失败时要让 error 卡留在屏幕上给重试入口）。 */
   const commitProposalInternal = useCallback(async (
     proposal: ActionProposal, overrides?: ProposalWriteOverrides,
-  ) => {
-    if (!bookId && !overrides?.bookId) { pushBookMissingError(proposal.proposalId); return }
+  ): Promise<boolean> => {
+    if (!bookId && !overrides?.bookId) { pushBookMissingError(proposal.proposalId); return false }
     setPhase('executing')
     setCardStatus('executing')
 
@@ -506,6 +625,7 @@ export function useAssistant({
       setPhase('idle')
 
       try { await bridge.triggerSync() } catch { /* ignore */ }
+      return true
     } catch (err) {
       // 本地写入失败必须可见；卡片保持 error 态可编辑重试
       // T12-8（决策 #7）：Kotlin 英文错误消息经映射表转中文透出
@@ -517,6 +637,7 @@ export function useAssistant({
       ))
       setCardStatus('error')
       setPhase('idle')
+      return false
     }
   }, [bridge, bookId, pushBookMissingError, writeTransactions])
 
@@ -695,10 +816,16 @@ export function useAssistant({
    *
    * 成功轮的落点按 `done` 的产物三选一，顺序即优先级：
    *   ① `executions` 非空 → 服务端已执行（单 Step 高置信），落回执 + 记事务 id 供撤销；
-   *   ② `proposals` 非空 → 挂起的提案（多步写入强制确认，T-M7-02e 决策 3），
+   *   ② 挂起提案队列非空 → 挂起的提案（多步写入强制确认，T-M7-02e 决策 3），
    *      进 `pending-confirm` 卡态等用户点头——**不自动写库**；
    *   ③ 都没有 → 纯文本答复（chat / query），气泡定型成正式消息。
    * `proposals` 与 `executions` 互斥（T-M7-02e 决策 2），所以①②不会同时命中。
+   *
+   * **T-M7-03e 起确认门为事件驱动 + 权威核对：** 卡在 `confirm` 帧到达时就出现
+   * （见 `handleApprovalEvent`），但**只有 `done.proposals`（权威清单）里列出的提案
+   * 才可被确认**——队列里不在清单上的（中途来的、或权威清单没有它的）一律按
+   * `unavailable` 收敛：**视为拒绝、零写**（架构 §7.4「不确定时倾向拒绝」）。
+   * 这既保住了 02i 决策 ③「不给中途提案开写入口」，又让用户能提前看见 agent 的意图。
    *
    * **不假设「每条回复都从 `delta` 开始」**（02g-2 探针：快档直调工具那一步 0 帧
    * `delta`）——`text` 为空时三个落点各自有兜底文案，不是错误路径。
@@ -708,6 +835,11 @@ export function useAssistant({
     const text = p.text
 
     if (p.canceled) {
+      // T-M7-03e：审批四值的 `cancelled`——用户主动中止整个任务。挂着的确认卡是
+      // 「用户没来得及回答」的提案，按下停止就不该再留一张卡等他（架构 §4.4
+      // 不变式 3：取消必须收敛到一致状态，不留悬挂的确认卡）。**零写。**
+      dropApprovals(() => true)
+      setInterrupted(null)
       appendAssistantMessage(text ? `${text}\n\n已取消` : '已取消')
       return
     }
@@ -719,18 +851,46 @@ export function useAssistant({
       // 下一轮不带它 → 服务端开新会话。当前这一屏消息**不动**（forgetConversation
       // 的语义），用户重发一次即可继续，不需要去别处找会话。
       if (p.error?.code === 'not_found') {
+        dropApprovals(() => true)
+        setInterrupted(null)
         forgetConversation()
         appendAssistantMessage(text
           ? `${text}\n\n⚠️ 这条会话已失效（可能已在其它设备删除），已切回本地会话，重发即可继续`
           : '⚠️ 这条会话已失效（可能已在其它设备删除），已切回本地会话，重发即可继续')
         return
       }
-      appendAssistantMessage(text ? `${text}\n\n⚠️ 本轮未完成，请重试` : '⚠️ 本轮未完成，请重试')
+      // T-M7-03e：失败 / 断连是**被动**中断（与用户主动取消是两回事，故不合并）。
+      // ① 没被回答的挂起提案按 `unavailable` 收敛——**视为拒绝**，零写；
+      // ② 留一个重连入口（R-PROD-19：弱网 / 后台断连的提示与恢复起点；按
+      //    `conversation_id` + `seq` 的续跑归 P3 的 04b）。
+      const dropped = dropApprovals(() => true)
+      setInterrupted({ input: lastTurnInputRef.current })
+      const note = dropped > 0 ? '；未确认的改动没有记录' : ''
+      appendAssistantMessage(text
+        ? `${text}\n\n⚠️ 连接中断，本轮未完成${note}`
+        : `⚠️ 连接中断，本轮未完成${note}`)
       return
     }
 
     // 会话 id 固化进 store：下一轮必须带上，否则每轮都开新会话（02f 的会话索引靠它接续）
     adoptConversation(done.conversation_id)
+    setInterrupted(null)
+
+    // T-M7-03e：`done.proposals` 是**权威清单**（`stream.py` 口径），用它核对队列——
+    // ① 不在清单上的（中途来的 / 权威清单没有它的）→ `unavailable`，视为拒绝、零写；
+    // ② 清单里但队列里没有的（`confirm` 帧掉了）→ 补进队列，不因丢帧而漏掉一个提案。
+    const authoritative = new Set<string>()
+    for (const pr of done.proposals) {
+      const id = (pr as { proposalId?: unknown }).proposalId
+      if (typeof id === 'string') authoritative.add(id)
+    }
+    const stranded = dropApprovals(a => !authoritative.has(a.proposal.proposalId))
+    if (stranded > 0) {
+      appendAssistantMessage(`⚠️ 有 ${stranded} 项改动未取得确认，没有记录`)
+    }
+    for (const pr of done.proposals) {
+      enqueueApproval(pr as unknown as ActionProposal, null)
+    }
 
     if (done.executions.length > 0) {
       const ids = done.executions.flatMap(e => (e.transaction_ids as string[] | undefined) ?? [])
@@ -750,27 +910,43 @@ export function useAssistant({
       return
     }
 
-    const proposal = done.proposals[0] as unknown as ActionProposal | undefined
-    if (proposal) {
+    const head = approvalsRef.current[0]
+    if (head) {
       setMessages(prev => [...prev, {
         id: 'msg_' + Date.now() + '_assistant',
         role: 'assistant' as const,
-        text: text || proposal.message,
-        proposal,
+        text: text || head.proposal.message,
+        proposal: head.proposal,
         proposalStatus: 'pending' as const,
       }])
-      setActiveProposal(proposal)
       // 挂起的提案 requiresConfirmation 恒为 True（T-M7-02e 决策 2），一律过确认门；
       // 用户点卡内「确认」后由 editProposal 的待确认分支接管首次写入。
-      isPendingConfirmRef.current = true
-      setCardStatus('pending-confirm')
+      showPendingApproval()
       return
     }
 
     appendAssistantMessage(text || (done.stop_reason === 'empty_response'
       ? '这次没想出合适的回答，换个说法再试试？'
       : '本轮没能得出结论，换个说法再试试？'))
-  }, [adoptConversation, appendAssistantMessage, bridge, finishProcessing, forgetConversation, setMessages])
+  }, [
+    adoptConversation, appendAssistantMessage, bridge, dropApprovals, enqueueApproval,
+    finishProcessing, forgetConversation, setMessages, showPendingApproval,
+  ])
+
+  /**
+   * T-M7-03e：`confirm` 帧到达 → 建确认卡（**事件驱动**的那一半）。
+   *
+   * P1 是「等 `done` 之后按产物分发渲染」（用户看到的是「思考完毕展开卡」）；03e 起卡
+   * 随事件实时出现，用户能在 agent 还在跑的时候就看见它想做什么（架构 §7.4：审批卡
+   * 同时是安全门与人机纠偏点）。**但动作在收尾后才启用**——`done.proposals` 才是权威
+   * 清单，中途来的提案在收尾核对时若不在清单上，按 `unavailable` 收敛（见 settleStream）。
+   */
+  const handleApprovalEvent = useCallback((
+    raw: Record<string, unknown>, step: number | null,
+  ) => {
+    if (!enqueueApproval(raw as unknown as ActionProposal, step)) return
+    showPendingApproval()
+  }, [enqueueApproval, showPendingApproval])
 
   /**
    * T-M7-02i / T-M7-03b：agent 流的收发（订阅、`streamId` 归属、收尾幂等、取消）
@@ -781,7 +957,7 @@ export function useAssistant({
    * 用户不可见）。
    */
   const { projection, start: startAgentStream, cancel: cancelAgentStream } =
-    useAssistantStream({ bridge, onSettled: settleStream })
+    useAssistantStream({ bridge, onSettled: settleStream, onConfirm: handleApprovalEvent })
 
   /**
    * T-M7-03b：起一轮 agent 流（**开关开启且桥具备能力时才走到这里**——闸在
@@ -791,6 +967,8 @@ export function useAssistant({
    * 时把它固化，切页 remount 也不丢。
    */
   const runAgentTurn = useCallback(async (text: string) => {
+    // T-M7-03e：留一份本轮输入——本轮若被中断，重连入口凭它原样重发
+    lastTurnInputRef.current = text
     const conversationId = useAssistantChatStore.getState().activeConversationId
     await startAgentStream(text, bookId!, conversationId)
   }, [bookId, startAgentStream])
@@ -804,21 +982,45 @@ export function useAssistant({
    * 就不该再留一张待确认的卡等着他。
    */
   const cancelStream = useCallback(async () => {
+    // T-M7-03e：未决的确认门一并收敛（审批四值的 `cancelled`）——用户按下停止，
+    // 就不该再留一张待确认的卡等着他（架构 §4.4 不变式 3）。
+    dropApprovals(() => true)
+    setInterrupted(null)
     setActiveProposal(null)
     setCardStatus(null)
     setPendingOp(null)
     setPendingConfig(null)
     isPendingCategoryRef.current = false
     isPendingConfirmRef.current = false
+    shownApprovalIdRef.current = null
     // 撤销窗（activeTxIdsRef）不动：那是**上一轮已落库**那笔的入口，与取消本轮无关
     await cancelAgentStream()
-  }, [cancelAgentStream])
+  }, [cancelAgentStream, dropApprovals])
+
+  /**
+   * T-M7-03e：确认门上的「拒绝」（审批四值 `rejected`）——**零写**，任务不中止。
+   *
+   * 与「停止生成」（`cancelled`）分开：拒绝是「这一项我不认可，别的接着来」，
+   * 取消是「整个任务到此为止」。两者都零写，但文案与后续不同——合并成一个状态
+   * 会让用户分不清「agent 还会继续」还是「已经结束了」。
+   */
+  const rejectApproval = useCallback(() => {
+    const shown = shownApprovalIdRef.current
+    if (!shown) return
+    dropApprovals(a => a.proposal.proposalId === shown)
+    appendAssistantMessage('已拒绝这次改动，没有记录')
+    showPendingApproval() // 队列里还有下一张就顶上（没有则卡保持在撤下的状态）
+  }, [appendAssistantMessage, dropApprovals, showPendingApproval])
 
   /** T-M7-03b：气泡视图——页面渲染读它（03c 的步骤卡片流读 `projection` 的 `steps`）。 */
   const streaming = useMemo<StreamingBubble | null>(
     () => (projection ? { text: projection.text, reasoning: projection.reasoning } : null),
     [projection],
   )
+
+  /** T-M7-03e：本轮是否仍在流式中（投影在场即未收尾）。确认门上的**动作只在收尾后
+   *  启用**——第一道在 UI（按钮禁用，卡上写明「本轮仍在执行」），第二道在这里。 */
+  const streamActive = projection !== null
 
   const submitInput = useCallback(async (text: string) => {
     if (!text.trim()) return
@@ -830,6 +1032,10 @@ export function useAssistant({
     // T13-5：config 预览卡同理
     setPendingOp(null)
     setPendingConfig(null)
+    // T-M7-03e：挂着的确认门与中断提示同理——新一轮是新的任务，上一轮未回答的挂起
+    // 提案随之作废（**零写**：它们本来就没落库，作废不丢任何东西）
+    dropApprovals(() => true)
+    setInterrupted(null)
 
     const userMsg: AssistantMessage = {
       id: 'msg_' + Date.now() + '_user',
@@ -1020,7 +1226,7 @@ export function useAssistant({
   }, [
     bridge, categories, bookId, timezone, profile, persona, aiCategories,
     books, accounts, budgets, goals, agentStream,
-    buildParseContext, commitProposalInternal, finishProcessing, runAgentTurn,
+    buildParseContext, commitProposalInternal, dropApprovals, finishProcessing, runAgentTurn,
     appendAssistantMessage, answerTextIntent, openOpPreview, openConfigPreview,
   ])
 
@@ -1042,16 +1248,27 @@ export function useAssistant({
       await commitProposalInternal(edited, overrides)
       return
     }
-    // T-M7-02i：待确认态（agent 挂起的提案）——用户点了卡内「确认」即接管首次写入。
+    // T-M7-02i / T-M7-03e：待确认态（agent 挂起的提案）——用户点了卡内「确认」即接管首次写入。
     // 与上一段同构，差别只在触发条件：这里不要求补齐任何字段，因为服务端已经组装并
     // 校验过提案，用户点头就是唯一前置（T-M7-02e 决策 3：多步写入一律强制确认）。
+    // 这就是审批四值的 `allowed-once`——**唯一放行值**，且执行后即失效（架构 §7.4：
+    // 不产生长期授权，下一次挂起会重新问一遍）。
     if (isPendingConfirmRef.current) {
-      isPendingConfirmRef.current = false
+      // T-M7-03e：**动作只在收尾后启用**——`done.proposals` 才是权威清单，中途来的
+      // 提案尚未被服务端最终确认（UI 上的按钮此时是禁用的，这里是第二道防线）。
+      if (streamActive) {
+        appendAssistantMessage('⚠️ 本轮还在执行，稍候再确认这次改动')
+        return
+      }
+      dropApprovals(a => a.proposal.proposalId === edited.proposalId)
       setActiveProposal(edited)
       setMessages(prev => prev.map(m =>
         m.proposal?.proposalId === edited.proposalId ? { ...m, proposal: edited } : m
       ))
-      await commitProposalInternal(edited, overrides)
+      const written = await commitProposalInternal(edited, overrides)
+      // 写入成功且队列里还有下一张 → 顶上（多步任务一轮可以挂起多个写提案）。
+      // 失败时**不顶**：error 卡要留在屏幕上给重试入口。
+      if (written) showPendingApproval()
       return
     }
     const oldIds = activeTxIdsRef.current
@@ -1086,7 +1303,8 @@ export function useAssistant({
       setCardStatus('error')
       setPhase('idle')
     }
-  }, [bridge, bookId, pushBookMissingError, writeTransactions, commitProposalInternal])
+  }, [bridge, bookId, pushBookMissingError, writeTransactions, commitProposalInternal,
+      dropApprovals, showPendingApproval, streamActive, appendAssistantMessage])
 
   const undoExecution = useCallback(async () => {
     const ids = activeTxIdsRef.current
@@ -1283,11 +1501,26 @@ export function useAssistant({
     appendAssistantMessage('已取消')
   }, [pendingConfig, appendAssistantMessage])
 
+  /**
+   * T-M7-03e：中断态的重连入口（R-PROD-19）——把中断那一轮的输入**原样重发**。
+   *
+   * P2 只做到这一步：服务端本轮不落库（02f 的一轮原子写入），重发是安全且诚实的恢复
+   * 手段。按 `conversation_id` + `seq` 的接续续跑归 P3 的 04b，那时的入口会换成
+   * 「继续」而不是「重发」。
+   */
+  const retryInterrupted = useCallback(() => {
+    const s = interrupted
+    if (!s) return
+    setInterrupted(null)
+    void submitInput(s.input)
+  }, [interrupted, submitInput])
+
   return {
     messages, phase, activeProposal, cardStatus, isSlow, pendingOp, pendingConfig,
     streaming, streamProjection: projection,
     submitInput, editProposal, undoExecution, confirmOp, cancelOp,
-    confirmConfig, cancelConfig, cancelStream,
+    confirmConfig, cancelConfig, cancelStream, rejectApproval,
+    interrupted, retryInterrupted,
     appendAssistantMessage,
   }
 }

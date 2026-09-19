@@ -60,6 +60,13 @@ interface ConfirmationCardProps {
   selectedAccountId: string | null
   /** T9-7：撤销该笔（软删，卡片存续期任意时刻可用）。只读态不提供。 */
   onUndo?: () => void
+  /** T-M7-03e：确认门上的「拒绝」（审批四值 `rejected`）——**零写**、任务不中止。
+   *  只在 `pending-confirm`（agent 挂起的提案）态出现；未写库的卡上它取代「撤销」
+   *  （撤销一笔还没记的账没有意义）。 */
+  onReject?: () => void
+  /** T-M7-03e：本轮仍在流式执行——确认门的**动作尚未启用**（`done.proposals` 才是
+   *  权威清单）。按钮禁用 + 一行说明；卡本身照样可见（用户提前看见 agent 想做什么）。 */
+  approvalBusy?: boolean
   /** T16-2（REQ-58）：历史消息只读卡——不可编辑/撤销，无任何写路径 */
   readonly?: boolean
 }
@@ -86,7 +93,7 @@ export function ConfirmationCard(props: ConfirmationCardProps) {
 
 function ConfirmationCardBody({
   proposal, categories, status, onEditCommit, accounts, books, bookId,
-  bookName, selectedAccountId, onUndo, readonly = false, tx,
+  bookName, selectedAccountId, onUndo, onReject, approvalBusy = false, readonly = false, tx,
 }: ConfirmationCardProps & { tx: TransactionItem }) {
   const initial: CommittedSnapshot = {
     type: tx.type,
@@ -120,6 +127,9 @@ function ConfirmationCardBody({
   const [committed, setCommitted] = useState<CommittedSnapshot>(initial)
   // T16-3（REQ-59）：新旧对照区展开态
   const [confirming, setConfirming] = useState(false)
+
+  /** T-M7-03e：确认门（agent 挂起的提案）——「拒绝」取代「撤销」，确认要在收尾后才可用。 */
+  const isApproval = status === 'pending-confirm'
 
   // C-M2 fix: 字符串解析避免浮点精度问题
   const parseAmountCents = (s: string): number | null => {
@@ -387,15 +397,28 @@ function ConfirmationCardBody({
               >
                 编辑
               </button>
-              <button
-                type="button"
-                onClick={onUndo}
-                className="text-[10px] px-2 py-1 rounded-lg"
-                style={smallBtnStyle}
-                data-testid="card-undo"
-              >
-                撤销
-              </button>
+              {/* T-M7-03e：确认门上的卡还没写库——「撤销」换成「拒绝」（同一处、同一种按钮） */}
+              {isApproval && onReject ? (
+                <button
+                  type="button"
+                  onClick={onReject}
+                  className="text-[10px] px-2 py-1 rounded-lg"
+                  style={smallBtnStyle}
+                  data-testid="card-reject"
+                >
+                  拒绝
+                </button>
+              ) : (
+                <button
+                  type="button"
+                  onClick={onUndo}
+                  className="text-[10px] px-2 py-1 rounded-lg"
+                  style={smallBtnStyle}
+                  data-testid="card-undo"
+                >
+                  撤销
+                </button>
+              )}
             </div>
           )}
         </div>
@@ -412,7 +435,9 @@ function ConfirmationCardBody({
         )}
         {status === 'pending-confirm' && (
           <div className="text-xs mt-1" style={{ color: 'var(--warning-text, #856404)' }} data-testid="card-pending-hint">
-            {readonly ? '待确认，尚未记账' : '点「确认」后才会记账'}
+            {readonly ? '待确认，尚未记账'
+              : approvalBusy ? '本轮仍在执行，稍候可确认（尚未记账）'
+              : '点「确认」后才会记账'}
           </div>
         )}
         {proposal.warnings.length > 0 && (
@@ -493,10 +518,11 @@ function ConfirmationCardBody({
           未识别到分类，请选一个后保存
         </div>
       )}
-      {/* T-M7-02i：待确认引导——agent 挂起的提案（多步写入强制确认，T-M7-02e 决策 3） */}
+      {/* T-M7-02i：待确认引导——agent 挂起的提案（多步写入强制确认，T-M7-02e 决策 3）
+       *  T-M7-03e：本轮还在跑时动作未启用（`done.proposals` 才是权威清单），如实说明 */}
       {status === 'pending-confirm' && !amountError && (
         <div className="text-xs mt-1" style={{ color: 'var(--warning-text, #856404)' }} data-testid="card-pending-hint">
-          确认无误后点「确认」记录（尚未记账）
+          {approvalBusy ? '本轮仍在执行，稍候再确认这次改动（尚未记账）' : '确认无误后点「确认」记录（尚未记账）'}
         </div>
       )}
       {/* 卡内展开的分类宫格（T12-6 共享组件；每页 10 格 2×5，>10 类横滑翻页） */}
@@ -592,7 +618,7 @@ function ConfirmationCardBody({
             <button
               type="button"
               onClick={handleConfirmEdit}
-              disabled={status === 'executing'}
+              disabled={status === 'executing' || approvalBusy}
               className="flex-1 py-1.5 rounded-lg text-xs font-medium text-white"
               style={{ background: 'var(--accent)' }}
               data-testid="card-compare-confirm"
@@ -605,17 +631,32 @@ function ConfirmationCardBody({
 
       {/* 底部「确认修改」展开对照区（T16-3：不再直接收起回写）
        * executing 态不禁止此按钮——对照区的「确认」按钮已禁用，避免 React 对 disabled 按钮
-       * 吞掉点击事件导致对照区打不开。 */}
+       * 吞掉点击事件导致对照区打不开。
+       * T-M7-03e：确认门的卡并排一个「拒绝」（零写、任务不中止）；流式期间按钮不 disable，
+       * 否则同上——用户点不动却不知道为什么，引导语已经写明「本轮仍在执行」。 */}
       {!confirming && (
-        <button
-          type="button"
-          onClick={() => setConfirming(true)}
-          className="w-full mt-2 py-1.5 rounded-lg text-xs font-medium text-white"
-          style={{ background: 'var(--accent)' }}
-          data-testid="card-done"
-        >
-          确认修改
-        </button>
+        <div className="flex gap-2 mt-2">
+          {isApproval && onReject && (
+            <button
+              type="button"
+              onClick={onReject}
+              className="flex-1 py-1.5 rounded-lg text-xs font-medium"
+              style={smallBtnStyle}
+              data-testid="card-reject"
+            >
+              拒绝
+            </button>
+          )}
+          <button
+            type="button"
+            onClick={() => setConfirming(true)}
+            className={`${isApproval && onReject ? 'flex-1' : 'w-full'} py-1.5 rounded-lg text-xs font-medium text-white`}
+            style={{ background: 'var(--accent)' }}
+            data-testid="card-done"
+          >
+            确认修改
+          </button>
+        </div>
       )}
     </div>
   )

@@ -359,7 +359,10 @@ describe('use-assistant — agent 流式消费（T-M7-02i）', () => {
     expect(result.current.streaming).toBeNull()
     expect(result.current.phase).toBe('idle')
     const last = result.current.messages[result.current.messages.length - 1]
-    expect(last.text).toBe('我正在\n\n⚠️ 本轮未完成，请重试')
+    // T-M7-03e：失败 / 断连的文案改为「连接中断」（R-PROD-19 要求明确提示中断状态），
+    // 并配一个重连入口（见下方「中断态」一组用例）
+    expect(last.text).toBe('我正在\n\n⚠️ 连接中断，本轮未完成')
+    expect(result.current.interrupted).toEqual({ input: '你好' })
   })
 
   it('桥层拒绝（旧 APK 无该命令）→ 同样按失败收尾，不静默回落', async () => {
@@ -370,7 +373,7 @@ describe('use-assistant — agent 流式消费（T-M7-02i）', () => {
 
     expect(result.current.phase).toBe('idle')
     const last = result.current.messages[result.current.messages.length - 1]
-    expect(last.text).toBe('⚠️ 本轮未完成，请重试')
+    expect(last.text).toBe('⚠️ 连接中断，本轮未完成')
     // 不静默回落单发：用户看得见失败，而不是被悄悄换一条链路
     expect(mockBridge.interpretAI).not.toHaveBeenCalled()
   })
@@ -863,5 +866,248 @@ describe('use-assistant — 陈旧 conversation_id 的 404 降级（T-M7-03d）'
 
     expect(useAssistantChatStore.getState().activeConversationId).toBe('c-ok')
     expect(lastMsg(result).text).toContain('本轮未完成')
+  })
+})
+
+/**
+ * T-M7-03e：确认门的**四值**（架构 §7.4）+ 中断态。
+ *
+ * 服务端 loop 只产出「挂起提案」，审批回答落在客户端。四值在这里各有落点：
+ *   allowed-once（卡上确认，唯一放行值，执行后即失效）/ rejected（拒绝，零写、任务继续）/
+ *   cancelled（停止生成 / 语音打断，零写、任务中止）/ unavailable（无法取得授权 → 视为拒绝、零写）。
+ *
+ * 两条设计边界在本组用例里被钉住：
+ * ① **事件驱动但动作在收尾后启用**——`confirm` 帧到达即出卡（用户提前看见 agent 的意图），
+ *    可 `done.proposals` 才是权威清单：流式期间点确认被拒，不在清单上的提案按
+ *    `unavailable` 收敛（延续 02i 决策 ③「不给中途提案开写入口」）。
+ * ② **取消（主动）与断连（被动）不合并**——前者「已取消」，后者「连接中断」+ 重连入口。
+ */
+describe('use-assistant — 确认门四值（T-M7-03e）', () => {
+  beforeEach(() => {
+    vi.clearAllMocks()
+    listeners = []
+    mockBridge.onAiStream.mockImplementation((l: (ev: AgentStreamEvent) => void) => {
+      listeners.push(l)
+      return () => { listeners = listeners.filter(x => x !== l) }
+    })
+    mockBridge.runAgent.mockResolvedValue({ pending: true, streamId: STREAM_ID })
+    mockBridge.isAvailable.mockReturnValue(true)
+    mockBridge.interpretAI.mockResolvedValue(null)
+    vi.mocked(parseInput).mockReturnValue(chatProposal())
+    useAssistantChatStore.getState().clear()
+  })
+
+  const TURN_INPUT = '先看看这个月花了多少，然后记一笔午饭12块'
+
+  /** 起一轮并把一张挂起提案推到客户端（`confirm` 帧）——返回那张提案。 */
+  async function openApproval(
+    r: { current: { submitInput: (t: string) => Promise<void> } },
+    proposal: ActionProposal = pendingProposal(),
+  ): Promise<ActionProposal> {
+    await act(async () => { await r.current.submitInput(TURN_INPUT) })
+    await act(async () => {
+      emit('confirm', { step: 2, proposal: proposal as unknown as Record<string, unknown> })
+    })
+    return proposal
+  }
+
+  it('事件驱动：confirm 帧到达即出卡（流式期间就在，不等 done），且**零写**', async () => {
+    const { result } = setup()
+    const proposal = await openApproval(result)
+
+    // 卡随事件出现——用户提前看见 agent 想做什么（架构 §7.4：审批卡同时是纠偏点）
+    expect(result.current.streaming).not.toBeNull()
+    expect(result.current.cardStatus).toBe('pending-confirm')
+    expect(result.current.activeProposal?.proposalId).toBe(proposal.proposalId)
+    expect(mockBridge.insertTransaction).not.toHaveBeenCalled()
+
+    // 收尾：权威清单里有它 → 卡留在屏幕上，可确认
+    await act(async () => {
+      emit('done', donePayload({ proposals: [proposal as unknown as Record<string, unknown>] }))
+    })
+    expect(result.current.cardStatus).toBe('pending-confirm')
+    expect(result.current.interrupted).toBeNull()
+  })
+
+  it('动作只在收尾后启用：流式期间点确认被拒（零写 + 明确提示）', async () => {
+    const { result } = setup()
+    const proposal = await openApproval(result)
+
+    await act(async () => { await result.current.editProposal(proposal) })
+
+    expect(mockBridge.insertTransaction).not.toHaveBeenCalled()
+    expect(lastMsg(result).text).toContain('本轮还在执行')
+    // 卡还挂着（没被这次无效点击弄丢）
+    expect(result.current.cardStatus).toBe('pending-confirm')
+  })
+
+  it('rejected：拒绝 → **零写**、卡不悬挂、有回执（任务不因此中止）', async () => {
+    const { result } = setup()
+    const proposal = await openApproval(result)
+    await act(async () => {
+      emit('done', donePayload({ proposals: [proposal as unknown as Record<string, unknown>] }))
+    })
+    expect(result.current.cardStatus).toBe('pending-confirm')
+
+    await act(async () => { result.current.rejectApproval() })
+
+    expect(result.current.activeProposal).toBeNull()
+    expect(result.current.cardStatus).toBeNull()
+    expect(lastMsg(result).text).toBe('已拒绝这次改动，没有记录')
+    expect(mockBridge.insertTransaction).not.toHaveBeenCalled()
+  })
+
+  it('cancelled：流式期间挂着确认卡时取消 → 卡收敛、零写（不变式 3：不留悬挂确认卡）', async () => {
+    const { result } = setup()
+    await openApproval(result)
+    expect(result.current.cardStatus).toBe('pending-confirm')
+
+    await act(async () => { await result.current.cancelStream() })
+
+    expect(mockBridge.cancelAgent).toHaveBeenCalledTimes(1)
+    expect(result.current.activeProposal).toBeNull()
+    expect(result.current.cardStatus).toBeNull()
+    expect(result.current.streaming).toBeNull()
+    expect(lastMsg(result).text).toBe('已取消')
+    expect(mockBridge.insertTransaction).not.toHaveBeenCalled()
+  })
+
+  it('unavailable：中途来的提案不在 done 权威清单里 → **视为拒绝、零写**', async () => {
+    const { result } = setup()
+    await openApproval(result)
+    expect(result.current.cardStatus).toBe('pending-confirm')
+
+    // 服务端最终**没有**挂起它（权威清单为空）——中途的实时信号不作数
+    await act(async () => { emit('done', donePayload({ proposals: [] })) })
+
+    expect(result.current.activeProposal).toBeNull()
+    expect(result.current.cardStatus).toBeNull()
+    expect(result.current.messages.some(m => m.text.includes('未取得确认'))).toBe(true)
+    expect(mockBridge.insertTransaction).not.toHaveBeenCalled()
+  })
+
+  it('断连（被动中断）：挂着的卡按 unavailable 收敛 + 重连入口（R-PROD-19）', async () => {
+    const { result } = setup()
+    await openApproval(result)
+
+    await act(async () => {
+      emitAll([['error', { code: 'agent_failed', message: '流中断' }]])
+    })
+
+    // ① 未回答的挂起提案视为拒绝、零写；② 中断提示与重连入口就位
+    expect(result.current.activeProposal).toBeNull()
+    expect(result.current.cardStatus).toBeNull()
+    expect(result.current.interrupted).toEqual({ input: TURN_INPUT })
+    expect(lastMsg(result).text).toContain('连接中断')
+    expect(lastMsg(result).text).toContain('未确认的改动没有记录')
+    expect(mockBridge.insertTransaction).not.toHaveBeenCalled()
+    // 与取消**不合并**：中断不是「已取消」
+    expect(lastMsg(result).text).not.toContain('已取消')
+  })
+
+  it('重连入口：把中断那一轮的输入原样重发，提示随之消失', async () => {
+    const { result } = setup()
+    await act(async () => {
+      const p = result.current.submitInput('帮我记一笔午饭12块')
+      await Promise.resolve()
+      emitAll([['error', { code: 'agent_failed', message: 'x' }]])
+      await p
+    })
+    expect(result.current.interrupted).toEqual({ input: '帮我记一笔午饭12块' })
+
+    await act(async () => {
+      result.current.retryInterrupted()
+      await Promise.resolve()
+    })
+
+    expect(result.current.interrupted).toBeNull()
+    expect(mockBridge.runAgent).toHaveBeenCalledTimes(2)
+    expect(mockBridge.runAgent).toHaveBeenLastCalledWith('帮我记一笔午饭12块', 'book-1', null)
+  })
+
+  it('多提案队列：确认第一张后第二张顶上（一轮可以挂起多笔写）', async () => {
+    const p1 = pendingProposal()
+    const p2 = { ...pendingProposal(), proposalId: 'agent-def456', message: '再记一笔打车' }
+    const { result } = setup()
+
+    await act(async () => {
+      const p = result.current.submitInput('先看预算，再记午饭，再记打车')
+      await Promise.resolve()
+      emit('confirm', { step: 2, proposal: p1 as unknown as Record<string, unknown> })
+      emit('confirm', { step: 3, proposal: p2 as unknown as Record<string, unknown> })
+      emit('done', donePayload({
+        proposals: [p1, p2] as unknown as Array<Record<string, unknown>>,
+      }))
+      await p
+    })
+
+    // 一次只展示一张（队头）
+    expect(result.current.activeProposal?.proposalId).toBe('agent-abc123')
+
+    await act(async () => { await result.current.editProposal(p1) })
+
+    // 第一张写完 → 第二张顶上，仍然是**未写库**的待确认态
+    await waitFor(() => expect(result.current.activeProposal?.proposalId).toBe('agent-def456'))
+    expect(result.current.cardStatus).toBe('pending-confirm')
+    expect(mockBridge.insertTransaction).toHaveBeenCalledTimes(1)
+  })
+
+  it('拒绝第一张 → 第二张顶上，且拒绝过的那张不会被后续帧复活', async () => {
+    const p1 = pendingProposal()
+    const p2 = { ...pendingProposal(), proposalId: 'agent-def456' }
+    const { result } = setup()
+
+    await act(async () => {
+      const p = result.current.submitInput('两个改动')
+      await Promise.resolve()
+      emit('confirm', { step: 2, proposal: p1 as unknown as Record<string, unknown> })
+      emit('confirm', { step: 3, proposal: p2 as unknown as Record<string, unknown> })
+      emit('done', donePayload({
+        proposals: [p1, p2] as unknown as Array<Record<string, unknown>>,
+      }))
+      await p
+    })
+
+    await act(async () => { result.current.rejectApproval() })
+    expect(result.current.activeProposal?.proposalId).toBe('agent-def456')
+
+    // 重复的 confirm 帧 / 权威清单里仍有它——已处置的提案都不再成卡
+    await act(async () => {
+      emit('confirm', { step: 2, proposal: p1 as unknown as Record<string, unknown> })
+    })
+    expect(result.current.activeProposal?.proposalId).toBe('agent-def456')
+  })
+
+  it('拒绝后同一张不会被「权威清单」补回（已处置的提案不再成卡）', async () => {
+    const { result } = setup()
+    // 流式期间就拒绝（零写动作，不必等收尾）——拒的是「这一项」，不是整个任务
+    const proposal = await openApproval(result)
+    await act(async () => { result.current.rejectApproval() })
+    expect(result.current.activeProposal).toBeNull()
+
+    // 收尾：服务端不知道用户已经拒绝过，`done.proposals` 里仍列着它——
+    // 权威清单会**补进**队列里缺的提案（confirm 帧丢了也不漏），但已处置的必须跳过
+    await act(async () => {
+      emit('done', donePayload({ proposals: [proposal as unknown as Record<string, unknown>] }))
+    })
+    expect(result.current.activeProposal).toBeNull()
+    expect(result.current.cardStatus).toBeNull()
+    expect(mockBridge.insertTransaction).not.toHaveBeenCalled()
+  })
+
+  it('新输入接管会话：未决的确认卡与中断提示一并作废（零写）', async () => {
+    const { result } = setup()
+    const proposal = await openApproval(result)
+    await act(async () => {
+      emit('done', donePayload({ proposals: [proposal as unknown as Record<string, unknown>] }))
+    })
+    expect(result.current.cardStatus).toBe('pending-confirm')
+
+    // 一轮收尾后用户改主意，直接说别的——那张没被回答的卡随之作废（它本来就没写库）
+    await act(async () => { await result.current.submitInput('换个说法再说一次') })
+
+    expect(result.current.activeProposal).toBeNull()
+    expect(result.current.cardStatus).toBeNull()
+    expect(result.current.interrupted).toBeNull()
   })
 })

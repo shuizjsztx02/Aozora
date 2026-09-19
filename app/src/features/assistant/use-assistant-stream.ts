@@ -97,10 +97,12 @@ export interface AgentStreamProjection {
   /** 步骤投影，按到达顺序（同 `step` 的多类帧归并进同一条） */
   steps: AgentStepView[]
   /**
-   * `confirm` 帧带来的挂起提案。**这是实时信号，不是权威清单**（`stream.py` 口径：
-   * `done.proposals` 才是权威，按 `proposalId` 去重即收敛）。本卡只留存不渲染。
+   * `confirm` 帧带来的挂起提案，按到达顺序累积（同一 `proposalId` 只留第一条）。
+   * **这是实时信号，不是权威清单**（`stream.py` 口径：`done.proposals` 才是权威）。
+   * T-M7-03e 起由 `use-assistant` 消费它**事件驱动**地建确认卡（03b 时只留存不渲染）；
+   * 收尾时仍以 `done.proposals` 核对——不在权威清单里的提案不可被确认。
    */
-  confirmProposal: Record<string, unknown> | null
+  confirmProposals: Array<{ step: number | null; proposal: Record<string, unknown> }>
   /** `device_request` 帧（P1 无生产者——设备能力通道归 P3）；原样留存，不丢帧 */
   deviceRequests: Array<Record<string, unknown>>
   /** `done` 帧载荷（null = 尚未收到，或本轮以失败/取消收尾） */
@@ -117,9 +119,14 @@ export interface AgentStreamProjection {
 
 export function createStreamProjection(): AgentStreamProjection {
   return {
-    text: '', reasoning: '', steps: [], confirmProposal: null,
+    text: '', reasoning: '', steps: [], confirmProposals: [],
     deviceRequests: [], done: null, error: null, canceled: false, settled: false,
   }
+}
+
+/** 提案的服务端 id（去重键）。不是字符串（畸形帧）→ null，该帧无法去重。 */
+function proposalIdOf(p: Record<string, unknown>): string | null {
+  return typeof p.proposalId === 'string' ? p.proposalId : null
 }
 
 const emptyStep = (step: number): AgentStepView => ({
@@ -190,8 +197,14 @@ export function applyStreamEvent(
         code: str(d.code),
       }) }
     }
-    case 'confirm':
-      return { ...p, confirmProposal: (d.proposal as Record<string, unknown>) ?? null }
+    case 'confirm': {
+      const proposal = d.proposal as Record<string, unknown> | undefined
+      if (!proposal) return p
+      // 同一提案重复到达（重发帧 / 畸形流）不重复成卡——`proposalId` 是服务端 id
+      const id = proposalIdOf(proposal)
+      if (id && p.confirmProposals.some(c => proposalIdOf(c.proposal) === id)) return p
+      return { ...p, confirmProposals: [...p.confirmProposals, { step: stepOf(d), proposal }] }
+    }
     case 'device_request':
       return { ...p, deviceRequests: [...p.deviceRequests, d] }
     case 'done':
@@ -210,6 +223,9 @@ export interface UseAssistantStreamOptions {
   /** 收尾回调：`done` / `error` / 取消三种收尾各调用一次，载荷是**最终投影**。
    *  实现方（use-assistant）负责落点与三态收敛。 */
   onSettled: (projection: AgentStreamProjection) => void
+  /** T-M7-03e：`confirm` 帧到达时**实时**转发一次（事件驱动建卡）。
+   *  本 hook 仍不碰业务状态——只把「又有了一张挂起提案」这件事告诉上层。 */
+  onConfirm?: (proposal: Record<string, unknown>, step: number | null) => void
 }
 
 export interface AssistantStreamHandle {
@@ -229,7 +245,7 @@ export interface AssistantStreamHandle {
  * ③ 取消有了正经入口（P1 只留了桥协议，没有调用点）。
  */
 export function useAssistantStream({
-  bridge, onSettled,
+  bridge, onSettled, onConfirm,
 }: UseAssistantStreamOptions): AssistantStreamHandle {
   const [projection, setProjection] = useState<AgentStreamProjection | null>(null)
   /** 同步镜像：事件处理器是 `start` 时建的闭包，靠 setState 的 prev 拿不到
@@ -250,6 +266,9 @@ export function useAssistantStream({
    *  值）；收尾只可能由桥事件或用户取消触发，都在 commit 之后。 */
   const onSettledRef = useRef(onSettled)
   useEffect(() => { onSettledRef.current = onSettled })
+  // 同上：`confirm` 的实时转发也取最新的那份
+  const onConfirmRef = useRef(onConfirm)
+  useEffect(() => { onConfirmRef.current = onConfirm })
 
   const unsubscribe = useCallback(() => {
     unsubRef.current?.()
@@ -284,9 +303,15 @@ export function useAssistantStream({
     const onEvent = (ev: AgentStreamEvent) => {
       if (settledRef.current || roundRef.current !== round) return
       if (streamIdRef.current && ev.streamId !== streamIdRef.current) return
-      const next = applyStreamEvent(projectionRef.current ?? initial, ev)
+      const before = projectionRef.current ?? initial
+      const next = applyStreamEvent(before, ev)
       projectionRef.current = next
       if (next.settled) { settle(next); return }
+      // T-M7-03e：事件驱动的确认卡——`confirm` 帧当场转发（新累积的那一条）
+      if (next.confirmProposals.length > before.confirmProposals.length) {
+        const added = next.confirmProposals[next.confirmProposals.length - 1]
+        onConfirmRef.current?.(added.proposal, added.step)
+      }
       setProjection(next)
     }
 

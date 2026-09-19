@@ -108,10 +108,32 @@ describe('agent 流投影 — 八类事件逐类落进投影', () => {
   it('confirm 原样留存（**实时信号**，非权威清单——权威是 done.proposals）', () => {
     const proposal = { proposalId: 'p-1', action: 'add_tx' }
     const p = run(ev('confirm', { step: 2, proposal }))
-    expect(p.confirmProposal).toEqual(proposal)
+    expect(p.confirmProposals).toEqual([{ step: 2, proposal }])
     // 未收尾：confirm 不是收尾信号
     expect(p.settled).toBe(false)
     expect(p.done).toBeNull()
+  })
+
+  it('confirm 多帧累积成队列（一轮多步可以有多张挂起提案）', () => {
+    const p = run(
+      ev('confirm', { step: 2, proposal: { proposalId: 'p-1' } }),
+      ev('confirm', { step: 3, proposal: { proposalId: 'p-2' } }),
+    )
+    expect(p.confirmProposals.map(c => c.proposal.proposalId)).toEqual(['p-1', 'p-2'])
+    expect(p.confirmProposals.map(c => c.step)).toEqual([2, 3])
+  })
+
+  it('同一 proposalId 的重复 confirm 只留一条（重发帧不成第二张卡）', () => {
+    const p = run(
+      ev('confirm', { step: 2, proposal: { proposalId: 'p-1', action: 'add_tx' } }),
+      ev('confirm', { step: 2, proposal: { proposalId: 'p-1', action: 'add_tx' } }),
+    )
+    expect(p.confirmProposals).toHaveLength(1)
+  })
+
+  it('confirm 缺 proposal 载荷 → 不成条（不出无主卡片）', () => {
+    const p = run(ev('confirm', { step: 2 }))
+    expect(p.confirmProposals).toEqual([])
   })
 
   it('device_request 原样留存（P1 无生产者，但通道帧不丢）', () => {

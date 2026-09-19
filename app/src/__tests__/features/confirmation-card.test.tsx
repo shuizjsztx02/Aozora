@@ -62,6 +62,8 @@ const renderCard = (over: {
   status?: 'executing' | 'committed' | 'error' | 'pending-category' | 'pending-confirm',
   onEditCommit?: Mock,
   onUndo?: Mock,
+  onReject?: Mock,
+  approvalBusy?: boolean,
   categoryId?: string,
   note?: string,
   accounts?: AccountData[],
@@ -72,6 +74,7 @@ const renderCard = (over: {
 } = {}) => {
   const onEditCommit: Mock = over.onEditCommit ?? vi.fn()
   const onUndo: Mock = over.onUndo ?? vi.fn()
+  const onReject: Mock = over.onReject ?? vi.fn()
   render(
     <ConfirmationCard
       proposal={proposal(over.categoryId, over.note)}
@@ -84,9 +87,11 @@ const renderCard = (over: {
       bookName={over.bookName ?? '默认账本'}
       selectedAccountId={over.selectedAccountId ?? 'acc-bank'}
       onUndo={onUndo}
+      onReject={onReject}
+      approvalBusy={over.approvalBusy}
     />,
   )
-  return { onEditCommit, onUndo }
+  return { onEditCommit, onUndo, onReject }
 }
 
 /** 点「编辑」进入编辑态。 */
@@ -569,5 +574,58 @@ describe('ConfirmationCard — 待确认态（T-M7-02i）', () => {
     fireEvent.click(screen.getByTestId('card-done'))
     fireEvent.click(screen.getByTestId('card-compare-confirm'))
     expect(onEditCommit).not.toHaveBeenCalled()
+  })
+})
+
+describe('ConfirmationCard — 确认门的拒绝与未启用态（T-M7-03e）', () => {
+  it('pending-confirm 编辑态：「拒绝」与「确认修改」并排；点拒绝只调 onReject，**不写库**', () => {
+    const { onReject, onEditCommit } = renderCard({ status: 'pending-confirm' })
+
+    fireEvent.click(screen.getByTestId('card-reject'))
+
+    expect(onReject).toHaveBeenCalledTimes(1)
+    expect(onEditCommit).not.toHaveBeenCalled()
+  })
+
+  it('pending-confirm 展示态：「拒绝」取代「撤销」（还没写库，没有可撤销的东西）', () => {
+    renderCard({ status: 'pending-confirm' })
+    // 编辑态 → 对照区「取消」回展示态
+    fireEvent.click(screen.getByTestId('card-done'))
+    fireEvent.click(screen.getByTestId('card-compare-cancel'))
+
+    expect(screen.getByTestId('card-reject')).toBeInTheDocument()
+    expect(screen.queryByTestId('card-undo')).toBeNull()
+    expect(screen.getByTestId('card-pending-hint').textContent).toBe('点「确认」后才会记账')
+  })
+
+  it('committed 态没有「拒绝」——它不是确认门的卡（撤销照旧）', () => {
+    renderCard({ status: 'committed' })
+
+    expect(screen.queryByTestId('card-reject')).toBeNull()
+    expect(screen.getByTestId('card-undo')).toBeInTheDocument()
+  })
+
+  it('approvalBusy（本轮仍在流式）：卡可见、引导语写明、对照区「确认」禁用', () => {
+    const { onEditCommit } = renderCard({ status: 'pending-confirm', approvalBusy: true })
+
+    // 卡在 confirm 帧到达时就出现——用户提前看见 agent 想做什么
+    expect(screen.getByTestId('card-pending-hint').textContent)
+      .toBe('本轮仍在执行，稍候再确认这次改动（尚未记账）')
+
+    // 动作未启用：展开对照区也点不动
+    fireEvent.click(screen.getByTestId('card-done'))
+    const confirm = screen.getByTestId('card-compare-confirm')
+    expect(confirm).toBeDisabled()
+    fireEvent.click(confirm)
+    expect(onEditCommit).not.toHaveBeenCalled()
+  })
+
+  it('approvalBusy 的展示态同样写明「本轮仍在执行」（拒绝入口仍在）', () => {
+    renderCard({ status: 'pending-confirm', approvalBusy: true })
+    fireEvent.click(screen.getByTestId('card-done'))
+    fireEvent.click(screen.getByTestId('card-compare-cancel'))
+
+    expect(screen.getByTestId('card-pending-hint').textContent).toBe('本轮仍在执行，稍候可确认（尚未记账）')
+    expect(screen.getByTestId('card-reject')).toBeInTheDocument()
   })
 })

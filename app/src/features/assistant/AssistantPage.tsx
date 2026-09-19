@@ -260,6 +260,10 @@ export function AssistantPage() {
     cancelOp,
     confirmConfig,
     cancelConfig,
+    cancelStream,
+    rejectApproval,
+    interrupted,
+    retryInterrupted,
     appendAssistantMessage,
   } = useAssistant({
     categories,
@@ -440,6 +444,9 @@ export function AssistantPage() {
       await voiceStopRecording()
       return
     }
+    // T-M7-03e：语音打断的语义同「取消」（架构 §9.2 交互对照）——开口即打断本轮生成，
+    // 再进入录音。与输入区的「停止生成」收敛到同一个状态（§4.4 不变式 3）。
+    if (streaming) await cancelStream()
     if (canRecord) {
       setMicPermissionHint(null)
       await voiceStartRecording()
@@ -459,6 +466,8 @@ export function AssistantPage() {
     permStatus,
     voiceStartRecording,
     requestMicPermission,
+    streaming,
+    cancelStream,
   ])
 
   // 权限异步结果续链（primitive dep：usePermissions 推送刷新后本 effect 感知变化）
@@ -719,6 +728,10 @@ export function AssistantPage() {
             categories={categories}
             status={cardStatus}
             onEditCommit={editProposal}
+            // T-M7-03e：确认门（agent 挂起的提案）的拒绝入口；流式期间动作未启用
+            // （卡在 confirm 帧到达时就出现，但 done.proposals 才是权威清单）
+            onReject={rejectApproval}
+            approvalBusy={streaming !== null}
             accounts={accounts}
             books={books}
             bookId={bookId}
@@ -842,6 +855,30 @@ export function AssistantPage() {
             )}
           </div>
         )}
+        {/* T-M7-03e（R-PROD-19）：agent 轮以失败 / 断连收尾 → 明确提示中断状态 + 重连入口。
+            与「已取消」是两种说法（那里是用户主动按的停止，这里是被动断的），故不合并。
+            P2 的恢复手段是原样重发；按 conversation_id 续跑归 P3 的 04b。 */}
+        {interrupted && (
+          <div
+            className="mb-2 px-3 py-1.5 rounded-lg text-xs flex items-center justify-between gap-2"
+            style={{
+              background: 'rgba(255, 208, 92, 0.18)',
+              color: 'var(--ink)',
+              border: '1px solid var(--glass-border)',
+            }}
+            data-testid="interrupted-banner"
+          >
+            <span className="truncate">⚠️ 连接中断，这一步没做完</span>
+            <button
+              type="button"
+              onClick={retryInterrupted}
+              className="shrink-0 underline font-medium"
+              data-testid="interrupted-retry"
+            >
+              重发
+            </button>
+          </div>
+        )}
         {/* T9-8: 图片链路进度提示（picking/parsing 期间 🖼️ 禁用） */}
         {(imageState === 'picking' || imageState === 'parsing') && (
           <div
@@ -883,7 +920,9 @@ export function AssistantPage() {
           {/* T-M4-04b: 语音输入按钮 */}
           <button
             onClick={handleMicClick}
-            disabled={phase === 'processing' || phase === 'executing'}
+            /* T-M7-03e：流式期间**可用**——按住它即打断（语义同取消，架构 §9.2）；
+             * 执行写库中（executing）与快路径处理中仍禁用（后者没有可打断的流） */
+            disabled={phase === 'executing' || (phase === 'processing' && !streaming)}
             className="px-3 py-2 rounded-xl text-sm transition-all disabled:opacity-40"
             style={{
               background: voiceIsRecording ? '#ef4444' : 'var(--glass)',
@@ -933,14 +972,32 @@ export function AssistantPage() {
               border: '1px solid var(--glass-border)',
             }}
           />
-          <button
-            onClick={handleSubmit}
-            disabled={!inputText.trim() || phase === 'processing' || phase === 'executing'}
-            className="px-4 py-2 rounded-xl text-sm font-medium text-white transition-opacity disabled:opacity-40"
-            style={{ background: 'var(--accent)' }}
-          >
-            发送
-          </button>
+          {/* T-M7-03e：流式期间发送位换成「停止」——`ai.cancel` 的 UI 入口（审批四值的
+              `cancelled`：零写、整个任务中止；架构 §4.4 不变式 3 收敛到一致状态）。
+              快路径（无 streaming）没有可打断的流，保持既有的 12 s / 25 s 体验。 */}
+          {streaming ? (
+            <button
+              onClick={() => { void cancelStream() }}
+              className="px-4 py-2 rounded-xl text-sm font-medium transition-opacity"
+              style={{
+                background: 'var(--glass)',
+                color: 'var(--ink2)',
+                border: '1px solid var(--glass-border)',
+              }}
+              data-testid="stop-generating"
+            >
+              停止
+            </button>
+          ) : (
+            <button
+              onClick={handleSubmit}
+              disabled={!inputText.trim() || phase === 'processing' || phase === 'executing'}
+              className="px-4 py-2 rounded-xl text-sm font-medium text-white transition-opacity disabled:opacity-40"
+              style={{ background: 'var(--accent)' }}
+            >
+              发送
+            </button>
+          )}
         </div>
       </div>
 

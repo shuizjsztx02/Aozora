@@ -8,7 +8,7 @@
  * - done/error 之后 streaming 置空 → 气泡卸载，让位给卡与正式消息
  */
 import { describe, it, expect, vi, beforeEach } from 'vitest'
-import { render, screen } from '@testing-library/react'
+import { render, screen, fireEvent } from '@testing-library/react'
 import { MemoryRouter } from 'react-router'
 import { AssistantPage } from '../../features/assistant/AssistantPage'
 import { useAssistantChatStore } from '../../platform/store/assistant-chat-store'
@@ -17,6 +17,9 @@ import type { AssistantMessage } from '../../features/assistant/use-assistant'
 const hookState = vi.hoisted(() => ({
   phase: 'idle' as 'idle' | 'processing' | 'executing',
   streaming: null as { text: string; reasoning: string } | null,
+  interrupted: null as { input: string } | null,
+  cancelStream: vi.fn(),
+  retryInterrupted: vi.fn(),
 }))
 
 const mockVoice = vi.hoisted(() => ({
@@ -70,6 +73,10 @@ vi.mock('../../features/assistant/use-assistant', async () => {
       cancelOp: vi.fn(),
       confirmConfig: vi.fn(),
       cancelConfig: vi.fn(),
+      cancelStream: hookState.cancelStream,
+      rejectApproval: vi.fn(),
+      interrupted: hookState.interrupted,
+      retryInterrupted: hookState.retryInterrupted,
       appendAssistantMessage: vi.fn(),
     }),
   }
@@ -90,6 +97,7 @@ describe('AssistantPage — agent 流式气泡（T-M7-02i）', () => {
     Element.prototype.scrollTo = vi.fn() as unknown as typeof Element.prototype.scrollTo
     hookState.phase = 'idle'
     hookState.streaming = null
+    hookState.interrupted = null
     useAssistantChatStore.setState({ messages: [] })
   })
 
@@ -145,5 +153,39 @@ describe('AssistantPage — agent 流式气泡（T-M7-02i）', () => {
     )
     expect(screen.queryByTestId('streaming-bubble')).toBeNull()
     expect(screen.getByText('思考中…')).toBeInTheDocument()
+  })
+
+  // ─── T-M7-03e：取消入口与中断提示 ───
+
+  it('流式期间发送位换成「停止」→ 触发 ai.cancel（审批四值的 cancelled）', async () => {
+    hookState.phase = 'processing'
+    hookState.streaming = { text: '正想说', reasoning: '' }
+    const { rerender } = renderPage()
+
+    const stop = await screen.findByTestId('stop-generating')
+    expect(screen.queryByText('发送')).toBeNull()
+    fireEvent.click(stop)
+    expect(hookState.cancelStream).toHaveBeenCalledTimes(1)
+
+    // 非流式（快路径）时回到「发送」——快路径的 12 s / 25 s 体验不变
+    hookState.streaming = null
+    hookState.phase = 'idle'
+    rerender(
+      <MemoryRouter>
+        <AssistantPage />
+      </MemoryRouter>,
+    )
+    expect(await screen.findByText('发送')).toBeInTheDocument()
+    expect(screen.queryByTestId('stop-generating')).toBeNull()
+  })
+
+  it('中断提示条 + 重连入口（R-PROD-19：断连是被动的，与「已取消」分开）', async () => {
+    hookState.interrupted = { input: '先看看这个月花了多少' }
+    renderPage()
+
+    const banner = await screen.findByTestId('interrupted-banner')
+    expect(banner).toHaveTextContent('连接中断')
+    fireEvent.click(screen.getByTestId('interrupted-retry'))
+    expect(hookState.retryInterrupted).toHaveBeenCalledTimes(1)
   })
 })
