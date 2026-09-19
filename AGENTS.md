@@ -27,11 +27,11 @@
  | `docs/architecture/` | 架构总览、数据模型、AI 协议、安全设计 | 任何架构/数据结构改动前必读 |
  | `docs/design/` | 青空设计令牌、组件规则、交互原则 | M2 视觉实施、UI 任何改动 |
  | `docs/engineering/` | 约束、测试策略、构建流水线 | 动工具链/测试框架/发版流程时 |
- | `docs/milestones/` | 里程碑计划（M0-M6） | 每个开发阶段开工前 |
+ | `docs/milestones/` | 里程碑计划（M0–M7）、生产执行规划与各期实施推进计划 | 每个开发阶段开工前 |
  | `docs/adr/` | 架构决策记录 | 理解历史决策原因时 |
  | `docs/risk-register.md` | 已知风险/缺陷与状态 | 每次发版前对照检查 |
  
- **当前阶段：** 生产化架构重基线。先执行 `docs/APP-CONTEXT.md` 的 M0 决策与文档任务，再进入客户端、服务端、同步和 AI 实施；旧 `docs/milestones/overview.md` 在 T-M0-08 中同步重写。
+ **当前阶段：** **M7（AI Agent 能力升级）优先推进，M6（生产发布）滞后**至 M7 收口之后（2026-09-18 决策——M7 是对 App 功能的重大新增，须在正式发布前完成）。M1–M5 已完成。M7 内部：**T-M7-01**（三实体上云）、**T-M7-02**（P1 服务端 Agent Loop 与 SSE 流式通道）、**T-M7-03**（P2 客户端瘦渲染与多会话管理）**均已交付并收口**；**T-M7-04**（P3 会话事件日志与摘要压缩）**进行中**——04a（事件日志完整化与 Surface 子集）已完成，04b–04e 未开始；**T-M7-05**（P4 全功能覆盖）待启，其中 05a 与 05e 协议部分可提前开工。任务边界与验收以 `docs/APP-CONTEXT.md` 第 9 节和 `docs/milestones/production-execution-plan.md` 为准，逐期进度看板见 `docs/milestones/T-M7-0*-implementation-plan.md`。
  
  **上下文加载指令：** 不要预加载所有项目文档。先读本文件和 `docs/APP-CONTEXT.md` 的相关章节，然后仅加载与当前任务相关的文档。修改涉及需求 → 读 `docs/product/`；涉及架构/数据 → 读 `docs/architecture/` 和 `docs/adr/`；涉及 UI → 读 `docs/design/`；涉及工程流程 → 读 `docs/engineering/`。
 
@@ -44,5 +44,7 @@
  - `修复 R-Mx-xx`、`修复 Mx review`、`bug-fix`：使用“Bug-fix 模式”。
 
  当前用户指令始终优先；若用户明确要求只分析、不要提交、不要推送或缩小范围，按本次要求执行。仅询问方案、解释、状态或建议时，不得自动进入执行模式。
+ 
+ **AI 协作稳定性守则：** 本仓库由 Agent 承担主要编码工作。开始任何改动前，除上述两份规范外还须遵循 `docs/engineering/AI协作稳定性守则.md`——它规定稳定性护栏（四层防线、跨层契约逐处守护、回归用例反向验证、清理通道、多会话并行纪律）与开工 / 交付检查清单。三份规范的分工：稳定性守则回答「为什么不会退化」，需求变更规范回答「变更多大要走多重流程」，通用任务执行规范回答「具体怎么执行」。
  
  **品牌与命名：** 唯一正式项目名和 App 名为 `Aozora`，Android namespace/applicationId 为 `com.aozora.app`，JS Bridge 为 `AozoraBridge`。`BestBills`、`best-bills`、`青空记账`、`小贝账本`、`小贝记账` 均为废弃历史名称，不得用于新增代码、文档或用户界面；`小贝`仅保留为 AI 伙伴角色名。旧数据键和签名标识仅允许用于迁移兼容。
