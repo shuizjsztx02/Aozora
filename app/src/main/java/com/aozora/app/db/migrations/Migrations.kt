@@ -67,7 +67,8 @@ val MIGRATION_3_4: Migration = object : Migration(3, 4) {
  *
  * v4 → v5：
  * - categories 新增 icon TEXT（自定义图标：emoji 或 data:image base64；可空）。
- * - 新增 savings_goals 表（存钱目标，仅本地不同步）。列序/类型须与
+ * - 新增 savings_goals 表（存钱目标；当时仅本地，T-M7-01 起上云，
+ *   见 SavingsGoalEntity）。列序/类型须与
  *   SavingsGoalEntity 一致，否则 Room 打开时 schema 校验失败。
  */
 val MIGRATION_4_5: Migration = object : Migration(4, 5) {
@@ -123,8 +124,8 @@ val MIGRATION_6_7: Migration = object : Migration(6, 7) {
  * 第十一轮（REQ-26 定时记账 + REQ-28 聊天角色）Room schema 迁移（决策 #1/#4/#8）。
  *
  * v7 → v8：一张迁移建两表（镜像 MIGRATION_4_5 双表先例）。
- * - scheduled_rules：定时记账规则，仅本地不同步。
- * - chat_personas：聊天角色，仅本地不同步（命令与种子在 T11-7）。
+ * - scheduled_rules：定时记账规则（当时仅本地，T-M7-01 起上云）。
+ * - chat_personas：聊天角色（当时仅本地，T-M7-01 起上云；命令与种子在 T11-7）。
  * 列序/类型须与实体一致，否则 Room 打开时 schema 校验失败。
  */
 val MIGRATION_7_8: Migration = object : Migration(7, 8) {

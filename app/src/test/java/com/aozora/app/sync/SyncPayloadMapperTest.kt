@@ -469,6 +469,7 @@ class SyncPayloadMapperTest {
 
     /**
      * rawEntityMap 必须保留原始 snake_case 键（P0-1 修复核心）。
+     * T-M7-01：同时必须保留 JSON 原始类型（Number/Boolean/null 不预先 toString）。
      */
     @Test
     fun rawEntityMap_preservesSnakeCaseKeys() {
@@ -485,7 +486,9 @@ class SyncPayloadMapperTest {
         assertEquals("b1", raw["book_id"])
         assertEquals("2026-09-05T10:00:00+00:00", raw["created_at"])
         assertEquals("2026-09-05T10:00:00+00:00", raw["updated_at"])
-        assertEquals("5000", raw["amount_cents"])
+        // 数字保留为 Number（不再 toString）——checksum 序列化据此出裸数字字面量
+        assertEquals(5000, raw["amount_cents"])
+        assertTrue(raw["amount_cents"] is Number)
         assertNull(raw["deleted_at"])
         // 不应出现 camelCase 键
         assertFalse(raw.containsKey("bookId"))

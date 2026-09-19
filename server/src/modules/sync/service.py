@@ -350,11 +350,7 @@ class SyncService:
                 _validate_name(payload["icon"], 64, "icon")
             _validate_amount_cents(payload["target_cents"])
             current_cents = payload.get("current_cents", 0)
-            if isinstance(current_cents, bool) or not isinstance(current_cents, int) or current_cents < 0:
-                raise AppException(
-                    422, "validation_error",
-                    "current_cents must be a non-negative integer",
-                )
+            _validate_current_cents(current_cents)
             period_value, period_unit = _validate_savings_period(
                 payload.get("period_value"), payload.get("period_unit"),
             )
@@ -406,12 +402,14 @@ class SyncService:
                 book_id=book_id,
                 category_id=category_id,
                 account_id=account_id,
-                include_in_budget=bool(payload.get("include_in_budget", True)),
+                include_in_budget=_require_bool(
+                    payload.get("include_in_budget", True), "include_in_budget",
+                ),
                 note=payload.get("note", ""),
                 repeat=repeat,
                 start_date=start_date,
                 end_date=end_date,
-                enabled=bool(payload.get("enabled", True)),
+                enabled=_require_bool(payload.get("enabled", True), "enabled"),
                 last_run_date=last_run_date,
                 run_hour=_require_int_in_range(payload.get("run_hour", 8), 0, 23, "run_hour"),
                 run_minute=_require_int_in_range(payload.get("run_minute", 0), 0, 59, "run_minute"),
@@ -451,7 +449,19 @@ class SyncService:
         """Update an existing entity. Returns (entity_id, new_version)."""
         entity = await self.repo.get_entity(entity_type, entity_id, user_id)
         if entity is None:
-            raise AppException(404, "not_found", f"{entity_type} not found")
+            # T-M7-01 收口：归档/软删实体在 include_deleted=False 下读不到，但它是
+            # "存在、只是不可写"，不是"不存在"。此前回 404（AppException 不被 push()
+            # 的单条 except 捕获 → 冒泡成整请求 HTTP 错误 → 客户端视为可重试 →
+            # 一条归档实体的 update 让整批 push 永远失败）。现改为回 conflict（带
+            # current_version），与 _apply_delete 对"已归档"的处理同口径：批内其余
+            # mutation 继续处理，该条由客户端标记终态失败。
+            # 真不存在、或归属他人，仍回 404（不泄露存在性）。
+            existing = await self.repo.get_entity(
+                entity_type, entity_id, user_id, include_deleted=True,
+            )
+            if existing is None:
+                raise AppException(404, "not_found", f"{entity_type} not found")
+            raise _Conflict(existing.version)
         if entity.version != expected_version:
             raise _Conflict(entity.version)
 
@@ -528,13 +538,8 @@ class SyncService:
                 _validate_amount_cents(payload["target_cents"])
                 entity.target_cents = payload["target_cents"]
             if "current_cents" in payload:
-                current_cents = payload["current_cents"]
-                if isinstance(current_cents, bool) or not isinstance(current_cents, int) or current_cents < 0:
-                    raise AppException(
-                        422, "validation_error",
-                        "current_cents must be a non-negative integer",
-                    )
-                entity.current_cents = current_cents
+                _validate_current_cents(payload["current_cents"])
+                entity.current_cents = payload["current_cents"]
             if "icon" in payload:
                 if payload["icon"] is not None:
                     _validate_name(payload["icon"], 64, "icon")
@@ -559,19 +564,28 @@ class SyncService:
                 entity.amount_cents = payload["amount_cents"]
             if "book_id" in payload:
                 book_id = _to_uuid(payload["book_id"])
-                await self._verify_book_ownership(book_id, user_id)
+                # T-M7-01 收口：归属校验只在**该字段实际变化**时执行。客户端 update
+                # 恒下发全字段（见 Repository.scheduledRuleToJson），若无条件校验，
+                # 则"规则挂靠的分类/账户/账本已被归档"这一与本次编辑无关的既成事实
+                # 会让每次 update 都被 404 拦下；而那是 AppException，会冒泡成整请求
+                # 失败（客户端视为可重试 → 毒丸），规则从此既改不动又拖垮整批同步。
+                if book_id != entity.book_id:
+                    await self._verify_book_ownership(book_id, user_id)
                 entity.book_id = book_id
             if "category_id" in payload:
                 category_id = _to_uuid(payload["category_id"])
-                await self._verify_category_ownership(category_id, user_id)
+                if category_id != entity.category_id:
+                    await self._verify_category_ownership(category_id, user_id)
                 entity.category_id = category_id
             if "account_id" in payload:
                 account_id = _to_uuid(payload["account_id"]) if payload["account_id"] else None
-                if account_id is not None:
+                if account_id is not None and account_id != entity.account_id:
                     await self._verify_account_ownership(account_id, user_id)
                 entity.account_id = account_id
             if "include_in_budget" in payload:
-                entity.include_in_budget = bool(payload["include_in_budget"])
+                entity.include_in_budget = _require_bool(
+                    payload["include_in_budget"], "include_in_budget",
+                )
             if "note" in payload:
                 _validate_note(payload["note"])
                 entity.note = payload["note"]
@@ -586,7 +600,7 @@ class SyncService:
             if "end_date" in payload:
                 entity.end_date = _to_date(payload["end_date"]) if payload["end_date"] else None
             if "enabled" in payload:
-                entity.enabled = bool(payload["enabled"])
+                entity.enabled = _require_bool(payload["enabled"], "enabled")
             # last_run_date 由引擎自管；sync 侧接受上行（跨设备去重锚点）。
             if "last_run_date" in payload:
                 entity.last_run_date = (
@@ -810,13 +824,51 @@ class SyncService:
 
 _TX_SOURCE_VALUES = frozenset(s.value for s in TxSource)
 
+# JS Number.MAX_SAFE_INTEGER：客户端以 Long 承载"分"，其上限即此。超过它的值在 DB 层
+# （BigInteger）会抛 DataError，而那不在 push() 捕获的 IntegrityError/KeyError/
+# ValueError 之列，会冒泡成 500。故在应用层前置拦截，与客户端 `require(x in 1..MAX)`
+# 同口径（T-M7-01 收口：避免畸形 payload 打成 500）。
+_MAX_SAFE_INT = 9007199254740991
+
 
 def _validate_amount_cents(value: object) -> None:
-    """Reject non-positive or non-integer ``amount_cents`` with 422."""
-    if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
+    """Reject non-positive / non-integer / out-of-range ``amount_cents`` with 422."""
+    if (
+        isinstance(value, bool)
+        or not isinstance(value, int)
+        or value <= 0
+        or value > _MAX_SAFE_INT
+    ):
         raise AppException(
-            422, "validation_error", "amount_cents must be a positive integer",
+            422, "validation_error",
+            f"amount_cents must be an integer in 1..{_MAX_SAFE_INT}",
         )
+
+
+def _validate_current_cents(value: object) -> None:
+    """Reject negative / non-integer / out-of-range ``current_cents`` with 422."""
+    if (
+        isinstance(value, bool)
+        or not isinstance(value, int)
+        or value < 0
+        or value > _MAX_SAFE_INT
+    ):
+        raise AppException(
+            422, "validation_error",
+            f"current_cents must be an integer in 0..{_MAX_SAFE_INT}",
+        )
+
+
+def _require_bool(value: object, field: str) -> bool:
+    """Reject non-boolean values for a boolean payload field with 422.
+
+    Python 的 ``bool("false")`` 是 ``True``，直接 ``bool()`` 强转会静默把字符串
+    旗标翻成真值。要求真正的 JSON 布尔（客户端发的就是布尔，见
+    Repository.scheduledRuleToJson）。
+    """
+    if not isinstance(value, bool):
+        raise AppException(422, "validation_error", f"{field} must be a boolean")
+    return value
 
 
 def _validate_note(value: object, field: str = "note") -> None:

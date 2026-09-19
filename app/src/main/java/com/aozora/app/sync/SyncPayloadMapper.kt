@@ -224,34 +224,35 @@ object SyncPayloadMapper {
     }
 
     /**
-     * P0-1 修复：将 JSONObject 转为 Map<String, String?>，保留原始键名（snake_case）。
-     * 值处理规则与 [snakeToCamelMap] 一致（null → null，Number/Boolean → toString，其他 → toString）。
-     * 用于 bootstrap checksum 重算，必须与服务端 _serialize_entity 输出的键一致。
+     * P0-1 修复：将 JSONObject 转为 Map<String, Any?>，保留原始键名（snake_case）。
+     *
+     * T-M7-01 修复：**值不再预先 toString**。此前统一转成 String 后，[BootstrapChecksum]
+     * 只能靠内容反推类型，字符串字段内容形如数字/布尔时（存钱目标名「2026」、备注「123」）
+     * 会被当成数字/布尔出网，与服务端 json.dumps 对 str 的带引号形式不等 → bootstrap
+     * checksum 恒不匹配。这里保留 JSON 原始类型（Boolean / Number / String / null），
+     * 序列化方按类型出字面量。
+     *
+     * 用于 bootstrap checksum 重算，必须与服务端 _serialize_entity 输出的键与类型一致。
      */
-    internal fun rawEntityMap(obj: JSONObject): Map<String, String?> {
-        val out = LinkedHashMap<String, String?>(obj.length())
+    internal fun rawEntityMap(obj: JSONObject): Map<String, Any?> {
+        val out = LinkedHashMap<String, Any?>(obj.length())
         val keys = obj.keys()
         while (keys.hasNext()) {
             val key = keys.next()
             val raw = obj.opt(key)
-            out[key] = when {
-                raw == null || raw == JSONObject.NULL -> null
-                raw is Boolean -> raw.toString()
-                raw is Number -> raw.toString()
-                else -> raw.toString()
-            }
+            out[key] = if (raw == null || raw == JSONObject.NULL) null else raw
         }
         return out
     }
 
-    /** 同一实体列表的两套键名视图：snake_case（checksum 重算）与 camelCase（Room upsert）。 */
+    /** 同一实体列表的两套视图：snake_case（checksum 重算，保留 JSON 原始类型）与 camelCase（Room upsert，统一为字符串）。 */
     internal data class EntityListDual(
-        val snake: List<Map<String, String?>>,
+        val snake: List<Map<String, Any?>>,
         val camel: List<Map<String, String?>>,
     )
 
     private fun parseEntityListDual(root: JSONObject, key: String): EntityListDual {
-        val snake = mutableListOf<Map<String, String?>>()
+        val snake = mutableListOf<Map<String, Any?>>()
         val camel = mutableListOf<Map<String, String?>>()
         val arr = root.optJSONArray(key) ?: JSONArray()
         for (i in 0 until arr.length()) {

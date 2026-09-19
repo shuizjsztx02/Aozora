@@ -544,6 +544,11 @@ class TestCloudEntityValidation:
         ({"name": "ok", "target_cents": 100, "period_unit": "week"}, "period unit without value"),
         ({"name": "ok", "target_cents": 100, "period_value": 3, "period_unit": "decade"},
          "invalid period unit"),
+        # T-M7-01 收口：BigInteger 列的应用层上界（对齐客户端 Long / JS safe integer）。
+        # 超过它的值会在 DB 层抛 DataError —— 那不在 push() 捕获类型之列，会冒泡成 500。
+        ({"name": "ok", "target_cents": 9007199254740992}, "target_cents over MAX_SAFE_INT"),
+        ({"name": "ok", "target_cents": 100, "current_cents": 9007199254740992},
+         "current_cents over MAX_SAFE_INT"),
     ])
     async def test_savings_goal_validation_rejects(self, cloud_ctx, payload, label):
         ctx = cloud_ctx
@@ -562,6 +567,11 @@ class TestCloudEntityValidation:
         ({"type": "transfer"}, "invalid type"),
         ({"note": "x" * 2001}, "note over 2000"),
         ({"name": "x" * 65}, "name over 64"),
+        # T-M7-01 收口：布尔字段必须是真的 JSON 布尔。Python 的 bool("false") == True，
+        # 直接强转会静默把字符串旗标翻成真值。
+        ({"include_in_budget": "false"}, "include_in_budget stringly-typed"),
+        ({"enabled": "false"}, "enabled stringly-typed"),
+        ({"amount_cents": 9007199254740992}, "amount over MAX_SAFE_INT"),
     ])
     async def test_scheduled_rule_validation_rejects(self, cloud_ctx, over, label):
         ctx = cloud_ctx
@@ -818,3 +828,195 @@ class TestCloudEntityDeviceMigration:
             select(SavingsGoal).where(SavingsGoal.owner_id == ctx["user_a"].id)
         )).scalars().all()
         assert len(rows) == 1
+
+
+# ---------------------------------------------------------------------------
+# T-M7-01 收口：归档实体 update 的拒绝形态 + 批次隔离
+# ---------------------------------------------------------------------------
+
+class TestArchivedEntityUpdateIsolation:
+    """归档/软删实体的 update 必须按条回 conflict，而不是让整个 push 请求失败。
+
+    此前 ``_apply_update`` 对归档实体抛 ``AppException(404)``，而 AppException 不在
+    ``push()`` 单条 except 捕获的类型之列 → 冒泡成整请求 HTTP 错误 → 客户端把所有
+    非 2xx 视为可重试，且该 mutation 仍是 pending，下一轮原样重推 → 整批 push 永远
+    失败（毒丸）。改回 conflict 后：请求 200、该条由客户端标记终态失败、后续轮次不再
+    带上它。注意 ``push()`` 对 conflict 有意 ``break``（批内剩余本轮跳过但仍为
+    pending，下一轮继续），故不存在任何 mutation 被永久丢弃。
+    """
+
+    @staticmethod
+    async def _seed_and_archive(ctx, entity_type: str) -> tuple[uuid.UUID, int]:
+        """插入一条实体 → 归档 → 返回 (id, 归档后的版本)。"""
+        entity_id = uuid.uuid4()
+        if entity_type == "savings_goal":
+            payload = _goal_payload()
+        elif entity_type == "scheduled_rule":
+            payload = _rule_payload(ctx)
+        else:
+            payload = _persona_payload()
+        r = _push(ctx, ctx["user_a"], [_mutation(entity_type, entity_id, payload)])
+        assert r.json()["results"][0]["status"] == "applied"
+        version = r.json()["results"][0]["version"]
+
+        # 三类实体的 delete 都是置 archived_at（见 repository.ARCHIVED_TYPES）
+        d = _push(ctx, ctx["user_a"], [
+            _mutation(entity_type, entity_id, {}, operation="delete", version=version),
+        ])
+        assert d.json()["results"][0]["status"] == "applied"
+        return entity_id, d.json()["results"][0]["version"]
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        "entity_type", ["savings_goal", "scheduled_rule", "chat_persona"],
+    )
+    async def test_update_archived_entity_is_conflict(self, cloud_ctx, entity_type):
+        ctx = cloud_ctx
+        entity_id, archived_version = await self._seed_and_archive(ctx, entity_type)
+
+        resp = _push(ctx, ctx["user_a"], [
+            _mutation(entity_type, entity_id, {"name": "改名"}, operation="update",
+                      version=archived_version),
+        ])
+        assert resp.status_code == 200
+        res = resp.json()["results"][0]
+        assert res["status"] == "conflict"
+        assert res["current_version"] == archived_version
+
+    @pytest.mark.asyncio
+    async def test_conflict_does_not_abort_rest_of_batch(self, cloud_ctx):
+        """同一批里既有归档实体的 update 又有正常 insert 时，正常那条必须落库。
+
+        毒丸的直接反证：修复前整个请求 404，正常那条也一起失败并被无限重推。
+        """
+        ctx = cloud_ctx
+        archived_id, archived_version = await self._seed_and_archive(ctx, "savings_goal")
+
+        fresh_id = uuid.uuid4()
+        resp = _push(ctx, ctx["user_a"], [
+            _mutation("savings_goal", fresh_id, _goal_payload(name="新目标")),
+            _mutation("savings_goal", archived_id, {"name": "改名"}, operation="update",
+                      version=archived_version),
+        ])
+        assert resp.status_code == 200
+        results = resp.json()["results"]
+        assert results[0]["status"] == "applied"
+        assert results[1]["status"] == "conflict"
+
+        rows = (await ctx["db"].execute(
+            select(SavingsGoal).where(SavingsGoal.id == fresh_id)
+        )).scalars().all()
+        assert len(rows) == 1
+        assert rows[0].name == "新目标"
+
+    @pytest.mark.asyncio
+    async def test_conflict_skips_remainder_recoverably(self, cloud_ctx):
+        """conflict 之后批内剩余 mutation 本轮不处理（push() 有意 break）。
+
+        锁住"可恢复"这一性质：请求仍是 200，剩余 mutation 不被丢弃、下一轮继续推送。
+        若哪天把 break 改成 continue，本用例仍通过 —— 但它守住的是"不得整请求失败"。
+        """
+        ctx = cloud_ctx
+        archived_id, archived_version = await self._seed_and_archive(ctx, "savings_goal")
+
+        trailing_id = uuid.uuid4()
+        resp = _push(ctx, ctx["user_a"], [
+            _mutation("savings_goal", archived_id, {"name": "改名"}, operation="update",
+                      version=archived_version),
+            _mutation("savings_goal", trailing_id, _goal_payload(name="后面那条")),
+        ])
+        assert resp.status_code == 200
+        results = resp.json()["results"]
+        assert results[0]["status"] == "conflict"
+        # 本轮被跳过的尾随 mutation 未落库（仍是 pending，下一轮重推）
+        assert len(results) == 1
+        rows = (await ctx["db"].execute(
+            select(SavingsGoal).where(SavingsGoal.id == trailing_id)
+        )).scalars().all()
+        assert rows == []
+
+        # 下一轮：conflict 那条已被客户端标记终态失败，它不再出现，尾随那条正常落库
+        r2 = _push(ctx, ctx["user_a"], [
+            _mutation("savings_goal", trailing_id, _goal_payload(name="后面那条")),
+        ])
+        assert r2.json()["results"][0]["status"] == "applied"
+
+
+class TestRuleUpdateWithInactiveReferences:
+    """规则挂靠的分类/账户/账本被归档后，编辑规则本身仍必须成功。
+
+    客户端 update 恒下发全字段（见 Repository.scheduledRuleToJson）。若无条件校验
+    归属，则"分类已被归档"这一与本次编辑无关的既成事实会让每次 update 都被 404 拦下
+    —— 而那是 AppException，会冒泡成整请求失败（毒丸），规则从此既改不动又拖垮整批
+    同步。故归属校验只在字段实际变化时执行。
+    """
+
+    @staticmethod
+    def _rule_and_version(ctx):
+        rule_id = uuid.uuid4()
+        r = _push(ctx, ctx["user_a"], [
+            _mutation("scheduled_rule", rule_id, _rule_payload(ctx)),
+        ])
+        assert r.json()["results"][0]["status"] == "applied"
+        return rule_id, r.json()["results"][0]["version"]
+
+    @pytest.mark.asyncio
+    async def test_update_rule_with_archived_category_applies(self, cloud_ctx):
+        ctx = cloud_ctx
+        rule_id, version = self._rule_and_version(ctx)
+        ctx["cat_a"].archived_at = datetime.now(UTC)
+        await ctx["db"].commit()
+
+        resp = _push(ctx, ctx["user_a"], [
+            _mutation("scheduled_rule", rule_id,
+                      _rule_payload(ctx, name="房租（改名）", enabled=False),
+                      operation="update", version=version),
+        ])
+        assert resp.status_code == 200
+        assert resp.json()["results"][0]["status"] == "applied"
+
+        row = (await ctx["db"].execute(
+            select(ScheduledRule).where(ScheduledRule.id == rule_id)
+        )).scalar_one()
+        assert row.name == "房租（改名）"
+        assert row.enabled is False
+
+    @pytest.mark.asyncio
+    async def test_update_rule_with_archived_account_applies(self, cloud_ctx):
+        ctx = cloud_ctx
+        rule_id, version = self._rule_and_version(ctx)
+        ctx["acc_a"].archived_at = datetime.now(UTC)
+        await ctx["db"].commit()
+
+        resp = _push(ctx, ctx["user_a"], [
+            _mutation("scheduled_rule", rule_id, _rule_payload(ctx, amount_cents=999),
+                      operation="update", version=version),
+        ])
+        assert resp.status_code == 200
+        assert resp.json()["results"][0]["status"] == "applied"
+
+    @pytest.mark.asyncio
+    async def test_changing_to_archived_category_still_rejected(self, cloud_ctx):
+        """真正**改动**归属字段时校验照旧生效（不是把校验整个关掉）。"""
+        ctx = cloud_ctx
+        rule_id, version = self._rule_and_version(ctx)
+        archived_cat = Category(
+            id=uuid.uuid4(), owner_id=ctx["user_a"].id, book_id=ctx["book_a"].id,
+            kind=CategoryKind.EXPENSE, name="已归档分类",
+        )
+        ctx["db"].add(archived_cat)
+        await ctx["db"].flush()
+        archived_cat.archived_at = datetime.now(UTC)
+        await ctx["db"].commit()
+
+        resp = _push(ctx, ctx["user_a"], [
+            _mutation("scheduled_rule", rule_id,
+                      _rule_payload(ctx, category_id=str(archived_cat.id)),
+                      operation="update", version=version),
+        ])
+        # 归属校验仍拦下（AppException → HTTP 错误），实体未被改写
+        assert resp.status_code == 404
+        row = (await ctx["db"].execute(
+            select(ScheduledRule).where(ScheduledRule.id == rule_id)
+        )).scalar_one()
+        assert row.category_id == ctx["cat_a"].id

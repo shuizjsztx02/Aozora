@@ -27,7 +27,8 @@ import com.aozora.app.db.migrations.MIGRATION_8_9
  * - v6：savings_goals 新增 periodValue/periodUnit（第九轮 REQ-14）
  * - v7：transactions 新增 includeInBudget（第十轮 REQ-17，默认计入）
  * - v8：新增 scheduled_rules / chat_personas 表（第十一轮 REQ-26/REQ-28，
- *        均仅本地不同步；一张迁移建两表）
+ *        一张迁移建两表）。两表当时均仅本地不同步；T-M7-01 起与
+ *        savings_goals 一并上云（D-PROD-03），Room 结构未变故无需新迁移。
  * - v9：scheduled_rules 新增 runHour/runMinute 执行时刻列（第十四轮 REQ-43，
  *        T14-5 决策 #1 唯一声明者；存量行默认 8/0=保持 08:00 语义）
  * 后续 migration 使用 MIGRATION_* 追加，不做破坏性 reset；缺失迁移时

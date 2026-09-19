@@ -2566,12 +2566,18 @@ class TestSoftDeleteConsistency:
 
     @pytest.mark.asyncio
     async def test_update_soft_deleted_book_rejected(self, auth_client, db_session):
-        """F-M3-1: sync update on a soft-deleted book returns 404 — the
-        multi-device scenario where device A deletes and device B's late
-        update must NOT resurrect the book."""
+        """F-M3-1: sync update on a soft-deleted book must not resurrect it.
+
+        T-M7-01 收口：拒绝形态由「整请求 404」改为「该条 conflict」。404 是
+        AppException，不被 push() 的单条 except 捕获 → 冒泡成整批 HTTP 错误 →
+        客户端把所有非 2xx 视为可重试 → 一条归档实体的 update 让整批 push 永远
+        失败（毒丸）。改回 conflict 后批内其余 mutation 继续，该条由客户端标记
+        终态失败 —— 不变量（不复活、不改写）不变。
+        """
         ctx = auth_client
         ctx["book_a"].deleted_at = datetime.now(UTC)
         await db_session.commit()
+        version_before = ctx["book_a"].version
 
         resp = ctx["client"].post(
             "/sync/push",
@@ -2589,14 +2595,23 @@ class TestSoftDeleteConsistency:
             },
             headers=_auth_header(ctx["user_a"].id),
         )
-        assert resp.status_code == 404
+        assert resp.status_code == 200
+        res = resp.json()["results"][0]
+        assert res["status"] == "conflict"
+        assert res["current_version"] == version_before
+        # 不变量：实体未被复活/改写
+        await db_session.refresh(ctx["book_a"])
+        assert ctx["book_a"].deleted_at is not None
+        assert ctx["book_a"].name != "Hacked"
 
     @pytest.mark.asyncio
     async def test_update_archived_category_rejected(self, auth_client, db_session):
-        """F-M3-1: sync update on an archived category returns 404."""
+        """F-M3-1: sync update on an archived category must not resurrect it
+        (T-M7-01 收口：拒绝形态为逐条 conflict，不再是整请求 404)。"""
         ctx = auth_client
         ctx["cat_expense_a"].archived_at = datetime.now(UTC)
         await db_session.commit()
+        version_before = ctx["cat_expense_a"].version
 
         resp = ctx["client"].post(
             "/sync/push",
@@ -2614,14 +2629,22 @@ class TestSoftDeleteConsistency:
             },
             headers=_auth_header(ctx["user_a"].id),
         )
-        assert resp.status_code == 404
+        assert resp.status_code == 200
+        res = resp.json()["results"][0]
+        assert res["status"] == "conflict"
+        assert res["current_version"] == version_before
+        await db_session.refresh(ctx["cat_expense_a"])
+        assert ctx["cat_expense_a"].archived_at is not None
+        assert ctx["cat_expense_a"].name != "HackedCat"
 
     @pytest.mark.asyncio
     async def test_update_archived_account_rejected(self, auth_client, db_session):
-        """F-M3-1: sync update on an archived account returns 404."""
+        """F-M3-1: sync update on an archived account must not resurrect it
+        (T-M7-01 收口：拒绝形态为逐条 conflict，不再是整请求 404)。"""
         ctx = auth_client
         ctx["acc_a"].archived_at = datetime.now(UTC)
         await db_session.commit()
+        version_before = ctx["acc_a"].version
 
         resp = ctx["client"].post(
             "/sync/push",
@@ -2639,11 +2662,18 @@ class TestSoftDeleteConsistency:
             },
             headers=_auth_header(ctx["user_a"].id),
         )
-        assert resp.status_code == 404
+        assert resp.status_code == 200
+        res = resp.json()["results"][0]
+        assert res["status"] == "conflict"
+        assert res["current_version"] == version_before
+        await db_session.refresh(ctx["acc_a"])
+        assert ctx["acc_a"].archived_at is not None
+        assert ctx["acc_a"].name != "HackedAcc"
 
     @pytest.mark.asyncio
     async def test_update_soft_deleted_transaction_rejected(self, auth_client):
-        """F-M3-1: sync update on a soft-deleted transaction returns 404."""
+        """F-M3-1: sync update on a soft-deleted transaction must not resurrect
+        it (T-M7-01 收口：拒绝形态为逐条 conflict，不再是整请求 404)。"""
         ctx = auth_client
         tx_id = uuid.uuid4()
         # Insert then delete.
@@ -2703,7 +2733,10 @@ class TestSoftDeleteConsistency:
             },
             headers=_auth_header(ctx["user_a"].id),
         )
-        assert resp.status_code == 404
+        assert resp.status_code == 200
+        res = resp.json()["results"][0]
+        assert res["status"] == "conflict"
+        assert res["current_version"] == 2
 
     @pytest.mark.asyncio
     async def test_double_delete_book_returns_conflict(self, auth_client, db_session):
@@ -2776,8 +2809,10 @@ class TestSoftDeleteConsistency:
     @pytest.mark.asyncio
     async def test_update_tx_under_soft_deleted_book_rejected(self, auth_client, db_session):
         """NEW-1: after a book is soft-deleted, sync update on a transaction
-        under that book must return 404 — otherwise multi-device scenarios
-        produce zombie mutations that bootstrap and pull disagree on."""
+        under that book must be rejected — otherwise multi-device scenarios
+        produce zombie mutations that bootstrap and pull disagree on.
+        T-M7-01 收口：拒绝形态为逐条 conflict，不再是整请求 404（后者会冒泡成
+        整批 HTTP 失败 → 客户端视为可重试 → 毒丸）。"""
         ctx = auth_client
         # 1. Insert a transaction via sync.
         tx_id = uuid.uuid4()
@@ -2830,12 +2865,16 @@ class TestSoftDeleteConsistency:
             },
             headers=_auth_header(ctx["user_a"].id),
         )
-        assert r2.status_code == 404
+        assert r2.status_code == 200
+        res = r2.json()["results"][0]
+        assert res["status"] == "conflict"
+        assert res["current_version"] == tx_version
 
     @pytest.mark.asyncio
     async def test_update_budget_under_soft_deleted_book_rejected(self, auth_client, db_session):
         """NEW-1: after a book is soft-deleted, sync update on a budget
-        under that book must return 404."""
+        under that book must be rejected (T-M7-01 收口：逐条 conflict，
+        不再是整请求 404)。"""
         ctx = auth_client
         # 1. Insert a budget via sync.
         budget_id = uuid.uuid4()
@@ -2884,7 +2923,10 @@ class TestSoftDeleteConsistency:
             },
             headers=_auth_header(ctx["user_a"].id),
         )
-        assert r2.status_code == 404
+        assert r2.status_code == 200
+        res = r2.json()["results"][0]
+        assert res["status"] == "conflict"
+        assert res["current_version"] == budget_version
 
 
 # ---------------------------------------------------------------------------

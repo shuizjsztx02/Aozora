@@ -94,7 +94,7 @@ class BootstrapChecksumTest {
     @Test
     fun compute_nullFields_serializeAsNull() {
         val hash = BootstrapChecksum.compute(
-            books = listOf(mapOf("id" to "a", "name" to "X", "icon" to null, "version" to "1")),
+            books = listOf(mapOf("id" to "a", "name" to "X", "icon" to null, "version" to 1)),
             categories = emptyList(), accounts = emptyList(),
             transactions = emptyList(), budgets = emptyList(),
             cursor = 0
@@ -103,8 +103,7 @@ class BootstrapChecksumTest {
         // Python: json.dumps({"id":"a","icon":null,"name":"X","version":1},
         //                    sort_keys=True, separators=(",",":"))
         // → '{"icon":null,"id":"a","name":"X","version":1}'
-        // 注意：version 在 Python 端是 int，序列化后不带引号；客户端的 "1" 经过
-        // isNumeric 判定后也序列化为不带引号的 1
+        // version 在两侧都是真数字（服务端 int / 客户端 JSON 解析出的 Number）→ 不带引号
         val expectedEntityJson = """{"icon":null,"id":"a","name":"X","version":1}"""
         val expectedPayload = "$expectedEntityJson|cursor:0"
         val expectedHash = sha256Reference(expectedPayload)
@@ -112,24 +111,45 @@ class BootstrapChecksumTest {
     }
 
     @Test
-    fun compute_numericValues_storedAsStringsButSerializedWithoutQuotes() {
+    fun compute_numericAndBooleanFields_serializeAsBareLiterals() {
+        // 服务端 _serialize_entity 的真类型：int / bool → json.dumps 出裸字面量。
+        // 客户端经 rawEntityMap 保留 JSON 原始类型后必须同样出裸字面量。
         val hash = BootstrapChecksum.compute(
-            books = emptyList(), categories = emptyList(), accounts = emptyList(),
-            transactions = listOf(mapOf(
-                "id" to "t1",
-                "bookId" to "b1",
-                "type" to "expense",
-                "amountCents" to "5000",  // numeric string
-                "categoryId" to "c1",
-                "bizDate" to "2026-09-05",
-                "occurredAt" to "1693872000000",
-                "source" to "manual",
-                "version" to "1"
+            books = listOf(mapOf(
+                "id" to "a",
+                "amountCents" to 5000,
+                "includeInBudget" to true,
+                "enabled" to false,
             )),
-            budgets = emptyList(),
+            categories = emptyList(), accounts = emptyList(),
+            transactions = emptyList(), budgets = emptyList(),
+            cursor = 0
+        )
+        // 键按字母序：amountCents, enabled, id, includeInBudget
+        val expected = """{"amountCents":5000,"enabled":false,"id":"a","includeInBudget":true}|cursor:0"""
+        assertEquals(sha256Reference(expected), hash)
+    }
+
+    @Test
+    fun compute_numericLookingStringFields_stayQuoted() {
+        // T-M7-01 回归（H1）：字符串字段的内容形如数字/布尔时，必须仍按**字符串**出网。
+        // 服务端对 str 恒出带引号形式；此前客户端靠内容猜类型（"2026" → 裸 2026、
+        // "true" → 布尔 true），于是「存钱目标名叫 2026」「交易备注 123」这类再普通
+        // 不过的数据会让两侧哈希不等 → bootstrap 判 RETRYABLE 死循环。
+        val hash = BootstrapChecksum.compute(
+            books = listOf(mapOf(
+                "id" to "a",
+                "name" to "2026",
+                "note" to "123",
+                "flag" to "true",
+            )),
+            categories = emptyList(), accounts = emptyList(),
+            transactions = emptyList(), budgets = emptyList(),
             cursor = 42
         )
-        assertEquals(64, hash.length)
+        // 键按字母序：flag, id, name, note —— 四个值全部带引号
+        val expected = """{"flag":"true","id":"a","name":"2026","note":"123"}|cursor:42"""
+        assertEquals(sha256Reference(expected), hash)
     }
 
     @Test
@@ -141,15 +161,15 @@ class BootstrapChecksumTest {
             "id" to "book-uuid-1",
             "name" to "Alice Book",
             "icon" to null,
-            "version" to "1",  // 字符串，但序列化为数字（与服务端 int 一致）
+            "version" to 1,  // 与服务端 int 同型（真数字，出裸字面量）
             "created_at" to "2026-09-05T10:00:00+00:00",
             "updated_at" to "2026-09-05T10:00:00+00:00",
             "deleted_at" to null
         ))
-        val categories = emptyList<Map<String, String?>>()
-        val accounts = emptyList<Map<String, String?>>()
-        val transactions = emptyList<Map<String, String?>>()
-        val budgets = emptyList<Map<String, String?>>()
+        val categories = emptyList<Map<String, Any?>>()
+        val accounts = emptyList<Map<String, Any?>>()
+        val transactions = emptyList<Map<String, Any?>>()
+        val budgets = emptyList<Map<String, Any?>>()
         val cursor = 7L
 
         val clientHash = BootstrapChecksum.compute(
@@ -176,14 +196,14 @@ class BootstrapChecksumTest {
             "id" to "tx-1",
             "book_id" to "b-1",
             "type" to "expense",
-            "amount_cents" to "5000",
+            "amount_cents" to 5000,
             "category_id" to "c-1",
             "account_id" to null,
             "note" to "lunch",
             "biz_date" to "2026-09-05",
             "occurred_at" to "2026-09-05T12:00:00+00:00",
             "source" to "manual",
-            "version" to "1",
+            "version" to 1,
             "created_at" to "2026-09-05T12:00:00+00:00",
             "updated_at" to "2026-09-05T12:00:00+00:00",
             "deleted_at" to null
@@ -217,16 +237,14 @@ class BootstrapChecksumTest {
 
     @Test
     fun compute_numericStrict_rejectsScientificNotation() {
-        // P3-2 修复验证：科学计数法不应被识别为数字（与服务端 json.dumps 对齐）
-        // "1e5" 应被当作字符串（带引号），而不是数字（不带引号）
+        // "1e5" 是**字符串字段的内容**，两侧都必须出带引号形式（服务端 json.dumps 对 str
+        // 如此；客户端 T-M7-01 起按类型出字面量，不再有内容推断）。保留用例锁住不回退。
         val hashScientific = BootstrapChecksum.compute(
             books = listOf(mapOf("id" to "a", "amount" to "1e5")),
             categories = emptyList(), accounts = emptyList(),
             transactions = emptyList(), budgets = emptyList(),
             cursor = 0
         )
-        // 若 isNumeric 错误地接受 "1e5"，会序列化为 {"amount":1e5,...}
-        // 严格模式下应序列化为 {"amount":"1e5",...}（带引号）
         val expectedJsonWithQuotes = """{"amount":"1e5","id":"a"}|cursor:0"""
         val expectedHash = sha256Reference(expectedJsonWithQuotes)
         assertEquals(expectedHash, hashScientific)
@@ -241,16 +259,19 @@ class BootstrapChecksumTest {
 
     // ─── T-M7-01: 八类 checksum（computeV2） ───
 
-    /** 与 fixture 同形的三实体（键名 snake_case，值同服务端 _serialize_entity 输出）。 */
+    /**
+     * 与 fixture 同形的三实体（键名 snake_case，值与类型同服务端 _serialize_entity 输出：
+     * 金额/编号是真数字，布尔是真布尔，时间戳是字符串）。
+     */
     private val cloudGoal = mapOf(
         "id" to "11111111-1111-4111-8111-111111111111",
         "name" to "旅行基金",
-        "target_cents" to "500000",
-        "current_cents" to "120000",
+        "target_cents" to 500000,
+        "current_cents" to 120000,
         "icon" to null,
-        "period_value" to "6",
+        "period_value" to 6,
         "period_unit" to "month",
-        "version" to "2",
+        "version" to 2,
         "created_at" to "2026-09-04T12:00:00+00:00",
         "updated_at" to "2026-09-04T12:00:00+00:00",
         "archived_at" to null,
@@ -259,20 +280,20 @@ class BootstrapChecksumTest {
         "id" to "22222222-2222-4222-8222-111111111111",
         "type" to "expense",
         "name" to "房租",
-        "amount_cents" to "350000",
+        "amount_cents" to 350000,
         "book_id" to "b1",
         "category_id" to "c1",
         "account_id" to null,
-        "include_in_budget" to "true",
+        "include_in_budget" to true,
         "note" to "",
         "repeat" to "monthly",
         "start_date" to "2026-01-01",
         "end_date" to null,
-        "enabled" to "true",
+        "enabled" to true,
         "last_run_date" to "2026-09-01",
-        "run_hour" to "9",
-        "run_minute" to "30",
-        "version" to "5",
+        "run_hour" to 9,
+        "run_minute" to 30,
+        "version" to 5,
         "created_at" to "2026-09-04T12:00:00+00:00",
         "updated_at" to "2026-09-04T12:00:00+00:00",
         "archived_at" to null,
@@ -282,7 +303,7 @@ class BootstrapChecksumTest {
         "name" to "小贝",
         "avatar" to null,
         "persona" to "hello",
-        "version" to "1",
+        "version" to 1,
         "created_at" to "2026-09-04T12:00:00+00:00",
         "updated_at" to "2026-09-04T12:00:00+00:00",
         "archived_at" to null,
