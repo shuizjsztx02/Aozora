@@ -242,65 +242,6 @@ body::after {
   letter-spacing: 0.2em;
 }
 
-/* ─── 天空画布 - 星空装饰 ─── */
-
-.sky-fixed {
-  position: fixed;
-  inset: 0;
-  z-index: 0;
-  pointer-events: none;
-  overflow: hidden;
-}
-
-/* 星星闪烁动画 */
-@keyframes starTwinkle {
-  0%, 100% { opacity: 0.2; transform: scale(0.8); }
-  50% { opacity: 1; transform: scale(1.2); }
-}
-
-/* 星星生成 - 随机分布 */
-.star {
-  position: absolute;
-  border-radius: 50%;
-  background: rgba(255, 255, 255, 0.8);
-  animation: starTwinkle var(--duration, 3s) ease-in-out infinite;
-  animation-delay: var(--delay, 0s);
-}
-
-/* 月亮装饰 */
-.moon-decor {
-  position: absolute;
-  top: 60px;
-  right: 40px;
-  width: 80px;
-  height: 80px;
-  border-radius: 50%;
-  background: radial-gradient(circle at 35% 35%, #FFF8E1 0%, #F5F5DC 40%, #E8E4C9 100%);
-  box-shadow: 0 0 40px rgba(255, 248, 225, 0.3), 0 0 80px rgba(255, 248, 225, 0.1);
-  animation: moonGlow 4s ease-in-out infinite;
-}
-
-@keyframes moonGlow {
-  0%, 100% { box-shadow: 0 0 40px rgba(255, 248, 225, 0.3), 0 0 80px rgba(255, 248, 225, 0.1); }
-  50% { box-shadow: 0 0 60px rgba(255, 248, 225, 0.4), 0 0 100px rgba(255, 248, 225, 0.15); }
-}
-
-/* 地平线/山峦装饰 */
-.horizon-decor {
-  position: absolute;
-  bottom: 60px;
-  left: 0;
-  right: 0;
-  height: 120px;
-  pointer-events: none;
-  opacity: 0.15;
-}
-
-.horizon-decor svg {
-  width: 100%;
-  height: 100%;
-}
-
 /* ─── 辅助 ─── */
 
 /* safe-area — Android WebView 在 edge-to-edge 下 env(safe-area-inset-top) 常为 0，
@@ -343,14 +284,10 @@ body::after {
   }
 }
 
-/* T-M4-06b: 低性能模式 — 关闭所有装饰动画与模糊 */
-.low-perf .sky-fixed,
+/* T-M4-06b: 低性能模式 — 关闭玻璃模糊（装饰动画随 T17-2 装饰层下线一并移除） */
 .low-perf .glass-card,
 .low-perf .sheet-glass,
 .low-perf .nav-glass {
   backdrop-filter: none !important;
   -webkit-backdrop-filter: none !important;
-}
-.low-perf .sky-fixed * {
-  display: none !important;
 }

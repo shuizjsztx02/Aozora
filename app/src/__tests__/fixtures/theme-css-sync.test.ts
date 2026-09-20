@@ -79,7 +79,7 @@ describe('T13-1: 四主题背景图 + scrim 已按决策#3 接入 index.css', ()
     expect(rule.decls).toMatch(/background-attachment:\s*fixed,\s*fixed/)
   })
 
-  it('scrim 纱层 = body::after fixed 层，压在图上、内容之下（z=-1，低于 .sky-fixed 的 z=0）', () => {
+  it('scrim 纱层 = body::after fixed 层，压在图上、内容之下（z=-1，低于内容层）', () => {
     const m = cssText.match(/body::after\s*\{[^}]*\}/)
     expect(m, '缺 body::after 规则').not.toBeNull()
     expect(m![0]).toContain('var(--bg-scrim')

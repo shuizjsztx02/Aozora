@@ -2,7 +2,7 @@
  * App — 根组件。
  *
  * 职责：
- * - 天空画布背景
+ * - 低性能降级标记（T17-2 起：装饰层下线，仅保留 .low-perf 副作用）
  * - 路由容器
  * - 全局错误边界
  * - 同步监听初始化（全应用生命周期）
@@ -12,7 +12,7 @@
 import { useEffect } from 'react'
 import { ErrorBoundary } from './app/ErrorBoundary'
 import { Router } from './app/Router'
-import { SkyCanvas } from './design/SkyCanvas'
+import { useLowPerformance } from './design/a11y'
 import { useInitSync } from './platform/hooks/use-bridge'
 
 /**
@@ -42,9 +42,11 @@ function FontScaleAdapter() {
 
 export default function App() {
   useInitSync()
+  // T17-2（REQ-64）：装饰层下线后，此处的调用只保留其副作用 —— 往 root 打
+  // .low-perf 标记（index.css 据此关掉 glass 的 backdrop-filter 降级）。
+  useLowPerformance()
   return (
     <ErrorBoundary>
-      <SkyCanvas />
       <FontScaleAdapter />
       <Router />
     </ErrorBoundary>
