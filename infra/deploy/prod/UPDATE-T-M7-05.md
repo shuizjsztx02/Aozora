@@ -19,8 +19,14 @@ nginx 形态仍以 `RUNBOOK.md` 与 `nginx/DEPLOYED.md` 为准，本文件不重
 | nginx | `/usr/local/nginx/conf.d/{api,ups}.conf`，监听 80，前缀 `/aozora-api/` | — |
 | 数据库迁移 | — | `aozora_test` = **`0016_cloud_entities`**；`aozora_prod` = 本轮不动 |
 
-**结论：** A 机代码落后 `origin/main` 约 **40+ 个提交**（停在 T16-7 时代），
-`aozora_test` 落后 **5 个迁移**。B 机不需要部署代码，但需要承接 A 机容器发起的迁移。
+**结论：** A 机代码落后 `origin/main` **144 个提交**（停在 T16-7 时代；目标 =
+`c2f6c9f`（T17 收口）＋ 本轮 `09ceaa1` / `72088c2`），`aozora_test` 落后 **5 个迁移**。
+B 机不需要部署代码，但需要承接 A 机容器发起的迁移。
+
+> **2026-09-20 收口轮复核（只读实查）：** 上表逐项**仍然准确**——A 机 HEAD `42913ec`、
+> 工作区干净、`aozora-api-test` healthy；B 机 `pg-test` / `pg-prod` healthy，
+> `aozora_test` 停在 `0016_cloud_entities`。本次复核同时实测了 **A 机 `/ai/agent` 当前
+> 返回 404**（正是 §二 步骤 5.3 那条判据的"未开启"一侧），确认本条更新的必要性。
 
 ### 1.1 待应用的迁移（`0016` → `0021`）
 
@@ -185,3 +191,29 @@ B 机只跑 PG；迁移由 A 机容器发起。**不要**在 B 机上 `git pull`
 - `api-prod` 启用所需的域名 / 备案 / HTTPS 证书（RUNBOOK 第 7 节）。
 - 迁移 `0021` 之后的**旧客户端兼容性**：本轮服务端改动了 bootstrap checksum
   车道（新增 `checksum_v3`），客户端侧要跟上（见提交 `ab243a2` 与收口记录）。
+
+---
+
+## 七、本轮补充（2026-09-20 收口轮，本机设备联测后）
+
+本轮在**本机**（dev server + docker PG）上跑通了模拟器的 AI 全链路实测。三条对
+A 机部署有直接影响的结论：
+
+1. **服务端开了还不够——客户端闸门是另一半。** `AI_AGENT_CLIENT_ENABLED`
+   （`app/src/features/assistant/use-assistant.ts`）是**编译期常量、默认 `false`**，
+   而服务端 compose 早已默认开。实测对照：闸门关闭时界面报「⚠️ 云端 AI 暂时不可用，
+   操作与查询需要云端可用」，开启后步骤卡与正确回答都出现。
+   **即：A 机部署完成后，已分发的旧 APK 仍然不会走 agent 路径**——要让设备真正用上，
+   需要重新构建并分发 APK。本轮已临时置 `true`（`09ceaa1`），**默认值是否正式翻向
+   待裁决**。
+2. **`/ai/agent` 的 404 归因问题在设备上真实复现**：服务端对「账本不存在」回
+   `not_found`，客户端把任意 404 译成「这条会话已失效…重发即可继续」，而重发
+   **永远失败**。已升格为尾卡（与 R-PROD-31 / 37 / 38 同批），**不阻塞本次部署**。
+3. **测试环境配方**（下次设备走查直接照做）：模拟器网络缺 `VALIDATED` 会让
+   WorkManager 不跑同步（首页却显示「已同步」），必须用 204 探针 +
+   `captive_portal_http_url` 修；刷新服务端后必须重启 uvicorn（无 `--reload`）
+   并落盘 stdout 才看得到日志。完整清单见
+   `docs/review/T-M7-ai-agent-issues-2026-09-20.md` §7.6。
+
+**执行顺序建议不变**：§二 步骤 0（B 机转储）→ 步骤 1–4 → 步骤 5 验证。
+步骤 5.3 的判据在本次复核中已被实测确认有效（A 机当前 `/ai/agent` = 404）。
