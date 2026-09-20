@@ -515,6 +515,15 @@ cd app && npx tsc --noEmit                       # 0 错
   ③ 模拟器小坑：用 KEYCODE_BACK 关掉系统权限框会把 App 一并退出（WebView 调试端口
   随之失效，需按新 PID 重建 adb forward）；相册选择器同理会退出。**授予权限请用
   `adb shell pm grant`，不要点框上的按钮或按 BACK**。
+远端状态（2026-09-20）：
+  已推送 `origin/main`（`c31d3a1` → `aa97083`）。**CI 未能确认**：push 触发的
+  CI / Secret Scan 作业**全部在 4 s 内 failure**，注解为「The job was not started
+  because recent account payments have failed or your spending limit needs to be
+  increased」——**属账户计费层问题，不是本次改动**（与 T-M7-04 收口时记录的同一
+  情形，05b 的推送同样如此）。四板结论以本地实测为准（数字见上）。
+  另记一笔网络：首次 push 遇 `github.com:443` 连接重置（`curl` 返回 **000**，
+  而 `api.github.com` 同时是 200——与 R-PROD 之外的既有经验一致：**判据要用
+  `github.com` 而不是 api 域名**），重试后恢复，`git -c http.version=HTTP/1.1 push` 成功。
 下一项未阻塞任务：05c（预算存钱 / 定时 / 角色域）与 05h（Skill 封装）——批次 3/4，
   两卡文件面不同；05d 依赖 05c 的注册表形态。
 ```
