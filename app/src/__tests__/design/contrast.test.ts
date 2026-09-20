@@ -4,6 +4,8 @@
  * 验证所有正文 Token 在各主题玻璃卡面上的对比度 ≥4.5:1。
  *
  * T13-1（REQ-45 决策#3）分层模型更新：背景图 → body::after scrim → 玻璃卡面。
+ * T17-1（REQ-63）叠加 body::before 淡出纱（主题底色渐变，opacity = --bg-veil），
+ * 位于图与 scrim 之间；本文件只锁其 veil=100（图被底色完全盖住）的可读性。
  * 测量方法：
  * 1. 取各主题 sky gradient 中点色作为图亮度代理（图片本身不可静态测亮度）
  * 2. 压 --bg-scrim 黑纱（scrim 常量与 index.css 同步断言，防回归）
@@ -134,6 +136,23 @@ describe('T-M4-06a: WCAG AA 对比度验证（图 → scrim → glass 分层）'
       })
     })
   }
+})
+
+// ─── T17-1（REQ-63）：背景图淡出纱拉满时的观感回归锁 ───
+// 纱 opacity=1 → 图被主题底色完全盖住，纱下即主题渐变色（可静态测量），
+// 取值与上面的亮度代理模型同值 —— 即把「修复后滑轴 100 的真实观感」钉死。
+describe('T17-1（REQ-63）：veil=100（背景图淡出为纯主题底色）正文仍 ≥4.5:1', () => {
+  it('四主题 ink/ink2/ink3 在「主题底色 × scrim × glass」上可读', () => {
+    for (const [name, tokens] of Object.entries(themes)) {
+      const bg = effectiveGlassBg(
+        tokens.skyFrom, tokens.skyTo, tokens.scrimAlpha,
+        ...tokens.glassRgb, tokens.glassAlpha,
+      )
+      for (const ink of [tokens.ink, tokens.ink2, tokens.ink3]) {
+        expect(contrastRatio(ink, bg), `${name} 主题 ${ink} on ${bg}`).toBeGreaterThanOrEqual(MIN_CONTRAST)
+      }
+    }
+  })
 })
 
 describe('T-M4-06a: 直接天空背景对比度（无玻璃卡面）', () => {

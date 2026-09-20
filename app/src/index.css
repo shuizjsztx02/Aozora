@@ -135,8 +135,22 @@ body.t-dawn, body.t-day, body.t-dusk, body.t-night {
   background-attachment: fixed, fixed;
 }
 
-/* 可读性 scrim：压在背景图之上、装饰层与内容之下
-   （body 背景经 canvas 传播先绘制，z=-1 的 ::after 恰在图与 .sky-fixed(z=0) 之间） */
+/* T17-1（REQ-63）背景图淡出纱：主题底色渐变按 --bg-veil 盖在背景图上
+   （opacity 0 = 图原样；1 = 图被主题底色完全取代 —— 浅色主题白化、夜间保持深底）。
+   必须写在 body::after 之前：两层同为 z-index -1，同层内按文档序绘制，
+   故绘制链 = 背景图 → 淡出纱 → 可读性黑纱 → 内容 */
+body::before {
+  content: '';
+  position: fixed;
+  inset: 0;
+  z-index: -1;
+  pointer-events: none;
+  background: linear-gradient(180deg, var(--sky-from), var(--sky-to));
+  opacity: var(--bg-veil, 0);
+}
+
+/* 可读性 scrim：压在背景图与淡出纱之上、内容之下
+   （body 背景经 canvas 传播先绘制，z=-1 的 ::after 恰在图/纱与内容之间） */
 body::after {
   content: '';
   position: fixed;

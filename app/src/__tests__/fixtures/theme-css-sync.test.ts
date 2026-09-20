@@ -87,4 +87,18 @@ describe('T13-1: 四主题背景图 + scrim 已按决策#3 接入 index.css', ()
     expect(m![0]).toMatch(/position:\s*fixed/)
     expect(m![0]).toMatch(/pointer-events:\s*none/)
   })
+
+  it('T17-1（REQ-63）：淡出纱 = body::before，主题底色渐变 + --bg-veil，且先于 body::after 绘制', () => {
+    const m = cssText.match(/body::before\s*\{[^}]*\}/)
+    expect(m, '缺 body::before 规则').not.toBeNull()
+    const rule = m![0]
+    expect(rule).toContain('linear-gradient(180deg, var(--sky-from), var(--sky-to))')
+    expect(rule).toContain('opacity: var(--bg-veil')
+    expect(rule).toMatch(/position:\s*fixed/)
+    expect(rule).toMatch(/inset:\s*0/)
+    expect(rule).toMatch(/z-index:\s*-1/)
+    expect(rule).toMatch(/pointer-events:\s*none/)
+    // 同层（z=-1）内按文档序绘制：纱必须写在黑纱之前
+    expect(cssText.search(/body::before\s*\{/)).toBeLessThan(cssText.search(/body::after\s*\{/))
+  })
 })

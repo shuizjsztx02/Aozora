@@ -51,27 +51,27 @@ export function applyTheme(theme: ThemeName): void {
   root.classList.add(`t-${theme}`)
 }
 
-/** T16-5（REQ-61）：背景透明度最大遮挡档 —— scrim 上限不透明度 */
-export const BG_SCRIM_MAX = 0.85
-
 /**
- * T16-5（REQ-61）：背景透明度 0–100 → 覆盖 root 的 --bg-scrim
- * （复用现成通道，body::after 消费）。0 = 不遮挡，回落各主题 CSS 现值。
+ * T17-1（REQ-63）：背景图淡出度 0–100 → 覆盖 root 的 --bg-veil
+ * （body::before 消费，纱色 = 该主题底色渐变）。0 = 无纱，背景图原样。
  */
 export function applyBgOpacity(value: number): void {
   const v = Math.max(0, Math.min(100, Math.round(value)))
   const root = document.documentElement
   if (v === 0) {
-    root.style.removeProperty('--bg-scrim')
+    root.style.removeProperty('--bg-veil')
   } else {
-    root.style.setProperty('--bg-scrim', `rgba(0, 0, 0, ${(BG_SCRIM_MAX * v / 100).toFixed(3)})`)
+    root.style.setProperty('--bg-veil', (v / 100).toFixed(3))
   }
 }
 
 interface ThemeState {
   mode: ThemeMode
   manual: ThemeName
-  /** T16-5（REQ-61）：背景透明度 0–100；0 = 各主题默认遮挡 */
+  /**
+   * T17-1（REQ-63）：背景图淡出度 0–100；0 = 背景图原样（纱 opacity 0）
+   * 存储字段名仍为 scrim（不迁移、不新增键）。
+   */
   scrim: number
 }
 
@@ -127,7 +127,7 @@ export function useTheme() {
     })
   }, [])
 
-  /** T16-5（REQ-61）：设置背景透明度（0–100），即时写 localStorage + --bg-scrim */
+  /** T16-5（REQ-61）：设置背景透明度（0–100），即时写 localStorage + --bg-veil */
   const setBgOpacity = useCallback((value: number) => {
     const v = Math.max(0, Math.min(100, Math.round(value)))
     setState(prev => {
@@ -189,7 +189,7 @@ export function useTheme() {
     theme,
     mode: state.mode,
     manualTheme: state.manual,
-    /** T16-5（REQ-61）：背景透明度 0–100（0 = 各主题默认遮挡） */
+    /** T17-1（REQ-63）：背景图淡出度 0–100（0 = 背景图原样） */
     bgOpacity: state.scrim,
     setBgOpacity,
     setAuto: () => updateTheme('auto'),

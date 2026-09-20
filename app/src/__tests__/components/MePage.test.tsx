@@ -169,11 +169,11 @@ describe('MePage — T16-5（REQ-61）背景透明度与自定义背景', () => 
     expect(screen.getByTestId('bg-opacity-value')).toHaveTextContent('35%')
   })
 
-  it('滑轴变更写入 localStorage 同键并即时应用 --bg-scrim', () => {
+  it('滑轴变更写入 localStorage 同键并即时应用 --bg-veil', () => {
     renderPage()
     fireEvent.change(screen.getByTestId('bg-opacity-slider'), { target: { value: '40' } })
     expect(JSON.parse(localStorage.getItem('aozora-theme')!).scrim).toBe(40)
-    expect(document.documentElement.style.getPropertyValue('--bg-scrim')).not.toBe('')
+    expect(document.documentElement.style.getPropertyValue('--bg-veil')).toBe('0.400')
   })
 
   it('点击「选自定义背景」调用 bridge（gallery）并把图应用到 body', async () => {

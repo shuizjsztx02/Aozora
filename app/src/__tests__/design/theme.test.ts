@@ -68,28 +68,28 @@ describe('T-M4-06a: CHART_COLORS', () => {
   })
 })
 
-describe('T16-5（REQ-61）：背景透明度', () => {
+describe('T16-5（REQ-61）/ T17-1（REQ-63）：背景图淡出度', () => {
   beforeEach(() => {
     localStorage.clear()
     document.documentElement.removeAttribute('style')
   })
 
-  it('applyBgOpacity(0) 移除覆盖 —— 回落各主题 CSS 现值', () => {
+  it('applyBgOpacity(0) 移除覆盖 —— 背景图无额外纱层', () => {
     applyBgOpacity(40)
-    expect(document.documentElement.style.getPropertyValue('--bg-scrim')).not.toBe('')
+    expect(document.documentElement.style.getPropertyValue('--bg-veil')).not.toBe('')
     applyBgOpacity(0)
-    expect(document.documentElement.style.getPropertyValue('--bg-scrim')).toBe('')
+    expect(document.documentElement.style.getPropertyValue('--bg-veil')).toBe('')
   })
 
-  it('applyBgOpacity 按 0.85 上限换算，越界值 clamp', () => {
+  it('applyBgOpacity 线性换算 v/100，越界值 clamp', () => {
     applyBgOpacity(100)
-    expect(document.documentElement.style.getPropertyValue('--bg-scrim')).toBe('rgba(0, 0, 0, 0.850)')
+    expect(document.documentElement.style.getPropertyValue('--bg-veil')).toBe('1.000')
     applyBgOpacity(50)
-    expect(document.documentElement.style.getPropertyValue('--bg-scrim')).toBe('rgba(0, 0, 0, 0.425)')
+    expect(document.documentElement.style.getPropertyValue('--bg-veil')).toBe('0.500')
     applyBgOpacity(150)
-    expect(document.documentElement.style.getPropertyValue('--bg-scrim')).toBe('rgba(0, 0, 0, 0.850)')
+    expect(document.documentElement.style.getPropertyValue('--bg-veil')).toBe('1.000')
     applyBgOpacity(-5)
-    expect(document.documentElement.style.getPropertyValue('--bg-scrim')).toBe('')
+    expect(document.documentElement.style.getPropertyValue('--bg-veil')).toBe('')
   })
 
   it('setBgOpacity 写入 aozora-theme 同键扩字段并即时应用', () => {
@@ -97,14 +97,14 @@ describe('T16-5（REQ-61）：背景透明度', () => {
     act(() => result.current.setBgOpacity(30))
     expect(result.current.bgOpacity).toBe(30)
     expect(JSON.parse(localStorage.getItem('aozora-theme')!).scrim).toBe(30)
-    expect(document.documentElement.style.getPropertyValue('--bg-scrim')).toMatch(/^rgba\(0, 0, 0, 0\.25/)
+    expect(document.documentElement.style.getPropertyValue('--bg-veil')).toBe('0.300')
   })
 
   it('旧格式（无 scrim）读取为 0，行为与升级前一致', () => {
     localStorage.setItem('aozora-theme', JSON.stringify({ mode: 'manual', manual: 'night' }))
     const { result } = renderHook(() => useTheme())
     expect(result.current.bgOpacity).toBe(0)
-    expect(document.documentElement.style.getPropertyValue('--bg-scrim')).toBe('')
+    expect(document.documentElement.style.getPropertyValue('--bg-veil')).toBe('')
   })
 
   it('已存 scrim 回填并应用', () => {
@@ -114,7 +114,7 @@ describe('T16-5（REQ-61）：背景透明度', () => {
     )
     const { result } = renderHook(() => useTheme())
     expect(result.current.bgOpacity).toBe(100)
-    expect(document.documentElement.style.getPropertyValue('--bg-scrim')).toBe('rgba(0, 0, 0, 0.850)')
+    expect(document.documentElement.style.getPropertyValue('--bg-veil')).toBe('1.000')
   })
 
   it('切换主题模式保留 scrim（不被覆写）', () => {
