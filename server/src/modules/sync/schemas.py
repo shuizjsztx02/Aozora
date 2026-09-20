@@ -114,8 +114,16 @@ class BootstrapResponse(BaseModel):
     - ``checksum_v2`` — over all eight lists + cursor, for clients that
       know about the cloud entities.
 
-    A client that predates T-M7-01 must NOT be switched to `checksum_v2`:
-    bootstrap mismatch puts it into a RETRYABLE loop.
+    T-M7-05j (偏好项上云): ``user_preferences`` joins the snapshot, and a
+    **third** checksum is added rather than extending v2:
+
+    - ``checksum_v3`` — over the nine lists above + cursor, for clients that
+      know about preferences.
+
+    Extending v2 instead would have put every already-built client into a
+    bootstrap mismatch (and therefore a RETRYABLE loop) as soon as the account
+    had a single preference row — the mismatch is invisible while the list is
+    empty, because an empty list contributes no hash segment.
     """
     books: list[dict[str, Any]]
     categories: list[dict[str, Any]]
@@ -132,3 +140,4 @@ class BootstrapResponse(BaseModel):
     cursor: int
     checksum: str = ""
     checksum_v2: str = ""
+    checksum_v3: str = ""

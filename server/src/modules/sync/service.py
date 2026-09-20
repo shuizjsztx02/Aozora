@@ -876,7 +876,21 @@ class SyncService:
             budgets=budgets,
             cursor=cursor,
         )
+        # v2 的输入保持八个列表不变 —— 05j 之前构建的客户端重算的就是八类，
+        # 把偏好塞进 v2 会让它们在下次 bootstrap 判失配并进入 RETRYABLE 死循环。
         checksum_v2 = compute_bootstrap_checksum_v2(
+            books=books,
+            categories=categories,
+            accounts=accounts,
+            transactions=transactions,
+            budgets=budgets,
+            savings_goals=savings_goals,
+            scheduled_rules=scheduled_rules,
+            chat_personas=chat_personas,
+            cursor=cursor,
+        )
+        # 知道偏好项的客户端用 v3（九类）；旧客户端读不到 v3，继续用 v2。
+        checksum_v3 = compute_bootstrap_checksum_v3(
             books=books,
             categories=categories,
             accounts=accounts,
@@ -902,6 +916,7 @@ class SyncService:
             cursor=cursor,
             checksum=checksum,
             checksum_v2=checksum_v2,
+            checksum_v3=checksum_v3,
         )
 
 
@@ -1235,20 +1250,46 @@ def compute_bootstrap_checksum_v2(
     savings_goals: list[dict],
     scheduled_rules: list[dict],
     chat_personas: list[dict],
-    user_preferences: list[dict] | None = None,
     cursor: int,
 ) -> str:
     """T-M7-01 checksum — all eight lists + cursor, for current clients.
 
-    T-M7-05j: 增加 ``user_preferences``（默认 None，向后兼容旧调用方）。
-    旧调用方（包括测试 fixture）继续拿到同一份 hash；新调用方传偏好列表后，
-    hash 覆盖九类列表。
+    输入的八类列表**不得随新实体上云而扩展**：客户端只要读到 ``checksum_v2``
+    就会用它比对，改了输入就等于把已发布的客户端推进 bootstrap 失配
+    （RETRYABLE 死循环）。新实体上云走 ``compute_bootstrap_checksum_v3``。
     """
     return _compute_checksum(
         [
             books, categories, accounts, transactions, budgets,
             savings_goals, scheduled_rules, chat_personas,
-            user_preferences or [],
+        ],
+        cursor,
+    )
+
+
+def compute_bootstrap_checksum_v3(
+    *,
+    books: list[dict],
+    categories: list[dict],
+    accounts: list[dict],
+    transactions: list[dict],
+    budgets: list[dict],
+    savings_goals: list[dict],
+    scheduled_rules: list[dict],
+    chat_personas: list[dict],
+    user_preferences: list[dict],
+    cursor: int,
+) -> str:
+    """T-M7-05j checksum — 九类列表 + cursor，供知道偏好项的客户端比对。
+
+    偏好列表**为空时与 v2 逐字节相同**（``_compute_checksum`` 对空列表不产出
+    分段），所以「没有偏好行的用户」在两条车道上算出同一个值——这也是 05j 最初
+    把它并进 v2 时没被发现问题的原因：只有真正写过偏好行的账号才会失配。
+    """
+    return _compute_checksum(
+        [
+            books, categories, accounts, transactions, budgets,
+            savings_goals, scheduled_rules, chat_personas, user_preferences,
         ],
         cursor,
     )

@@ -5,9 +5,11 @@ insert), pull, and bootstrap — including the two properties that make the
 rollout safe for clients that predate the entity:
 
 * the legacy ``checksum`` keeps covering exactly the original five lists
-  (so an old client's recomputation still matches), and
-* ``checksum_v2`` covers all nine, agreeing with the legacy value when the
-  four cloud-entity lists are empty.
+  (so an old client's recomputation still matches),
+* ``checksum_v2`` keeps covering exactly the original eight lists — unchanged
+  by this card, so clients built before 05j keep matching, and
+* ``checksum_v3`` covers all nine, agreeing with v2 when the preference list
+  is empty.
 
 与 ``test_sync_cloud_entities.py``（T-M7-01 的三实体）同模式，但偏好项无
 ``archived_at`` / ``deleted_at``：清除即物理删。
@@ -30,6 +32,7 @@ from src.models.user_preference import SYNCABLE_KEYS, UserPreference
 from src.modules.sync.service import (
     compute_bootstrap_checksum,
     compute_bootstrap_checksum_v2,
+    compute_bootstrap_checksum_v3,
 )
 
 
@@ -401,11 +404,12 @@ class TestPreferencePull:
 
 
 class TestPreferenceBootstrap:
-    async def test_bootstrap_emits_preferences_and_updates_v2_checksum(
+    async def test_bootstrap_emits_preferences_and_updates_v3_checksum(
         self, pref_ctx,
     ):
         """push 一条 preference 后，bootstrap 的 ``user_preferences`` 列表有值，
-        ``checksum_v2`` 反映它（旧 ``checksum`` 不受影响）。"""
+        ``checksum_v3`` 反映它，而 ``checksum`` / ``checksum_v2`` 都不受影响
+        —— 后两者是已发布客户端的比对基准，动了就是让它们 bootstrap 失配。"""
         ctx = pref_ctx
         user = ctx["user_a"]
         pref_id = uuid.uuid4()
@@ -434,29 +438,40 @@ class TestPreferenceBootstrap:
         )
         assert body["checksum"] == legacy_before
 
-        # 新 checksum 包含 user_preferences：与 push 前重算的值不同。
-        v2_with_pref = compute_bootstrap_checksum_v2(
+        # v2 也不包含 user_preferences：八类输入下与"无偏好"重算一致。
+        v2 = compute_bootstrap_checksum_v2(
+            books=[], categories=[], accounts=[],
+            transactions=[], budgets=[],
+            savings_goals=[], scheduled_rules=[], chat_personas=[],
+            cursor=body["cursor"],
+        )
+        assert body["checksum_v2"] == v2
+
+        # v3 包含 user_preferences：与"空偏好"的 v3 不同（有值 vs 无值）。
+        v3_with_pref = compute_bootstrap_checksum_v3(
             books=[], categories=[], accounts=[],
             transactions=[], budgets=[],
             savings_goals=[], scheduled_rules=[], chat_personas=[],
             user_preferences=body["user_preferences"],
             cursor=body["cursor"],
         )
-        assert body["checksum_v2"] == v2_with_pref
+        assert body["checksum_v3"] == v3_with_pref
 
-        # 与"空 user_preferences"的 v2 比较：应当不同（有值 vs 无值）。
-        v2_without = compute_bootstrap_checksum_v2(
+        v3_without = compute_bootstrap_checksum_v3(
             books=[], categories=[], accounts=[],
             transactions=[], budgets=[],
             savings_goals=[], scheduled_rules=[], chat_personas=[],
             user_preferences=[],
             cursor=body["cursor"],
         )
-        assert v2_with_pref != v2_without
+        assert v3_with_pref != v3_without
+        # 空偏好时 v3 与 v2 逐字节相同（空列表不产出分段）——这正是 05j 最初
+        # 把它并进 v2 时问题被掩盖的原因。
+        assert v3_without == v2
 
     async def test_bootstrap_preferences_empty_for_fresh_user(self, pref_ctx):
-        """user_b 没推过任何偏好：``user_preferences`` 列表为空，``checksum_v2``
-        与"无偏好"重算一致。"""
+        """user_b 没推过任何偏好：``user_preferences`` 列表为空，``checksum_v3``
+        与"无偏好"重算一致（且等于 v2）。"""
         ctx = pref_ctx
         user = ctx["user_b"]
 
@@ -465,14 +480,15 @@ class TestPreferenceBootstrap:
         body = bs.json()
 
         assert body["user_preferences"] == []
-        v2 = compute_bootstrap_checksum_v2(
+        v3 = compute_bootstrap_checksum_v3(
             books=[], categories=[], accounts=[],
             transactions=[], budgets=[],
             savings_goals=[], scheduled_rules=[], chat_personas=[],
             user_preferences=[],
             cursor=body["cursor"],
         )
-        assert body["checksum_v2"] == v2
+        assert body["checksum_v3"] == v3
+        assert body["checksum_v3"] == body["checksum_v2"]
 
 
 # ---------------------------------------------------------------------------
