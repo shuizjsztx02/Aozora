@@ -101,7 +101,15 @@ import type {
   AccountData, BookData, BudgetData, CategoryData, SavingsGoalData, TransactionData,
 } from '../../platform/bridge/bridge-types'
 import type { AiInterpretContext, AiValidateVerdict } from '../../platform/bridge/bridge-types'
+import type { DeviceRequestFrame } from '../../platform/bridge/bridge-types'
 import type { Category } from '../../domain/types'
+// T-M7-05f：设备能力通道的客户端执行器（能力名 → 桥调用 + 回传编排）
+import {
+  VOICE_CAPABILITY,
+  deliverDeviceResult,
+  runDeviceRequest,
+  type DeviceExecutorBridge,
+} from './device-executor'
 
 // T-M7-03b：流式契约与接线搬去 use-assistant-stream.ts；这几个名字从这里转出，
 // 是为了不动既有 import 面（02i 的用例与后续卡片都从本文件取类型）。
@@ -326,6 +334,15 @@ interface UseAssistantReturn {
   interrupted: InterruptedTurn | null
   /** T-M7-03e：重连入口——把中断那一轮的输入原样重发（P2 的恢复手段；按 seq 续跑归 P3）。 */
   retryInterrupted: () => void
+  /** T-M7-05f：等用户开口的设备语音请求（null = 无）。页面据此渲染提示，用户点既有的
+   *  mic 按钮走完录音——**执行器不自动开麦**（T12-1 的语音按需授权口径）。 */
+  deviceVoiceRequest: DeviceRequestFrame | null
+  /** T-M7-05f：用户说完了——转写文本回传服务端，唤醒挂起的那一轮 loop。 */
+  respondDeviceVoice: (text: string) => void
+  /** T-M7-05f：这次语音输入没成（用户取消 / 录音失败）——按结局回传。不回传会让
+   *  服务端白等满 `ai_device_timeout_seconds`（超时是它的收敛路径，但那是用户已经
+   *  看得到的等待）。默认 `denied`。 */
+  dismissDeviceVoice: (status?: 'denied' | 'failed') => void
   /** 卡片编辑保存：softDelete 旧笔 + insert 新（编辑 = 替换写）。
    *  T12-9（REQ-35）：overrides = 卡内账本/预算 chip 覆盖（首提与替换写均生效）。 */
   editProposal: (edited: ActionProposal, overrides?: ProposalWriteOverrides) => Promise<void>
@@ -438,6 +455,16 @@ export function useAssistant({
   const [pendingConfig, setPendingConfig] = useState<PendingConfig | null>(null)
   // T-M7-03e：中断态（失败 / 断连）——页面据此渲染提示与重连入口（R-PROD-19）
   const [interrupted, setInterrupted] = useState<InterruptedTurn | null>(null)
+  /**
+   * T-M7-05f：等用户开口的设备语音请求（null = 无）。
+   *
+   * **不自动开麦**：模型下发 `voice.transcribe` 时替用户打开麦克风是不该有的默认
+   * （T12-1 的语音按需授权口径要求由用户发起）。页面据此渲染一条提示，用户点那颗
+   * 既有的 mic 按钮走完录音，收尾时由 `respondDeviceVoice` 回传转写文本。
+   */
+  const [deviceVoiceRequest, setDeviceVoiceRequest] = useState<DeviceRequestFrame | null>(null)
+  /** 同上的同步镜像：回传要在事件回调里当场判断有没有挂着的语音请求。 */
+  const deviceVoiceRef = useRef<DeviceRequestFrame | null>(null)
   /**
    * T-M7-03e：挂起提案的队列（未处置的那些，含正在展示的那张）。
    *
@@ -874,6 +901,11 @@ export function useAssistant({
    */
   const settleStream = useCallback(async (p: AgentStreamProjection) => {
     finishProcessing()
+    // T-M7-05f：流收尾了，等用户开口的那条设备语音请求随之作废——服务端那一轮已经
+    // 结束，挂起条目要么已超时收敛、要么随 Turn 注销，回传不再有意义（真回传也是 404，
+    // 那条路径按「已收敛」吞掉）。提示条要收掉，否则用户会对着一条不再有用的提示说话。
+    deviceVoiceRef.current = null
+    setDeviceVoiceRequest(null)
     const text = p.text
     // T-M7-04e：游标要落在**活动桶的键**上。成功路径的第 1 轮里这个值还是 null
     // （要等下面的 `adoptConversation` 才变成服务端 id），所以那里不用它、用
@@ -1009,6 +1041,56 @@ export function useAssistant({
   }, [enqueueApproval, showPendingApproval])
 
   /**
+   * T-M7-05f：把一次设备语音请求交给界面（见 `deviceVoiceRequest` 的说明）。
+   *
+   * **结算路径有两条，且都必须走到**：用户说完 → `respondDeviceVoice`；用户取消 / 录音
+   * 失败 → `dismissDeviceVoice`。服务端那一轮正挂在这一句上等，不回传它就白等满
+   * `ai_device_timeout_seconds`（超时是它的收敛路径，但那是用户已经看得到的等待）。
+   */
+  const clearDeviceVoice = useCallback(() => {
+    deviceVoiceRef.current = null
+    setDeviceVoiceRequest(null)
+  }, [])
+
+  /**
+   * T-M7-05f：`device_request` 帧到达（`useAssistantStream` 实时转发）→ 执行。
+   *
+   * 语音以外的能力一并在这里委托给执行器（它调 `device.execute`，需结果类顺带回传）；
+   * 语音只**置位**，等界面走完既有录音路径（见 `deviceVoiceRequest`）。
+   */
+  const handleDeviceRequest = useCallback((frame: DeviceRequestFrame) => {
+    if (frame.capability !== VOICE_CAPABILITY) {
+      void runDeviceRequest(bridge as DeviceExecutorBridge, frame)
+      return
+    }
+    if (deviceVoiceRef.current) {
+      // 同一时刻只等一次语音输入：人的动作没法排队，而两条同时挂起只会让先到的那条
+      // 永远等不到回传。后来者按 `unavailable` 当场结算（模型拿到既定的「此刻用不了」
+      // 文案，不悬挂）。
+      void deliverDeviceResult(bridge as DeviceExecutorBridge, frame.request_id, 'unavailable')
+      return
+    }
+    deviceVoiceRef.current = frame
+    setDeviceVoiceRequest(frame)
+  }, [bridge])
+
+  /** T-M7-05f：用户说完了——把转写文本回传，唤醒挂起的那一轮 loop。 */
+  const respondDeviceVoice = useCallback((text: string) => {
+    const frame = deviceVoiceRef.current
+    if (!frame) return
+    clearDeviceVoice()
+    void deliverDeviceResult(bridge as DeviceExecutorBridge, frame.request_id, 'ok', { text })
+  }, [bridge, clearDeviceVoice])
+
+  /** T-M7-05f：这次语音输入没成（用户取消 / 录音失败）——按结局回传同样不能省。 */
+  const dismissDeviceVoice = useCallback((status: 'denied' | 'failed' = 'denied') => {
+    const frame = deviceVoiceRef.current
+    if (!frame) return
+    clearDeviceVoice()
+    void deliverDeviceResult(bridge as DeviceExecutorBridge, frame.request_id, status)
+  }, [bridge, clearDeviceVoice])
+
+  /**
    * T-M7-02i / T-M7-03b：agent 流的收发（订阅、`streamId` 归属、收尾幂等、取消）
    * 在 `useAssistantStream` 里，本 hook 只提供收尾回调。
    *
@@ -1017,7 +1099,10 @@ export function useAssistant({
    * 用户不可见）。
    */
   const { projection, start: startAgentStream, cancel: cancelAgentStream } =
-    useAssistantStream({ bridge, onSettled: settleStream, onConfirm: handleApprovalEvent })
+    useAssistantStream({
+      bridge, onSettled: settleStream, onConfirm: handleApprovalEvent,
+      onDeviceRequest: handleDeviceRequest,
+    })
 
   /**
    * T-M7-03b：起一轮 agent 流（**开关开启且桥具备能力时才走到这里**——闸在
@@ -1582,6 +1667,7 @@ export function useAssistant({
     confirmConfig, cancelConfig, cancelStream, rejectApproval,
     interrupted, retryInterrupted,
     appendAssistantMessage,
+    deviceVoiceRequest, respondDeviceVoice, dismissDeviceVoice,
   }
 }
 

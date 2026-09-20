@@ -182,6 +182,17 @@ object BridgeCommands {
     // 第十一轮 T11-2（REQ-24 / 决策 #5）：桌面小组件手动刷新（配置页保存后即时重绘）。
     const val WIDGET_REFRESH = "widget.refresh"
 
+    // T-M7-05f（决策 #1：桥计数本轮唯一变更点 83→85）：设备能力通道的客户端执行器。
+    // 服务端 loop 的 `device_request` 帧（05e）经 `__aozoraAiStream__` 到达 WebView 后，
+    // 由执行器翻成这里的两次调用：
+    //   device.execute = 「能力名 → 桥命令」的分派 + status 归一化，都在原生一侧
+    //                    （WebView 只面对 ok / denied / unavailable / failed 四值，
+    //                     与服务端的协议四值同构）
+    //   device.result  = 需结果类的结局回传（`POST /ai/device-result`）。回传必须走
+    //                    Kotlin —— Token 不出这一层（ADR-003 不变）。
+    const val DEVICE_EXECUTE = "device.execute"
+    const val DEVICE_RESULT = "device.result"
+
     /**
      * T-M5-02a review: canonical list of every command constant above.
      *
@@ -224,6 +235,7 @@ object BridgeCommands {
         AUTH_LOGIN, AUTH_LOGOUT, AUTH_ME, AUTH_UPDATE_PROFILE,
         META_GET, META_SET,
         WIDGET_REFRESH,
+        DEVICE_EXECUTE, DEVICE_RESULT,
     )
 }
 

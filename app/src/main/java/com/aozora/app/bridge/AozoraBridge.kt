@@ -28,10 +28,12 @@ import kotlinx.coroutines.withContext
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.cancelAndJoin
+import kotlinx.coroutines.suspendCancellableCoroutine
 import org.json.JSONObject
 import org.json.JSONTokener
 import java.util.concurrent.atomic.AtomicBoolean
 import kotlin.coroutines.coroutineContext
+import kotlin.coroutines.resume
 
 /**
  * Aozora 版本化 JS Bridge。
@@ -277,6 +279,10 @@ class AozoraBridge(
 
             // 第十一轮 T11-2（REQ-24 / 决策 #5）：桌面小组件手动刷新
             BridgeCommands.WIDGET_REFRESH -> handleWidgetRefresh(requestId)
+
+            // T-M7-05f: 设备能力通道的客户端执行器（05e 的 device_request 帧的落地侧）
+            BridgeCommands.DEVICE_EXECUTE -> handleDeviceExecute(requestId, payload)
+            BridgeCommands.DEVICE_RESULT -> handleDeviceResult(requestId, payload)
 
             else -> BridgeResponse.error(requestId, "unknown_command", "Unknown command: $command")
         }
@@ -2382,6 +2388,189 @@ class AozoraBridge(
             BridgeResponse.success(requestId, JSONObject().put("ok", true).toString())
         } catch (e: Exception) {
             BridgeResponse.error(requestId, "internal_error", e.message ?: "share failed")
+        }
+    }
+
+    // ─── T-M7-05f: 设备能力通道（客户端执行器） ───
+
+    /**
+     * T-M7-05f: `device.execute` —— 执行一个设备动作（服务端 `device_request` 帧的落地侧）。
+     *
+     * 载荷 `{capability, payload}`（`payload` 是模型给的原始参数，服务端已过 schema
+     * 校验，本层不再校验值域——与 v2 契约「payload 的所有权在 op 侧」同一取舍）。
+     * 响应 `{status, data?}`：`status` 取服务端协议的四个可回传值
+     * （`devices.DELIVERABLE_STATUSES`），`data` 只在 `ok` 时有值。
+     *
+     * 本函数做两件事，**两件都不新增设备语义**：
+     *
+     * ① **分派**——能力名（点号，协议层）→ 既有的设备类桥命令 handler；
+     * ② **归一化**——6 个能力各自的错误码族（`cancelled` / `permission_denied` /
+     *    `model_not_loaded` / `compress_failed` …）收成四值。WebView 因此不必认识
+     *    任何一条桥错误码，模型那一侧的降级文案由服务端按四值给出。
+     *
+     * **语音转写（`voice.transcribe`）不在这里**：它的起止由用户在录音界面上掌握
+     * （`use-voice` 的状态机），执行器在 WebView 侧用既有的
+     * `voice.startRecording` / `voice.stopRecording` 编排——本层没有能让用户"停下"
+     * 的界面，硬塞进来只会让那条既有路径出现第二个 writer。
+     */
+    private suspend fun handleDeviceExecute(
+        requestId: String, p: JSONObject,
+    ): BridgeResponse {
+        val capability = p.optString("capability", "")
+        if (capability.isBlank()) {
+            return BridgeResponse.error(requestId, "invalid_input", "Missing required field: capability")
+        }
+        val args = p.optJSONObject("payload") ?: JSONObject()
+        val (status, data) = when (capability) {
+            "haptic.feedback" -> deviceOutcome(handleHapticFeedback(requestId, args))
+            "widget.refresh" -> deviceOutcome(handleWidgetRefresh(requestId))
+            "share.text" -> deviceOutcome(handleShareText(requestId, args))
+            "image.pick" -> deviceOutcome(handleImagePick(requestId, args))
+            "permissions.request" -> requestDevicePermission(args)
+            else -> DeviceStatus.UNAVAILABLE to null
+        }
+        val body = JSONObject().put("status", status)
+        if (data != null) body.put("data", data)
+        return BridgeResponse.success(requestId, body.toString())
+    }
+
+    /**
+     * T-M7-05f: `device.result` —— 把需结果类的结局回传服务端（05e 的
+     * `POST /ai/device-result`），唤醒挂起中的那一轮 loop。
+     *
+     * 服务端对「没有这条请求 / 已经回过 / 已经超时注销 / 属于别人」一律回同一个
+     * 404，**404 在这里等价于成功**：那一轮的挂起条目已经不在，重投只会得到同一个
+     * 答案（重试安全，与 03d 的删除端点同口径）。响应里的 `accepted` 因此是
+     * 「这次投递没有被拒」而不是「服务端一定收到了」——两者对调用方没有区别。
+     */
+    private suspend fun handleDeviceResult(
+        requestId: String, p: JSONObject,
+    ): BridgeResponse {
+        val deviceRequestId = p.optString("request_id", "")
+        if (deviceRequestId.isBlank()) {
+            return BridgeResponse.error(requestId, "invalid_input", "Missing required field: request_id")
+        }
+        val status = p.optString("status", "")
+        if (status !in DELIVERABLE_DEVICE_STATUSES) {
+            return BridgeResponse.error(requestId, "invalid_input", "Unknown device status: $status")
+        }
+        // 入参校验**先于**桥依赖检查：调用方给错了东西就说给错了，别用「AI 客户端没注入」
+        // 这种部署形态问题盖住它（两者都会让这一次回传失败，但排查方向完全不同）。
+        val client = aiGatewayClient
+            ?: return BridgeResponse.error(requestId, "unavailable", "AI gateway client not injected")
+        val dataJson = p.optJSONObject("data")?.toString()
+        val accepted = try {
+            client.submitDeviceResult(deviceRequestId, status, dataJson)
+            true
+        } catch (e: AiGatewayClient.AiError.NotFound) {
+            // 「回不去」——已经收敛过了，不是失败（见上）。
+            true
+        } catch (e: AiGatewayClient.AiError.Timeout) {
+            return BridgeResponse.error(requestId, "timeout", "Device result timed out")
+        } catch (e: AiGatewayClient.AiError.Network) {
+            return BridgeResponse.error(requestId, "network", e.message ?: "Network error")
+        } catch (e: AiGatewayClient.AiError.RateLimited) {
+            return BridgeResponse.error(requestId, "429", "AI rate limit exceeded")
+        } catch (e: AiGatewayClient.AiError.Unavailable) {
+            return BridgeResponse.error(requestId, "503", "AI service unavailable")
+        } catch (e: AiGatewayClient.AiError.AuthLost) {
+            return BridgeResponse.error(requestId, "auth_lost", "Authentication required")
+        }
+        return BridgeResponse.success(requestId, JSONObject().put("accepted", accepted).toString())
+    }
+
+    /**
+     * 设备结局的四个取值（服务端 `devices.DELIVERABLE_STATUSES` 的同构副本）。
+     *
+     * `timeout` **不在其中**：那个结局只能由服务端产生（挂起期满），客户端报它没有
+     * 意义——服务端在协议边界上也会拒（`DeviceChannel.deliver` 的第二道）。
+     */
+    private object DeviceStatus {
+        const val OK = "ok"
+        const val DENIED = "denied"
+        const val UNAVAILABLE = "unavailable"
+        const val FAILED = "failed"
+    }
+
+    private val DELIVERABLE_DEVICE_STATUSES =
+        setOf(DeviceStatus.OK, DeviceStatus.DENIED, DeviceStatus.UNAVAILABLE, DeviceStatus.FAILED)
+
+    /**
+     * 既有设备类 handler 的桥响应 → 设备结局（`handleDeviceExecute` 的归一化）。
+     *
+     * **分派表只负责找 handler，本函数负责让 WebView 与模型都不必认识桥错误码。**
+     * 两个映射值得说明：
+     *
+     * - `permission_denied` → `denied`：录音 / 拍照前的权限闸（既有 handler 的
+     *   先决检查）与用户当场拒绝是同一件事的下游，对模型都意味着「别重试」。
+     * - `unavailable` / `model_not_loaded` → `unavailable`：设备不支持或能力没就绪。
+     *
+     * `data` 只在成功时透出。非 ok 的结局**服务端不消费 data**（`agent._device_outcome`
+     * 走 `_failure_outcome`），因此这里也不花力气归一化它。
+     */
+    private fun deviceOutcome(resp: BridgeResponse): Pair<String, JSONObject?> {
+        if (resp.success) {
+            val data = resp.data?.let {
+                runCatching { JSONTokener(it).nextValue() as? JSONObject }.getOrNull()
+            }
+            return DeviceStatus.OK to data
+        }
+        val status = when (resp.errorCode) {
+            "cancelled", "permission_denied" -> DeviceStatus.DENIED
+            "unavailable", "model_not_loaded" -> DeviceStatus.UNAVAILABLE
+            else -> DeviceStatus.FAILED
+        }
+        return status to null
+    }
+
+    /**
+     * `permissions.request` 的设备通道形态：**挂起等回调**，不像桥命令那样
+     * 「返回 pending + 事件推送」（那条路径属于界面上的按钮，这里没有界面）。
+     *
+     * 四态映射见 [deviceOutcome] 的说明，其中 **`permanently_denied` → `unavailable`**
+     * 与 05e 的既定口径一致：`ERR_DEVICE_UNAVAILABLE` 的文案原文就是「权限被永久
+     * 拒绝或设备不支持」（`agent.py`）——`denied` 的语义是「用户这次拒了，别重复
+     * 发起」，永久拒绝需要的是「去设置页」，两者不能混。
+     *
+     * `granted` 的 data 里带 `status`：模型的工具描述承诺了 `granted / denied /
+     * permanently_denied` 三态，而**只有 ok 的 data 会回喂模型**（同上），所以三态
+     * 里能到达模型的那一个必须自带说明。
+     */
+    private suspend fun requestDevicePermission(
+        args: JSONObject,
+    ): Pair<String, JSONObject?> {
+        val manager = permissionManager ?: return DeviceStatus.UNAVAILABLE to null
+        val name = args.optString("permission", "")
+        if (name.isBlank()) return DeviceStatus.FAILED to null
+        val grantedData = JSONObject().put("permission", name).put("status", "granted")
+        // 既有口径（P3-3）：API < 33 的 POST_NOTIFICATIONS 不是运行时权限，直接算授予。
+        if (name == "POST_NOTIFICATIONS" && android.os.Build.VERSION.SDK_INT <
+            android.os.Build.VERSION_CODES.TIRAMISU
+        ) {
+            return DeviceStatus.OK to grantedData
+        }
+        val androidPerm = keyToPermission(name) ?: return DeviceStatus.FAILED to null
+        // 两个同步短路：
+        // - 已授予——再走一次 launcher 只是多一轮系统往返，结果还是 granted
+        //   （与既有 `permissions.request` 的 P3-4 fix 同一口径）；
+        // - 已永久拒绝——Android 根本不会再弹框（launcher 立刻回调 denied），照走会
+        //   **丢掉「永久」这个语义**，而那正是模型该知道的事：它对应的服务端文案是
+        //   「权限被永久拒绝或设备不支持……不要重试，先向用户说明」（`ERR_DEVICE_UNAVAILABLE`）。
+        when (manager.getStatus(androidPerm)) {
+            PermissionStatus.GRANTED -> return DeviceStatus.OK to grantedData
+            PermissionStatus.PERMANENTLY_DENIED -> return DeviceStatus.UNAVAILABLE to null
+            else -> Unit
+        }
+        val status = suspendCancellableCoroutine { cont ->
+            manager.requestPermission(androidPerm) { st ->
+                if (cont.isActive) cont.resume(st)
+            }
+        }
+        return when (status) {
+            PermissionStatus.GRANTED -> DeviceStatus.OK to grantedData
+            PermissionStatus.DENIED -> DeviceStatus.DENIED to null
+            PermissionStatus.PERMANENTLY_DENIED -> DeviceStatus.UNAVAILABLE to null
+            PermissionStatus.NOT_REQUESTED -> DeviceStatus.FAILED to null
         }
     }
 

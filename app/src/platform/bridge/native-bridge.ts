@@ -65,6 +65,9 @@ import {
   type FeedbackSubmitResult,
   type AuthLoginResult,
   type MeData,
+  type DeviceExecuteResult,
+  type DeviceOutcomeStatus,
+  type DeviceResultAck,
 } from './bridge-types'
 // T-M7-03d 收口：`ai.agent` 的 `conversation_id` 只认服务端 id，而会话桶的键空间
 // （本地会话 `local:*` / `__local__` vs 服务端会话）由 store 定义——单一事实源。
@@ -546,6 +549,45 @@ export class NativeBridge {
         ;(window as any).__aozoraAiStream__ = prev
       }
     }
+  }
+
+  // ─── T-M7-05f: 设备能力通道（客户端执行器） ───
+
+  /**
+   * 执行一个设备动作（T-M7-05e 的 `device_request` 帧的落地侧）。
+   *
+   * 能力名 → 桥命令的分派与结局归一化都在原生侧（`AozoraBridge.handleDeviceExecute`），
+   * 这一层因此只面对四个结局值，不认识任何一个具体能力的错误码族。
+   *
+   * **不设调用超时**（`timeoutMs: 0`）：需结果类的等待时长由用户在设备上决定
+   * （权限对话框 / 相册 / 相机），服务端自己有 `timeout_seconds` 的挂起上限；桥这
+   * 一层再加一个更短的超时只会把「用户还在选」误判成失败（同 `pickImage` 的先例）。
+   *
+   * 语音转写（`voice.transcribe`）不走这里：它的起止由录音界面掌握，执行器在
+   * `device-executor.ts` 里用既有的 `voice.startRecording` / `voice.stopRecording`
+   * 编排。
+   */
+  async executeDevice(
+    capability: string, payload: Record<string, unknown>,
+  ): Promise<DeviceExecuteResult> {
+    return this.call<DeviceExecuteResult>(
+      'device.execute', { capability, payload }, { timeoutMs: 0 },
+    )
+  }
+
+  /**
+   * 回传需结果类的结局（`POST /ai/device-result`，唤醒挂起中的那一轮 loop）。
+   *
+   * **404 等价于成功**：服务端对「没有这条请求 / 已经回过 / 已经超时注销 / 属于别人」
+   * 一律回同一个 404，桥层把它翻成 `{accepted: true}`——那一轮的挂起条目已经不在，
+   * 重投只会得到同一个答案（与 `deleteConversation` 的幂等口径同源）。
+   */
+  async resultDevice(
+    requestId: string, status: DeviceOutcomeStatus, data?: Record<string, unknown>,
+  ): Promise<DeviceResultAck> {
+    const payload: Record<string, unknown> = { request_id: requestId, status }
+    if (data) payload.data = data
+    return this.call<DeviceResultAck>('device.result', payload)
   }
 
   // ─── T-M7-03d: 会话索引 ───

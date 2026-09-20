@@ -48,10 +48,13 @@ class SecurityConfigTest {
         // T-M7-04b（决策 #1）: +CONVERSATION_EVENTS（conversation.events）→ 83。
         //   03d 曾判「不加密钥无人调用」；04b 的服务端改成逐事件落库后，客户端要按
         //   游标续读自己落下的部分，于是有了调用方。
+        // T-M7-05f（决策 #1）: +DEVICE_EXECUTE/DEVICE_RESULT（device.execute / device.result）→ 85。
+        //   设备能力通道的客户端执行器：前者是「能力名 → 桥命令」的分派 + status
+        //   归一化，后者是需结果类的上行回传（Token 不出 Kotlin 层）。
         val kotlinCommands = BridgeCommands.ALL
         assertEquals(
-            "Bridge command count must be 83 (sync with bridge-types.ts)",
-            83,
+            "Bridge command count must be 85 (sync with bridge-types.ts)",
+            85,
             kotlinCommands.size
         )
         assertEquals(

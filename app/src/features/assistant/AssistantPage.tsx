@@ -290,6 +290,11 @@ export function AssistantPage() {
     interrupted,
     retryInterrupted,
     appendAssistantMessage,
+    // T-M7-05f：设备通道要的一段语音（模型请求 voice.transcribe）——见下方提示条与
+    // `voiceFinalText` 那个 effect 的分支
+    deviceVoiceRequest,
+    respondDeviceVoice,
+    dismissDeviceVoice,
   } = useAssistant({
     categories,
     bookId,
@@ -433,13 +438,21 @@ export function AssistantPage() {
   }, [])
 
   // T-M4-04b: 转写文本 → 填入输入框
+  // T-M7-05f：**这一轮录音是替设备通道说的**（模型请求 `voice.transcribe`，服务端
+  // loop 正挂在这句话上等回传）→ 文本回传服务端，而不是填进输入框：用户要的是
+  // 「助手听见了」，不是留一条待发的草稿。两条出口互斥，判据是本次录音有没有
+  // 那条挂起的设备请求。
   useEffect(() => {
     if (voiceFinalText && voiceFinalText !== prevFinalTextRef.current) {
       prevFinalTextRef.current = voiceFinalText
-      setInputText(voiceFinalText)
+      if (deviceVoiceRequest) {
+        respondDeviceVoice(voiceFinalText)
+      } else {
+        setInputText(voiceFinalText)
+      }
       voiceReset()
     }
-  }, [voiceFinalText, voiceReset])
+  }, [voiceFinalText, voiceReset, deviceVoiceRequest, respondDeviceVoice])
 
   const handleSubmit = useCallback(async () => {
     if (!inputText.trim() || phase === 'processing' || phase === 'executing') return
@@ -466,12 +479,18 @@ export function AssistantPage() {
 
   const handleMicClick = useCallback(async () => {
     if (voiceIsRecording) {
-      await voiceStopRecording()
+      const text = await voiceStopRecording()
+      // T-M7-05f：设备通道要的那段语音，用户停下来却没说出可转写的内容——
+      // 也要结算（下面那个 effect 只在有文本时触发），否则服务端会一直挂到超时。
+      if (deviceVoiceRequest && !text.trim()) dismissDeviceVoice('denied')
       return
     }
     // T-M7-03e：语音打断的语义同「取消」（架构 §9.2 交互对照）——开口即打断本轮生成，
     // 再进入录音。与输入区的「停止生成」收敛到同一个状态（§4.4 不变式 3）。
-    if (streaming) await cancelStream()
+    // T-M7-05f：**设备通道要的那一段除外**——模型请求 voice.transcribe 时服务端正挂在
+    // 那句话上等回传，用户开口是在**回答它**、不是打断这一轮；这里若照旧取消，SSE 一断
+    // 服务端就把整轮当取消了（ADR-010），设备请求连同用户刚说的话一起作废。
+    if (streaming && !deviceVoiceRequest) await cancelStream()
     if (canRecord) {
       setMicPermissionHint(null)
       await voiceStartRecording()
@@ -493,6 +512,8 @@ export function AssistantPage() {
     requestMicPermission,
     streaming,
     cancelStream,
+    deviceVoiceRequest,
+    dismissDeviceVoice,
   ])
 
   // 权限异步结果续链（primitive dep：usePermissions 推送刷新后本 effect 感知变化）
@@ -526,6 +547,14 @@ export function AssistantPage() {
     })
     return () => { cancelled = true }
   }, [voiceError, refreshPermissions])
+
+  // T-M7-05f：设备通道要的那段语音出错了（录音启动失败 / 权限不足 / 服务层报错）→
+  // 按结局回传。**不能只把错误条留在屏幕上**：服务端那一轮正挂着等这一句，不回传
+  // 它会白等满 `ai_device_timeout_seconds`。重复调用是安全的（已结算就是空操作）。
+  useEffect(() => {
+    if (!voiceError || !deviceVoiceRequest) return
+    dismissDeviceVoice('failed')
+  }, [voiceError, deviceVoiceRequest, dismissDeviceVoice])
 
   return (
     <div
@@ -846,6 +875,30 @@ export function AssistantPage() {
         )}
         {/* T12-1（REQ-29 / 决策 #8）：未授权红条——denied 内联「授权」重发请求，
             permanently_denied 内联「去设置」跳系统设置页 */}
+        {/* T-M7-05f：设备通道要的一段语音（模型请求 voice.transcribe，服务端 loop 正挂在
+            那句话上等回传）。**不自动开麦**——只提示，用户点那颗既有的 mic 按钮走完
+            录音（T12-1 的语音按需授权口径）。录音中不显示这条（mic 已经在响了）。 */}
+        {deviceVoiceRequest && !voiceIsRecording && (
+          <div
+            className="mb-2 px-3 py-1.5 rounded-lg text-xs flex items-center justify-between gap-2"
+            style={{
+              background: '#eff6ff',
+              color: '#1d4ed8',
+              border: '1px solid #bfdbfe',
+            }}
+            data-testid="device-voice-bar"
+          >
+            <span>🎤 助手想听你说一句——点麦克风开始</span>
+            <button
+              type="button"
+              onClick={() => dismissDeviceVoice('denied')}
+              className="shrink-0 underline font-medium"
+              data-testid="device-voice-dismiss"
+            >
+              不用了
+            </button>
+          </div>
+        )}
         {micPermissionHint && !voiceIsRecording && (
           <div
             className="mb-2 px-3 py-1.5 rounded-lg text-xs flex items-center justify-between gap-2"

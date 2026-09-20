@@ -37,6 +37,10 @@
  * 本 hook 的行为一行未变——它只是把 `settle` 那一刻的游标一并交出去，由上层落盘，
  * 供 `use-conversations` 的跨设备增量补齐当起点（决策见
  * `docs/adr/ADR-008-conversation-cross-device.md`）。
+ *
+ * T-M7-05f：新增 `onDeviceRequest`——`device_request` 帧到达时**实时**转发（与
+ * `onConfirm` 同范式），由上层用 `device-executor` 落地。本 hook 仍不碰业务状态，
+ * 也不认识任何能力名。
  */
 
 import { useCallback, useEffect, useRef, useState } from 'react'
@@ -45,6 +49,7 @@ import type {
   AiConversationEventsResponse,
   AiStreamDoneData,
   AiStreamEvent,
+  DeviceRequestFrame,
 } from '../../platform/bridge/bridge-types'
 
 /**
@@ -129,7 +134,9 @@ export interface AgentStreamProjection {
    * 收尾时仍以 `done.proposals` 核对——不在权威清单里的提案不可被确认。
    */
   confirmProposals: Array<{ step: number | null; proposal: Record<string, unknown> }>
-  /** `device_request` 帧（P1 无生产者——设备能力通道归 P3）；原样留存，不丢帧 */
+  /** `device_request` 帧（T-M7-05e 起有生产者，ADR-010）；原样留存，不丢帧。
+   *  **执行不在这里**——帧到达即由 `onDeviceRequest` 转发给上层（`device-executor`），
+   *  本投影只让步骤卡片看得见「助手在做一次设备操作」。 */
   deviceRequests: Array<Record<string, unknown>>
   /** `done` 帧载荷（null = 尚未收到，或本轮以失败/取消收尾） */
   done: AgentStreamDone | null
@@ -313,6 +320,14 @@ export interface UseAssistantStreamOptions {
   /** T-M7-03e：`confirm` 帧到达时**实时**转发一次（事件驱动建卡）。
    *  本 hook 仍不碰业务状态——只把「又有了一张挂起提案」这件事告诉上层。 */
   onConfirm?: (proposal: Record<string, unknown>, step: number | null) => void
+  /**
+   * T-M7-05f：`device_request` 帧到达时**实时**转发一次（事件驱动执行设备动作）。
+   *
+   * 与 `onConfirm` 同范式：本 hook 不碰业务状态，只把「又来了一条设备指令」交出去，
+   * 由上层（`use-assistant`）用 `device-executor` 落地。**必须实时**——需结果类在
+   * 服务端是挂起等回传的，攒到收尾再执行就等于让 loop 白等一个超时窗。
+   */
+  onDeviceRequest?: (frame: DeviceRequestFrame, step: number | null) => void
 }
 
 export interface AssistantStreamHandle {
@@ -332,7 +347,7 @@ export interface AssistantStreamHandle {
  * ③ 取消有了正经入口（P1 只留了桥协议，没有调用点）。
  */
 export function useAssistantStream({
-  bridge, onSettled, onConfirm,
+  bridge, onSettled, onConfirm, onDeviceRequest,
 }: UseAssistantStreamOptions): AssistantStreamHandle {
   const [projection, setProjection] = useState<AgentStreamProjection | null>(null)
   /** 同步镜像：事件处理器是 `start` 时建的闭包，靠 setState 的 prev 拿不到
@@ -365,6 +380,9 @@ export function useAssistantStream({
   // 同上：`confirm` 的实时转发也取最新的那份
   const onConfirmRef = useRef(onConfirm)
   useEffect(() => { onConfirmRef.current = onConfirm })
+  // T-M7-05f：设备指令的实时转发同此
+  const onDeviceRequestRef = useRef(onDeviceRequest)
+  useEffect(() => { onDeviceRequestRef.current = onDeviceRequest })
 
   const unsubscribe = useCallback(() => {
     unsubRef.current?.()
@@ -478,6 +496,13 @@ export function useAssistantStream({
       if (next.confirmProposals.length > before.confirmProposals.length) {
         const added = next.confirmProposals[next.confirmProposals.length - 1]
         onConfirmRef.current?.(added.proposal, added.step)
+      }
+      // T-M7-05f：事件驱动的设备执行——`device_request` 帧当场转发（新到达的那一条）
+      if (next.deviceRequests.length > before.deviceRequests.length) {
+        const added = next.deviceRequests[next.deviceRequests.length - 1]
+        onDeviceRequestRef.current?.(
+          added as unknown as DeviceRequestFrame, stepOf(added),
+        )
       }
       setProjection(next)
     }

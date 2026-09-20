@@ -161,6 +161,12 @@ export const BridgeCommands = {
   PERSONA_INSERT: 'persona.insert',
   PERSONA_UPDATE: 'persona.update',
   PERSONA_ARCHIVE: 'persona.archive',
+
+  // T-M7-05f（桥计数 83→85）：设备能力通道的客户端执行器。device.execute 把服务端
+  // 的 `device_request` 帧落成一次设备动作（能力名 → 桥命令的分派 + status 归一化
+  // 都在原生一侧），device.result 是需结果类的上行回传（Token 不出 Kotlin 层）。
+  DEVICE_EXECUTE: 'device.execute',
+  DEVICE_RESULT: 'device.result',
 } as const
 
 export type BridgeCommandName = typeof BridgeCommands[keyof typeof BridgeCommands]
@@ -633,6 +639,44 @@ export interface AiStreamEvent {
   streamId: string
   event: AiStreamEventName
   data: Record<string, unknown>
+}
+
+// ─── T-M7-05f: 设备能力通道（客户端执行器） ───
+
+/** 设备结局：与服务端 `devices.DELIVERABLE_STATUSES` 同构的四个**可回传**取值
+ *  （`timeout` 不在其中——它只能由服务端挂起期满产生）。 */
+export type DeviceOutcomeStatus = 'ok' | 'denied' | 'unavailable' | 'failed'
+
+/**
+ * `device_request` 帧的载荷（服务端 `devices.DeviceRequest.to_payload`）。
+ *
+ * `payload` 是模型给的原始参数（服务端已过 schema 校验）——值域与语义由能力自己的
+ * 实现负责，客户端这一层与其他帧一样**不加工字段**。
+ */
+export interface DeviceRequestFrame {
+  /** 回传凭据（原样带回 `device.result`，不解析、不入库）。 */
+  request_id: string
+  /** `one_way` 下发即继续（不回传）；`result` 服务端挂起等上行回传。 */
+  kind: 'one_way' | 'result'
+  /** 协议层的能力名（点号），执行器据此分派。 */
+  capability: string
+  payload: Record<string, unknown>
+  /** 仅需结果类带：服务端的挂起时长（期满自行收敛成 `timeout`）。 */
+  timeout_seconds?: number
+  /** Step 序号（帧那一层统一带上）。 */
+  step?: number
+}
+
+/** `device.execute` 的响应：归一化后的结局，`data` 只在 `ok` 时有值。 */
+export interface DeviceExecuteResult {
+  status: DeviceOutcomeStatus
+  data?: Record<string, unknown>
+}
+
+/** `device.result` 的回执。**404 与成功同解**：那一轮的挂起条目已经不在了
+ *  （已回过 / 已超时 / 属于别人），重投只会得到同一个答案。 */
+export interface DeviceResultAck {
+  accepted: boolean
 }
 
 // ─── T-M7-03d: 会话索引（/ai/conversations） ───

@@ -202,6 +202,25 @@ class AiGatewayClient(
         streamEvents(request, onEvent)
     }
 
+    /**
+     * T-M7-05f: `POST /ai/device-result` —— 需结果类设备请求的**上行回传**（05e 端点）。
+     *
+     * 服务端的 loop 正挂在 `DeviceChannel.wait` 上等这一次投递；这一发就是唤醒它的
+     * 唯一途径（单向指令不走这里，它们不回传）。
+     *
+     * **404 是「回不去」而不是失败**：端点对「没有这条请求 / 已经回过 / 已经超时
+     * 注销 / 属于别人」一律回同一个 404 `device_request_not_found`（重试安全、不泄漏
+     * 存在性，与 03d 的删除端点同口径）。因此 [AiError.NotFound] 在桥层要与成功同等
+     * 对待——那一轮的挂起条目已经不在了，重投只会得到同一个答案。
+     */
+    suspend fun submitDeviceResult(
+        requestId: String, status: String, dataJson: String? = null,
+    ): String {
+        val body = JSONObject().put("request_id", requestId).put("status", status)
+        if (dataJson != null) body.put("data", JSONObject(dataJson))
+        return executeAuthorized("$baseUrl/ai/device-result", body.toString())
+    }
+
     // ─── internal ────────────────────────────────────────────────────────
 
     private fun buildInterpretRequest(input: String, contextJson: String?): String {
