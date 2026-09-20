@@ -174,6 +174,7 @@ from .provider import (
 )
 from .routing import RoutingDecision, route_domains
 from .service import AIService
+from .skills import render_skill_section, skills_for_domains
 from .tools import (
     DEVICE_EXECUTED_OPS,
     DOMAINS,
@@ -1036,6 +1037,10 @@ class AgentLoop:
         self._timeout = timeout
         self._today = today
         self._max_tokens = max_tokens
+        #: 本轮已加载的域知识的域集合（T-M7-05h）。与其余轮级状态一样**两处都有**：
+        #: ``__init__`` 保证 ``_system_message`` 在 ``run`` 之前也能被调用（探针与
+        #: 用例就是这么用的），``_reset`` 保证每轮从空开始。
+        self._skill_domains: set[str] = set()
         self._device = device
         self._contract_version = contract_version
         #: 设备能力（通道在位时）。**域路由与它无关**：路由选的是**服务端工具域**，
@@ -1210,6 +1215,9 @@ class AgentLoop:
         self._steps += 1
         self._notify("step_started", step=self._steps, level=level)
 
+        # 域知识与**即将发出的这次请求**同步（T-M7-05h）：幂等，没有新的域命中就
+        # 不改动系统提示。
+        self._load_skills()
         result = await self._stream_step(
             list(self._messages), tools=self._openai_tools, reasoning=level,
         )
@@ -1249,6 +1257,10 @@ class AgentLoop:
         self._no_progress = (
             0 if any(o.kind != "error" for o in outcomes) else self._no_progress + 1
         )
+        # 本轮用过的域 → 从**下一个 Step** 起带上它的域知识（T-M7-05h 的懒加载：
+        # 不依赖域路由的兜底路径）。多步任务的第一步通常是查询，域知识恰好赶在
+        # 第二步动手之前到位。
+        self._load_skills(self._called_domains(calls))
         return True
 
     # -- 内部：消息与请求 -----------------------------------------------
@@ -1270,6 +1282,9 @@ class AgentLoop:
         self._prompt_tokens = 0
         self._completion_tokens = 0
         self._summary = ""
+        #: 本轮已加载的**域知识**的域集合（T-M7-05h）。每轮从空开始——上一轮用过
+        #: 的域不该在这一轮继续占着系统提示。
+        self._skill_domains: set[str] = set()
 
     def _system_message(self) -> dict[str, Any]:
         prompt = (
@@ -1280,7 +1295,67 @@ class AgentLoop:
         )
         if self._summary:
             prompt += f"\n\n{_SUMMARY_SECTION_HEADER}{self._summary}"
+        # 域知识（T-M7-05h）：**没命中就一个字都不加**——系统提示与 05b–05d 逐字
+        # 相同，快路径的 prompt 与 token 成本因此不受本卡影响。
+        section = self._skill_section()
+        if section:
+            prompt += f"\n\n{section}"
         return {"role": "system", "content": prompt}
+
+    # -- 域知识（T-M7-05h）----------------------------------------------
+
+    def _skill_section(self) -> str:
+        """本轮命中的域知识段；没有命中的域时是 ``""``。"""
+        return render_skill_section(skills_for_domains(self._skill_domains))
+
+    def _prospective_skill_domains(self) -> set[str]:
+        """**收窄后的注入面**覆盖的域（前瞻式命中的来源，见 ``skills`` 模块头）。
+
+        尺子是**本车道**的全部域，不是 ``tools.DOMAINS``：v1 车道上 ``meta`` 域
+        一个工具都没有（它只有 ``meta_set`` 一个写工具，车道过滤后为空），拿
+        ``DOMAINS`` 比会把每一轮都误判成「收窄了」，域知识于是又变回常驻。
+        """
+        injected = {t.domain for t in self._tools if isinstance(t, Tool)}
+        full = {
+            t.domain
+            for t in tools_for_domains(DOMAINS, contract_version=self._contract_version)
+        }
+        return set() if injected >= full else injected
+
+    def _called_domains(self, calls: Sequence[tuple[str, ToolCall]]) -> set[str]:
+        """这批工具调用落在哪些域上（**只算本轮真的注入过**的工具）。
+
+        入参是 ``_assistant_tool_calls`` 的产物（``(call_id, ToolCall)`` 对），与
+        :meth:`_run_tools` 同一个形状。没注入的名字（域路由收窄掉的域里、模型
+        幻觉出来的那一个）不算数：它当轮根本执行不了，那个域也就不算「在用」。
+        """
+        domains: set[str] = set()
+        for _call_id, call in calls:
+            if call.name not in self._advertised:
+                continue
+            tool = get_tool(call.name)
+            if tool is not None:
+                domains.add(tool.domain)
+        return domains
+
+    def _load_skills(self, domains: Iterable[str] = ()) -> None:
+        """把域并进「本轮的域知识」；命中的条目真的变了才重建系统提示。
+
+        调用点是**每次模型请求之前**（见 :meth:`step`）：注入面可能在本轮开始之后
+        才收窄（域路由的决策在 ``run()`` 里做，位置由它自己定），所以这里不做
+        「只在开头同步一次」的假设——幂等，没用新的域命中就什么都不做。
+        """
+        wanted = set(domains) | self._prospective_skill_domains()
+        if wanted <= self._skill_domains:
+            return
+        before = skills_for_domains(self._skill_domains)
+        self._skill_domains |= wanted
+        if skills_for_domains(self._skill_domains) == before:
+            return
+        # 系统提示每轮只建一次（``run`` 里的第一条），这里就地替换它。它**不在**
+        # ``_delta_start`` 之后的增量里，因此这一行不触碰落库面（日志里没有 system
+        # 消息），只影响后续请求发出去的内容。
+        self._messages[0] = self._system_message()
 
     def _append(self, message: dict[str, Any]) -> MessageStamp:
         """把一条消息放进消息流，返回它与它**产出**的时刻。
