@@ -125,6 +125,11 @@ _PAYLOAD_ID_FIELDS: dict[str, tuple[tuple[str, str], ...]] = {
     "auth_update_profile": (),
     "account_deletion_request": (),
     "sync_trigger": (),
+    # reminder_set（尾卡 / R-PROD-38）：参数是开关与时间（``enabled`` / ``hour`` /
+    # ``minute``），**没有 id 目标**——空元组是明确表态。执行位置在设备
+    # （``DEVICE_EXECUTED_OPS``），但授权口径不因执行位置放松：payload 是服务端
+    # 组装、也可能被客户端伪造的那一份。
+    "reminder_set": (),
     #: ``account_delete`` **刻意不在这里**：它的语义是「拿一个一次性 token 确认
     #: 删除」，而那个 token 是凭据——服务端绝不该把它交给模型（模型会把它写进
     #: 下一轮 payload，凭据随即进入模型上下文与日志）。AI 路径上的注销走

@@ -455,15 +455,19 @@ class TestV2PayloadAuthorization:
         assert _execute(v2_env, user, book_b, proposal).status_code == 403
 
     def test_an_unregistered_op_fails_closed(self, v2_env):
-        """授权表里没表态的 op 一律拒绝——默认放行会让「忘了登记」变成越权面。"""
+        """授权表里没表态的 op 一律拒绝——默认放行会让「忘了登记」变成越权面。
+
+        ``account_delete`` 是现在**唯一**同时没有授权规则、没有执行体、也没有工具体
+        的注册表成员（它要一次性 ``deletionToken``，凭据不进模型上下文）。
+
+        ``reminder_set`` 曾被用在这里当反面例子；尾卡（R-PROD-38）登记它之后就不
+        适用了——**登记状态的任何变化都会在这条用例上现形**，这正是它的价值。
+        """
         c, _ = v2_env
         user = _guest(v2_env)
         book_id = _mk_book(c, user)
 
-        # reminder_set 是注册表成员（提醒行），但它既没有授权规则也没有执行体：
-        # 执行位置在设备（桥 reminder.set），工具体归 05f 的设备执行器——
-        # 在此之前它对服务端是不存在的（见计划 §五 挂账项）。
-        proposal = _v2("reminder_set", {})
+        proposal = _v2("account_delete", {"confirm": True})
         verdict = _validate(v2_env, user, book_id, proposal).json()
         assert verdict["valid"] is False
         assert verdict["verdict"] == "rejected_hallucination"
@@ -482,13 +486,12 @@ class TestV2PayloadAuthorization:
         user = _guest(v2_env)
         book_id = _mk_book(c, user)
 
-        for op, payload in (
-            ("account_delete", {"confirm": True}),
-            ("reminder_set", {}),
-        ):
-            resp = _execute(v2_env, user, book_id, _v2(op, payload))
-            assert resp.status_code == 403, op
-            assert resp.json()["code"] == "ai_proposal_rejected", op
+        # 只剩 ``account_delete`` 一个：``reminder_set`` 被尾卡登记后，它的拒法
+        # 不再是「授权面未表态」（现在有规则了），而是「设备 op 在服务端不可执行」
+        # ——那是 ``TestDeviceOps`` 那一类的用例管的，别在这里重复。
+        resp = _execute(v2_env, user, book_id, _v2("account_delete", {"confirm": True}))
+        assert resp.status_code == 403
+        assert resp.json()["code"] == "ai_proposal_rejected"
 
     def test_a_device_op_is_not_executable_on_the_server(self, v2_env):
         """``sync_trigger`` 的执行位置在设备（T-M7-05j 后 ``meta_set`` 已迁回

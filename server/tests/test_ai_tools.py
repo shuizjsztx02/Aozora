@@ -45,8 +45,10 @@ with open(_SCHEMA_PATH, "r", encoding="utf-8") as _f:
 #:
 #: **``account_delete`` 不在其中**，这是刻意的：它是「用一次性 token 确认删除」的
 #: 那一步，凭据不进模型上下文，AI 路径合并进 ``account_deletion_request``
-#: （05d 的取舍，见 ``proposal_ops`` 的模块 docstring）。``reminder_set`` 同样不在
-#: ——执行位置在设备，归 05f 的设备执行器（计划 §五 挂账项）。
+#: （05d 的取舍，见 ``proposal_ops`` 的模块 docstring）。``reminder_set`` 原先也
+#: 不在（那会儿归 05f 的设备执行器、无卡认领），**尾卡（R-PROD-38）已认领它**，
+#: 故现在在表内——它的执行位置仍在设备（``DEVICE_EXECUTED_OPS``），在表内指的是
+#: 「它是一个已交付的写 op」，与在哪执行是两件事。
 _WRITE_OPS_05B_05C_05D: set[str] = {
     "transaction_add",
     "transaction_update",
@@ -82,6 +84,8 @@ _WRITE_OPS_05B_05C_05D: set[str] = {
     "auth_update_profile",
     "account_deletion_request",
     "sync_trigger",
+    # ── 尾卡（R-PROD-38）──
+    "reminder_set",
 }
 
 

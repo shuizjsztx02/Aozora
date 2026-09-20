@@ -58,6 +58,7 @@ from .tools import (
     DOMAIN_META,
     DOMAIN_PERSONA,
     DOMAIN_PRIVACY,
+    DOMAIN_REMINDER,
     DOMAIN_SAVINGS,
     DOMAIN_SCHEDULED,
     DOMAIN_SECURITY,
@@ -137,6 +138,17 @@ _SIGNALS: tuple[tuple[str, tuple[str, ...]], ...] = (
     ("房租", (DOMAIN_SCHEDULED,)),
     ("周期", (DOMAIN_SCHEDULED,)),
     ("重复记账", (DOMAIN_SCHEDULED,)),
+    # ── 提醒（reminder，尾卡 / R-PROD-38）──
+    # 与 ``scheduled`` 刻意**不合并**：定时记账是让服务端按期落一笔账，提醒只是
+    # 让这台设备弹通知。两者在「提醒我交房租」这种句子上会**同时命中**
+    # （「提醒」→ reminder、「房租」→ scheduled），而路由是并集语义——两个域都
+    # 注入，由模型按语义选，这正是我们要的：它的判据比词表细。
+    # 「叫我」有误命中面（「叫我小明」），但误差方向是**多注入一个域**（选择面宽
+    # 一点），与「宁可多注入」的既定取向一致；漏注入的代价才是能力消失。
+    ("提醒", (DOMAIN_REMINDER,)),
+    ("闹钟", (DOMAIN_REMINDER,)),
+    ("叫我", (DOMAIN_REMINDER,)),
+    ("到点", (DOMAIN_REMINDER,)),
     # ── 角色（persona）──
     ("角色", (DOMAIN_PERSONA,)),
     ("人设", (DOMAIN_PERSONA,)),

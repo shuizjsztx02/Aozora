@@ -390,6 +390,17 @@ class TestRegistryDelta:
         assert not has_authorization_rule("account_delete")
         assert "account_delete" not in {t.proposal_action for t in T.TOOLS}
 
-    def test_reminder_set_is_still_unclaimed(self):
-        """提醒行的工具体归 05f 的设备执行器，05d 不越界（计划 §五 挂账项）。"""
-        assert "reminder_set" not in {t.proposal_action for t in T.TOOLS}
+    def test_reminder_set_is_now_claimed_by_the_tail_card(self):
+        """提醒行已由尾卡（R-PROD-38）认领：**三处表态一次钉齐**。
+
+        本用例原先钉的是「05d 不越界代做」；认领之后它的反面同样要钉——三处
+        表态必须**同时**在场（注册表工具 / ``DEVICE_EXECUTED_OPS`` / 授权规则）。
+        少任何一处都会退化：缺 ``DEVICE_EXECUTED_OPS`` 会让模型以为服务端能执行，
+        缺授权规则则在授权面 fail-closed 被拒（``authorize_payload`` 对未登记的
+        op 一律回错），两者都表现为「确认后什么都没发生」。
+        """
+        from src.modules.ai.authorization import has_authorization_rule
+
+        assert "reminder_set" in {t.proposal_action for t in T.TOOLS}
+        assert "reminder_set" in T.DEVICE_EXECUTED_OPS
+        assert has_authorization_rule("reminder_set")

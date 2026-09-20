@@ -133,6 +133,15 @@ DOMAIN_SYNC = "sync"
 #: 数据域都会让那个域的语义变浑（「导出」域里塞一个「怎么用导出」的工具，模型
 #: 在「导出一份 CSV」与「导出在哪里下载」之间就没有可分辨的边界了）。
 DOMAIN_HELP = "help"
+#: 尾卡（R-PROD-38）：架构 §3.2 覆盖度清单的**最后一行**——「提醒」。
+#:
+#: 它与 ``scheduled`` 是**两件事**，架构把两者记成两行，这里的域边界照抄：
+#: ``scheduled`` 是让**服务端**按期自动记一笔（规则存在云端）；``reminder_set``
+#: 是让**这台设备**到点弹一条通知（配置存在设备本地的 ``ReminderScheduler``）。
+#: 模型眼里这两句话也确实不同——「每月一号自动记一笔房租」对
+#: 「明天早上八点提醒我交房租」。混进一个域会让那个域内出现两个近义工具，
+#: 正是架构 §7.2 说的「域内近义面」问题。
+DOMAIN_REMINDER = "reminder"
 
 DOMAINS: tuple[str, ...] = (
     DOMAIN_TRANSACTION,
@@ -150,6 +159,7 @@ DOMAINS: tuple[str, ...] = (
     DOMAIN_SECURITY,
     DOMAIN_SYNC,
     DOMAIN_HELP,
+    DOMAIN_REMINDER,
 )
 
 #: 架构 §7.2 的经验上限：单域工具数超过 8 会显著降低模型的选择准确率。
@@ -190,10 +200,11 @@ V1_LANE_OPS: frozenset[str] = frozenset({"transaction_add"})
 #: 个"，不是用户偏好本身，跨设备一致语义与默认账本不同；05j 收窄时保留现状）。
 #: 05d 的 ``consent_record`` / ``sync_trigger`` 同样留在这里——判据同构：
 #: 服务端缺的是「设备身份」，不是存储位置（详见每条的注释）。
-#: ``reminder_set`` 同类（桥 ``reminder.set``），但**不在本卡范围**——它归 05f 的
-#: 设备执行器，见 ``docs/milestones/T-M7-05-P4-implementation-plan.md`` §五 挂账项。
+#: ``reminder_set``（尾卡 / R-PROD-38）判据同构：提醒配置存在设备本地的
+#: ``ReminderScheduler``（桥命令 ``reminder.set`` 收 enabled/hour/minute），
+#: 服务端没有它的落点——**只能挂起、由设备执行**。
 DEVICE_EXECUTED_OPS: frozenset[str] = frozenset({
-    "persona_switch", "consent_record", "sync_trigger",
+    "persona_switch", "consent_record", "sync_trigger", "reminder_set",
 })
 
 #: **不可自动执行的 op**：即使单 Step + 高置信，也必须过确认卡（架构 §7.4 的
@@ -2910,6 +2921,41 @@ async def _handle_sync_trigger(ctx: ToolContext, params: dict[str, Any]) -> Tool
 
 
 # ---------------------------------------------------------------------------
+# 提醒域（尾卡 / R-PROD-38）
+# ---------------------------------------------------------------------------
+
+
+async def _handle_reminder_set(ctx: ToolContext, params: dict[str, Any]) -> ToolOutcome:
+    """产出「设每日提醒」的提案（**执行位置＝设备**，见 ``DEVICE_EXECUTED_OPS``）。
+
+    payload 与桥命令 ``reminder.set`` 的参数**逐字对应**（``enabled`` / ``hour`` /
+    ``minute``）——设备侧的执行器把 payload 原样递过去、中间不做翻译，两边因此
+    不会漂移（同 ``sync_trigger`` 的做法）。
+
+    越界的 ``hour`` / ``minute`` 在这里就拒掉：schema 也会拦，但工具层不信任上游
+    ——模型可能经别的路径带进一个不合规的取值，而一个 ``hour=25`` 到了设备侧
+    要么静默变成别的时间、要么让 ``AlarmManager`` 抛异常。
+    """
+    hour = params.get("hour")
+    minute = params.get("minute")
+    if not isinstance(hour, int) or isinstance(hour, bool) or not 0 <= hour <= 23:
+        return ToolOutcome.failure(ERR_INVALID_ARGUMENTS, field="hour")
+    if not isinstance(minute, int) or isinstance(minute, bool) or not 0 <= minute <= 59:
+        return ToolOutcome.failure(ERR_INVALID_ARGUMENTS, field="minute")
+    enabled = bool(params.get("enabled", True))
+    hhmm = f"{hour:02d}:{minute:02d}"
+    return ToolOutcome.proposal({
+        "action": "reminder_set",
+        "payload": {"enabled": enabled, "hour": hour, "minute": minute},
+        "message": (
+            f"把这台设备的每日提醒设为 {hhmm}" if enabled
+            else "关掉这台设备的每日提醒"
+        ),
+        "warnings": [],
+    })
+
+
+# ---------------------------------------------------------------------------
 # 帮助域（05i）
 # ---------------------------------------------------------------------------
 
@@ -4352,6 +4398,35 @@ TOOLS: tuple[Tool, ...] = (
         ),
         parameters=_object_schema({}),
         handler=_handle_sync_trigger,
+    ),
+    # ── 提醒域（尾卡 / R-PROD-38）──────────────────────────────────────
+    Tool(
+        name="reminder_set",
+        domain=DOMAIN_REMINDER,
+        kind="write",
+        proposal_action="reminder_set",
+        description=(
+            "给**这台设备**设每日提醒：到点弹一条通知。用户说「提醒我」"
+            "「到点叫我」「每天九点提醒我记账」时用它。"
+            "它**不是**定时记账——「每月一号自动记一笔房租」要用 scheduled_create。"
+            "两者容易混：定时记账是让服务端按期落一笔账，提醒只是弹通知、不动账本。"
+            "用户只是想静音某条通知时也不用它（那是系统设置里的事）。"
+        ),
+        parameters=_object_schema(
+            {
+                "enabled": {"type": "boolean", "description": "开还是关"},
+                "hour": {
+                    "type": "integer", "minimum": 0, "maximum": 23,
+                    "description": "24 小时制的小时，例如晚上八点是 20",
+                },
+                "minute": {
+                    "type": "integer", "minimum": 0, "maximum": 59,
+                    "description": "分钟，例如八点整是 0",
+                },
+            },
+            required=["enabled", "hour", "minute"],
+        ),
+        handler=_handle_reminder_set,
     ),
     # ── 帮助域（05i）────────────────────────────────────────────────────
     Tool(
