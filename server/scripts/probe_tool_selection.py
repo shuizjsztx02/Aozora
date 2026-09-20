@@ -3,8 +3,8 @@
 **为什么要有这个脚本**：架构 §7.2 的经验上限（单域 5–8 个工具）与 R-PROD-17
 （工具集过大降低选择准确率）都只能靠**真实调用**取证——MockTransport 不经过
 真实接口，测不出模型会不会在两个近义工具之间选错（02c 的点号命名事故就是这么
-漏掉的）。05b 把工具集从 15 扩到 27、05c 再扩到 43（9 个域），每一步都是这条
-风险最该被量一次的时刻。
+漏掉的）。05b 把工具集从 15 扩到 27、05c 再扩到 43（9 个域）、05d 收尾到 54
+（14 个域），每一步都是这条风险最该被量一次的时刻。
 
 口径
 ----
@@ -19,8 +19,8 @@
     计成选错会把策略误判成失误）。
   两个都没中的才是真正的选择错误。
 - 车道固定 v2（全量注入），因为 05b / 05c 的新工具只出现在这条车道上。
-- **05b 与 05c 的用例分开记账**（``CASES`` / ``CASES_05C``）：扩域之后要看的
-  不只是总准确率，还有「新工具会不会被同域的读工具或近义工具抢走」。
+- **05b / 05c / 05d 的用例分开记账**（``CASES`` / ``CASES_05C`` / ``CASES_05D``）：
+  扩域之后要看的不只是总准确率，还有「新工具会不会被同域的读工具或近义工具抢走」。
 
 用法::
 
@@ -132,6 +132,28 @@ CASES_05C: list[tuple[str, str]] = [
     ("我有哪些聊天角色", "persona_list"),
 ]
 
+#: T-M7-05d：五域 11 个工具各一条。**每个工具一条**是有意的——本轮要看的正是
+#: 「新域的工具会不会被别的域抢走」（`stats_monthly` 与 `transaction_summary` /
+#: `stats_trends` 近义、`sync_status` 与 `consent_status` 都在回答「为什么不行」）。
+CASES_05D: list[tuple[str, str]] = [
+    # ── 分析域（与 transaction_summary / budget_status 近义）──
+    ("这个月我一共花了多少", "stats_monthly"),
+    ("帮我看看最近半年的收支趋势", "stats_trends"),
+    # ── 导出域 ──
+    ("把日常账本导出成 CSV", "export_create"),
+    ("我之前导出的文件还在吗", "export_list"),
+    # ── 反馈与隐私域 ──
+    ("我要反馈一个问题，预算页点进去是白屏", "feedback_submit"),
+    ("我同意隐私政策", "consent_record"),
+    ("我同意过隐私政策吗", "consent_status"),
+    # ── 安全账号域 ──
+    ("以后叫我小王", "auth_update_profile"),
+    ("我不想用了，把账号注销掉", "account_deletion_request"),
+    # ── 同步域（与 consent_status 都在回答「为什么不行」）──
+    ("怎么同步不了了", "sync_status"),
+    ("同步一下", "sync_trigger"),
+]
+
 
 #: 假读结果：形状与真工具一致（键名取自工具处理器），内容是编的。
 #: 只喂给**读**工具——写工具不执行（本探针不碰库）。
@@ -206,6 +228,55 @@ _FAKE_READS: dict[str, dict] = {
         {"name": "小贝", "avatar": "🐻", "persona": "你是小贝，一个温和的记账助手。"},
         {"name": "猫娘", "avatar": "🐱", "persona": "你说话带喵。"},
     ], "total": 2},
+    # ── T-M7-05d 的五个读工具（形状取自各自的处理器，内容是编的）──
+    "stats_monthly": {
+        "period": "2026-09", "totalIncomeCents": 500000, "totalExpenseCents": 320000,
+        "balanceCents": 180000, "transactionCount": 42,
+        "expenseByCategory": [
+            {"name": "餐饮", "totalCents": 168000, "count": 21},
+            {"name": "交通", "totalCents": 152000, "count": 21},
+        ],
+        "incomeByCategory": [{"name": "工资", "totalCents": 500000, "count": 1}],
+        "budget": {"budgetCents": 500000, "spentCents": 320000,
+                   "remainingCents": 180000, "pctUsed": 64.0},
+        "largestExpense": {"amountCents": 4500, "categoryName": "交通",
+                           "note": "打车费", "bizDate": "2026-09-11"},
+        "largestIncome": {"amountCents": 500000, "categoryName": "工资",
+                          "note": "九月工资", "bizDate": "2026-09-05"},
+        "trend": [
+            {"period": "2026-04", "totalIncomeCents": 480000, "totalExpenseCents": 300000,
+             "balanceCents": 180000, "transactionCount": 38},
+            {"period": "2026-09", "totalIncomeCents": 500000, "totalExpenseCents": 320000,
+             "balanceCents": 180000, "transactionCount": 42},
+        ],
+    },
+    "stats_trends": {
+        "periodFrom": "2026-04", "periodTo": "2026-09",
+        "points": [
+            {"period": "2026-04", "totalIncomeCents": 480000,
+             "totalExpenseCents": 300000, "balanceCents": 180000, "transactionCount": 38},
+            {"period": "2026-05", "totalIncomeCents": 490000,
+             "totalExpenseCents": 310000, "balanceCents": 180000, "transactionCount": 40},
+            {"period": "2026-06", "totalIncomeCents": 0,
+             "totalExpenseCents": 0, "balanceCents": 0, "transactionCount": 0},
+            {"period": "2026-07", "totalIncomeCents": 500000,
+             "totalExpenseCents": 330000, "balanceCents": 170000, "transactionCount": 41},
+            {"period": "2026-08", "totalIncomeCents": 500000,
+             "totalExpenseCents": 340000, "balanceCents": 160000, "transactionCount": 43},
+            {"period": "2026-09", "totalIncomeCents": 500000,
+             "totalExpenseCents": 320000, "balanceCents": 180000, "transactionCount": 42},
+        ],
+    },
+    "export_list": {"count": 2, "exports": [
+        {"format": "csv", "status": "completed", "createdAt": "2026-09-18T09:00:00+00:00",
+         "expiresAt": "2026-09-19T09:00:00+00:00", "fileSizeBytes": 20480},
+        {"format": "json", "status": "expired", "createdAt": "2026-09-10T09:00:00+00:00",
+         "expiresAt": "2026-09-11T09:00:00+00:00", "fileSizeBytes": 40960},
+    ]},
+    "consent_status": {"hasConsented": True, "policyVersion": "2026-01-01",
+                       "consentedAt": "2026-01-01T00:00:00+00:00"},
+    "sync_status": {"accountStatus": "active", "consented": True, "canSync": True,
+                    "lastServerChangeAt": "2026-09-18T08:30:00+00:00"},
 }
 _FAKE_DEFAULT: dict = {"status": "ok", "note": "（探针的假结果）"}
 
@@ -330,10 +401,17 @@ async def main() -> int:
     results: list[tuple[str, bool, bool]] = []
     cases = CASES[: args.limit] if args.limit else CASES
     cases_05c = CASES_05C[: args.limit] if args.limit else CASES_05C
+    cases_05d = CASES_05D[: args.limit] if args.limit else CASES_05D
     n_05b = len(cases)
+    n_05c = len(cases_05c)
     try:
-        for offset, (utterance, expected) in enumerate(cases + cases_05c):
-            group = "05b" if offset < n_05b else "05c"
+        for offset, (utterance, expected) in enumerate(cases + cases_05c + cases_05d):
+            if offset < n_05b:
+                group = "05b"
+            elif offset < n_05b + n_05c:
+                group = "05c"
+            else:
+                group = "05d"
             names = await _sequence(
                 provider, system=system, tools=payload,
                 model=cfg.ai_agent_provider_model, utterance=utterance,
@@ -353,7 +431,8 @@ async def main() -> int:
     for group, subset in (
         ("全部", results),
         ("05b（既有对照组）", [r for r in results if r[0] == "05b"]),
-        ("05c（本轮新增 16 个工具）", [r for r in results if r[0] == "05c"]),
+        ("05c（工具 27→43 时新增 16 个）", [r for r in results if r[0] == "05c"]),
+        ("05d（工具 43→54 时新增 11 个）", [r for r in results if r[0] == "05d"]),
     ):
         if not subset:
             continue

@@ -37,12 +37,17 @@ _SCHEMA_PATH = _REPO_ROOT / "contracts" / "action-proposal" / "schema.json"
 with open(_SCHEMA_PATH, "r", encoding="utf-8") as _f:
     _ACTION_ENUM: set[str] = set(json.load(_f)["properties"]["action"]["enum"])
 
-#: **05b + 05c 落地的写 op**：记账域（transaction_update / transaction_delete）与
+#: **05b + 05c + 05d 落地的写 op**：记账域（transaction_update / transaction_delete）与
 #: 账户账本域（category.* / account.* / book.*）的全量 CRUD + 默认项（05b），
-#: 外加预算存钱 / 定时 / 角色三域（05c），以及 P1 的 ``transaction_add``（单条与
-#: 批量是同一个 op）。写工具的 proposal_action 必须落在这里——多一个就是越界
-#: （05d 的域），少一个就是没做完。
-_WRITE_OPS_05B_05C: set[str] = {
+#: 外加预算存钱 / 定时 / 角色三域（05c）、导出 / 反馈 / 账号 / 同步四条（05d），
+#: 以及 P1 的 ``transaction_add``（单条与批量是同一个 op）。写工具的 proposal_action
+#: 必须落在这里——多一个就是越界，少一个就是没做完。
+#:
+#: **``account_delete`` 不在其中**，这是刻意的：它是「用一次性 token 确认删除」的
+#: 那一步，凭据不进模型上下文，AI 路径合并进 ``account_deletion_request``
+#: （05d 的取舍，见 ``proposal_ops`` 的模块 docstring）。``reminder_set`` 同样不在
+#: ——执行位置在设备，归 05f 的设备执行器（计划 §五 挂账项）。
+_WRITE_OPS_05B_05C_05D: set[str] = {
     "transaction_add",
     "transaction_update",
     "transaction_delete",
@@ -70,6 +75,13 @@ _WRITE_OPS_05B_05C: set[str] = {
     "persona_update",
     "persona_archive",
     "persona_switch",
+    # ── T-M7-05d ──
+    "export_create",
+    "feedback_submit",
+    "consent_record",
+    "auth_update_profile",
+    "account_deletion_request",
+    "sync_trigger",
 }
 
 
@@ -159,9 +171,12 @@ class TestRegistryContract:
             assert count <= T.MAX_TOOLS_PER_DOMAIN, f"{domain} 有 {count} 个工具"
             assert count > 0, f"{domain} 是空域"
 
-    def test_write_tools_cover_exactly_the_05b_and_05c_ops(self):
-        """写工具的 op 集合 = 05b + 05c 的交付面（越界与缺项都要在这里现形）。"""
-        assert {t.proposal_action for t in T.TOOLS if t.kind == "write"} == _WRITE_OPS_05B_05C
+    def test_write_tools_cover_exactly_the_05b_and_05c_and_05d_ops(self):
+        """写工具的 op 集合 = 05b + 05c + 05d 的交付面（越界与缺项都要在这里现形）。"""
+        assert (
+            {t.proposal_action for t in T.TOOLS if t.kind == "write"}
+            == _WRITE_OPS_05B_05C_05D
+        )
 
     def test_descriptions_are_reviewed_chinese(self):
         """description 是模型可见的唯一语义来源，必须是人写的中文而非占位符。

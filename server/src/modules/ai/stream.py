@@ -332,6 +332,18 @@ TOOL_PROGRESS: dict[str, str] = {
     "persona_archive": "正在归档聊天角色…",
     "persona_switch": "正在切换聊天角色…",
     "meta_set": "正在设置默认项…",
+    # ── T-M7-05d：分析 / 导出 / 反馈与隐私 / 安全账号 / 同步 ──────────────
+    "stats_monthly": "正在统计这个月的收支…",
+    "stats_trends": "正在统计这段时间的趋势…",
+    "export_create": "正在导出账本数据…",
+    "export_list": "正在查询导出记录…",
+    "feedback_submit": "正在提交反馈…",
+    "consent_record": "正在记录隐私同意…",
+    "consent_status": "正在查询隐私同意状态…",
+    "auth_update_profile": "正在修改昵称…",
+    "account_deletion_request": "正在申请注销账号…",
+    "sync_status": "正在检查同步状态…",
+    "sync_trigger": "正在同步…",
 }
 
 #: 设备能力的步骤卡文案（T-M7-05e）。与 ``TOOL_PROGRESS`` 是同一件事的两半：

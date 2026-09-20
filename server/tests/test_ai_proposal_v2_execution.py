@@ -460,15 +460,19 @@ class TestV2PayloadAuthorization:
         user = _guest(v2_env)
         book_id = _mk_book(c, user)
 
-        # export_create 是注册表成员（05d 的域），但授权表与执行面都还没它
-        proposal = _v2("export_create", {})
+        # reminder_set 是注册表成员（提醒行），但它既没有授权规则也没有执行体：
+        # 执行位置在设备（桥 reminder.set），工具体归 05f 的设备执行器——
+        # 在此之前它对服务端是不存在的（见计划 §五 挂账项）。
+        proposal = _v2("reminder_set", {})
         verdict = _validate(v2_env, user, book_id, proposal).json()
         assert verdict["valid"] is False
         assert verdict["verdict"] == "rejected_hallucination"
 
     def test_an_unregistered_op_is_refused_before_it_can_reach_the_executor(self, v2_env):
-        """**最高危的 op 到不了执行面**：``account_delete`` 必须先有授权规则与执行体
-        （05d 的最严审批），在那之前它在授权表里就没表态——fail-closed 判 403。
+        """**最高危的 op 到不了执行面**：``account_delete`` 在授权表里就没表态
+        ——fail-closed 判 403。05d 的取舍是**不接**它（它的 payload 要一次性
+        ``deletionToken``，凭据不进模型上下文，AI 路径合并进
+        ``account_deletion_request``），所以这条断言在 05d 之后依然成立。
 
         这是**两道门的第一道**：授权面先拒（``authorization`` 未登记 → 拒），
         执行面还有第二道（``execute_op`` 的 ``ai_unsupported_action``，见
@@ -480,8 +484,7 @@ class TestV2PayloadAuthorization:
 
         for op, payload in (
             ("account_delete", {"confirm": True}),
-            ("export_create", {}),
-            ("sync_trigger", {}),
+            ("reminder_set", {}),
         ):
             resp = _execute(v2_env, user, book_id, _v2(op, payload))
             assert resp.status_code == 403, op

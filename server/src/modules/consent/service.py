@@ -60,3 +60,20 @@ class ConsentService:
         ).exists()
         result = await self._db.execute(select(stmt))
         return bool(result.scalar())
+
+    async def get_latest_user_consent(self, user_id: uuid.UUID) -> UserConsent | None:
+        """The newest consent record across the user's bound devices.
+
+        Same ``device_sessions`` correlation as :meth:`has_user_consented`
+        (a user has no consent row of their own), but returns the record
+        instead of a bool — T-M7-05d's read tool reports which policy
+        version was accepted and when.
+        """
+        result = await self._db.execute(
+            select(UserConsent)
+            .join(DeviceSession, DeviceSession.device_id == UserConsent.device_id)
+            .where(DeviceSession.user_id == user_id)
+            .order_by(UserConsent.consented_at.desc())
+            .limit(1)
+        )
+        return result.scalar_one_or_none()

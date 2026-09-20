@@ -178,6 +178,7 @@ from .tools import (
     DOMAINS,
     ERR_INVALID_ARGUMENTS,
     ERR_UNKNOWN_TOOL,
+    HIGH_RISK_OPS,
     PROPOSAL_CONTRACT_V1,
     PROPOSAL_CONTRACT_V2,
     Tool,
@@ -738,23 +739,33 @@ def assemble_proposal(
     return proposal
 
 
-def confirm_reason(*, step: int, confidence: float) -> str | None:
+def confirm_reason(
+    *, step: int, confidence: float, op: str | None = None,
+) -> str | None:
     """是否需要用户确认；``None`` = 可自动执行（沿用快路径策略）。
 
     判定口径（架构 §7.4「审批触发策略」；实施口径见 P1 计划 §三 02e）：
 
+    - ``op`` 在 ``HIGH_RISK_OPS`` 里 → 强制确认（**05d 补上的第三个理由**，
+      架构 §7.4 那张表里的「高风险」一类此前没有信号源）。判据是「后果不可
+      通过 App 内的任何操作挽回」，目前只有注销账号一条。
     - ``step >= 2`` → 强制确认。取**提案产出时**的步号而非回合总步数：总步数在
       产出那一刻还不可知，而「第 2 步才写出提案」恰恰说明模型先查了别的东西
       （多步形态，连续写库的累积风险高）；第 1 步就写出提案的是单发形态，
       与快路径同待遇，PR-2 的高置信快速通道因此不被击穿。
     - ``confidence < CONFIDENCE_THRESHOLD`` → 强制确认（架构 §7.4 的「低置信出
-      确认卡」）。P1 的置信度只有两档（``1.0`` / 带 ``warnings`` 的 ``0.8``），
-      该表的「高风险」一类尚无信号源，等有分类器时再作为第三个理由加在这里。
+      确认卡」）。P1 的置信度只有两档（``1.0`` / 带 ``warnings`` 的 ``0.8``）。
+
+    **顺序即优先级**：高风险排在最前。注销账号的工具同时带着 ``warnings``
+    （置信度因此是 0.8），两条路径都会要求确认——双保险是刻意的，任一条被将来
+    的改动放松，另一条仍然拦得住。
 
     **设备类 op（``tools.DEVICE_EXECUTED_OPS``）不走这里**——它们不参与审批策略的
     判定，而是在 :meth:`AgentLoop._handle_proposal` 里直接挂起（服务端执行不了
     它们，问一次批准没有任何意义）。
     """
+    if op is not None and op in HIGH_RISK_OPS:
+        return "high_risk"
     if step >= 2:
         return "multi_step"
     if confidence < CONFIDENCE_THRESHOLD:
@@ -1577,7 +1588,9 @@ class AgentLoop:
                 )
                 return _failure_outcome(ERR_PROPOSAL_REJECTED, paths=paths)
 
-        reason = confirm_reason(step=self._steps, confidence=proposal["confidence"])
+        reason = confirm_reason(
+            step=self._steps, confidence=proposal["confidence"], op=op,
+        )
 
         # 1) 设备类 op（执行位置在设备）：**一律挂起**，不参与审批策略，也永不
         #    走执行通道。理由不是安全而是能力：服务端没有它的存储位置（见

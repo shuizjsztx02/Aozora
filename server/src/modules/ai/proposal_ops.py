@@ -1,11 +1,15 @@
-"""T-M7-05b / T-M7-05c: v2 op 的服务端执行面（``/ai/execute`` 与 loop 的执行器共用）。
+"""T-M7-05b / T-M7-05c / T-M7-05d: v2 op 的服务端执行面（``/ai/execute`` 与 loop 的执行器共用）。
 
 v2 的 op 注册表（``contracts/action-proposal/schema-v2.json``）有 34 个成员，
 但**能执行的只有登记在本模块的那些**——注册表成员身份是「这是一个提案」，
 不是「服务端会执行它」。05b 落地记账域与账户账本域，05c 加上预算存钱 / 定时 /
-角色三域（T-M7-01 上云的三实体），其余 op（导出 / 反馈 / 隐私 / 账号 / 同步……
-归 05d）**没登记的一律 400**，包括 ``account_delete`` 这类最高危 op（它必须等
-05d 连上「最严审批 + 不绕过既有删号流程」之后才能放行）。
+角色三域（T-M7-01 上云的三实体），05d 补上导出 / 反馈 / 账号四条。
+
+**05d 之后仍有两个注册表成员不在表里，且都是刻意的**（不是待办）：
+``account_delete``——它的 payload 要一次性 ``deletionToken``，而凭据不进模型
+上下文，AI 路径把「申请 + 确认」合并进 ``account_deletion_request``；
+``reminder_set``——执行位置在设备（桥 ``reminder.set``），归 05f 的设备执行器
+（见计划 §五 挂账项）。两者都以 ``ai_unsupported_action`` 拒绝。
 
 三条口径
 --------
@@ -37,6 +41,7 @@ v2 的 op 注册表（``contracts/action-proposal/schema-v2.json``）有 34 个�
 
 from __future__ import annotations
 
+import hashlib
 import re
 import uuid
 from dataclasses import dataclass
@@ -53,12 +58,17 @@ from src.models.persona import ChatPersona
 from src.models.savings import SavingsGoal
 from src.models.scheduled import ScheduledRule
 from src.models.sync import SyncOperation
+from src.models.user import User
 from src.modules.accounts.schemas import AccountCreate, AccountUpdate
 from src.modules.accounts.service import AccountService
+from src.modules.auth.schemas import UpdateProfileRequest
+from src.modules.auth.service import AuthService
 from src.modules.books.schemas import BookCreate, BookUpdate
 from src.modules.books.service import BookService
 from src.modules.categories.schemas import CategoryCreate, CategoryUpdate
 from src.modules.categories.service import CategoryService
+from src.modules.deletion.service import DeletionService
+from src.modules.exports.service import ExportService
 
 # 三域的**字段规则只有一份**，在 sync.service 里（实体上行 push 走的同一条门）。
 # 这里 import 私有名是有意的：把它抄成第二份必然漂移——同一份 payload 从 sync
@@ -74,6 +84,8 @@ from src.modules.sync.service import (  # noqa: PLC2701 - 见上
     _validate_note,
     _validate_savings_period,
 )
+from src.modules.telemetry.schemas import FeedbackRequest
+from src.modules.telemetry.service import TelemetryService
 from src.modules.transactions.schemas import TransactionUpdate
 from src.modules.transactions.service import TransactionService
 
@@ -87,6 +99,10 @@ class OpReceipt:
     ``entity_type`` 是 sync 的实体类型（``transaction`` / ``category`` /
     ``account`` / ``book``），也是客户端 pull 时的分派键；``entity_ids`` 是本次
     写入的实体 id（改 / 归档是同一个 id 的新版本，创建是新 id）。
+
+    05d 起它也被**不参与 sync 的 op**（导出 / 反馈 / 账号）复用：那时
+    ``entity_type`` 只是一个回执标签（``export`` / ``feedback`` / ``user``），
+    执行体**不登 sync change**——设备 pull 的实体白名单里没有这几类。
     """
 
     entity_type: str
@@ -903,8 +919,112 @@ async def _execute_persona_archive(
     return OpReceipt(entity_type="chat_persona", entity_ids=[persona.id])
 
 
-#: op → 执行体。**不在表里的 op 一律 400**（含 05c / 05d 尚未落地的 op 与最高危
-#: 的 ``account_delete``）——注册表成员身份不是执行许可。
+# ---------------------------------------------------------------------------
+# 05d：其余服务端域（导出 / 反馈 / 账号）
+# ---------------------------------------------------------------------------
+#
+# 这四条都**不登 sync change**——它们动的东西不是可同步实体（`sync/schemas.py`
+# 的 ``entity_type`` 白名单只有八类业务实体），设备 pull 也拿不到它们。因此
+# 下面的 ``OpReceipt.entity_type`` 只是**回执标签**（客户端的 ``transaction_ids``
+# 里会带上这些 id），不是 pull 的分派键。
+
+async def _load_user(db: AsyncSession, user_id: uuid.UUID) -> User:
+    """取出调用者本人。**认的是端点的鉴权结果**（``user_id``），不是提案内容。"""
+    user = await db.scalar(select(User).where(User.id == user_id))
+    if user is None:
+        raise AppException(404, "not_found", "User not found")
+    return user
+
+
+async def _execute_export_create(
+    db: AsyncSession, *, user_id: uuid.UUID, book_id: uuid.UUID, payload: dict[str, Any],
+) -> OpReceipt:
+    """建一个导出任务并**同步生成文件**（``ExportService.create_export`` 内部把文件
+    IO 丢进线程池，返回时文件已就绪）。
+
+    账本必须是本轮的那个：授权面只校验了「这本书属于本人」，跨账本导出仍然是
+    越权（与 ``transaction`` 的账本收窄同口径）。
+    """
+    fmt = _enum_field(payload, "format", ("json", "csv"))
+    target_book = _uuid_field(payload, "bookId")
+    if target_book != book_id:
+        raise AppException(404, "not_found", "Book not found")
+
+    export = await ExportService(db).create_export(book_id, user_id, fmt)
+    return OpReceipt(entity_type="export", entity_ids=[export.id])
+
+
+async def _execute_feedback_submit(
+    db: AsyncSession, *, user_id: uuid.UUID, book_id: uuid.UUID, payload: dict[str, Any],
+) -> OpReceipt:
+    """落一条用户反馈。
+
+    **设备元信息一律留空**：``POST /telemetry/feedback`` 要 ``app_version`` /
+    ``android_version`` / ``device_model``，而 ``/ai/agent`` 的请求里没有设备标识
+    ——服务端不知道这台设备是什么型号、装的哪个版本。**留空是诚实的缺失**
+    （Grafana 上看得见「这条反馈没带版本」），编一个 ``"unknown"`` 才是往运维的
+    数据里掺假。用户标识同样按既有口径只存 ``sha256(user_id)[:16]``。
+
+    路由层的内存限速（5 条/小时/用户）**不在这条路径上**——AI 通道有自己的两层
+    节制：会话级配额与单轮的工具调用上限（``agent.py`` 的 ``max_tool_calls``）。
+    """
+    category = _enum_field(payload, "category", ("bug", "suggestion", "other"))
+    user_id_hash = hashlib.sha256(str(user_id).encode()).hexdigest()[:16]
+    feedback = await TelemetryService(db).submit_feedback(
+        FeedbackRequest(
+            category=category,
+            content=_text_field(payload, "content"),
+            contact=_optional_text(payload, "contact"),
+            app_version="",
+            android_version="",
+            device_model="",
+        ),
+        user_id_hash,
+    )
+    return OpReceipt(entity_type="feedback", entity_ids=[feedback.id])
+
+
+async def _execute_auth_update_profile(
+    db: AsyncSession, *, user_id: uuid.UUID, book_id: uuid.UUID, payload: dict[str, Any],
+) -> OpReceipt:
+    """改昵称。形状校验走 auth 模块**自己那份** ``UpdateProfileRequest``
+    （strip 后非空、≤64），不在这里抄第二份。"""
+    data = _model_or_400(UpdateProfileRequest, {"nickname": payload.get("nickname")})
+    user = await AuthService(db).update_profile(await _load_user(db, user_id), data.nickname)
+    return OpReceipt(entity_type="user", entity_ids=[user.id])
+
+
+async def _execute_account_deletion_request(
+    db: AsyncSession, *, user_id: uuid.UUID, book_id: uuid.UUID, payload: dict[str, Any],
+) -> OpReceipt:
+    """注销账号：**在同一处内部走完「申请令牌 → 用令牌确认」两步**。
+
+    既有流程（``deletion/service.py``）把这两步拆成两个 HTTP 调用，因为
+    ``confirm_token`` 是**给人看的一次性凭据**（5 分钟有效）。AI 路径上不能照搬：
+
+    - 让模型拿着 token（``account_delete`` 的 payload 就是它）＝把凭据写进模型
+      上下文与下一轮请求，与 ADR-003「Token 不出安全层」同一类问题；
+    - 让「申请」与「确认」隔着一次人工确认卡（用户可能几分钟后才点），token
+      大概率已经过期，用户看到的会是一次莫名其妙的失败。
+
+    所以这里由服务端**连续调用既有的两个服务方法**（顺序与 REST 路径完全一致，
+    ``request_deletion_token`` → ``confirm_deletion``），**一行删号逻辑都没有重写**
+    ——「不绕过既有流程」的落点正在于此：真正的删除仍由
+    ``infra/cleanup/account-deletion.py`` 在 7 天冷静期之后执行，本执行体只把账号
+    推进 FROZEN，撤销入口（``POST /me/deletion-cancel``）原样可用。
+    """
+    user = await _load_user(db, user_id)
+    service = DeletionService(db)
+    token = await service.request_deletion_token(user)
+    await service.confirm_deletion(user, token)
+    return OpReceipt(entity_type="user", entity_ids=[user.id])
+
+
+#: op → 执行体。**不在表里的 op 一律 400**——注册表成员身份不是执行许可。
+#: ``account_delete`` 与 ``reminder_set`` 是两个**刻意留在表外**的注册表成员：
+#: 前者是「用一次性 token 确认删除」的那一步（token 不进模型上下文，AI 路径合并
+#: 进 ``account_deletion_request``），后者的执行位置在设备（见 ``tools.py`` 的
+#: ``DEVICE_EXECUTED_OPS`` 注释）。两者都会以 ``ai_unsupported_action`` 拒绝。
 EXECUTORS: dict[str, Callable[..., Awaitable[OpReceipt]]] = {
     "transaction_update": _execute_transaction_update,
     "transaction_delete": _execute_transaction_delete,
@@ -932,6 +1052,13 @@ EXECUTORS: dict[str, Callable[..., Awaitable[OpReceipt]]] = {
     "persona_archive": _execute_persona_archive,
     # ``persona_switch`` **不在这里**：它的执行位置在设备（当前角色指针是
     # ``sync_meta`` 的本地键），与 ``meta_set`` 同类，见 ``DEVICE_EXECUTED_OPS``。
+    # ── T-M7-05d：其余服务端域 ─────────────────────────────────────────
+    "export_create": _execute_export_create,
+    "feedback_submit": _execute_feedback_submit,
+    "auth_update_profile": _execute_auth_update_profile,
+    "account_deletion_request": _execute_account_deletion_request,
+    # ``consent_record`` / ``sync_trigger`` 的执行位置在设备（同 ``meta_set``），
+    # ``account_delete`` 刻意不接线（见上）。
 }
 
 #: **服务端执行得了的 op 全集**：上面那张表 + ``transaction_add``。记账走的是

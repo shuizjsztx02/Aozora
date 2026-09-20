@@ -80,6 +80,14 @@ class _FakeDb:
     async def scalars(self, _query: Any) -> Any:
         return self._result()
 
+    async def scalar(self, _query: Any) -> Any:
+        """v2 的 payload 级授权要查库（``authorization._is_authorized``）。
+
+        这个桩的回答是「**这些 id 都真实存在且属于本人**」——本文件只关心审批
+        策略，授权的判定细节归 ``test_ai_proposal_v2_execution.py``。
+        """
+        return uuid.uuid4()
+
     def _result(self) -> Any:
         rows = self._rows
 
@@ -249,6 +257,7 @@ def _loop(
     ctx: T.ToolContext | None = None,
     approver: Any = None,
     executor: Any = None,
+    contract_version: int = 1,
 ) -> AgentLoop:
     return AgentLoop(
         provider,
@@ -258,6 +267,7 @@ def _loop(
         today=TODAY,
         approver=approver,
         executor=executor,
+        contract_version=contract_version,
     )
 
 
@@ -707,6 +717,96 @@ class TestApprovalPolicy:
         assert approver.requests[0].reason == "low_confidence"
         assert outcome.kind == "error"
         assert outcome.data["code"] == ERR_APPROVAL_REJECTED
+
+
+# ── T-M7-05d：高风险 op 一律强制确认 ──────────────────────────────────────
+
+
+def _deletion_draft(*, warnings: list[str] | None = None) -> dict[str, Any]:
+    """注销草案的规范形状（与工具真实产出的逐字一致）。"""
+    return {
+        "action": "account_deletion_request",
+        "payload": {},
+        "message": "申请注销账号，账号将进入 7 天冷静期",
+        "warnings": list(warnings or []),
+    }
+
+
+class TestHighRiskApproval:
+    """注销账号**不可自动执行**：单 Step + 高置信也必须过确认卡。
+
+    ``HIGH_RISK_OPS`` 是 05d 补上的第三个审批理由——架构 §7.4 那张表里的
+    「高风险」一类此前没有信号源。这里的用例走**真实的写路径**
+    （``_handle_proposal``：组装 → 校验 → 授权 → 策略 → 征询），不是只对纯函数
+    下断言；纯函数的优先级表在 ``test_ai_tools_05d.py``。
+    """
+
+    async def test_a_single_step_deletion_still_asks(self):
+        approver = FakeApprover(ApprovalDecision.REJECTED)
+        executor = FakeExecutor()
+        loop = _loop(
+            ScriptedProvider([]), approver=approver, executor=executor,
+            contract_version=2,
+        )
+        loop._steps = 1
+
+        outcome = await loop._handle_proposal(
+            _deletion_draft(warnings=["7 天后数据被永久删除"]),
+            tool=T.get_tool("account_deletion_request"),
+        )
+
+        assert executor.calls == [], "高风险不走自动执行"
+        assert len(approver.requests) == 1
+        assert approver.requests[0].reason == "high_risk"
+        assert outcome.kind == "error"
+        assert outcome.data["code"] == ERR_APPROVAL_REJECTED
+
+    async def test_the_guard_does_not_depend_on_the_warnings(self):
+        """把 warnings 去掉（置信度回到 1.0）也拦得住——两条理由各自独立。
+
+        工具产出的注销草案恰好带着 warnings（走「低置信」那条路），所以本用例
+        手工造一份**无 warnings** 的草案：高风险判据若只靠置信度，这里就会自动
+        执行，而那是「一句话注销账号」。
+        """
+        approver = FakeApprover(ApprovalDecision.ALLOWED_ONCE)
+        executor = FakeExecutor()
+        loop = _loop(
+            ScriptedProvider([]), approver=approver, executor=executor,
+            contract_version=2,
+        )
+        loop._steps = 1
+
+        outcome = await loop._handle_proposal(
+            _deletion_draft(), tool=T.get_tool("account_deletion_request"),
+        )
+
+        assert len(approver.requests) == 1
+        assert approver.requests[0].reason == "high_risk"
+        assert outcome.kind == "result", "用户同意之后照常执行"
+        assert len(executor.calls) == 1
+
+    async def test_other_05d_writes_keep_the_fast_path(self):
+        """导出这类普通写不受影响——PR-2 的高置信快速通道不能被本卡击穿。"""
+        approver = FakeApprover(ApprovalDecision.REJECTED)
+        executor = FakeExecutor()
+        loop = _loop(
+            ScriptedProvider([]), approver=approver, executor=executor,
+            contract_version=2,
+        )
+        loop._steps = 1
+
+        await loop._handle_proposal(
+            {
+                "action": "export_create",
+                "payload": {"bookId": str(uuid.uuid4()), "format": "csv"},
+                "message": "导出当前账本",
+                "warnings": [],
+            },
+            tool=T.get_tool("export_create"),
+        )
+
+        assert approver.requests == [], "普通写不因本卡多一次征询"
+        assert len(executor.calls) == 1
 
 
 # ── 执行通道接线 ───────────────────────────────────────────────────────────

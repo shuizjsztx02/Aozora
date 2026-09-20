@@ -13,7 +13,10 @@
 - **P4（05c）** 再加**预算存钱 / 定时 / 角色**三域（``budget.*`` 的写 +
   ``savings.*`` / ``scheduled.*`` / ``persona.*``）：43 个工具、9 个域。这三类实体
   已于 T-M7-01 上云，服务端 loop 从 05c 起才够得到它们（此前「仅本地」）。
-  分析 / 导出 / 安全账号等域仍归 05d。
+- **P4（05d）** 收尾：**分析**（``analysis``）、**导出**（``export``）、
+  **反馈与隐私同意**（``privacy``）、**安全账号**（``security``）、**同步**
+  （``sync``）五域 11 个工具 → 54 个工具、14 个域。架构 §3.2 覆盖度清单到此
+  除「提醒」（``reminder_set``，归 05f 的设备执行器，见 §五 挂账项）外**全部落地**。
 
 工具名一律用下划线，**不沿用桥命令的 ``domain.action`` 点号命名**——provider
 对 ``function.name`` 只接受 ``[a-zA-Z0-9_-]``，带点号会 400。约束、实测证据与
@@ -69,6 +72,7 @@ payload, ...}``；v1 车道 → 根上带 ``transactions`` 的 v1 信封（只�
 
 from __future__ import annotations
 
+import enum
 import uuid
 from collections.abc import Awaitable, Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
@@ -84,6 +88,8 @@ from src.models.ledger import Account, Book, Category, Transaction, TxType
 from src.models.persona import ChatPersona
 from src.models.savings import SavingsGoal
 from src.models.scheduled import ScheduledRule
+from src.models.sync import SyncChange
+from src.models.user import User
 
 from .validator import _FORMAT_CHECKER
 
@@ -104,6 +110,16 @@ DOMAIN_SAVINGS = "savings"
 DOMAIN_SCHEDULED = "scheduled"
 DOMAIN_PERSONA = "persona"
 DOMAIN_META = "meta"
+#: 05d 的五个域（架构 §3.2 覆盖度清单的剩余行）。每一行一个域：``analysis``
+#: 是分析行，``export`` / ``privacy`` 合起来是「导出 / 反馈 / 隐私」行（拆两个
+#: 是因为导出与反馈同意在模型眼里是两件事），``security`` 是安全账号行，
+#: ``sync`` 是同步行。**都远低于 §7.2 的 8 个上限**——域是 05g 域路由的注入
+#: 单位，小域让路由切得更准。
+DOMAIN_ANALYSIS = "analysis"
+DOMAIN_EXPORT = "export"
+DOMAIN_PRIVACY = "privacy"
+DOMAIN_SECURITY = "security"
+DOMAIN_SYNC = "sync"
 
 DOMAINS: tuple[str, ...] = (
     DOMAIN_TRANSACTION,
@@ -115,6 +131,11 @@ DOMAINS: tuple[str, ...] = (
     DOMAIN_SCHEDULED,
     DOMAIN_PERSONA,
     DOMAIN_META,
+    DOMAIN_ANALYSIS,
+    DOMAIN_EXPORT,
+    DOMAIN_PRIVACY,
+    DOMAIN_SECURITY,
+    DOMAIN_SYNC,
 )
 
 #: 架构 §7.2 的经验上限：单域工具数超过 8 会显著降低模型的选择准确率。
@@ -148,8 +169,26 @@ V1_LANE_OPS: frozenset[str] = frozenset({"transaction_add"})
 #: ``persona_switch``（05c）同理：**当前角色指针**是 ``sync_meta`` 的
 #: ``active_persona_id`` 键（``BridgeProtocol.kt``：角色表已上云，指针不上行），
 #: 换角色＝在设备上写这一个本地键。
-#: ``reminder_set``（05f）与 ``widget.refresh`` 同类，届时并进本集合。
-DEVICE_EXECUTED_OPS: frozenset[str] = frozenset({"meta_set", "persona_switch"})
+#: 05d 再加两个，判据同构——**服务端缺的是「设备身份」，不是存储位置**：
+#: ``consent_record`` 的同意记录按 ``device_id`` 存（``user_consents.device_id``，
+#: 设计上允许注册前打点），而 ``/ai/agent`` 的请求里没有设备标识，服务端**认不出
+#: 这是哪台设备**；写到「最近活跃的那台」会让另一台该弹的同意框不再弹，是错答案。
+#: ``sync_trigger`` 的语义是「让**这台设备**立刻跑一次同步」，而 push / pull 都由
+#: 设备发起，服务端没有任何主动触发的通道。两者客户端都已有现成桥命令
+#: （``consent.record`` / ``sync.trigger``），执行体落在设备侧。
+#: ``reminder_set`` 同类（桥 ``reminder.set``），但**不在本卡范围**——它归 05f 的
+#: 设备执行器，见 ``docs/milestones/T-M7-05-P4-implementation-plan.md`` §五 挂账项。
+DEVICE_EXECUTED_OPS: frozenset[str] = frozenset({
+    "meta_set", "persona_switch", "consent_record", "sync_trigger",
+})
+
+#: **不可自动执行的 op**：即使单 Step + 高置信，也必须过确认卡（架构 §7.4 的
+#: 「高风险」一类——此前没有信号源，05d 的删号是它的第一个）。
+#: 判据不是「会写库」（写库的 op 有二十多个），而是**后果不可通过 App 内的任何
+#: 操作挽回**：``account_deletion_request`` 会把账号冻结进 7 天冷静期，期间同步
+#: 与遥测全停（``sync/routes.py`` / ``telemetry/routes.py`` 的 frozen 分支），
+#: 用户唯一能做的是撤销。把它放进 PR-2 的高置信快速通道，等于让一句话注销账号。
+HIGH_RISK_OPS: frozenset[str] = frozenset({"account_deletion_request"})
 
 #: 单次批量的交易条数上限（``transaction_add_batch``）。执行是原子的，
 #: 上限保护单次写操作的影响面（架构 §4.4「单 Turn 最大写操作数」的下游）。
@@ -176,6 +215,9 @@ ERR_UNKNOWN_PERSONA = "unknown_persona"
 ERR_AMBIGUOUS_PERSONA = "ambiguous_persona"
 ERR_UNKNOWN_BUDGET = "unknown_budget"
 ERR_BUDGET_INCOME_CATEGORY = "income_category_budget"
+#: 05d：趋势查询的区间反了。与``invalid_period``（月份格式不对）分开，是因为
+#: 两者的修法不同——一个是改写法，一个是调换起止。
+ERR_INVALID_PERIOD_RANGE = "invalid_period_range"
 
 _TOOL_ERROR_MESSAGES: dict[str, str] = {
     ERR_UNKNOWN_TOOL: "没有这个工具，请改用工具清单中已有的工具。",
@@ -227,6 +269,9 @@ _TOOL_ERROR_MESSAGES: dict[str, str] = {
     ERR_BUDGET_INCOME_CATEGORY: (
         "预算是花销的上限，只能设在支出分类上；这个名字是收入分类。"
         "请确认用户想限制的是哪一项支出，或改用收入分类的名字重新确认。"
+    ),
+    ERR_INVALID_PERIOD_RANGE: (
+        "起始月份晚于结束月份了，请把两个月份调换过来或改成正确的区间。"
     ),
 }
 
@@ -567,6 +612,17 @@ _TX_TYPE_SCHEMA: dict[str, Any] = {
     "type": "string",
     "enum": ["expense", "income"],
     "description": "expense=支出，income=收入。",
+}
+
+#: 05d 的月度参数。与 ``_PERIOD_SCHEMA`` 只差描述（那个写着「本工具只处理月度
+#: 预算」，是预算域专用的措辞）——校验口径（pattern）两者一字不差。
+_MONTH_SCHEMA: dict[str, Any] = {
+    "type": "string",
+    "pattern": r"^\d{4}-\d{2}$",
+    "description": (
+        "月份 YYYY-MM。用户说「这个月」「上个月」时，按系统提示的今天日期换算；"
+        "不要臆造月份。"
+    ),
 }
 
 _LIMIT_SCHEMA: dict[str, Any] = {
@@ -2515,6 +2571,305 @@ async def _handle_persona_switch(ctx: ToolContext, params: dict[str, Any]) -> To
 
 
 # ---------------------------------------------------------------------------
+# 分析域 —— 读工具（T-M7-05d）
+# ---------------------------------------------------------------------------
+
+def _enum_text(value: Any) -> str:
+    """枚举（或已经是字符串的值）→ 它的**取值**。
+
+    ``ExportFormat`` / ``ExportStatus`` / ``UserStatus`` 都是 ``(str, Enum)`` 混入类，
+    而 ``str(member)`` 在 Python 3.12 上给的是 ``"ExportFormat.CSV"``（``Enum.__str__``
+    赢过 ``str.__str__``）——直接把 ``str(row.format)`` 回喂给模型，它会读到
+    ``ExportFormat.CSV`` 这种既不是取值也不是人话的东西。
+    """
+    return value.value if isinstance(value, enum.Enum) else str(value)
+
+
+def _fact_category_row(cat: Any) -> dict[str, Any]:
+    """``fact_pack.CategoryFact`` → 回喂形状。**剥掉 ``category_id``**（铁律 1）。"""
+    return {
+        "name": cat.category_name,
+        "totalCents": cat.total_cents,
+        "count": cat.count,
+    }
+
+
+def _fact_tx_row(tx: Any) -> dict[str, Any]:
+    """``fact_pack.TransactionFact`` → 回喂形状。**剥掉 ``id``**（同上）。"""
+    return {
+        "amountCents": tx.amount_cents,
+        "categoryName": tx.category_name,
+        "note": tx.note,
+        "bizDate": tx.biz_date,
+    }
+
+
+def _fact_pack_payload(pack: Any) -> dict[str, Any]:
+    """``fact_pack.FactPack`` → 回喂形状。
+
+    **这是 ``/ai/report`` 的数据面**，不是它的叙事面：``generate_report`` 会在这一
+    份事实之上再调一次模型写一段分析（并逐条核对数字），而对话里模型自己就会写
+    分析——把叙事层也搬进工具等于对同一份数据付两次模型费用，还把一段模型生成的
+    文字当成「工具事实」回喂给另一个模型。故这里只给确定性事实（架构 §7.4 铁律 2）。
+
+    ``data_hash`` 刻意不出现在结果里：它是缓存键，对模型没有语义。
+    """
+    budget = pack.budget
+    return {
+        "period": pack.period,
+        "totalIncomeCents": pack.total_income,
+        "totalExpenseCents": pack.total_expense,
+        "balanceCents": pack.balance,
+        "transactionCount": pack.transaction_count,
+        "expenseByCategory": [_fact_category_row(c) for c in pack.expense_by_category],
+        "incomeByCategory": [_fact_category_row(c) for c in pack.income_by_category],
+        "budget": None if budget is None else {
+            "budgetCents": budget.amount_cents,
+            "spentCents": budget.spent_cents,
+            "remainingCents": budget.remaining_cents,
+            "pctUsed": budget.pct_used,
+        },
+        "largestExpense": (
+            None if pack.largest_expense is None else _fact_tx_row(pack.largest_expense)
+        ),
+        "largestIncome": (
+            None if pack.largest_income is None else _fact_tx_row(pack.largest_income)
+        ),
+        "trend": [
+            {
+                "period": point.period,
+                "totalIncomeCents": point.total_income,
+                "totalExpenseCents": point.total_expense,
+                "balanceCents": point.balance,
+                "transactionCount": point.transaction_count,
+            }
+            for point in pack.trend
+        ],
+    }
+
+
+async def _handle_stats_monthly(ctx: ToolContext, params: dict[str, Any]) -> ToolOutcome:
+    """单月完整财务事实（收入 / 支出 / 结余 / 分类明细 / 预算执行 / 最大单笔 / 近 6 期趋势）。"""
+    period = str(params["period"])
+    if _resolve_period(period) is None:
+        return ToolOutcome.failure(ERR_INVALID_PERIOD)
+
+    from .fact_pack import FactPackService
+
+    pack = await FactPackService(ctx.db).build(ctx.book_id, ctx.user_id, period)
+    return ToolOutcome.result(_fact_pack_payload(pack))
+
+
+async def _handle_stats_trends(ctx: ToolContext, params: dict[str, Any]) -> ToolOutcome:
+    """指定区间的逐月趋势（含区间内的空月）。"""
+    period_from = str(params["periodFrom"])
+    period_to = str(params["periodTo"])
+    if _resolve_period(period_from) is None or _resolve_period(period_to) is None:
+        return ToolOutcome.failure(ERR_INVALID_PERIOD)
+    if period_from > period_to:
+        # 字符串比较对 ``YYYY-MM`` 等价于时间先后（零填充定长）。
+        return ToolOutcome.failure(ERR_INVALID_PERIOD_RANGE)
+
+    from src.modules.statistics.service import StatisticsService
+
+    stats = await StatisticsService(ctx.db).get_trend_stats(
+        ctx.book_id, ctx.user_id, period_from, period_to,
+    )
+    return ToolOutcome.result({
+        "periodFrom": period_from,
+        "periodTo": period_to,
+        "points": [
+            {
+                "period": point.period,
+                "totalIncomeCents": point.total_income,
+                "totalExpenseCents": point.total_expense,
+                "balanceCents": point.balance,
+                "transactionCount": point.transaction_count,
+            }
+            for point in stats.points
+        ],
+    })
+
+
+# ---------------------------------------------------------------------------
+# 导出域（T-M7-05d）
+# ---------------------------------------------------------------------------
+
+async def _handle_export_create(ctx: ToolContext, params: dict[str, Any]) -> ToolOutcome:
+    """产出导出的提案。**账本由服务端填**（``ctx.book_id``），模型只选格式。"""
+    fmt = str(params["format"])
+    book_name = ctx.book_names_by_id.get(str(ctx.book_id))
+    return ToolOutcome.proposal({
+        "action": "export_create",
+        "payload": {"bookId": str(ctx.book_id), "format": fmt},
+        "message": (
+            f"把「{book_name}」的流水导出成 {fmt.upper()} 文件"
+            if book_name else f"把当前账本的流水导出成 {fmt.upper()} 文件"
+        ),
+        "warnings": [],
+    })
+
+
+async def _handle_export_list(ctx: ToolContext, params: dict[str, Any]) -> ToolOutcome:
+    """列出这个用户已经建过的导出任务（**不含 id**——模型拿不到下载凭据）。"""
+    from src.modules.exports.service import ExportService
+
+    rows = await ExportService(ctx.db).list_exports(ctx.user_id)
+    return ToolOutcome.result({
+        "count": len(rows),
+        "exports": [
+            {
+                "format": _enum_text(row.format),
+                "status": _enum_text(row.status),
+                "createdAt": row.created_at.isoformat(),
+                "expiresAt": (
+                    row.expires_at.isoformat() if row.expires_at is not None else None
+                ),
+                "fileSizeBytes": row.file_size,
+            }
+            for row in rows
+        ],
+    })
+
+
+# ---------------------------------------------------------------------------
+# 反馈与隐私域（T-M7-05d）
+# ---------------------------------------------------------------------------
+
+async def _handle_feedback_submit(ctx: ToolContext, params: dict[str, Any]) -> ToolOutcome:
+    """产出反馈的提案。**设备元信息由执行体补**（见 ``proposal_ops``）。"""
+    payload: dict[str, Any] = {
+        "category": str(params["category"]),
+        "content": str(params["content"]),
+    }
+    contact = params.get("contact")
+    if contact:
+        payload["contact"] = str(contact)
+
+    return ToolOutcome.proposal({
+        "action": "feedback_submit",
+        "payload": payload,
+        "message": "把这条反馈提交给产品团队",
+        "warnings": [],
+    })
+
+
+async def _handle_consent_record(ctx: ToolContext, params: dict[str, Any]) -> ToolOutcome:
+    """产出隐私同意的提案（**执行位置＝设备**，见 ``DEVICE_EXECUTED_OPS``）。"""
+    payload: dict[str, Any] = {}
+    version = params.get("policyVersion")
+    if version:
+        payload["policyVersion"] = str(version)
+
+    return ToolOutcome.proposal({
+        "action": "consent_record",
+        "payload": payload,
+        "message": "记录这台设备的隐私政策同意",
+        # 同意是**法律意义上的表态**，用户最好在设置页里点那个按钮完成它——
+        # 回喂给模型的这句话会让它把用户引到界面上（而不是当成一次普通写操作）。
+        "warnings": ["隐私同意也可以在「设置 → 隐私」里完成"],
+    })
+
+
+async def _handle_consent_status(ctx: ToolContext, params: dict[str, Any]) -> ToolOutcome:
+    """这个用户是否同意过隐私政策，以及同意的是哪一版、什么时候。"""
+    from src.modules.consent.service import ConsentService
+
+    latest = await ConsentService(ctx.db).get_latest_user_consent(ctx.user_id)
+    if latest is None:
+        return ToolOutcome.result({"hasConsented": False})
+    return ToolOutcome.result({
+        "hasConsented": True,
+        "policyVersion": latest.policy_version,
+        "consentedAt": latest.consented_at.isoformat(),
+    })
+
+
+# ---------------------------------------------------------------------------
+# 安全账号域（T-M7-05d）
+# ---------------------------------------------------------------------------
+
+async def _handle_auth_update_profile(
+    ctx: ToolContext, params: dict[str, Any],
+) -> ToolOutcome:
+    """改昵称。**只开放昵称**——``PATCH /me`` 能改的也只有它（账号是手机号 +
+    验证码，没有密码与邮箱字段，见 ``auth/schemas.py`` 的 ``UpdateProfileRequest``）。"""
+    nickname = str(params["nickname"])
+    # ``minLength: 1`` 拦不住 ``"   "``（strip 后是空串），而 auth 侧的
+    # ``UpdateProfileRequest`` 会拒。在这里先挡一次：执行时才失败对模型是
+    # 「不可行动的错」——它拿不到「哪个字段不对」的反馈。
+    if not nickname.strip():
+        return ToolOutcome.failure(ERR_INVALID_ARGUMENTS, argument="nickname")
+    return ToolOutcome.proposal({
+        "action": "auth_update_profile",
+        "payload": {"nickname": nickname},
+        "message": f"把昵称改成「{nickname}」",
+        "warnings": [],
+    })
+
+
+async def _handle_account_deletion_request(
+    ctx: ToolContext, params: dict[str, Any],
+) -> ToolOutcome:
+    """注销账号（**最高危 op**，见 ``HIGH_RISK_OPS``）。
+
+    ``warnings`` 非空会同时把置信度压到 ``_WARNED_CONFIDENCE``——于是「低置信」
+    与「高风险」两条路径都要求确认卡，这是刻意的双保险：判据分别落在
+    ``confirm_reason`` 的两个分支上，任一条被将来的改动放松，另一条仍然拦得住。
+    """
+    return ToolOutcome.proposal({
+        "action": "account_deletion_request",
+        "payload": {},
+        "message": "申请注销账号，账号将进入 7 天冷静期",
+        "warnings": [
+            "注销后同步与数据上报立即停止",
+            "7 天内可以撤销，7 天后账号与全部数据被永久删除",
+        ],
+    })
+
+
+# ---------------------------------------------------------------------------
+# 同步域（T-M7-05d）
+# ---------------------------------------------------------------------------
+
+async def _handle_sync_status(ctx: ToolContext, params: dict[str, Any]) -> ToolOutcome:
+    """同步能不能跑、服务端这边的数据到哪一步了。
+
+    **服务端不知道设备侧的游标**（``sync_cursor`` 是 ``sync_meta`` 的本地键，
+    不上行），所以这里给的是**同步的前提条件**与**服务端最后一笔变更的时间**：
+    用户问「怎么同步不了」时，答案通常在这两项里（未同意隐私政策 / 账号在冷静期）。
+    """
+    from src.modules.consent.service import ConsentService
+
+    status = await ctx.db.scalar(select(User.status).where(User.id == ctx.user_id))
+    last_change = await ctx.db.scalar(
+        select(func.max(SyncChange.changed_at)).where(SyncChange.user_id == ctx.user_id),
+    )
+    consented = await ConsentService(ctx.db).has_user_consented(ctx.user_id)
+    account_status = _enum_text(status) if status is not None else "unknown"
+    return ToolOutcome.result({
+        "accountStatus": account_status,
+        "consented": consented,
+        # frozen（注销冷静期）与 deactivated 的账号 push 会被服务端拒掉，
+        # 两类都算「同步跑不起来」。
+        "canSync": consented and account_status in ("guest", "active"),
+        "lastServerChangeAt": (
+            last_change.isoformat() if last_change is not None else None
+        ),
+    })
+
+
+async def _handle_sync_trigger(ctx: ToolContext, params: dict[str, Any]) -> ToolOutcome:
+    """产出「让设备立刻同步一次」的提案（**执行位置＝设备**，见 ``DEVICE_EXECUTED_OPS``）。"""
+    return ToolOutcome.proposal({
+        "action": "sync_trigger",
+        "payload": {},
+        "message": "让这台设备立刻同步一次",
+        "warnings": [],
+    })
+
+
+# ---------------------------------------------------------------------------
 # 注册表
 # ---------------------------------------------------------------------------
 
@@ -3707,6 +4062,206 @@ TOOLS: tuple[Tool, ...] = (
             required=["key"],
         ),
         handler=_handle_meta_set,
+    ),
+    # ── 分析域（05d）────────────────────────────────────────────────────
+    Tool(
+        name="stats_monthly",
+        domain=DOMAIN_ANALYSIS,
+        kind="read",
+        description=(
+            "查某个月的收支全貌：收入、支出、结余、笔数、支出与收入的分类明细、"
+            "当月预算执行情况、最大的一笔收入与支出，以及包含该月在内的近 6 个月"
+            "趋势。用户问「这个月花了多少」「上个月怎么样」「预算超了吗」时用它。"
+            "要跨月对比请用 stats_trends。金额单位是分。"
+        ),
+        parameters=_object_schema({"period": _MONTH_SCHEMA}, required=["period"]),
+        handler=_handle_stats_monthly,
+    ),
+    Tool(
+        name="stats_trends",
+        domain=DOMAIN_ANALYSIS,
+        kind="read",
+        description=(
+            "查一段时间的逐月收支趋势，用来做跨月对比（「最近半年」「今年前三个月」）。"
+            "起止月份都要填，区间内没有记录的月份也会以 0 出现。"
+            "只看某一个月请用 stats_monthly。金额单位是分。"
+        ),
+        parameters=_object_schema(
+            {
+                "periodFrom": {**_MONTH_SCHEMA, "description": "起始月份 YYYY-MM（含）。"},
+                "periodTo": {**_MONTH_SCHEMA, "description": "结束月份 YYYY-MM（含）。"},
+            },
+            required=["periodFrom", "periodTo"],
+        ),
+        handler=_handle_stats_trends,
+    ),
+    # ── 导出域（05d）────────────────────────────────────────────────────
+    Tool(
+        name="export_create",
+        domain=DOMAIN_EXPORT,
+        kind="write",
+        proposal_action="export_create",
+        description=(
+            "把当前账本的流水导出成文件。用户说「把账导出来」「导一份 CSV」时用它。"
+            "导出文件 24 小时内有效，之后会被自动清理；文件生成后要请用户到"
+            "「设置 → 数据导出」里下载。"
+        ),
+        parameters=_object_schema(
+            {
+                "format": {
+                    "type": "string",
+                    "enum": ["json", "csv"],
+                    "description": (
+                        "导出格式：json=结构化数据，csv=表格文件。用户没指定时用 json。"
+                    ),
+                },
+            },
+            required=["format"],
+        ),
+        handler=_handle_export_create,
+    ),
+    Tool(
+        name="export_list",
+        domain=DOMAIN_EXPORT,
+        kind="read",
+        description=(
+            "列出这个账号已经建过的导出任务（格式、状态、生成时间、过期时间、文件大小）。"
+            "用户问「我之前导出的文件还在吗」时用它。结果里没有下载地址——下载请让"
+            "用户到「设置 → 数据导出」里做。"
+        ),
+        parameters=_object_schema({}),
+        handler=_handle_export_list,
+    ),
+    # ── 反馈与隐私域（05d）──────────────────────────────────────────────
+    Tool(
+        name="feedback_submit",
+        domain=DOMAIN_PRIVACY,
+        kind="write",
+        proposal_action="feedback_submit",
+        description=(
+            "把用户对产品的反馈提交给开发团队。用户说「我要反馈一个问题」"
+            "「建议加个功能」并给出了具体内容时用它。content 用用户的原话，"
+            "不要替他改写、总结或补充他没说的事；分类拿不准就用 other。"
+        ),
+        parameters=_object_schema(
+            {
+                "category": {
+                    "type": "string",
+                    "enum": ["bug", "suggestion", "other"],
+                    "description": "反馈类型：bug=功能出问题，suggestion=功能建议，other=其它。",
+                },
+                "content": {
+                    "type": "string",
+                    "minLength": 1,
+                    # 4000 = telemetry 的 MAX_CONTENT_CHARS（超长会被服务端截断）。
+                    "maxLength": 4000,
+                    "description": "反馈正文，用用户的原话。",
+                },
+                "contact": {
+                    "type": "string",
+                    # 128 = telemetry 的 MAX_CONTACT_CHARS。
+                    "maxLength": 128,
+                    "description": "用户主动留下的联系方式；他没给就省略。",
+                },
+            },
+            required=["category", "content"],
+        ),
+        handler=_handle_feedback_submit,
+    ),
+    Tool(
+        name="consent_record",
+        domain=DOMAIN_PRIVACY,
+        kind="write",
+        proposal_action="consent_record",
+        description=(
+            "记录这台设备已同意隐私政策。**只有用户在对话里明确表达了同意**"
+            "（「我同意隐私政策」）时才用它——不要替他默认同意，也不要在他只是"
+            "询问政策内容时调用。同意之后同步功能才会可用。"
+        ),
+        parameters=_object_schema(
+            {
+                "policyVersion": {
+                    "type": "string",
+                    "description": "隐私政策版本，用户没提就省略（由设备按当前弹窗版本填）。",
+                },
+            },
+        ),
+        handler=_handle_consent_record,
+    ),
+    Tool(
+        name="consent_status",
+        domain=DOMAIN_PRIVACY,
+        kind="read",
+        description=(
+            "查这个账号是否同意过隐私政策，以及同意的是哪一版、什么时候同意的。"
+            "用户问「我同意过隐私政策吗」时用它。没同意过时只返回 hasConsented=false。"
+        ),
+        parameters=_object_schema({}),
+        handler=_handle_consent_status,
+    ),
+    # ── 安全账号域（05d）────────────────────────────────────────────────
+    Tool(
+        name="auth_update_profile",
+        domain=DOMAIN_SECURITY,
+        kind="write",
+        proposal_action="auth_update_profile",
+        description=(
+            "修改用户自己的昵称。用户说「以后叫我小王」「把昵称改成…」时用它。"
+            "只能改昵称——手机号不能通过对话修改，用户要换手机号请让他到设置页去。"
+        ),
+        parameters=_object_schema(
+            {
+                "nickname": {
+                    "type": "string",
+                    "minLength": 1,
+                    # 64 = auth 的 UpdateProfileRequest.nickname 的 max_length。
+                    "maxLength": 64,
+                    "description": "新的昵称，1-64 个字符。",
+                },
+            },
+            required=["nickname"],
+        ),
+        handler=_handle_auth_update_profile,
+    ),
+    Tool(
+        name="account_deletion_request",
+        domain=DOMAIN_SECURITY,
+        kind="write",
+        proposal_action="account_deletion_request",
+        description=(
+            "申请注销账号。账号会进入 7 天冷静期：期间同步与数据上报立即停止，"
+            "7 天后账号与全部数据被永久删除。**只有用户明确要求注销账号时才能调用**，"
+            "调用前必须先向他讲清楚后果。用户只是想退出登录时不要用它——"
+            "退出登录在设置页里做。"
+        ),
+        parameters=_object_schema({}),
+        handler=_handle_account_deletion_request,
+    ),
+    # ── 同步域（05d）────────────────────────────────────────────────────
+    Tool(
+        name="sync_status",
+        domain=DOMAIN_SYNC,
+        kind="read",
+        description=(
+            "查同步能不能跑：账号是否处于可同步状态（注销冷静期、未同意隐私政策都会"
+            "让同步停摆），以及服务端最后一笔数据变更发生在什么时候。"
+            "用户问「怎么同步不了」「我的数据同步了吗」时先用它排查。"
+        ),
+        parameters=_object_schema({}),
+        handler=_handle_sync_status,
+    ),
+    Tool(
+        name="sync_trigger",
+        domain=DOMAIN_SYNC,
+        kind="write",
+        proposal_action="sync_trigger",
+        description=(
+            "让这台设备立刻同步一次：把本机的改动推上去、把云端的变更拉下来。"
+            "用户说「同步一下」时用它。正常情况下 App 会自己同步，"
+            "用户通常不需要手动触发。"
+        ),
+        parameters=_object_schema({}),
+        handler=_handle_sync_trigger,
     ),
 )
 

@@ -111,6 +111,25 @@ _PAYLOAD_ID_FIELDS: dict[str, tuple[tuple[str, str], ...]] = {
     "persona_archive": (("personaId", _PERSONA),),
     # persona_switch 的执行位置在设备，payload 里的角色 id 同样要授权。
     "persona_switch": (("personaId", _PERSONA),),
+    # ── T-M7-05d：分析之外的四个服务端域 ────────────────────────────────
+    # 导出按**账本**授权：payload 的 ``bookId`` 由服务端按当前账本填，但一份
+    # 客户端伪造的提案同样会打到这里，放行它等于让 AI 导出别人的账本。
+    "export_create": (("bookId", _BOOK),),
+    # 反馈 / 昵称 / 注销 / 同意 / 同步**都没有 id 目标**——空元组是**明确表态**，
+    # 不是遗漏（同 ``account_create``）。它们的授权面不在 payload 里：反馈与注销
+    # 认的是调用者本人（``user_id`` 由端点的鉴权给出，不取自提案），
+    # 同意与同步的执行位置在设备（``DEVICE_EXECUTED_OPS``），服务端只挂起。
+    "feedback_submit": (),
+    "consent_record": (),
+    "auth_update_profile": (),
+    "account_deletion_request": (),
+    "sync_trigger": (),
+    #: ``account_delete`` **刻意不在这里**：它的语义是「拿一个一次性 token 确认
+    #: 删除」，而那个 token 是凭据——服务端绝不该把它交给模型（模型会把它写进
+    #: 下一轮 payload，凭据随即进入模型上下文与日志）。AI 路径上的注销走
+    #: ``account_deletion_request``：执行体在服务端内部完成「申请 → 确认」两步，
+    #: token 不出服务端（见 ``proposal_ops``）。未登记授权规则的 op 一律拒绝，
+    #: 所以伪造的 ``account_delete`` 提案在授权面就被挡下（fail-closed）。
 }
 
 
