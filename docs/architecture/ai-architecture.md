@@ -105,16 +105,29 @@ v1 是**固定 action 集**（`add_tx` / `add_tx_batch` / `query` / `report` / `
 | `persona_update` | 角色 | 桥 `persona.update` | 05c |
 | `persona_archive` | 角色 | 桥 `persona.archive` | 05c |
 | `persona_switch` | 角色 | 桥 `persona.*` 的当前角色切换（写入侧即 `meta.set(当前角色)`） | 05c |
-| `reminder_set` | 提醒 | 桥 `reminder.set`（**执行位置＝设备**，05f 接线） | 05f |
-| `export_create` | 导出 | `POST /exports` | 05d |
-| `feedback_submit` | 反馈 | `POST /telemetry/feedback` | 05d |
-| `consent_record` | 隐私 | `POST /consent` | 05d |
-| `auth_update_profile` | 安全账号 | 桥 `auth.updateProfile` | 05d |
-| `account_deletion_request` | 安全账号 | `POST /deletion/*`（申请删除令牌） | 05d |
-| `account_delete` | 安全账号 | `DELETE /deletion/me`（**最高危：`requiresConfirmation` 必须为 true，且不得绕过既有删号流程**） | 05d |
-| `sync_trigger` | 同步 | 桥 `sync.trigger` | 05d |
+| `reminder_set` | 提醒 | 桥 `reminder.set`（**执行位置＝设备**）。**工具体本身无人认领**——05f 交付时未含它，05d 的卡面也不含（见「未覆盖的最后一行」）| **未认领** |
+| `export_create` | 导出 | `POST /exports`（**服务端执行已落地**，05d）| 05d |
+| `feedback_submit` | 反馈 | `POST /telemetry/feedback`（**服务端执行已落地**；设备元信息留空，见 05d 收尾段）| 05d |
+| `consent_record` | 隐私 | 桥 `consent.record`——**执行位置＝设备**（同意按 `device_id` 存，服务端认不出设备），05d 已登记进 `DEVICE_EXECUTED_OPS` | 05d |
+| `auth_update_profile` | 安全账号 | 服务端 `PATCH /me`（只支持 nickname）——**服务端执行已落地**（客户端另有同义的桥命令）| 05d |
+| `account_deletion_request` | 安全账号 | `POST /me/deletion-request` + `DELETE /me`（**执行体在服务端内部走完两步**）——服务端执行已落地 | 05d |
+| `account_delete` | 安全账号 | 同上的第二步（**最高危**）。**刻意不接线**：payload 的 `deletionToken` 是凭据，不进模型上下文——AI 路径合并进上一条 | 05d（不接） |
+| `sync_trigger` | 同步 | 桥 `sync.trigger`——**执行位置＝设备**（「立刻同步」是设备发起的动作），05d 已登记进 `DEVICE_EXECUTED_OPS` | 05d |
 
 **不在注册表里的，是**读操作（`transaction_list`、`budget_status`、`/stats/*`…：读工具的结果直接回喂模型，**不是提案**）、纯对话（v1 的 `chat`）与**设备指令**（见下）。
+
+**未覆盖的最后一行（T-M7-05d 交付后盘点，2026-09-20）：** 架构 §3.2 的覆盖度
+清单里只剩**提醒**一行没有工具体——`reminder_set` 是 v2 注册表成员，但**没有人
+认领它**：05f 的卡面产出与验收列的是设备能力通道的 6 个 capability（不含提醒），
+05d 的卡面列的是分析 / 导出反馈隐私 / 安全账号 / 同步四块。它需要的三处表态与
+`meta_set` 同形（工具 + `DEVICE_EXECUTED_OPS` + 授权规则），但**判给谁是一张
+新卡的边界问题**，05d 不越界代做（见计划 §五 挂账项，P4 收口裁决）。
+
+同一盘点里还有两行**部分覆盖**，它们要等 **05j** 的数据面决策：`meta.set` 的
+「小组件配置」与「用户画像」两个键仍是纯设备本地量（`meta_set` 的 key 枚举当前
+只有 `default_book` / `default_account`）。**该不该上云、以什么形态上云是 05j 的
+设计决策**（用户 2026-09-20 指定的目标），05d 只按 `meta_set` 现有的 key 集合
+做事——这正是 05c 立下的判据：有专属语义的键给它自己的 op，纯偏好才走 `meta_set`。
 
 ### v1 ↔ v2 动作名（`v1-action-aliases.json`）
 
@@ -175,6 +188,31 @@ sync change，设备上线后 pull 到）写在 `proposal_ops.py` 的文件头�
 在 v2 车道上装的是「本次 op 影响的**实体** id」（改 / 归档是同一 id 的新版本，
 新建是新 id），字段名沿用是为了不动既有回执契约。等 R-PROD-31（客户端渲染 v2
 提案的路径）落定、真有消费方时再谈改名。
+
+**05d 收尾（2026-09-20）：** 分析之外的四个服务端域按**同一范式**接了进来——
+导出 / 反馈 / 昵称 / 注销四条写 op 进 `proposal_ops.EXECUTORS`，六条授权规则进
+`authorization`（`export_create` 按 `bookId` 授权，其余五条**空元组＝明确表态**：
+它们的授权面不在 payload 里，见下）。工具集到 **54 个 / 14 域**，架构 §3.2 的
+覆盖度清单至此只剩**提醒**一行（见「未覆盖的最后一行」）。
+
+**05d 的三条口径（与 05b / 05c 不同，值得单独记）：**
+
+| 决策 | 内容 | 理由 |
+|---|---|---|
+| **同意与同步触发是设备 op** | `consent_record` / `sync_trigger` 进 `DEVICE_EXECUTED_OPS`，服务端只挂起 | 服务端缺的**不是存储位置而是设备身份**：同意按 `device_id` 存（设计上允许注册前打点），而 `/ai/agent` 的请求里没有设备标识；「立刻同步」是设备发起的行为，服务端没有主动触发的通道。两者客户端都已有桥命令 |
+| **注销走 `account_deletion_request`，`account_delete` 不接线** | 执行体在服务端内部走完 `request_deletion_token` → `confirm_deletion` 两步 | `account_delete` 的 payload 要一次性 `deletionToken`——**凭据不进模型上下文**（与 ADR-003 同一类问题）；而两步之间的确认卡可能让 5 分钟的 token 过期。「不绕过既有流程」的落点是**一行删号逻辑都没重写**：账号只到 FROZEN，7 天后的物理删除仍归 `infra/cleanup/account-deletion.py`，撤销入口原样可用 |
+| **反馈的设备元信息留空** | `app_version` / `android_version` / `device_model` 一律填 `""` | 服务端不知道这台设备是什么型号、装的哪个版本。**留空是诚实的缺失**（Grafana 上看得出），编一个 `"unknown"` 是往运维数据里掺假 |
+
+**新增第三个审批理由：** `tools.HIGH_RISK_OPS` → `confirm_reason` 的 `high_risk`
+分支。架构 §7.4 那张表里的「高风险」一类此前没有信号源，注销是它的第一个——判据
+是「**后果不可通过 App 内的任何操作挽回**」，而不是「会写库」（写库的 op 有三十
+多个）。它排在 multi_step / low_confidence 之前，与 warnings 带来的低置信构成
+**双保险**：两条判据各自独立，任一条被将来的改动放松，另一条仍拦得住。
+
+**回执字段（`transaction_ids`）的第二次语义扩张：** 05d 的四个执行体返回的
+`entity_type` 是 `export` / `feedback` / `user`——都不是 sync 的实体类型。它们的
+回执**不登 sync change**（设备 pull 的八类白名单里没有它们），`entity_type` 只是
+一个标签。见 `proposal_ops.OpReceipt` 的 docstring。
 
 ### payload 的所有权（本契约最重要的一处取舍）
 
