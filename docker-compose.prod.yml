@@ -41,6 +41,17 @@ x-api-env: &api-env
   AI_PROVIDER_API_KEY: ${AI_PROVIDER_API_KEY:-}
   AI_PROVIDER_MODEL: ${AI_PROVIDER_MODEL:-qwen3.7-flash}
   AI_PROVIDER_BASE_URL: ${AI_PROVIDER_BASE_URL:-https://dashscope.aliyuncs.com/compatible-mode/v1}
+  # --- AI Agent 路径（M7 / T-M7-02b，ADR-007）---
+  # 以下五项在 T-M7-05 收口前**完全没有接线**——compose 不透传，容器里恒为
+  # config.py 的默认值，于是 `AI_AGENT_ENABLED` 永远是 false、`/ai/agent` 恒 404，
+  # 「部署到 A 机后测 AI Agent」在配置上就不可能发生。agent 走 DeepSeek，
+  # 与上面快路径的 DashScope 是两套凭据，故单列。
+  AI_AGENT_PROVIDER_API_KEY: ${AI_AGENT_PROVIDER_API_KEY:-}
+  AI_AGENT_PROVIDER_MODEL: ${AI_AGENT_PROVIDER_MODEL:-deepseek-flash}
+  AI_AGENT_PROVIDER_BASE_URL: ${AI_AGENT_PROVIDER_BASE_URL:-https://api.deepseek.com}
+  # 灰度开关，默认关闭（与 config.py 同取向）。测试实例在下面单独开放。
+  AI_AGENT_ENABLED: ${AI_AGENT_ENABLED:-false}
+  AI_DEVICE_CHANNEL_ENABLED: ${AI_DEVICE_CHANNEL_ENABLED:-false}
   # 本文件不部署 OTel Collector，关闭埋点导出避免后台重试噪音；
   # 上 observability 栈时再改回 true（见 RUNBOOK 第 7 节）
   ENABLE_TELEMETRY: "false"
@@ -70,6 +81,13 @@ services:
       LOG_LEVEL: INFO
       # 测试环境游客配额临时放宽，方便连测；生产实例见 PROD_AI_QUOTA
       AI_DAILY_QUOTA_GUEST: ${TEST_AI_QUOTA:-100000}
+      # 测试实例**默认开放 agent 路径**（与上面的 TEST_AI_QUOTA 同一个道理：
+      # 这个实例存在的意义就是被测）。生产实例仍由共享块里的
+      # ``AI_AGENT_ENABLED`` 把关，默认关闭。
+      # 设备通道的开启时点按 ADR-010 决策 7 归 P4 收口 —— 05f 的客户端执行器
+      # 已交付，故此处一并打开；客户端还要 `AI_AGENT_CLIENT_ENABLED` 也开。
+      AI_AGENT_ENABLED: ${TEST_AI_AGENT_ENABLED:-true}
+      AI_DEVICE_CHANNEL_ENABLED: ${TEST_AI_DEVICE_CHANNEL_ENABLED:-true}
 
   api-prod:
     <<: *api-build
