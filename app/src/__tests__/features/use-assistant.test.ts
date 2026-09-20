@@ -248,7 +248,10 @@ describe('use-assistant — 免确认本地记账（T8-6）', () => {
     await waitFor(() => expect(result.current.cardStatus).toBe('committed'))
 
     const msg = useAssistantChatStore.getState().messages.find(m => m.proposal)
-    expect(msg?.proposal?.transactions?.[0].accountId).toBe('acc-def')
+    // 本用例走的是本地解析（v1 车道）——`AnyProposal` 是两条车道的并集，
+    // 这里明确收窄到 v1 再看 `transactions`（v2 没有那个根字段）。
+    expect((msg?.proposal as ActionProposal | undefined)?.transactions?.[0].accountId)
+      .toBe('acc-def')
   })
 
   it('T16-7：编辑链路同样回填（换账户后消息内提案 = 实际写入账户）', async () => {
@@ -263,7 +266,8 @@ describe('use-assistant — 免确认本地记账（T8-6）', () => {
     await act(async () => { await result.current.editProposal(edited) })
 
     const msg = useAssistantChatStore.getState().messages.find(m => m.proposal)
-    expect(msg?.proposal?.transactions?.[0].accountId).toBe('acc-new')
+    expect((msg?.proposal as ActionProposal | undefined)?.transactions?.[0].accountId)
+      .toBe('acc-new')
   })
 
   it('卡编辑换账户 → softDelete 旧 + insert 新且 accountId 更新', async () => {
@@ -473,7 +477,8 @@ describe('use-assistant — 免确认本地记账（T8-6）', () => {
 
     expect(mockBridge.insertTransaction).not.toHaveBeenCalled()
     expect(result.current.cardStatus).toBe('pending-category')
-    expect(result.current.activeProposal?.transactions?.[0].amountCents).toBe(5000)
+    expect((result.current.activeProposal as ActionProposal | null)?.transactions?.[0].amountCents)
+      .toBe(5000)
   })
 
   it('待选态选定分类 → 接管首次写入（无 softDelete），committed + 文案已记录', async () => {

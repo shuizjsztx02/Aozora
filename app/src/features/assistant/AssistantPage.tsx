@@ -20,10 +20,14 @@ import { useBridge } from '../../platform/hooks/use-bridge'
 import { usePermissions } from '../../platform/hooks/use-permissions'
 import { useVoice } from '../../platform/hooks/use-voice'
 import { useAssistant, type AssistantMessage, type CardStatus } from './use-assistant'
+// 车道判定来自契约层——放在这里（而不是从 use-assistant 取）也让本文件的测试
+// 不必在 `vi.mock` 里补这个导出。
+import { isV2Proposal } from '../../domain/action-proposal'
 import { StepCardStream } from './StepCardStream'
 import { ConversationList } from './ConversationList'
 import { useConversations } from './use-conversations'
 import { ConfirmationCard } from './ConfirmationCard'
+import { V2ConfirmationCard } from './V2ConfirmationCard'
 import { OpPreviewCard } from './OpPreviewCard'
 import { buildAiCategoryNames } from '../../domain/ai-proposal-builder'
 import { BatchConfirmationCard } from '../ledger/BatchConfirmationCard'
@@ -647,7 +651,9 @@ export function AssistantPage() {
           // 撤销依赖内存态 activeTxIdsRef，切页/重启后不可用）；当轮那张卡仍由下方
           // activeProposal 链路渲染，同一提案不重复出卡。
           const p = msg.proposal
-          const historyProposal = p && (p.transactions?.length ?? 0) > 0 &&
+          // 尾卡（R-PROD-31）：只读历史卡是 v1 的形状（读 `transactions`）——
+          // v2 提案没有那个根字段，它的回执由消息文本承载，这里不参与。
+          const historyProposal = p && !isV2Proposal(p) && (p.transactions?.length ?? 0) > 0 &&
             p.proposalId !== activeProposal?.proposalId ? p : null
           // T16-4（REQ-60）：助手侧左上、用户侧右上（flex-row-reverse 将头像与气泡整体镜像）
           const isUser = msg.role === 'user'
@@ -788,6 +794,20 @@ export function AssistantPage() {
             撤销不限 5s 窗，卡片存续期常驻可用（撤销后本卡随 activeProposal 清空卸载，
             消息流转「已撤销」灰态） */}
         {activeProposal && cardStatus && (
+          isV2Proposal(activeProposal) ? (
+            /* 尾卡（R-PROD-31）：v2 提案走**通用卡**——34 个 op 的 payload 形状各异，
+               逐 op 写卡等于把 34 种表单在客户端再实现一遍（见 V2ConfirmationCard 的
+               文件头）。确认入口复用 `editProposal` 的 pending-confirm 分支：
+               它调的 `commitProposalInternal` 会按车道分派到服务端 / 设备执行。 */
+            <V2ConfirmationCard
+              key={activeProposal.proposalId}
+              proposal={activeProposal}
+              status={cardStatus}
+              busy={streaming !== null}
+              onConfirm={() => { void editProposal(activeProposal) }}
+              onReject={rejectApproval}
+            />
+          ) : (
           <ConfirmationCard
             key={activeProposal.proposalId}
             proposal={activeProposal}
@@ -807,6 +827,7 @@ export function AssistantPage() {
             }
             onUndo={undoExecution}
           />
+          )
         )}
 
         {/* T9-8（REQ-16）：图片批量卡——消息流末尾，与文本单卡链路独立共存 */}

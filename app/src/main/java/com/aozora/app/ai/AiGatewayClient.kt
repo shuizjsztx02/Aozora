@@ -262,6 +262,14 @@ class AiGatewayClient(
     private fun buildAgentRequest(input: String, bookId: String, conversationId: String?): String {
         val body = JSONObject().put("input", input).put("book_id", bookId)
         if (conversationId != null) body.put("conversation_id", conversationId)
+        // 尾卡（R-PROD-31）：声明 v2 契约车道。
+        //
+        // **声明本身就是灰度旋钮**：不声明时服务端只注入 P1 的 15 个工具（写操作
+        // 仅 ``transaction_add``），声明后才是全量 56 个工具 / 16 域与 v2 信封
+        // （``AIAgentRequest.proposal_contract_version`` 的缺省是 1）。
+        // 渲染面（``V2ConfirmationCard``）与本字段**必须同时上线**——只声明不渲染
+        // 会让连记账都出不了卡，比不开更糟（收口记录 §六 的取舍）。
+        body.put("proposal_contract_version", PROPOSAL_CONTRACT_VERSION)
         return body.toString()
     }
 
@@ -449,5 +457,7 @@ class AiGatewayClient(
         private const val IMAGE_PARSE_TIMEOUT_SECONDS = 120L
         /** T-M7-02h: SSE 静默上限 = 架构 §8.3 的「单步静默 25 s」口径。 */
         private const val STREAM_READ_TIMEOUT_SECONDS = 25L
+        /** 尾卡（R-PROD-31）：本客户端声明的 ActionProposal 契约版本。 */
+        private const val PROPOSAL_CONTRACT_VERSION = 2
     }
 }

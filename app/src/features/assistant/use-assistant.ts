@@ -78,7 +78,8 @@
  */
 
 import { useState, useCallback, useRef, useEffect, useMemo } from 'react'
-import type { ActionProposal } from '../../domain/action-proposal'
+import type { ActionProposal, ActionProposalV2 } from '../../domain/action-proposal'
+import { isV2Proposal } from '../../domain/action-proposal'
 import { parseInput, type ParseContext } from '../../domain/nlu/parser'
 import {
   buildProposalFromAiOutput, parseAiInterpretOutput, hasOpConditions, applyOpFilter,
@@ -123,7 +124,7 @@ export interface AssistantMessage {
   id: string
   role: 'user' | 'assistant'
   text: string
-  proposal?: ActionProposal
+  proposal?: AnyProposal
   proposalStatus?: 'pending' | 'confirming' | 'executing' | 'committed' | 'undone' | 'error'
   transactionIds?: string[]
   verdict?: AiValidateVerdict
@@ -188,8 +189,57 @@ export type ApprovalOutcome = 'allowed-once' | 'rejected' | 'cancelled' | 'unava
  * 审批策略（单 Step 自动 / 多步强制）是**服务端**的判定，客户端不重算。
  */
 export interface PendingApproval {
-  proposal: ActionProposal
+  proposal: AnyProposal
   step: number | null
+}
+
+/**
+ * 尾卡（R-PROD-31）：**两条车道的提案**都可能是挂起态的那一张。
+ *
+ * `contractVersion` 在场与否就是车道判据（与 `validateProposalAny` 同一把尺子）——
+ * 服务端为一个不认识 v2 的旧客户端降级产出 v1，本客户端两条都得能收。
+ */
+export type AnyProposal = ActionProposal | ActionProposalV2
+
+/** 车道判定见契约层（`domain/action-proposal.ts` 的 `isV2Proposal`）——本文件
+ *  只是转发它，方便 `use-assistant` 的既有调用点少一个 import。 */
+export { isV2Proposal } from '../../domain/action-proposal'
+
+/**
+ * 尾卡（R-PROD-37）：**设备执行 op → 桥命令**的分派表。
+ *
+ * 这四个 op 的服务端**只挂起不执行**（`tools.DEVICE_EXECUTED_OPS`）——它们写的
+ * 是设备本地的状态（当前角色指针 / 隐私同意 / 同步触发 / 提醒调度），服务端没有
+ * 落点。所以客户端必须自己把它们落到桥命令上，否则表现就是 R-PROD-37 记的那个
+ * 形态：确认卡点下去、回执说成功、实际什么都没发生。
+ *
+ * 表里的四条桥命令**都已存在**（`native-bridge.ts` 的 `setMeta` / `recordConsent` /
+ * `triggerSync` / `setReminder`），本卡不需要新增通道——因此**不触桥命令计数面**。
+ *
+ * 参数形状与 `tools.py` 里各工具体产出的 `payload` **逐字对应**：那一侧按同一份
+ * 定义写，中间不做翻译，两边因此不会漂移。
+ */
+/**
+ * 设备分派表需要的那几个桥方法——**结构化窄接口**（同 `AgentStreamBridge` 的做法：
+ * 只声明用到的部分，不要求整个 bridge 类型）。这样表可以写在 hook 外面，
+ * 也不必把 `useBridge()` 的具体类型引进来。
+ */
+export interface DeviceOpBridge {
+  setMeta(key: string, value: string): Promise<unknown>
+  recordConsent(): Promise<unknown>
+  triggerSync(): Promise<unknown>
+  setReminder(enabled: boolean, hour: number, minute: number): Promise<unknown>
+}
+
+export const DEVICE_OP_DISPATCH: Record<
+  string,
+  (payload: Record<string, unknown>, bridge: DeviceOpBridge) => Promise<unknown>
+> = {
+  persona_switch: (p, bridge) => bridge.setMeta('active_persona_id', String(p.personaId ?? '')),
+  consent_record: (_p, bridge) => bridge.recordConsent(),
+  sync_trigger: (_p, bridge) => bridge.triggerSync(),
+  reminder_set: (p, bridge) =>
+    bridge.setReminder(Boolean(p.enabled), Number(p.hour), Number(p.minute)),
 }
 
 /**
@@ -306,7 +356,7 @@ interface UseAssistantReturn {
   messages: AssistantMessage[]
   phase: AssistantPhase
   /** 常驻卡数据；解析成功后设置，撤销后清除。 */
-  activeProposal: ActionProposal | null
+  activeProposal: AnyProposal | null
   cardStatus: CardStatus | null
   isSlow: boolean
   /** T12-11：edit/delete 意图圈定后的待确认操作（null=无）；确认/取消后清空。 */
@@ -348,7 +398,7 @@ interface UseAssistantReturn {
   dismissDeviceVoice: (status?: 'denied' | 'failed') => void
   /** 卡片编辑保存：softDelete 旧笔 + insert 新（编辑 = 替换写）。
    *  T12-9（REQ-35）：overrides = 卡内账本/预算 chip 覆盖（首提与替换写均生效）。 */
-  editProposal: (edited: ActionProposal, overrides?: ProposalWriteOverrides) => Promise<void>
+  editProposal: (edited: AnyProposal, overrides?: ProposalWriteOverrides) => Promise<void>
   undoExecution: () => Promise<void>
   /** T12-11：执行 pendingOp（逐笔 update/softDelete，上限 50；部分失败可见）。 */
   confirmOp: () => Promise<void>
@@ -449,7 +499,7 @@ export function useAssistant({
   const setCursor = useAssistantChatStore(s => s.setCursor)
   const forgetCursor = useAssistantChatStore(s => s.forgetCursor)
   const [phase, setPhase] = useState<AssistantPhase>('idle')
-  const [activeProposal, setActiveProposal] = useState<ActionProposal | null>(null)
+  const [activeProposal, setActiveProposal] = useState<AnyProposal | null>(null)
   const [cardStatus, setCardStatus] = useState<CardStatus | null>(null)
   const [isSlow, setIsSlow] = useState(false)
   // T12-11（REQ-37）：edit/delete 意图的待确认操作卡
@@ -522,7 +572,7 @@ export function useAssistant({
   // ───────────────────────────────────────────────────────────────────────────
 
   /** 把一张挂起提案放进确认门队列。重复的 / 已处置的 → false（不成第二张卡）。 */
-  const enqueueApproval = useCallback((proposal: ActionProposal, step: number | null): boolean => {
+  const enqueueApproval = useCallback((proposal: AnyProposal, step: number | null): boolean => {
     const id = proposal.proposalId
     if (!id) return false
     if (handledApprovalsRef.current.has(id)) return false
@@ -668,13 +718,63 @@ export function useAssistant({
     setPhase('idle')
   }, [])
 
+  /**
+   * 尾卡（R-PROD-31）：**v2 提案的执行**——与 v1 完全不同的路径。
+   *
+   * v1 是「客户端本地写 + sync push」；v2 是**服务端执行**（`/ai/execute`，服务端
+   * 重新校验 + 重新授权后落权威库），设备 op 例外——服务端没有它们的落点
+   * （`DEVICE_EXECUTED_OPS`），由本机经既有桥命令执行。
+   *
+   * 回执文案直接用提案自带的 `message`：05b 起每个工具都产出一句人类可读的中文
+   * （`tools.py` 里 37 处 `"message"`），它就是为这一刻写的——所以**通用卡片
+   * 不需要按 op 各写一套文案**。
+   */
+  const commitV2Proposal = useCallback(async (
+    proposal: ActionProposalV2,
+  ): Promise<boolean> => {
+    if (!bookId) { pushBookMissingError(proposal.proposalId); return false }
+    setPhase('executing')
+    setCardStatus('executing')
+    try {
+      const dispatch = DEVICE_OP_DISPATCH[proposal.action]
+      if (dispatch) {
+        await dispatch(proposal.payload ?? {}, bridge)
+      } else {
+        await bridge.executeProposal(
+          proposal as unknown as Record<string, unknown>, bookId, newUuid(),
+        )
+      }
+      setMessages(prev => prev.map(m =>
+        m.proposal?.proposalId === proposal.proposalId
+          ? { ...m, proposalStatus: 'committed' as const, text: `✅ ${proposal.message}` }
+          : m
+      ))
+      setCardStatus('committed')
+      setPhase('idle')
+      try { await bridge.triggerSync() } catch { /* ignore */ }
+      return true
+    } catch (err) {
+      const errMsg = localizeBridgeError(err instanceof Error ? err.message : '未知错误')
+      setMessages(prev => prev.map(m =>
+        m.proposal?.proposalId === proposal.proposalId
+          ? { ...m, proposalStatus: 'error' as const, text: `❌ 执行失败：${errMsg}` } : m
+      ))
+      setCardStatus('error')
+      setPhase('idle')
+      return false
+    }
+  }, [bridge, bookId, pushBookMissingError])
+
   /** 首次本地提交（解析成功后自动触发，无确认按钮）。
    *  T12-9：overrides.bookId 存在时视为卡内已选账本，hook 层 bookId 缺失也可写。
    *  T-M7-03e：返回**是否真的写进去了**——确认门据此决定要不要把队列里的下一张顶上来
    *  （失败时要让 error 卡留在屏幕上给重试入口）。 */
   const commitProposalInternal = useCallback(async (
-    proposal: ActionProposal, overrides?: ProposalWriteOverrides,
+    proposal: AnyProposal, overrides?: ProposalWriteOverrides,
   ): Promise<boolean> => {
+    // 尾卡（R-PROD-31）：按车道分流。v1 走下面的本地写路径（**一字未改**），
+    // v2 走服务端 / 设备执行——两条路径的存储权威不同（本地 Room vs 服务端库）。
+    if (isV2Proposal(proposal)) return commitV2Proposal(proposal)
     if (!bookId && !overrides?.bookId) { pushBookMissingError(proposal.proposalId); return false }
     setPhase('executing')
     setCardStatus('executing')
@@ -1381,12 +1481,15 @@ export function useAssistant({
   /** 卡片编辑保存：替换写（softDelete 旧 + insert 新），不新增 transaction.update。
    *  T12-9（REQ-35）：overrides 透传给首提与替换写（卡内切账本 = 该笔改挂新账本）。 */
   const editProposal = useCallback(async (
-    edited: ActionProposal, overrides?: ProposalWriteOverrides,
+    edited: AnyProposal, overrides?: ProposalWriteOverrides,
   ) => {
     if (!bookId && !overrides?.bookId) { pushBookMissingError(edited.proposalId); return }
     // T12-8（REQ-30 ①）：待选分类态——分类补齐前编辑只回写消息（不写库、态保持），
     // 选定分类后接管首次写入（commitProposalInternal：文案「已记录 N 笔」+ triggerSync）
     if (isPendingCategoryRef.current) {
+      // 尾卡（R-PROD-31）：v2 没有「待选分类」这回事——它的 payload 形状由服务端
+      // 工具注册表拥有，补分类是 v1 本地解析路径的产物。这条守卫同时给类型收窄。
+      if (isV2Proposal(edited)) return
       setActiveProposal(edited)
       setMessages(prev => prev.map(m =>
         m.proposal?.proposalId === edited.proposalId ? { ...m, proposal: edited } : m
@@ -1419,6 +1522,11 @@ export function useAssistant({
       if (written) showPendingApproval()
       return
     }
+    // 尾卡（R-PROD-31）：走到这里只剩 v1——v2 提案只可能来自确认门（服务端挂起的
+    // 那一张），上面那个分支已经 return 了。这条守卫既是给类型收窄，也是**下一道
+    // 防线**：万一将来有别的路径把 v2 送进来，它不会掉进下面的 v1 写路径
+    // （那条路径读 `transactions`，对 v2 读到的是 undefined，会静默什么都不写）。
+    if (isV2Proposal(edited)) return
     const oldIds = activeTxIdsRef.current
     setPhase('executing')
     setCardStatus('executing')

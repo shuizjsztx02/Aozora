@@ -322,6 +322,16 @@ export function validateProposalV2(input: unknown): ValidationResult {
 
 export type ProposalContractVersion = 1 | 2
 
+/**
+ * 车道判定（类型守卫）：**有 `contractVersion` 就是 v2 信封**。
+ *
+ * 与 `validateProposalAny` 用同一把尺子（在场与否）。放在契约层而不是 hook 里，
+ * 是因为它只依赖契约本身——任何人拿到一份提案都能判车道，不需要经过 hook。
+ */
+export function isV2Proposal(p: ActionProposal | ActionProposalV2): p is ActionProposalV2 {
+  return (p as { contractVersion?: unknown }).contractVersion === PROPOSAL_CONTRACT_VERSION_V2
+}
+
 export interface DualReadResult extends ValidationResult {
   /** 实际走到的车道；输入不是对象时为 null。 */
   contractVersion: ProposalContractVersion | null
