@@ -17,7 +17,7 @@
 | **05c** | 全量工具：预算存钱、定时、角色域 | ⏳ 未开始 | | | 批次 3 |
 | **05d** | 全量工具：分析与其余服务端域 | ⏳ 未开始 | | | 批次 4 |
 | **05e** | 设备能力通道：服务端协议与 loop 暂停/恢复 | ✅ 完成 | 2026-09-19 | `ec05120` | 批次 2；服务端侧全部交付，客户端执行器归 05f；开关默认关闭（`AI_DEVICE_CHANNEL_ENABLED`） |
-| **05f** | 设备能力通道：客户端执行器与设备工具接线 | ⏳ 未开始 | | | 批次 3 |
+| **05f** | 设备能力通道：客户端执行器与设备工具接线 | ✅ 完成 | 2026-09-20 | `62199c0` | 批次 3；命令计数 83 → 85；桥侧执行器（分派 + status 归一化）+ WebView 侧编排；六能力**逐条走查通过**；闸门默认值未动（见 §六） |
 | **05g** | 域路由与预路由 | ⏳ 未开始 | | | 批次 5 |
 | **05h** | Skill 封装与按需加载 | ⏳ 未开始 | | | 批次 4 |
 | **05i** | 帮助文档检索（**可选，可砍**） | ⏳ 未开始 | | | 批次 5 |
@@ -176,6 +176,7 @@ cd app && npx tsc --noEmit                       # 0 错
 | 7 | **`ai_agent_step_timeout_seconds=20` 是初值**（02d 实测深档单步 5–7 s，真实分布待统计） | 02g / 02g-2 §五 | **收口**（全量工具与设备通道接上后按真实分布校准） |
 | 8 | **会话级配额数值（50 轮 / 500k token）与合并窗参数均为初始值** | 02f / 02g-2 §五 | **收口**（按真实使用分布校准） |
 | 9 | **R-PROD-22 残余：经真实 nginx 的 SSE 端到端确认** | 02g §五 | **收口 / 部署执行者**（P4 覆盖度走查时一并确认） |
+| 10 | **`meta_set`（默认账本 / 默认账户）的客户端执行未落地**——05b 把它登记为 `tools.DEVICE_EXECUTED_OPS`（服务端只挂起、`/ai/execute` 对它回 400 `ai_device_op_not_executable`），架构文档把执行侧指派给「05f 的设备执行器」；**05f 未接**（卡面产出与验收均不含它，且它不止是"执行"一处——`ConfirmationCard` 按 `transactions` 渲染，而 `meta_set` 提案没有 transactions，卡面同样是空的）。**当前形态：用户确认后卡显示「已记录 0 笔交易」——静默无效**（比报错更糟）。见 R-PROD-37 | 05b §六 / 架构 §4.3 | **05g 或 P4 收口**（认领前先把「设备执行 op」的执行 + 卡面渲染一起设计，别只补执行） |
 
 ---
 
@@ -409,6 +410,113 @@ cd app && npx tsc --noEmit                       # 0 错
   **另一处值得记的**：四板里 TS / JVM 两块与本卡零交集，但在共享树上会被别人的在途
   改动污染（实测：05f 在途时 bridge 命令计数用例红）——**要报告的是「本卡的四板」，
   就得在隔离树里跑**，否则会把别人的半成品记成自己的失败。
+```
+
+### 05f 设备能力通道：客户端执行器与设备工具接线（2026-09-20，`62199c0`）
+
+```text
+任务编号：T-M7-05f（P4 批次 3，客户端侧）
+完成范围 / 明确未做：
+  完成——① 桥命令 device.execute / device.result（**命令计数 83 → 85**，四处清单 +
+  SecurityConfigTest 断言同一次改完）；② 桥侧执行器：能力名 → 既有设备类 handler 的
+  分派 + 各错误码族 → 协议四值的归一化；③ AiGatewayClient.submitDeviceResult
+  （POST /ai/device-result，404 等价于成功）；④ TS 侧契约（命令常量、帧与结局类型）
+  与两个桥方法；⑤ device-executor.ts（WebView 侧编排：帧 → 执行 → 需结果类顺带回传）；
+  ⑥ use-assistant-stream 的 onDeviceRequest 实时转发（与 onConfirm 同范式）；
+  ⑦ use-assistant / AssistantPage 接线，含语音的界面承接；⑧ 15 个 Kotlin 用例 +
+  11 个 TS 用例。
+  未做（刻意，非遗漏）——① 服务端一行未动（05e 已闭环，本卡是它的消费侧）；
+  ② **闸门默认值不动**（ai_device_channel_enabled 仍 false，开启时点归 P4 收口）；
+  ③ **不自动开麦**——模型下发 voice.transcribe 时替用户打开麦克风是不该有的默认
+  （T12-1 的语音按需授权口径），执行器只置位、由用户点既有 mic 按钮；
+  ④ 不回传失败重试（服务端的挂起有 ai_device_timeout_seconds 自己的收敛路径）；
+  ⑤ R-PROD-17 的选择准确率实测（1 个数据点，见下）；
+  ⑥ **`meta_set` 的客户端执行未接**——05b 把它登记为 `tools.DEVICE_EXECUTED_OPS` 并在
+  架构文档里把执行侧指派给「05f 的设备执行器」。**本卡刻意不接**：卡面的产出与验收
+  列的都是**设备能力通道**（`device_request` 的 6 个 capability），而 `meta_set` 是
+  ActionProposal 的一条 op——它要的是**确认卡链路的改造**（执行时按 op 分派到设备、
+  卡面按 op 渲染），不是设备通道的分派表。只补"执行"会得到一个仍然空白的卡面。
+  已登记为挂账项 10 + R-PROD-37（现状是**静默无效**，见下）。
+修改的文档、契约与代码：
+  app/src/main/.../bridge/BridgeProtocol.kt（+2 常量 + ALL）、AozoraBridge.kt
+  （dispatch +2 分支、handleDeviceExecute / handleDeviceResult / deviceOutcome /
+  requestDevicePermission）、ai/AiGatewayClient.kt（submitDeviceResult）、
+  app/src/platform/bridge/bridge-types.ts（命令 + DeviceRequestFrame /
+  DeviceExecuteResult / DeviceOutcomeStatus / DeviceResultAck）、native-bridge.ts
+  （executeDevice / resultDevice）、features/assistant/device-executor.ts（新）、
+  use-assistant-stream.ts（onDeviceRequest + 投影注释笔误改正）、use-assistant.ts、
+  AssistantPage.tsx、SecurityConfigTest.kt（83 → 85）、
+  app/src/test/.../bridge/AozoraBridgeDeviceTest.kt（新，15 例）、
+  app/src/__tests__/features/device-executor.test.ts（新，11 例）、
+  native-bridge.test.ts（命令清单 + 计数 85）。
+验证命令与结果（**合流后复跑**——05b 的 `733379e` 已落在本卡之后，见「并发记要」）：
+  cd app && npx tsc --noEmit                     → 0 错
+  cd app && npx vitest run                       → 85 files / 1338 passed（+1 文件 +11 例）
+  ./gradlew :app:testDebugUnitTest --rerun-tasks  → BUILD SUCCESSFUL，439 tests / 0 失败
+                                                    （+15：AozoraBridgeDeviceTest）
+  cd server && python -m pytest tests/ -q          → **1344 passed / 37 skipped**
+                                                    （合流后；本卡零改动，1290 → 1344 的增量
+                                                    全部来自 05b 的服务端用例）
+  **逐能力走查（模拟器 Pixel_7_API_36，真实 Android 路径）**：
+  走查前置（重要，后续走查者必读）：服务端需 AI_DEVICE_CHANNEL_ENABLED=true **且**
+  AI_AGENT_ENABLED=true（后者默认 false，端点直接 503 agent_disabled）；客户端
+  **AI_AGENT_CLIENT_ENABLED 默认 false**，走的是 ai.interpret 老链路（无工具集、
+  无 device_request 帧）——走查期间临时置 true 并重建 APK，**走查后已还原**
+  （git diff 为空，见「兼容与回退」）。
+  ① 桥直调（device.execute × 7）：触感 → {status:ok,data:{ok:true}}；小组件 →
+  {status:ok,data:{success:true}}；未知能力 → unavailable；缺 capability →
+  invalid_input；空文本分享 → failed；权限已授予 → {status:ok,data:{permission,
+  status:"granted"}}；相册取消 → **denied**（真实 PhotopickerGetContentActivity
+  弹出后 BACK）。**系统权限框与相册选择器都真实弹出**，证明分派落到了既有命令上。
+  ② 端到端·单向（「给我一个震动反馈」）：phase(thinking,fast) → tool_call
+  device_haptic「正在给一次触感反馈…」→ device_request{kind:one_way} →
+  tool_result **status:ok** → phase(thinking,deep) → delta→ **done completed**
+  （steps 2 / tool_calls 1）——**下发即继续、不等回传**成立。
+  ③ 端到端·需结果（「帮我从相册里选一张图片」）：device_request{kind:result,
+  capability:image.pick,timeout_seconds:120} → 相册弹出 → 用户取消 →
+  tool_result **code:device_denied**（服务端 ERR_DEVICE_DENIED 文案）→
+  **loop 继续**（step 2 deep）→ 模型按降级文案解释「这次相册选择被取消了……
+  需要我改成直接拍照，跟我说一声就行」→ done completed。
+  ④ 端到端·语音（「请让我说一段话，你转成文字」）：device_request
+  {capability:voice.transcribe} → **页面出现提示条**「🎤 助手想听你说一句——点麦克风
+  开始」+ 步骤卡「正在等待语音输入…」 → 点 mic（先真实弹出 RECORD_AUDIO 权限框，
+  授予后）→ 录制（mic 变「停止录音」）→ 停止 → 空文本按 denied 结算 →
+  tool_result device_denied → **loop 继续** → 模型解释并提示可去设置页开权限 →
+  done completed。
+数据/同步/AI/安全影响：
+  AI 协议面：device_request 从「有生产者」变成「有消费者」——两处协议取值
+  （DELIVERABLE_STATUSES 四值、kind 两值）在 Kotlin 侧有了同构副本。
+  同步 / 数据模型：零改动（设备动作不写库）。
+  安全：**Token 不出 Kotlin 层**（ADR-003 不变）——回传 POST 也走 AiGatewayClient；
+  三条铁律未触及；设备动作不占写预算（05e 口径）。
+  分派表只调用既有 handler、不复制它们的实现（既有的界面直调路径一行未改）。
+兼容与回退方式：
+  旧 APK（命令表无 device.execute/device.result）→ device-executor 的能力探测
+  直接安静退出（帧原样留在投影里，服务端等满超时自行收敛），界面不报错。
+  走查期间的 AI_AGENT_CLIENT_ENABLED 临时置 true **已还原**，工作区对 HEAD 无差异。
+  整卡回退＝不打开 ai_device_channel_enabled。
+开放风险与责任人：
+  ① **R-PROD-35 更新**（05f 就位、六能力走查通过；剩「开启时点」归 P4 收口）；
+  ② 新增 **R-PROD-36**：设备工具的**选择准确率只有 1 个数据点**（本卡 4 条走查输入
+     里 4 次命中、0 次误选），量级不足以支撑 R-PROD-17 的结论——按 R-PROD-17 口径
+     的实测归 P4 收口（责任人：05g / 收口）；
+  ③ 语音的录音内容在模拟器上为空（无声输入），**真机口述的转写回传路径未走**
+     （空文本 → denied 那条已走）——归真机走查（责任人：收口）。
+  ④ 新增 **R-PROD-37**：`meta_set` 提案在客户端是**静默无效**的（确认后卡显示
+     「已记录 0 笔交易」，实际什么都没写）。这是 05b 的 `DEVICE_EXECUTED_OPS` 与
+     客户端确认卡链路之间**没有对接**的结果——本卡未接的理由见「未做 ⑥」，
+     归属见 §五 挂账项 10。
+并发记要（供下一卡参考）：
+  ① 本卡提交（62199c0）之后，05b（733379e）落在同一个 main 上——**它改的是服务端**，
+  与本卡的 app/ 文件面零交集；本卡因此在合流后复跑了四板，数字如上。
+  ② **本轮走查的最大时间陷阱是客户端 agent 流的默认关闭**：不打开它，输入会走
+  ai.interpret 老链路（本地 NLU 认得记账句就直接本地写入），表现为「模型回复了但
+  一个流帧都没有」——先查开关再怀疑链路。
+  ③ 模拟器小坑：用 KEYCODE_BACK 关掉系统权限框会把 App 一并退出（WebView 调试端口
+  随之失效，需按新 PID 重建 adb forward）；相册选择器同理会退出。**授予权限请用
+  `adb shell pm grant`，不要点框上的按钮或按 BACK**。
+下一项未阻塞任务：05c（预算存钱 / 定时 / 角色域）与 05h（Skill 封装）——批次 3/4，
+  两卡文件面不同；05d 依赖 05c 的注册表形态。
 ```
 
 ---
