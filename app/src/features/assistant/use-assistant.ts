@@ -45,7 +45,8 @@
  *   - **职责边界：** 不做步骤卡片流、不做多会话、不做模式选择（归 P2 / T-M7-03）。
  *     三个互斥瞬时态（activeProposal / pendingOp / pendingConfig）的约束不变。
  *   - **桥命令由 T-M7-02h 提供，本卡只消费**：`bridge.runAgent` / `bridge.onAiStream`
- *     （取消的 `bridge.cancelAgent` 协议已就绪但本卡未接线——P1 无 UI 触发点）。
+ *     （取消的 `bridge.cancelAgent` 协议已就绪但本卡未接线——P1 无 UI 触发点；
+ *     接线见下方 T-M7-03b 段落）。
  *     本文件用**结构化窄接口 + 运行时能力探测**取用它们（见 `AgentStreamBridge`），
  *     因此桥未落地或 APK 版本落后时自动回落，不需要与 02h 并行改同一批文件。
  *   - 开关关闭**或桥不具备能力** → 整条回落既有 ai.interpret 单发链路，12 s / 25 s 体验不变。
@@ -259,8 +260,10 @@ export interface PendingConfig {
  * **默认关闭**：与服务端同口径的灰度默认值。开启前须确认服务端开关已开、且本机
  * APK 是带 `ai.agent` / `ai.cancel` 命令的版本——桥命令表里没有这两条时，
  * `runAgent` 会以桥错误 reject，本轮直接按失败收尾（不会静默回落）。
+ *
+ * ⚠️ 2026-09-20（M7 收口轮）：**临时置 true 做真机联测**，测后按裁决恢复。
  */
-export const AI_AGENT_CLIENT_ENABLED = false
+export const AI_AGENT_CLIENT_ENABLED = true
 
 interface UseAssistantOptions {
   categories: CategoryData[]
