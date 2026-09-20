@@ -30,6 +30,7 @@ from src.common.telemetry import record_ai_gateway
 from src.models.ai import AIUsage
 from src.models.user import User, UserStatus
 
+from .authorization import authorize_payload
 from .prompts import (
     INTERPRET_TASK,
     REPORT_TASK,
@@ -38,6 +39,7 @@ from .prompts import (
     render_messages,
     render_messages_with_context,
 )
+from .proposal_ops import execute_op
 from .provider import LLMProvider, ProviderError, ProviderResult
 from .schemas import (
     AIInterpretRequest,
@@ -611,8 +613,20 @@ class AIService:
         The order matters: schema errors are reported first because they
         mean the input is malformed — hallucination checks would be
         meaningless on a structurally invalid proposal.
+
+        **两条车道（T-M7-05b）。** 车道按 ``contractVersion`` 在场与否判定
+        （05a 的双读入口）：
+
+        - **v1** —— 逐字沿用 P1：schema → 幻觉（categoryId / accountId 对拍
+          上下文）→ 低置信。下列判定与顺序一行未改。
+        - **v2** —— 信封由 ``validate_proposal_v2`` 校验；**payload 里的 id 不在
+          这里对拍**，因为它们需要查库（交易 / 账本归属），由
+          ``authorization.authorize_payload`` 在**组装与执行时**施加——
+          ``/ai/validate`` 与 ``execute_proposal`` 各自调用它一次。
+          本函数的 v2 分支只做信封 + 低置信两道，因此它**不是**执行许可
+          （同 ``ai-architecture.md`` 的「结构通过不是执行许可」）。
         """
-        from .validator import validate_proposal as _schema_validate
+        from .validator import validate_proposal_any
 
         # Confidence threshold — matches the local NLU in
         # ``app/src/domain/nlu/parser.ts`` (confidence < 0.9 → require
@@ -621,7 +635,25 @@ class AIService:
         # AI-produced proposal and auto-execute it.
         CONFIDENCE_THRESHOLD = 0.9
 
-        result = _schema_validate(proposal)
+        result = validate_proposal_any(proposal)
+        proposal_dict = proposal if isinstance(proposal, dict) else {}
+
+        if result["contractVersion"] == 2:
+            if not result["valid"]:
+                return {
+                    "valid": False,
+                    "errors": result["errors"],
+                    "verdict": "rejected_schema",
+                }
+            confidence = proposal_dict.get("confidence")
+            if isinstance(confidence, (int, float)) and confidence < CONFIDENCE_THRESHOLD:
+                return {
+                    "valid": True,
+                    "errors": [],
+                    "verdict": "rejected_low_confidence",
+                }
+            return {"valid": True, "errors": [], "verdict": "accepted"}
+
         if not result["valid"]:
             return {
                 "valid": False,
@@ -631,7 +663,6 @@ class AIService:
 
         # Context-based checks. ``proposal`` is schema-valid here, so we
         # can trust its shape (typed access is safe).
-        proposal_dict = proposal if isinstance(proposal, dict) else {}
         hallucination_errors: list[dict[str, str]] = []
         transactions = proposal_dict.get("transactions") or []
         for i, tx in enumerate(transactions):
@@ -706,6 +737,8 @@ class AIService:
         from src.modules.sync.repository import SyncRepository
         from src.modules.transactions.service import TransactionService
 
+        from .validator import validate_proposal_any
+
         proposal_id = proposal.get("proposalId")
 
         # ── Idempotency check ────────────────────────────────────────────
@@ -751,67 +784,111 @@ class AIService:
 
         # Extract action and transactions
         action = proposal.get("action")
-        transactions = proposal.get("transactions", [])
+        lane = validate_proposal_any(proposal)["contractVersion"]
+        #: 对外回执里的 id 列表。**v1 车道是交易的 id**（字段名 ``transaction_ids``
+        #: 即由此而来）；v2 车道是本次 op 影响的**实体** id（改 / 归档是同一个 id
+        #: 的新版本，新建是新 id）——列名沿用是为了不动既有回执契约，语义见
+        #: ``proposal_ops.OpReceipt``。
+        transaction_ids: list[str] = []
 
-        if action not in ("add_tx", "add_tx_batch"):
-            raise AppException(
-                400, "ai_unsupported_action",
-                f"Action '{action}' is not executable via /ai/execute",
-            )
-
-        if not transactions:
-            raise AppException(400, "ai_no_transactions", "Proposal has no transactions")
-
-        # Build transaction items
-        items = []
-        for tx in transactions:
-            biz_date_str = tx.get("bizDate")
-            try:
-                biz_date = date_type.fromisoformat(biz_date_str)
-            except (ValueError, TypeError):
-                raise AppException(400, "ai_invalid_date", f"Invalid bizDate: {biz_date_str}")
-
-            items.append({
-                "type": tx.get("type"),
-                "amount_cents": tx.get("amountCents"),
-                "category_id": uuid.UUID(tx["categoryId"]) if tx.get("categoryId") else None,
-                "account_id": uuid.UUID(tx["accountId"]) if tx.get("accountId") else None,
-                "note": tx.get("note", ""),
-                "biz_date": biz_date,
-            })
-
-        # T14-3（REQ-40 / 决策 #5）：任一行缺分类 → 落库前 400 拦截。
-        # Transaction.category_id 是 NOT NULL，缺分类直达 create_transaction_batch
-        # 会 IntegrityError → 500 英文（旧链路）。400 + code 可被前端映射中文。
-        if any(item["category_id"] is None for item in items):
-            raise AppException(
-                400, "ai_missing_category",
-                "有记录未识别到分类，请在卡片中选择分类后重试",
-            )
-
-        # Execute atomically
-        tx_service = TransactionService(self._db)
-        created = await tx_service.create_transaction_batch(
-            user_id=user.id,
-            book_id=book_id,
-            items=items,
-            source="ai",
-        )
-        transaction_ids = [str(tx.id) for tx in created]
-
-        # T14-8 修复：execute 是服务端权威直写，只有 sync push 路径写
-        # sync_changes——不在此登记则任何设备 pull 永远看不到这笔交易
-        # （模拟器实测：确认卡显示「已记录」但本机查无）。与 push 的
-        # _apply_mutation 同口径：insert / version=1，同事务提交。
-        sync_repo = SyncRepository(self._db)
-        for tx in created:
-            await sync_repo.write_change(
+        if lane == 2:
+            # ── v2 车道的 payload 级授权（**所有** op，含记账）─────────────
+            # 再跑一次（TOCTOU）：/ai/validate 之后 payload 可能被改过，而它正是
+            # 执行要用的那一份（05a：结构通过不是执行许可）。
+            #
+            # **记账 op 必须一起过这道门**：它虽然走与 v1 共用的批量写路径，
+            # 但那条路径只校验账本与分类的归属（``_verify_category_ownership``），
+            # **账户 id 不校验**——v1 靠上下文对拍挡住账户，v2 的对拍就在这里。
+            # 漏掉它等于放行「把别人的账户 id 写进自己的流水」。
+            auth_errors = await authorize_payload(
+                self._db,
                 user_id=user.id,
-                entity_type="transaction",
-                entity_id=tx.id,
-                operation=SyncOperation.INSERT,
-                version=tx.version,
+                book_id=book_id,
+                op=str(action),
+                payload=proposal.get("payload"),
             )
+            if auth_errors:
+                raise AppException(
+                    403, "ai_proposal_rejected",
+                    "Proposal payload failed authorization",
+                )
+
+        if lane == 2 and action != "transaction_add":
+            # ── v2 车道：非记账 op（T-M7-05b）────────────────────────────
+            receipt = await execute_op(
+                self._db,
+                user_id=user.id,
+                book_id=book_id,
+                op=str(action),
+                payload=proposal.get("payload"),
+            )
+            transaction_ids = [str(entity_id) for entity_id in receipt.entity_ids]
+        else:
+            # ── v1 车道 + v2 的记账 op：同一条写路径 ─────────────────────
+            if lane == 2:
+                payload = proposal.get("payload")
+                transactions = (payload or {}).get("transactions") or []
+            else:
+                if action not in ("add_tx", "add_tx_batch"):
+                    raise AppException(
+                        400, "ai_unsupported_action",
+                        f"Action '{action}' is not executable via /ai/execute",
+                    )
+                transactions = proposal.get("transactions", [])
+
+            if not transactions:
+                raise AppException(400, "ai_no_transactions", "Proposal has no transactions")
+
+            # Build transaction items
+            items = []
+            for tx in transactions:
+                biz_date_str = tx.get("bizDate")
+                try:
+                    biz_date = date_type.fromisoformat(biz_date_str)
+                except (ValueError, TypeError):
+                    raise AppException(400, "ai_invalid_date", f"Invalid bizDate: {biz_date_str}")
+
+                items.append({
+                    "type": tx.get("type"),
+                    "amount_cents": tx.get("amountCents"),
+                    "category_id": uuid.UUID(tx["categoryId"]) if tx.get("categoryId") else None,
+                    "account_id": uuid.UUID(tx["accountId"]) if tx.get("accountId") else None,
+                    "note": tx.get("note", ""),
+                    "biz_date": biz_date,
+                })
+
+            # T14-3（REQ-40 / 决策 #5）：任一行缺分类 → 落库前 400 拦截。
+            # Transaction.category_id 是 NOT NULL，缺分类直达 create_transaction_batch
+            # 会 IntegrityError → 500 英文（旧链路）。400 + code 可被前端映射中文。
+            if any(item["category_id"] is None for item in items):
+                raise AppException(
+                    400, "ai_missing_category",
+                    "有记录未识别到分类，请在卡片中选择分类后重试",
+                )
+
+            # Execute atomically
+            tx_service = TransactionService(self._db)
+            created = await tx_service.create_transaction_batch(
+                user_id=user.id,
+                book_id=book_id,
+                items=items,
+                source="ai",
+            )
+            transaction_ids = [str(tx.id) for tx in created]
+
+            # T14-8 修复：execute 是服务端权威直写，只有 sync push 路径写
+            # sync_changes——不在此登记则任何设备 pull 永远看不到这笔交易
+            # （模拟器实测：确认卡显示「已记录」但本机查无）。与 push 的
+            # _apply_mutation 同口径：insert / version=1，同事务提交。
+            sync_repo = SyncRepository(self._db)
+            for tx in created:
+                await sync_repo.write_change(
+                    user_id=user.id,
+                    entity_type="transaction",
+                    entity_id=tx.id,
+                    operation=SyncOperation.INSERT,
+                    version=tx.version,
+                )
 
         # ── Record idempotency ───────────────────────────────────────────
         if proposal_id:
@@ -891,7 +968,7 @@ class AIService:
                 "request_id": request_id,
                 "proposal_id": proposal_id,
                 "action": action,
-                "transaction_count": len(created),
+                "affected_count": len(transaction_ids),
                 "verdict": verdict,
             },
         )

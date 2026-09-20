@@ -93,6 +93,25 @@ class _FakeDb:
         return _Result()
 
 
+def _tx_draft(
+    transactions: list[dict[str, Any]],
+    *,
+    message: str = "记一笔",
+    warnings: list[str] | None = None,
+) -> dict[str, Any]:
+    """规范草案（05b 的形状）：``{action: <v2 op>, payload: {...}}``。
+
+    手搓草案的用例用它——**草案的形状是工具层的内部契约**，v1 信封由组装器按
+    车道装（缺省 v1），所以这里给的一律是规范形状，与工具真实产出的逐字一致。
+    """
+    return {
+        "action": "transaction_add",
+        "payload": {"transactions": transactions},
+        "message": message,
+        "warnings": list(warnings or []),
+    }
+
+
 def _ctx(**overrides: Any) -> T.ToolContext:
     """内存 ToolContext。**只填名字→id 那一套映射**——校验上下文的派生必须容忍
     反向映射缺席（真实 ``load_tool_context`` 两套都填，手搓上下文常常只填一套）。
@@ -304,18 +323,13 @@ class TestForgedIdentifiers:
         """
         loop = _loop(ScriptedProvider([]))
         foreign = str(uuid.uuid4())
-        outcome = await loop._handle_proposal({
-            "action": "add_tx",
-            "transactions": [{
-                "type": "expense",
-                "amountCents": 100,
-                "categoryId": foreign,
-                "bizDate": "2026-09-18",
-                "note": "",
-            }],
-            "message": "记一笔",
-            "warnings": [],
-        })
+        outcome = await loop._handle_proposal(_tx_draft([{
+            "type": "expense",
+            "amountCents": 100,
+            "categoryId": foreign,
+            "bizDate": "2026-09-18",
+            "note": "",
+        }]))
 
         assert outcome.kind == "error"
         assert outcome.data["code"] == ERR_PROPOSAL_REJECTED
@@ -328,15 +342,15 @@ class TestForgedIdentifiers:
         草案给的是对抗性取值：想自己定提案号（幂等键）、想把置信度压到自动执行
         门槛之下（好让执行器去要确认口令）、想直接声明「不需要确认」。
         """
-        proposal = assemble_proposal({
-            "action": "add_tx",
-            "transactions": [],
-            "message": "x",
-            "warnings": [],
-            "proposalId": "attacker-chosen",
-            "confidence": 0,
-            "requiresConfirmation": False,
-        })
+        proposal = assemble_proposal(
+            {
+                **_tx_draft([], message="x"),
+                "proposalId": "attacker-chosen",
+                "confidence": 0,
+                "requiresConfirmation": False,
+            },
+            contract_version=T.PROPOSAL_CONTRACT_V1,
+        )
 
         assert proposal["proposalId"] != "attacker-chosen"
         assert proposal["proposalId"].startswith("agent-")
@@ -383,10 +397,13 @@ class TestIronLaws:
 
     def test_confidence_is_computed_not_trusted(self):
         """铁律 2：置信度由确定性代码推导——工具带 ``warnings`` 就降档。"""
-        clean = assemble_proposal({"action": "add_tx", "message": "x", "warnings": []})
-        warned = assemble_proposal({
-            "action": "add_tx", "message": "x", "warnings": ["金额和上次差很多"],
-        })
+        clean = assemble_proposal(
+            _tx_draft([], message="x"), contract_version=T.PROPOSAL_CONTRACT_V1,
+        )
+        warned = assemble_proposal(
+            _tx_draft([], message="x", warnings=["金额和上次差很多"]),
+            contract_version=T.PROPOSAL_CONTRACT_V1,
+        )
 
         assert clean["confidence"] == 1.0
         assert warned["confidence"] < clean["confidence"]
@@ -407,9 +424,13 @@ class TestIronLaws:
             "bizDate": "2026-09-18",
             "note": "",
         }
-        base = {"action": "add_tx", "transactions": [item], "message": "x"}
-        low = assemble_proposal({**base, "warnings": ["不确定"]})
-        high = assemble_proposal({**base, "warnings": []})
+        low = assemble_proposal(
+            _tx_draft([item], message="x", warnings=["不确定"]),
+            contract_version=T.PROPOSAL_CONTRACT_V1,
+        )
+        high = assemble_proposal(
+            _tx_draft([item], message="x"), contract_version=T.PROPOSAL_CONTRACT_V1,
+        )
 
         assert AIService.validate_proposal(low, vctx)["verdict"] == "rejected_low_confidence"
         assert confirm_reason(step=1, confidence=low["confidence"]) == "low_confidence"
@@ -670,18 +691,16 @@ class TestApprovalPolicy:
         loop = _loop(ScriptedProvider([]), ctx=ctx, approver=approver, executor=executor)
         loop._steps = 1
 
-        outcome = await loop._handle_proposal({
-            "action": "add_tx",
-            "transactions": [{
+        outcome = await loop._handle_proposal(_tx_draft(
+            [{
                 "type": "expense",
                 "amountCents": 1250,
                 "categoryId": ctx.categories_by_kind["expense"]["餐饮"],
                 "bizDate": "2026-09-18",
                 "note": "",
             }],
-            "message": "记一笔",
-            "warnings": ["金额和上次差很多"],
-        })
+            warnings=["金额和上次差很多"],
+        ))
 
         assert executor.calls == [], "低置信不走自动执行"
         assert len(approver.requests) == 1

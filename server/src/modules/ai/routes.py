@@ -16,6 +16,7 @@ from src.models.user import User
 from src.modules.auth.dependencies import get_current_user
 from src.modules.auth.frozen import require_active as _require_active
 
+from .authorization import authorize_payload
 from .context import load_validation_context
 from .conversation import ConversationService
 from .devices import DeviceOutcome, device_channel
@@ -99,6 +100,11 @@ async def validate_proposal(
     client. The verdict tells the client whether the failure is a
     schema violation, a hallucinated/unauthorised ID, or a low-
     confidence result that needs explicit user confirmation.
+
+    **两条车道（T-M7-05b）**：车道按 ``contractVersion`` 在场与否判定。
+    v1 走 ``ProposalValidationContext`` 的 categoryIds / accountIds 对拍（一字
+    未改）；v2 只校验信封，payload 里的 id 由 ``authorize_payload`` 查库授权——
+    与 loop 组装、``/ai/execute`` 是同一个函数（三处口径不许漂移）。
     """
     _require_active(current_user)
     try:
@@ -112,6 +118,25 @@ async def validate_proposal(
 
     ctx = await load_validation_context(db, current_user.id, book_uuid)
     result = AIService.validate_proposal(body.proposal, ctx)
+
+    proposal = body.proposal if isinstance(body.proposal, dict) else {}
+    if result["verdict"] != "rejected_schema" and "contractVersion" in proposal:
+        # v2 车道：payload 级授权（05a 的代价项，05b 落地）。授权失败一律判
+        # 「幻觉」——语义与 v1 那条一致：id 不在服务端认可的集合里。
+        auth_errors = await authorize_payload(
+            db,
+            user_id=current_user.id,
+            book_id=book_uuid,
+            op=str(proposal.get("action") or ""),
+            payload=proposal.get("payload"),
+        )
+        if auth_errors:
+            return AIValidateProposalResponse(
+                valid=False,
+                errors=[AIValidationError(**e) for e in auth_errors],
+                verdict="rejected_hallucination",
+            )
+
     return AIValidateProposalResponse(
         valid=result["valid"],
         errors=[AIValidationError(**e) for e in result["errors"]],
@@ -450,6 +475,9 @@ async def agent(
             # 「今天」按**用户本地时区**算，与配额日界同一套解析（模型换算
             # 「今天 / 昨天」全靠它，服务端不猜用户在哪个时区）。
             today=local_today(current_user.timezone),
+            # 客户端声明的 ActionProposal 契约版本（05b）：决定注入哪些写工具、
+            # 提案装进哪条信封。缺省 1 = 旧 APK 的 v1 车道，行为与 P1 逐字一致。
+            contract_version=body.proposal_contract_version,
         ),
         media_type="text/event-stream",
         headers=_SSE_HEADERS,

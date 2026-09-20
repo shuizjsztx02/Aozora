@@ -1,37 +1,50 @@
-"""T-M7-02c: Agent 工具注册表（P1 最小集）。
+"""T-M7-02c / T-M7-05b: Agent 工具注册表。
 
 工具是服务端 Agent 的能力面。**工具的 ``description`` 是模型可见的唯一语义
 来源**（架构 §7.1），因此这里的文案按「模型读到它会做什么」来写，而不是按
 「这个函数做什么」来写。
 
-P1 范围（架构 §10 的 P1 期）
-- **记账域**（``transaction.*``）：2 写 + 3 读
-- **预算域**（``budget.*``）：5 读
-- **账户账本域**（``account_*`` / ``book_*`` / ``category_list``）：5 读
+范围
+----
+- **P1（02c）** 交付最小集：15 个工具、3 个域，写工具只有记账的两个。
+- **P4（05b）** 把**记账域**（``transaction.*`` / ``category.*``）与**账户账本域**
+  （``account.*`` / ``book.*`` / ``meta_set(默认项)``）扩到全量 CRUD：27 个工具、
+  6 个域（架构 §3.2 的覆盖度清单）。预算 / 定时 / 角色 / 分析等域归 05c / 05d。
 
 工具名一律用下划线，**不沿用桥命令的 ``domain.action`` 点号命名**——provider
 对 ``function.name`` 只接受 ``[a-zA-Z0-9_-]``，带点号会 400。约束、实测证据与
 兜底用例见 ``PROVIDER_TOOL_NAME_PATTERN`` 与 ``test_tool_names_are_provider_safe``。
 
-不做全量：P4 才扩到 77 个 bridge 命令对应的全集（架构 §3.2）。
+域拆分（架构 §7.2 的 ≤8）
+------------------------
+05b 把 P1 的 ``ledger`` 域按操作面拆成 ``category`` / ``account`` / ``book`` 三域——
+「账户账本」合起来是 11 个工具，超过 §7.2 的单域上限（域是 05g 域路由的注入
+单位，工具数直接决定模型的选择准确率）。``meta`` 单列一域：它只有
+``meta_set`` 一个工具，而它的执行位置在**设备**（见下）。
 
-写工具与 ActionProposal 的对齐（本模块最关键的约束）
---------------------------------------------------
-写工具**不直接执行**，只产出 ActionProposal 草案（架构 §7.3）；草案交由
-02e 的提案组装器补齐 ``confidence`` / ``proposalId`` / ``requiresConfirmation``
-后，走 ``validate_proposal`` → 确认门 → ``execute_proposal``。
+写工具与 ActionProposal v2 的对齐（本模块最关键的约束）
+-----------------------------------------------------
+写工具**不直接执行**，只产出**规范草案**（架构 §7.3），由 02e/05b 的提案组装器
+按客户端声明的契约版本装进对应车道：v2 车道 → ``{contractVersion: 2, action,
+payload, ...}``；v1 车道 → 根上带 ``transactions`` 的 v1 信封（只有记账 op 装得进去）。
 
-草案的 ``action`` 必须落在 ``contracts/action-proposal/schema.json`` 的 action
-枚举内，且必须是**服务端可执行**的那几个——``AIService.execute_proposal``
-只接受 ``add_tx`` / ``add_tx_batch``（其余 action 抛 400）。因此 P1 的写工具
-只存在于记账域；预算 / 账户 / 账本的写操作目前由客户端本地 config 链路承载
-（``prompts.py`` 的 6 个 config op），迁到服务端属 ActionProposal v2 的工作，
-归 P4。
+**草案的形状是规范 v2 形状**（``{"action": <v2 op>, "payload": {...}, "message",
+"warnings"}``），车道信封由组装器加——工具层不关心客户端版本，一份草案两种车道
+是同一个事实源。``Tool.proposal_action`` 是同一个 op 的注册表声明（05a 的
+``canonical_op`` 把它翻成两条车道各自的动作名）。
+
+`_DEVICE_EXECUTED_OPS` 里的 op（当前只有 ``meta_set``）**服务端不执行**：它写的是
+设备本地的 ``sync_meta``（默认账本 / 默认账户是本地展示元数据，桥命令 ``meta.set``
+明写「不上行」，见 ``BridgeProtocol.kt``）。因此这类提案只能**挂起**、由客户端在
+设备上执行（05f 的执行器按 op 分派），服务端执行面（``/ai/execute``）对它报错。
 
 铁律（架构 §7.4，agent 化不放松）
 1. 模型永不输出 UUID —— 工具参数只接受**对象名**，名→id 由本模块的确定性
-   解析完成（``ToolContext`` 携带用户的实际名字集合）。读工具的**结果**里
-   也不含任何 id。
+   解析完成（``ToolContext`` 携带用户的实际名字集合）。**改 / 删 / 归档类工具
+   因此只接受「定位条件」（locator）而不是 id**：读工具的结果里刻意不含 id，
+   模型只能描述它要动的那一笔，由 ``_resolve_transaction_target`` 之类的确定性
+   代码把它翻成唯一的 id（匹配到 0 笔 / 多笔都报可行动的错，绝不猜）。
+   读工具的**结果**里也不含任何 id。
 2. 金额与统计永远由确定性代码计算 —— 工具不接受模型的算术结论，只接受原
    始参数，聚合一律走 SQL。
 3. 写库必须经校验与确认门 —— 见上。
@@ -68,12 +81,24 @@ from .validator import _FORMAT_CHECKER
 # 常量
 # ---------------------------------------------------------------------------
 
-#: 域标识。工具按域分组注入（架构 §7.2），P1 三个域。
+#: 域标识。工具按域分组注入（架构 §7.2）。05b 起 6 个域——P1 的 ``ledger``
+#: 按操作面拆成 ``category`` / ``account`` / ``book``（合起来 11 个工具会越过
+#: §7.2 的单域上限）。
 DOMAIN_TRANSACTION = "transaction"
+DOMAIN_CATEGORY = "category"
+DOMAIN_ACCOUNT = "account"
+DOMAIN_BOOK = "book"
 DOMAIN_BUDGET = "budget"
-DOMAIN_LEDGER = "ledger"
+DOMAIN_META = "meta"
 
-DOMAINS: tuple[str, ...] = (DOMAIN_TRANSACTION, DOMAIN_BUDGET, DOMAIN_LEDGER)
+DOMAINS: tuple[str, ...] = (
+    DOMAIN_TRANSACTION,
+    DOMAIN_CATEGORY,
+    DOMAIN_ACCOUNT,
+    DOMAIN_BOOK,
+    DOMAIN_BUDGET,
+    DOMAIN_META,
+)
 
 #: 架构 §7.2 的经验上限：单域工具数超过 8 会显著降低模型的选择准确率。
 MAX_TOOLS_PER_DOMAIN = 8
@@ -86,9 +111,25 @@ MAX_TOOLS_PER_DOMAIN = 8
 #: ``domain.action`` 点号命名**（桥命令是另一套命名空间，不受此约束）。
 PROVIDER_TOOL_NAME_PATTERN = r"^[a-zA-Z0-9_-]{1,64}$"
 
-#: P1 工具总数上限。防「顺手把全量工具塞进来」——全量（约 70 个）明确排除
-#: 在 P1 之外，见架构 §3.2 与 §10。
-MAX_TOOLS_P1 = 20
+#: ActionProposal 契约版本（05a 的两条车道）。
+PROPOSAL_CONTRACT_V1 = 1
+PROPOSAL_CONTRACT_V2 = 2
+PROPOSAL_CONTRACTS: tuple[int, ...] = (PROPOSAL_CONTRACT_V1, PROPOSAL_CONTRACT_V2)
+
+#: **v1 车道可承载的写 op。** v1 的写形状只有根上的 ``transactions``
+#: （``schema.json``），且 ``/ai/execute`` 的 v1 分支只放行 ``add_tx`` /
+#: ``add_tx_batch``——两者都是 ``transaction_add`` 的别名（05a 的别名表把
+#: 单条与批量合成同一个 op）。**其余写 op 在 v1 车道上不可注入**：让模型看见
+#: 一个产不出可用提案的工具，等于给它一条死路（提案会被旧校验器整条判无效，
+#: 卡片不出、写入静默失败，见 ai-architecture.md「版本协商与降级」）。
+V1_LANE_OPS: frozenset[str] = frozenset({"transaction_add"})
+
+#: **执行位置在设备的 op**：服务端不执行，提案一律挂起、由客户端在设备上执行
+#: （05f 的执行器按 op 分派）。``meta_set`` 写的是设备本地的 ``sync_meta``
+#: （默认账本 / 默认账户 / 小组件配置 / 用户画像都是本地展示元数据，桥命令
+#: ``meta.set`` 明写「不上行」），服务端没有这些键的存储位置。
+#: ``reminder_set``（05f）与 ``widget.refresh`` 同类，届时并进本集合。
+DEVICE_EXECUTED_OPS: frozenset[str] = frozenset({"meta_set"})
 
 #: 单次批量的交易条数上限（``transaction_add_batch``）。执行是原子的，
 #: 上限保护单次写操作的影响面（架构 §4.4「单 Turn 最大写操作数」的下游）。
@@ -104,6 +145,9 @@ ERR_AMBIGUOUS_ACCOUNT = "ambiguous_account"
 ERR_UNKNOWN_BOOK = "unknown_book"
 ERR_AMBIGUOUS_BOOK = "ambiguous_book"
 ERR_INVALID_PERIOD = "invalid_period"
+ERR_UNKNOWN_TRANSACTION = "unknown_transaction"
+ERR_AMBIGUOUS_TRANSACTION = "ambiguous_transaction"
+ERR_TARGET_ARCHIVED = "target_archived"
 
 _TOOL_ERROR_MESSAGES: dict[str, str] = {
     ERR_UNKNOWN_TOOL: "没有这个工具，请改用工具清单中已有的工具。",
@@ -120,6 +164,15 @@ _TOOL_ERROR_MESSAGES: dict[str, str] = {
         "不要自行猜测。"
     ),
     ERR_INVALID_PERIOD: "月份格式必须是 YYYY-MM。",
+    ERR_UNKNOWN_TRANSACTION: (
+        "没有找到符合条件的交易。请先用 transaction_recent 或 transaction_list "
+        "确认这笔记录的样子，再按看到的日期 / 金额 / 分类重新描述它；不要凭印象改参数。"
+    ),
+    ERR_AMBIGUOUS_TRANSACTION: (
+        "符合条件的交易不止一笔，无法确定要改哪一笔。请补充日期、金额或分类等条件，"
+        "把目标缩小到唯一一笔；也可以把候选逐条报给用户请他指明。不要自行猜测。"
+    ),
+    ERR_TARGET_ARCHIVED: "目标已归档，不能修改。请把它当成不存在处理。",
 }
 
 ToolKind = Literal["read", "write"]
@@ -470,6 +523,83 @@ def _object_schema(
     }
 
 
+#: 「定位条件」——改 / 删类工具指向某一笔交易的方式。
+#:
+#: **这不是 id。** 读工具刻意不回传 id（铁律 1），模型因此只能**描述**它要动的
+#: 那一笔；服务端把描述翻成唯一的 id（``_resolve_transaction_target``）。条件是
+#: 合取关系，给得越全越准；匹配到 0 笔 / 多笔都不猜，各报一个可行动的错。
+_TX_LOCATOR_PROPERTIES: dict[str, Any] = {
+    "bizDate": {
+        "type": "string",
+        "format": "date",
+        "pattern": r"^\d{4}-\d{2}-\d{2}$",
+        "description": "这笔交易的业务日期，必须完全一致。",
+    },
+    "amountCents": {
+        "type": "integer",
+        "minimum": 1,
+        "description": "这笔交易的金额，单位是分，必须完全一致。",
+    },
+    "type": _TX_TYPE_SCHEMA,
+    "categoryName": {
+        "type": "string",
+        "description": "这笔交易的分类名，必须与现有分类完全一致。",
+    },
+    "accountName": {
+        "type": "string",
+        "description": "这笔交易的账户名，必须与现有账户完全一致。",
+    },
+    "keyword": {
+        "type": "string",
+        "description": "备注或分类名里包含的词。",
+    },
+}
+
+#: 改一笔交易时**允许改的字段**。缺省＝不动那个字段（与 ``TransactionUpdate``
+#: 的 None 语义一致）。改不了的字段（如清空账户）刻意不在这里——能表达的动作
+#: 越少，模型越不容易做出它无法完成的事。
+_TX_CHANGE_PROPERTIES: dict[str, Any] = {
+    "type": _TX_TYPE_SCHEMA,
+    "amountCents": {
+        "type": "integer",
+        "minimum": 1,
+        "maximum": 9007199254740991,
+        "description": (
+            "新的金额，单位是分（1 元 = 100 分）。你必须自己完成口语金额到分的"
+            "换算。"
+        ),
+    },
+    "categoryName": {
+        "type": "string",
+        "description": (
+            "新的分类名，必须与现有分类完全一致。改成收入 / 支出另一侧的分类时，"
+            "请同时给出 type。"
+        ),
+    },
+    "accountName": {
+        "type": "string",
+        "description": "新的账户名，必须与现有账户完全一致。不能用来清空账户。",
+    },
+    "note": {
+        "type": "string",
+        # 2000 = transactions.note 的列宽，同 ``_TX_ITEM_PROPERTIES.note``。
+        "maxLength": 2000,
+        "description": "新的备注；清空备注就传空字符串。",
+    },
+    "bizDate": _BIZ_DATE_SCHEMA,
+}
+
+
+def _tx_locator_schema() -> dict[str, Any]:
+    """定位条件对象；``minProperties: 1`` 钉住「至少给一个条件」。"""
+    return {**_object_schema(_TX_LOCATOR_PROPERTIES), "minProperties": 1}
+
+
+def _tx_changes_schema() -> dict[str, Any]:
+    """改动对象；``minProperties: 1`` 钉住「至少改一样」。"""
+    return {**_object_schema(_TX_CHANGE_PROPERTIES), "minProperties": 1}
+
+
 # ---------------------------------------------------------------------------
 # 内部工具函数
 # ---------------------------------------------------------------------------
@@ -598,8 +728,8 @@ async def _handle_transaction_add(ctx: ToolContext, params: dict[str, Any]) -> T
         return failure
     assert item is not None  # _build_tx_item 的两条返回路径互斥
     return ToolOutcome.proposal({
-        "action": "add_tx",
-        "transactions": [item],
+        "action": "transaction_add",
+        "payload": {"transactions": [item]},
         "message": _tx_message(params),
         "warnings": [],
     })
@@ -616,8 +746,8 @@ async def _handle_transaction_add_batch(ctx: ToolContext, params: dict[str, Any]
 
     total = sum(item["amountCents"] for item in items)
     return ToolOutcome.proposal({
-        "action": "add_tx_batch",
-        "transactions": items,
+        "action": "transaction_add",
+        "payload": {"transactions": items},
         "message": f"记 {len(items)} 笔，合计 ¥{_format_yuan(total)}",
         "warnings": [],
     })
@@ -852,6 +982,189 @@ async def _summary_groups(
         }
         for row in rows
     ]
+
+
+# ---------------------------------------------------------------------------
+# 记账域 —— 写工具：改一笔 / 删一笔（T-M7-05b）
+# ---------------------------------------------------------------------------
+
+
+def _tx_verb(tx_type: str | None) -> str:
+    return "收入" if tx_type == "income" else "支出"
+
+
+def _describe_locator(locator: Mapping[str, Any]) -> str:
+    """定位条件 → 一句人话（进提案 message，给用户在确认卡上看）。"""
+    parts: list[str] = []
+    if locator.get("bizDate"):
+        parts.append(str(locator["bizDate"]))
+    if locator.get("amountCents") is not None:
+        parts.append(f"¥{_format_yuan(int(locator['amountCents']))}")
+    if locator.get("categoryName"):
+        parts.append(str(locator["categoryName"]))
+    if locator.get("accountName"):
+        parts.append(str(locator["accountName"]))
+    if locator.get("keyword"):
+        parts.append(f"含「{locator['keyword']}」")
+    if locator.get("type"):
+        parts.append(_tx_verb(locator["type"]))
+    return " ".join(parts) or "未加条件"
+
+
+def _describe_changes(changes: Mapping[str, Any]) -> str:
+    parts: list[str] = []
+    if changes.get("type"):
+        parts.append(f"类型={_tx_verb(changes['type'])}")
+    if changes.get("amountCents") is not None:
+        parts.append(f"金额=¥{_format_yuan(int(changes['amountCents']))}")
+    if changes.get("categoryName"):
+        parts.append(f"分类={changes['categoryName']}")
+    if changes.get("accountName"):
+        parts.append(f"账户={changes['accountName']}")
+    if changes.get("bizDate"):
+        parts.append(f"日期={changes['bizDate']}")
+    if "note" in changes:
+        parts.append(f"备注={changes['note'] or '（清空）'}")
+    return "、".join(parts) or "无改动"
+
+
+async def _resolve_transaction_target(
+    ctx: ToolContext,
+    locator: Mapping[str, Any],
+) -> tuple[Any, ToolOutcome | None]:
+    """定位条件 → 唯一一笔交易行 ``(id, version, type)``。
+
+    读工具刻意不回传 id（铁律 1），所以「改 / 删哪一笔」只能靠描述来指认；把
+    描述翻成 id 是本函数的事——**这是写路径上唯一产生交易 id 的地方**。
+
+    匹配到 0 笔 → ``unknown_transaction``；匹配到多笔 → ``ambiguous_transaction``
+    （可行动：补充条件或请用户指明）。**绝不猜**：猜错就是改错账，而账目被悄悄
+    改掉比「改不动」糟得多。取 2 行即足以判定「唯一」，不做全量物化。
+    """
+    conditions = [
+        Transaction.book_id == ctx.book_id,
+        Transaction.deleted_at.is_(None),
+    ]
+    stmt = select(Transaction.id, Transaction.version, Transaction.type).where(*conditions)
+
+    if locator.get("bizDate"):
+        parsed = _parse_biz_date(str(locator["bizDate"]))
+        if parsed is None:
+            return None, ToolOutcome.failure(ERR_INVALID_ARGUMENTS, argument="locator.bizDate")
+        stmt = stmt.where(Transaction.biz_date == parsed)
+    if locator.get("amountCents") is not None:
+        stmt = stmt.where(Transaction.amount_cents == int(locator["amountCents"]))
+    if locator.get("type"):
+        stmt = stmt.where(Transaction.type == locator["type"])
+    if locator.get("categoryName"):
+        # 同名分类取全集（含重名），与读工具的过滤口径一致。
+        ids = ctx.category_ids_named(str(locator["categoryName"]))
+        stmt = stmt.where(
+            Transaction.category_id.in_([uuid.UUID(c) for c in ids]) if ids else false(),
+        )
+    if locator.get("accountName"):
+        ids = ctx.account_ids_named(str(locator["accountName"]))
+        stmt = stmt.where(
+            Transaction.account_id.in_([uuid.UUID(a) for a in ids]) if ids else false(),
+        )
+    if locator.get("keyword"):
+        pattern = _escaped_like(str(locator["keyword"]))
+        stmt = stmt.join(Category, Transaction.category_id == Category.id).where(
+            Transaction.note.like(pattern, escape="\\")
+            | Category.name.like(pattern, escape="\\"),
+        )
+
+    rows = (
+        await ctx.db.execute(
+            stmt.order_by(
+                Transaction.biz_date.desc(), Transaction.created_at.desc(),
+            ).limit(2),
+        )
+    ).all()
+    if not rows:
+        return None, ToolOutcome.failure(ERR_UNKNOWN_TRANSACTION, argument="locator")
+    if len(rows) > 1:
+        return None, ToolOutcome.failure(ERR_AMBIGUOUS_TRANSACTION, argument="locator")
+    return rows[0], None
+
+
+def _build_tx_changes(
+    ctx: ToolContext,
+    changes: Mapping[str, Any],
+    *,
+    current_type: str,
+) -> tuple[dict[str, Any], ToolOutcome | None]:
+    """改动参数 → 契约 payload 里那几个字段（名 → id 在这里发生）。
+
+    ``current_type`` 是目标交易当前的收支类型：分类解析要带 kind，而改 ``type``
+    时分类必须按**新的** kind 解析——否则「把支出改成收入」会落到支出侧的同名
+    分类上（数据库对分类的唯一约束含 kind，两侧同名可以共存）。
+    """
+    payload: dict[str, Any] = {}
+    if changes.get("type"):
+        payload["type"] = changes["type"]
+    if changes.get("amountCents") is not None:
+        payload["amountCents"] = int(changes["amountCents"])
+    if changes.get("bizDate"):
+        payload["bizDate"] = changes["bizDate"]
+    if "note" in changes:
+        payload["note"] = _normalize_note(changes["note"])
+
+    kind = str(changes.get("type") or current_type)
+    if changes.get("categoryName"):
+        category_id = _resolve_category(ctx, kind, str(changes["categoryName"]))
+        if isinstance(category_id, ToolOutcome):
+            return {}, category_id
+        payload["categoryId"] = category_id
+    if changes.get("accountName"):
+        account_id = _resolve_account(ctx, str(changes["accountName"]))
+        if isinstance(account_id, ToolOutcome):
+            return {}, account_id
+        payload["accountId"] = account_id
+    return payload, None
+
+
+async def _handle_transaction_update(ctx: ToolContext, params: dict[str, Any]) -> ToolOutcome:
+    locator = params["locator"]
+    changes = params["changes"]
+    row, failure = await _resolve_transaction_target(ctx, locator)
+    if failure is not None:
+        return failure
+    tx_id, version, current_type = row
+
+    payload, failure = _build_tx_changes(ctx, changes, current_type=str(current_type))
+    if failure is not None:
+        return failure
+
+    return ToolOutcome.proposal({
+        "action": "transaction_update",
+        # ``version`` 是**服务端读到的当前版本**（乐观并发令牌，不是模型输出）：
+        # 提案挂起期间目标被改过时，执行会以 409 拒绝，而不是把那次改动覆盖掉。
+        "payload": {"transactionId": str(tx_id), "version": int(version), **payload},
+        "message": (
+            f"修改一笔{_tx_verb(current_type)}记录（{_describe_locator(locator)}）："
+            f"{_describe_changes(changes)}"
+        ),
+        "warnings": [],
+    })
+
+
+async def _handle_transaction_delete(ctx: ToolContext, params: dict[str, Any]) -> ToolOutcome:
+    locator = params["locator"]
+    row, failure = await _resolve_transaction_target(ctx, locator)
+    if failure is not None:
+        return failure
+    tx_id, _version, current_type = row
+
+    return ToolOutcome.proposal({
+        "action": "transaction_delete",
+        # 不带 version：删除按**对象身份**（id）生效，与 REST 的 DELETE 同口径
+        # （``delete_transaction`` 没有版本参数）。定位条件在提案产出时已经把
+        # 「哪一笔」定死了。
+        "payload": {"transactionId": str(tx_id)},
+        "message": f"删除一笔{_tx_verb(current_type)}记录（{_describe_locator(locator)}）",
+        "warnings": [],
+    })
 
 
 # ---------------------------------------------------------------------------
@@ -1241,6 +1554,271 @@ async def _handle_category_list(ctx: ToolContext, params: dict[str, Any]) -> Too
 
 
 # ---------------------------------------------------------------------------
+# 分类域 —— 写工具（T-M7-05b）
+# ---------------------------------------------------------------------------
+
+
+async def _current_version(ctx: ToolContext, model: Any, obj_id: uuid.UUID) -> int | None:
+    """读某个对象的**当前版本**（乐观并发令牌）。
+
+    ``version`` 是服务端读出来的整数，不是模型输出——铁律 1 管的是 id，但治理
+    字段同理：任何决定写入行为的量都不该由模型给。对象不存在 / 不属于本用户时
+    返回 ``None``（调用方按「定位失败」处理）。
+    """
+    return await ctx.db.scalar(
+        select(model.version).where(model.id == obj_id, model.owner_id == ctx.user_id),
+    )
+
+
+async def _handle_category_create(ctx: ToolContext, params: dict[str, Any]) -> ToolOutcome:
+    name = str(params["name"])
+    kind = str(params["kind"])
+    book_id = _resolve_book(ctx, params.get("bookName"))
+    if isinstance(book_id, ToolOutcome):
+        return book_id
+
+    parent_id: str | None = None
+    parent_name = params.get("parentName")
+    if parent_name:
+        resolved = _resolve_category(ctx, kind, str(parent_name))
+        if isinstance(resolved, ToolOutcome):
+            return resolved
+        parent_id = resolved
+
+    return ToolOutcome.proposal({
+        "action": "category_create",
+        "payload": {
+            "name": name,
+            "kind": kind,
+            "bookId": str(book_id),
+            "parentId": parent_id,
+        },
+        "message": (
+            f"新建{_tx_verb(kind)}分类「{name}」"
+            + (f"，放在「{parent_name}」下" if parent_name else "")
+        ),
+        "warnings": [],
+    })
+
+
+async def _handle_category_update(ctx: ToolContext, params: dict[str, Any]) -> ToolOutcome:
+    kind = str(params["kind"])
+    resolved = _resolve_category(ctx, kind, str(params["categoryName"]))
+    if isinstance(resolved, ToolOutcome):
+        return resolved
+
+    payload: dict[str, Any] = {"categoryId": resolved}
+    version = await _current_version(ctx, Category, uuid.UUID(resolved))
+    if version is None:
+        return ToolOutcome.failure(ERR_UNKNOWN_CATEGORY, argument=params["categoryName"])
+    payload["version"] = int(version)
+
+    notes: list[str] = []
+    if params.get("newName"):
+        payload["name"] = str(params["newName"])
+        notes.append(f"改名为「{params['newName']}」")
+    if params.get("parentName"):
+        parent = _resolve_category(ctx, kind, str(params["parentName"]))
+        if isinstance(parent, ToolOutcome):
+            return parent
+        payload["parentId"] = parent
+        notes.append(f"移到「{params['parentName']}」下")
+    if len(payload) == 2:  # 只有 categoryId + version → 没有任何改动
+        return ToolOutcome.failure(ERR_INVALID_ARGUMENTS, argument="changes")
+
+    return ToolOutcome.proposal({
+        "action": "category_update",
+        "payload": payload,
+        "message": f"修改分类「{params['categoryName']}」：{'、'.join(notes)}",
+        "warnings": [],
+    })
+
+
+async def _handle_category_archive(ctx: ToolContext, params: dict[str, Any]) -> ToolOutcome:
+    kind = str(params["kind"])
+    resolved = _resolve_category(ctx, kind, str(params["categoryName"]))
+    if isinstance(resolved, ToolOutcome):
+        return resolved
+
+    return ToolOutcome.proposal({
+        "action": "category_archive",
+        # 不带 version：归档按**对象身份**（id）生效，与 REST 的 DELETE 同口径
+        # （``archive_category`` 没有版本参数）。定位在提案产出时已经定死。
+        "payload": {"categoryId": resolved},
+        "message": f"归档{_tx_verb(kind)}分类「{params['categoryName']}」（不再出现在分类清单里）",
+        # 归档会让**已有交易**的分类在清单上消失——用户可能没料到这一步。
+        "warnings": ["归档后这个分类不再出现在分类清单中，已记录的交易仍保留原分类。"],
+    })
+
+
+# ---------------------------------------------------------------------------
+# 账户域 —— 写工具（T-M7-05b）
+# ---------------------------------------------------------------------------
+
+
+async def _handle_account_create(ctx: ToolContext, params: dict[str, Any]) -> ToolOutcome:
+    name = str(params["name"])
+    payload: dict[str, Any] = {"name": name}
+    if params.get("icon"):
+        payload["icon"] = str(params["icon"])
+    return ToolOutcome.proposal({
+        "action": "account_create",
+        "payload": payload,
+        "message": f"新建账户「{name}」",
+        "warnings": [],
+    })
+
+
+async def _handle_account_update(ctx: ToolContext, params: dict[str, Any]) -> ToolOutcome:
+    resolved = _resolve_account(ctx, str(params["accountName"]))
+    if isinstance(resolved, ToolOutcome):
+        return resolved
+    version = await _current_version(ctx, Account, uuid.UUID(resolved))
+    if version is None:
+        return ToolOutcome.failure(ERR_UNKNOWN_ACCOUNT, argument=params["accountName"])
+
+    payload: dict[str, Any] = {"accountId": resolved, "version": int(version)}
+    notes: list[str] = []
+    if params.get("newName"):
+        payload["name"] = str(params["newName"])
+        notes.append(f"改名为「{params['newName']}」")
+    if params.get("icon"):
+        payload["icon"] = str(params["icon"])
+        notes.append("更换图标")
+    if len(payload) == 2:
+        return ToolOutcome.failure(ERR_INVALID_ARGUMENTS, argument="changes")
+
+    return ToolOutcome.proposal({
+        "action": "account_update",
+        "payload": payload,
+        "message": f"修改账户「{params['accountName']}」：{'、'.join(notes)}",
+        "warnings": [],
+    })
+
+
+async def _handle_account_archive(ctx: ToolContext, params: dict[str, Any]) -> ToolOutcome:
+    resolved = _resolve_account(ctx, str(params["accountName"]))
+    if isinstance(resolved, ToolOutcome):
+        return resolved
+
+    return ToolOutcome.proposal({
+        "action": "account_archive",
+        "payload": {"accountId": resolved},
+        "message": f"归档账户「{params['accountName']}」",
+        "warnings": ["归档后这个账户不再出现在账户清单中，已记录的交易仍保留原账户。"],
+    })
+
+
+# ---------------------------------------------------------------------------
+# 账本域 —— 写工具（T-M7-05b）
+# ---------------------------------------------------------------------------
+
+
+async def _handle_book_create(ctx: ToolContext, params: dict[str, Any]) -> ToolOutcome:
+    name = str(params["name"])
+    payload: dict[str, Any] = {"name": name}
+    if params.get("icon"):
+        payload["icon"] = str(params["icon"])
+    return ToolOutcome.proposal({
+        "action": "book_create",
+        "payload": payload,
+        "message": f"新建账本「{name}」",
+        "warnings": [],
+    })
+
+
+async def _handle_book_update(ctx: ToolContext, params: dict[str, Any]) -> ToolOutcome:
+    resolved = _resolve_book(ctx, params.get("bookName"))
+    if isinstance(resolved, ToolOutcome):
+        return resolved
+    version = await _current_version(ctx, Book, resolved)
+    if version is None:
+        return ToolOutcome.failure(ERR_UNKNOWN_BOOK, argument=params.get("bookName"))
+
+    payload: dict[str, Any] = {"bookId": str(resolved), "version": int(version)}
+    notes: list[str] = []
+    if params.get("newName"):
+        payload["name"] = str(params["newName"])
+        notes.append(f"改名为「{params['newName']}」")
+    if params.get("icon"):
+        payload["icon"] = str(params["icon"])
+        notes.append("更换图标")
+    if len(payload) == 2:
+        return ToolOutcome.failure(ERR_INVALID_ARGUMENTS, argument="changes")
+
+    return ToolOutcome.proposal({
+        "action": "book_update",
+        "payload": payload,
+        "message": f"修改账本「{params.get('bookName') or '当前账本'}」：{'、'.join(notes)}",
+        "warnings": [],
+    })
+
+
+async def _handle_book_delete(ctx: ToolContext, params: dict[str, Any]) -> ToolOutcome:
+    resolved = _resolve_book(ctx, params.get("bookName"))
+    if isinstance(resolved, ToolOutcome):
+        return resolved
+
+    name = params.get("bookName") or "当前账本"
+    warnings: list[str] = []
+    if str(resolved) == str(ctx.book_id):
+        # 删掉当前账本会让这一轮的上下文失效（下一轮 book_id 查不到）。工具不
+        # 替用户做这个决定，但要**明确告诉他**——warnings 非空还会把置信度降档，
+        # 于是单步也强制出确认卡（02e 的策略），不会静默执行。
+        warnings.append("这是当前正在使用的账本，删除后需要切换到别的账本才能继续记账。")
+
+    return ToolOutcome.proposal({
+        "action": "book_delete",
+        "payload": {"bookId": str(resolved)},
+        "message": f"删除账本「{name}」",
+        "warnings": warnings,
+    })
+
+
+# ---------------------------------------------------------------------------
+# meta 域 —— 写工具（T-M7-05b；执行位置＝设备）
+# ---------------------------------------------------------------------------
+
+
+async def _handle_meta_set(ctx: ToolContext, params: dict[str, Any]) -> ToolOutcome:
+    """写一个本地 meta 键（当前只覆盖「默认账本 / 默认账户」两个键）。
+
+    **执行位置是设备，不是服务端**：这两个键存在设备本地的 ``sync_meta`` 里
+    （``BridgeProtocol.kt`` 的 ``meta.set`` 明写「不加实体列、不上行」），服务端
+    没有它们的落点。因此本工具产出的提案在服务端**只挂起、不执行**，由客户端在
+    设备上执行（``DEVICE_EXECUTED_OPS``；05f 的执行器按 op 分派）。
+
+    当前角色 / 小组件配置 / 用户画像三个键同样是设备本地量，由 05c / 05d 按各自
+    的卡扩这个枚举——它们不是服务端存储，扩的是同一个工具的 key 集合。
+    """
+    key = str(params["key"])
+    if key == "default_book":
+        book_id = _resolve_book(ctx, params.get("bookName"))
+        if isinstance(book_id, ToolOutcome):
+            return book_id
+        payload: dict[str, Any] = {"key": key, "bookId": str(book_id)}
+        label = params.get("bookName") or "当前账本"
+        message = f"把默认账本设为「{label}」"
+    else:  # default_account
+        account_name = params.get("accountName")
+        if not account_name:
+            return ToolOutcome.failure(ERR_INVALID_ARGUMENTS, argument="accountName")
+        account_id = _resolve_account(ctx, str(account_name))
+        if isinstance(account_id, ToolOutcome):
+            return account_id
+        payload = {"key": key, "accountId": account_id}
+        label = str(account_name)
+        message = f"把默认账户设为「{label}」"
+
+    return ToolOutcome.proposal({
+        "action": "meta_set",
+        "payload": payload,
+        "message": message,
+        "warnings": [],
+    })
+
+
+# ---------------------------------------------------------------------------
 # 注册表
 # ---------------------------------------------------------------------------
 
@@ -1250,7 +1828,7 @@ TOOLS: tuple[Tool, ...] = (
         name="transaction_add",
         domain=DOMAIN_TRANSACTION,
         kind="write",
-        proposal_action="add_tx",
+        proposal_action="transaction_add",
         description=(
             "新增一笔收支记录。用户说「记一笔」「花了 30 块打车」「今天收入 500」"
             "这类要往账上添一笔的诉求时用它。金额单位是分，你需要自己把口语金额"
@@ -1264,7 +1842,7 @@ TOOLS: tuple[Tool, ...] = (
         name="transaction_add_batch",
         domain=DOMAIN_TRANSACTION,
         kind="write",
-        proposal_action="add_tx_batch",
+        proposal_action="transaction_add",
         description=(
             "一次新增多笔收支记录，整批要么全部写入要么全部不写。用户一口气报"
             "多笔账（「早饭 12、午饭 25、打车 30」）时用它，比连续调用 transaction_add "
@@ -1283,6 +1861,56 @@ TOOLS: tuple[Tool, ...] = (
             required=["transactions"],
         ),
         handler=_handle_transaction_add_batch,
+    ),
+    Tool(
+        name="transaction_update",
+        domain=DOMAIN_TRANSACTION,
+        kind="write",
+        proposal_action="transaction_update",
+        description=(
+            "修改**已经记过**的一笔交易的金额、分类、账户、备注、日期或收支类型。"
+            "用户说「刚才那笔记错了」「把昨天 12 块的午饭改成 15」时用它。"
+            "用 locator 描述要改的是哪一笔（日期 / 金额 / 分类 / 账户 / 备注关键词，"
+            "尽量给全），再用 changes 说明改成什么。locator 匹配到不止一笔时服务端"
+            "会拒绝并要求你补充条件——那时请向用户确认是哪一笔，**不要**自己挑一笔。"
+            "改收入 / 支出的方向时请同时给出 type。要新记一笔请用 transaction_add。"
+        ),
+        parameters=_object_schema(
+            {
+                "locator": {
+                    **_tx_locator_schema(),
+                    "description": "要修改的是哪一笔（条件之间是「并且」）。",
+                },
+                "changes": {
+                    **_tx_changes_schema(),
+                    "description": "要改成的值（没提到的字段保持不变）。",
+                },
+            },
+            required=["locator", "changes"],
+        ),
+        handler=_handle_transaction_update,
+    ),
+    Tool(
+        name="transaction_delete",
+        domain=DOMAIN_TRANSACTION,
+        kind="write",
+        proposal_action="transaction_delete",
+        description=(
+            "删除一笔已经记过的交易（软删除，记录不再出现在流水里）。用户说"
+            "「把刚才那笔删掉」「昨天那笔 30 块记重了」时用它。用 locator 描述要删"
+            "的是哪一笔，匹配到不止一笔时服务端会拒绝并要求补充条件——请向用户"
+            "确认，**不要**自己挑一笔。删了就没了，删除前请确认用户说的是这笔。"
+        ),
+        parameters=_object_schema(
+            {
+                "locator": {
+                    **_tx_locator_schema(),
+                    "description": "要删除的是哪一笔（条件之间是「并且」）。",
+                },
+            },
+            required=["locator"],
+        ),
+        handler=_handle_transaction_delete,
     ),
     Tool(
         name="transaction_list",
@@ -1479,10 +2107,10 @@ TOOLS: tuple[Tool, ...] = (
         parameters=_object_schema({"period": _PERIOD_SCHEMA}, required=["period"]),
         handler=_handle_budget_overspent,
     ),
-    # ── 账户账本域 ──────────────────────────────────────────────────────
+    # ── 账户域 ──────────────────────────────────────────────────────────
     Tool(
         name="account_list",
-        domain=DOMAIN_LEDGER,
+        domain=DOMAIN_ACCOUNT,
         kind="read",
         description=(
             "列出用户现有的全部账户（名称与图标），不含已归档账户。用户问「我有"
@@ -1494,7 +2122,7 @@ TOOLS: tuple[Tool, ...] = (
     ),
     Tool(
         name="account_balances",
-        domain=DOMAIN_LEDGER,
+        domain=DOMAIN_ACCOUNT,
         kind="read",
         description=(
             "按账户汇总金额流向：每个账户在某段时间内的收入、支出与净额。"
@@ -1518,8 +2146,91 @@ TOOLS: tuple[Tool, ...] = (
         handler=_handle_account_balances,
     ),
     Tool(
+        name="account_create",
+        domain=DOMAIN_ACCOUNT,
+        kind="write",
+        proposal_action="account_create",
+        description=(
+            "新建一个账户（如「招行卡」「现金」「支付宝」）。用户说「帮我建一个"
+            "账户」时用它。账户名不要和已有账户重名——先用 account_list 核对。"
+            "只建账户本身，不涉及任何金额。"
+        ),
+        parameters=_object_schema(
+            {
+                "name": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 64,
+                    "description": "账户名，用户怎么称呼它就怎么写。",
+                },
+                "icon": {
+                    "type": "string",
+                    "maxLength": 64,
+                    "description": "图标标识；用户没提就不要填（会走默认图标）。",
+                },
+            },
+            required=["name"],
+        ),
+        handler=_handle_account_create,
+    ),
+    Tool(
+        name="account_update",
+        domain=DOMAIN_ACCOUNT,
+        kind="write",
+        proposal_action="account_update",
+        description=(
+            "修改一个已有账户的名称或图标。用户说「把招行卡改名成工资卡」时用它。"
+            "accountName 必须与现有账户完全一致（先用 account_list 核对）；重名"
+            "账户会被拒绝，那时请向用户指明是哪一个。改不动账目余额——本工具只"
+            "改账户自身的名字与图标。"
+        ),
+        parameters=_object_schema(
+            {
+                "accountName": {
+                    "type": "string",
+                    "description": "要修改的账户名，必须与现有账户完全一致。",
+                },
+                "newName": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 64,
+                    "description": "新的账户名；不改名字就不要填。",
+                },
+                "icon": {
+                    "type": "string",
+                    "maxLength": 64,
+                    "description": "新的图标标识；不换图标就不要填。",
+                },
+            },
+            required=["accountName"],
+        ),
+        handler=_handle_account_update,
+    ),
+    Tool(
+        name="account_archive",
+        domain=DOMAIN_ACCOUNT,
+        kind="write",
+        proposal_action="account_archive",
+        description=(
+            "归档（停用）一个账户。用户说「这个账户不用了」「把旧卡删掉」时用它。"
+            "归档不是删除：账户不再出现在账户清单里，但已记录的交易仍保留原账户，"
+            "统计也不会因此变动。想彻底抹掉记录请用 transaction_delete 逐笔处理。"
+        ),
+        parameters=_object_schema(
+            {
+                "accountName": {
+                    "type": "string",
+                    "description": "要归档的账户名，必须与现有账户完全一致。",
+                },
+            },
+            required=["accountName"],
+        ),
+        handler=_handle_account_archive,
+    ),
+    # ── 账本域 ──────────────────────────────────────────────────────────
+    Tool(
         name="book_list",
-        domain=DOMAIN_LEDGER,
+        domain=DOMAIN_BOOK,
         kind="read",
         description=(
             "列出用户现有的全部账本（名称、图标，并标出当前正在使用的账本）。"
@@ -1531,7 +2242,7 @@ TOOLS: tuple[Tool, ...] = (
     ),
     Tool(
         name="book_detail",
-        domain=DOMAIN_LEDGER,
+        domain=DOMAIN_BOOK,
         kind="read",
         description=(
             "看某个账本的概况：分类数、交易笔数、记账的时间跨度。用户问「这个账本"
@@ -1546,8 +2257,85 @@ TOOLS: tuple[Tool, ...] = (
         handler=_handle_book_detail,
     ),
     Tool(
+        name="book_create",
+        domain=DOMAIN_BOOK,
+        kind="write",
+        proposal_action="book_create",
+        description=(
+            "新建一个账本（如「家庭账本」「旅行账本」）。用户说「再建一个账本」时"
+            "用它。新建的账本是空的：不带分类、不带任何记录。"
+        ),
+        parameters=_object_schema(
+            {
+                "name": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 128,
+                    "description": "账本名，用户怎么称呼它就怎么写。",
+                },
+                "icon": {
+                    "type": "string",
+                    "maxLength": 64,
+                    "description": "图标标识；用户没提就不要填。",
+                },
+            },
+            required=["name"],
+        ),
+        handler=_handle_book_create,
+    ),
+    Tool(
+        name="book_update",
+        domain=DOMAIN_BOOK,
+        kind="write",
+        proposal_action="book_update",
+        description=(
+            "修改一个已有账本的名称或图标。用户说「把旅行账本改名成蜜月账本」时用"
+            "它。bookName 必须与现有账本完全一致（先用 book_list 核对）；不填表示"
+            "当前账本。"
+        ),
+        parameters=_object_schema(
+            {
+                "bookName": {
+                    "type": "string",
+                    "description": "要修改的账本名，必须与现有账本完全一致。不填表示当前账本。",
+                },
+                "newName": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 128,
+                    "description": "新的账本名；不改名字就不要填。",
+                },
+                "icon": {
+                    "type": "string",
+                    "maxLength": 64,
+                    "description": "新的图标标识；不换图标就不要填。",
+                },
+            },
+        ),
+        handler=_handle_book_update,
+    ),
+    Tool(
+        name="book_delete",
+        domain=DOMAIN_BOOK,
+        kind="write",
+        proposal_action="book_delete",
+        description=(
+            "删除一个账本及其中的记录。用户说「把这个账本删掉」时用它。删除前"
+            "务必确认用户指的是哪个账本——**删掉的账本连同里面的流水一起不再可见**，"
+            "这是本工具集里破坏性最强的操作之一。不填账本名表示当前账本。"
+        ),
+        parameters=_object_schema({
+            "bookName": {
+                "type": "string",
+                "description": "要删除的账本名，必须与现有账本完全一致。不填表示当前账本。",
+            },
+        }),
+        handler=_handle_book_delete,
+    ),
+    # ── 分类域 ──────────────────────────────────────────────────────────
+    Tool(
         name="category_list",
-        domain=DOMAIN_LEDGER,
+        domain=DOMAIN_CATEGORY,
         kind="read",
         description=(
             "列出可用的分类（名称、收支类型、上级分类）。在你不确定分类的准确名称时"
@@ -1562,6 +2350,126 @@ TOOLS: tuple[Tool, ...] = (
         }),
         handler=_handle_category_list,
     ),
+    Tool(
+        name="category_create",
+        domain=DOMAIN_CATEGORY,
+        kind="write",
+        proposal_action="category_create",
+        description=(
+            "新建一个分类。用户说「加一个分类叫宠物」「收入里加个奖金」时用它。"
+            "必须给出收支类型（expense 支出 / income 收入）——同名的支出分类与"
+            "收入分类是两个不同的分类。可选用 parentName 挂在某个已有分类下面。"
+            "新分类建在当前账本下。"
+        ),
+        parameters=_object_schema(
+            {
+                "name": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 64,
+                    "description": "分类名。",
+                },
+                "kind": _TX_TYPE_SCHEMA,
+                "parentName": {
+                    "type": "string",
+                    "description": "上级分类名（可选），必须是同类型下已有的分类。",
+                },
+                "bookName": {
+                    "type": "string",
+                    "description": "建在哪个账本下；不填表示当前账本。",
+                },
+            },
+            required=["name", "kind"],
+        ),
+        handler=_handle_category_create,
+    ),
+    Tool(
+        name="category_update",
+        domain=DOMAIN_CATEGORY,
+        kind="write",
+        proposal_action="category_update",
+        description=(
+            "修改一个已有分类的名称或它挂在哪个上级分类下。用户说「把宠物改叫"
+            "猫主子」时用它。categoryName + kind 一起定位要改的分类（同名跨收支"
+            "类型时靠 kind 区分）。不能改收支类型——那等于换一个分类，请用"
+            "category_create 建新的。"
+        ),
+        parameters=_object_schema(
+            {
+                "categoryName": {
+                    "type": "string",
+                    "description": "要修改的分类名，必须与现有分类完全一致。",
+                },
+                "kind": _TX_TYPE_SCHEMA,
+                "newName": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 64,
+                    "description": "新的分类名；不改名字就不要填。",
+                },
+                "parentName": {
+                    "type": "string",
+                    "description": "新的上级分类名；不移动就不要填。",
+                },
+            },
+            required=["categoryName", "kind"],
+        ),
+        handler=_handle_category_update,
+    ),
+    Tool(
+        name="category_archive",
+        domain=DOMAIN_CATEGORY,
+        kind="write",
+        proposal_action="category_archive",
+        description=(
+            "归档（停用）一个分类。用户说「这个分类不用了」时用它。归档不是删除："
+            "分类不再出现在分类清单里、也不能再用于记账，但已记录的交易仍保留原"
+            "分类。归档前先确认用户说的就是这个分类——归档后它会从清单上消失。"
+        ),
+        parameters=_object_schema(
+            {
+                "categoryName": {
+                    "type": "string",
+                    "description": "要归档的分类名，必须与现有分类完全一致。",
+                },
+                "kind": _TX_TYPE_SCHEMA,
+            },
+            required=["categoryName", "kind"],
+        ),
+        handler=_handle_category_archive,
+    ),
+    # ── meta 域（执行位置＝设备）─────────────────────────────────────────
+    Tool(
+        name="meta_set",
+        domain=DOMAIN_META,
+        kind="write",
+        proposal_action="meta_set",
+        description=(
+            "设置本地偏好：默认账本（记账时默认用哪个账本）与默认账户（新记录默认"
+            "挂在哪个账户上）。用户说「默认用旅行账本」「以后都记在招行卡上」时用它。"
+            "**这只改默认值，不动任何已有记录。** 要新增 / 修改账本或账户本身，请用"
+            "book_* / account_* 那几个工具。"
+        ),
+        parameters=_object_schema(
+            {
+                "key": {
+                    "type": "string",
+                    "enum": ["default_book", "default_account"],
+                    "description": "default_book=默认账本，default_account=默认账户。",
+                },
+                "bookName": {
+                    "type": "string",
+                    "description": "key=default_book 时填：选哪个账本，必须是现有账本的完整名称。不填表示当前账本。",
+                },
+                "accountName": {
+                    "type": "string",
+                    "description": "key=default_account 时填：选哪个账户，必须是现有账户的完整名称。",
+                },
+            },
+            required=["key"],
+        ),
+        handler=_handle_meta_set,
+    ),
 )
 
 TOOLS_BY_NAME: dict[str, Tool] = {tool.name: tool for tool in TOOLS}
@@ -1572,15 +2480,44 @@ TOOLS_BY_NAME: dict[str, Tool] = {tool.name: tool for tool in TOOLS}
 # ---------------------------------------------------------------------------
 
 
-def tools_for_domains(domains: Iterable[str]) -> list[Tool]:
-    """按域取工具（架构 §7.2 的分组注入）。
+def tool_supports_contract(tool: Tool, contract_version: int) -> bool:
+    """这个工具能否在指定契约车道上**产出可用的提案**（T-M7-05b）。
+
+    读工具与两条车道都无关（结果只回喂模型，不进客户端校验器），一律 ``True``。
+    写工具只有 ``V1_LANE_OPS`` 里的 op 能在 v1 车道上用——v1 的写形状只有根上的
+    ``transactions``，且 ``/ai/execute`` 的 v1 分支只放行它的两个别名。
+    **其余写工具在 v1 车道上一律不可注入**：让模型看见一个产不出可用提案的工具
+    等于给它一条死路（提案被旧校验器整条判无效，卡片不出、写入静默失败）。
+
+    未知的 ``contract_version`` 按 v1 处理（**倾向少注入**而不是多注入：多注入
+    的后果是死路，少注入的后果只是能力不可用）。
+    """
+    if tool.kind == "read":
+        return True
+    if contract_version != PROPOSAL_CONTRACT_V2:
+        return tool.proposal_action in V1_LANE_OPS
+    return True
+
+
+def tools_for_domains(
+    domains: Iterable[str],
+    *,
+    contract_version: int = PROPOSAL_CONTRACT_V1,
+) -> list[Tool]:
+    """按域取工具（架构 §7.2 的分组注入），并按契约车道过滤（05b）。
 
     域未知时该域贡献 0 个工具而非报错——域路由的输入可能来自配置或预路由，
     不该因为一个笔误让整轮对话失败。P1 尚未启用域路由（架构 §12.2 已定表
-    第 2 项），loop 直接注入全部三个域即可。
+    第 2 项），loop 直接注入全部域即可。
+
+    ``contract_version`` **默认 v1**：调用方忘了传时拿到的是「旧客户端那一套」，
+    行为与 P1 逐字一致（fail-closed，见 :func:`tool_supports_contract`）。
     """
     wanted = set(domains)
-    return [tool for tool in TOOLS if tool.domain in wanted]
+    return [
+        tool for tool in TOOLS
+        if tool.domain in wanted and tool_supports_contract(tool, contract_version)
+    ]
 
 
 def get_tool(name: str) -> Tool | None:

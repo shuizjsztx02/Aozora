@@ -931,7 +931,7 @@ class TestFastTierThinking:
         assert seen["body"]["thinking"] == {"type": "disabled"}
         assert "reasoning_effort" not in seen["body"]
 
-    async def test_request_carries_the_p1_tool_catalog(self):
+    async def test_request_carries_the_v1_lane_tool_catalog(self):
         seen: dict[str, Any] = {}
 
         def handler(request: httpx.Request) -> httpx.Response:
@@ -949,8 +949,14 @@ class TestFastTierThinking:
             await provider.aclose()
 
         names = [t["function"]["name"] for t in seen["body"]["tools"]]
-        assert len(names) == len(T.TOOLS)
+        # 缺省车道是 v1（05b）：注入面就是 P1 的那 15 个工具
+        assert names == [
+            t.name for t in T.tools_for_domains(
+                T.DOMAINS, contract_version=T.PROPOSAL_CONTRACT_V1,
+            )
+        ]
         assert "transaction_add" in names and "budget_status" in names
+        assert "book_delete" not in names, "v2-only 的写工具不进 v1 车道"
         assert seen["body"]["tool_choice"] == "auto"
         assert seen["body"]["max_tokens"] == DEFAULT_MAX_TOKENS
 
@@ -1248,12 +1254,24 @@ class TestTurnTermination:
         assert result.tool_calls == 0
         assert len(provider.calls[0]["tools"]) == 1
 
-    async def test_injected_tools_default_to_the_p1_catalog(self):
-        provider = ScriptedProvider([_text("好")])
-        await _loop(provider).run("你好")
+    async def test_injected_tools_follow_the_declared_contract_lane(self):
+        """05b：车道决定注入面。缺省（没声明版本）＝ v1 ＝ P1 的 15 个工具；
+        声明 2 才拿到全量 27 个。**这条是「旧客户端行为不变」的注入面证据。**"""
+        v1_provider = ScriptedProvider([_text("好")])
+        await _loop(v1_provider).run("你好")
+        v1_names = [t["function"]["name"] for t in v1_provider.calls[0]["tools"]]
 
-        names = [t["function"]["name"] for t in provider.calls[0]["tools"]]
-        assert names == [tool.name for tool in T.TOOLS]
+        v2_provider = ScriptedProvider([_text("好")])
+        await _loop(v2_provider, contract_version=2).run("你好")
+        v2_names = [t["function"]["name"] for t in v2_provider.calls[0]["tools"]]
+
+        assert v1_names == [tool.name for tool in T.TOOLS if tool.name in {
+            t.name for t in T.tools_for_domains(
+                T.DOMAINS, contract_version=T.PROPOSAL_CONTRACT_V1,
+            )
+        }]
+        assert v2_names == [tool.name for tool in T.TOOLS]
+        assert len(v2_names) > len(v1_names)
 
 
 class TestToolPayloadHygiene:

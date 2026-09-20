@@ -450,10 +450,14 @@ class StreamEnv:
         *,
         conversation_id: str | None = None,
         book_id: str | None = None,
+        contract_version: int | None = None,
     ) -> httpx.Response:
         body: dict[str, Any] = {"input": text, "book_id": book_id or self.book_id}
         if conversation_id:
             body["conversation_id"] = conversation_id
+        if contract_version is not None:
+            # 05b：客户端声明的 ActionProposal 契约版本（不传 = 缺省 1 = 老 APK）
+            body["proposal_contract_version"] = contract_version
         return await self.client.post(
             "/ai/agent", json=body, headers=self.auth_headers,
         )
@@ -464,10 +468,12 @@ class StreamEnv:
         *,
         conversation_id: str | None = None,
         book_id: str | None = None,
+        contract_version: int | None = None,
     ) -> tuple[httpx.Response, str]:
         """跑一轮并返回 ``(响应, 正文)``。正文用 ``read()`` 完整收下。"""
         response = await self.post_turn(
             text, conversation_id=conversation_id, book_id=book_id,
+            contract_version=contract_version,
         )
         return response, response.text
 
@@ -595,15 +601,16 @@ class TestFrameFormat:
 
     def test_every_registered_tool_has_progress_text(self):
         """``tool_call`` 的文案是**人看的**，漏一个只会退化到兜底文案——
-        但新工具掉队必须被发现，否则步骤卡片长期显示「正在处理…」。"""
-        missing = [
-            tool.name for tool in tools_for_domains(DOMAINS)
-            if tool.name not in S.TOOL_PROGRESS
-        ]
+        但新工具掉队必须被发现，否则步骤卡片长期显示「正在处理…」。
+
+        按 **v2 车道**取全集（05b）：v1 车道只注入一个子集，拿它当全集会让
+        v2-only 的工具既查不出缺文案、又变成反向检查里的「孤儿」。
+        """
+        all_tools = tools_for_domains(DOMAINS, contract_version=2)
+        missing = [tool.name for tool in all_tools if tool.name not in S.TOOL_PROGRESS]
         assert missing == []
         # 反向也不能有孤儿：文案表里的名字必须都在注册表里
-        registered = {tool.name for tool in tools_for_domains(DOMAINS)}
-        assert set(S.TOOL_PROGRESS) <= registered
+        assert set(S.TOOL_PROGRESS) <= {tool.name for tool in all_tools}
 
     def test_outcome_summary_carries_no_raw_data(self):
         from src.modules.ai.tools import ToolOutcome
@@ -1593,3 +1600,103 @@ class TestCompression:
         rows = await _rows(stream_env, AIUsage, user_id=stream_env.user_id)
         assert len(rows) == 1
         assert rows[0].tokens == 12  # 只有第 1 步（5 + 7）；失败那一步零
+
+
+# ── 13. 契约车道（T-M7-05b）─────────────────────────────────────────────────
+
+
+class TestContractLane:
+    """客户端声明的 ``proposal_contract_version`` 决定车道——**注入面与信封两处**。
+
+    v1 车道必须与 P1 逐字一致（旧 APK 什么都不声明），v2 车道才拿到全量工具与
+    ``contractVersion: 2`` 的信封。这是 05b 的「旧客户端行为不变」在真实链路上的
+    证据（注入面在 ``test_ai_agent.py``、组装面在 ``test_ai_agent_approval.py``
+    另有直测）。
+    """
+
+    async def test_a_v1_client_keeps_the_p1_tool_set(self, stream_env: StreamEnv):
+        stream_env.provider.reset([_text("你好")])
+        # 不声明版本 = 旧 APK
+        await stream_env.turn("你好")
+
+        names = [t["function"]["name"] for t in stream_env.provider.calls[0]["tools"]]
+        assert names == [
+            tool.name for tool in tools_for_domains(
+                DOMAINS, contract_version=1,
+            )
+        ]
+        assert "book_delete" not in names and "meta_set" not in names
+
+    async def test_a_v2_client_gets_the_full_tool_set(self, stream_env: StreamEnv):
+        stream_env.provider.reset([_text("你好")])
+        await stream_env.turn("你好", contract_version=2)
+
+        names = [t["function"]["name"] for t in stream_env.provider.calls[0]["tools"]]
+        assert names == [tool.name for tool in tools_for_domains(DOMAINS, contract_version=2)]
+        assert "book_delete" in names and "meta_set" in names
+
+    async def test_a_v1_client_cannot_call_a_v2_only_tool(self, stream_env: StreamEnv):
+        """装不进 v1 车道的工具**模型看不见**——即便它硬报出这个名字，也只拿到
+        一条可纠正的错误结果，且**一次写库都不会发生**。"""
+        from src.models.ledger import Book
+
+        before = len(await _rows(stream_env, Book, owner_id=stream_env.user_id))
+        stream_env.provider.reset([
+            _tool_turn(_call("book_create", {"name": "旅行"}, id="w1")),
+            _text("我没有这个能力。"),
+        ])
+        _, body = await stream_env.turn("建个旅行账本")
+
+        assert payload_of(body, "done")["stop_reason"] == "completed"
+        assert len(await _rows(stream_env, Book, owner_id=stream_env.user_id)) == before
+
+    async def test_a_v2_write_runs_the_whole_chain(self, stream_env: StreamEnv):
+        """单 Step 高置信 → 自动执行：组装（v2 信封）→ 校验 → **payload 授权** →
+        执行（``execute_op``）→ sync 登记。一条链路全在真实端点上过一遍。"""
+        from src.models.ledger import Book
+        from src.models.sync import SyncChange
+
+        stream_env.provider.reset([
+            _tool_turn(_call("book_create", {"name": "旅行"}, id="w1")),
+            _text("建好了。"),
+        ])
+        _, body = await stream_env.turn("建个旅行账本", contract_version=2)
+
+        done = payload_of(body, "done")
+        assert done["proposals"] == [], "高置信单步写沿用快路径：不留确认卡"
+        assert len(done["executions"]) == 1
+        # 覆盖率哨兵：book_create 确实在注入面上（否则「执行成功」可能是空转）
+        assert "book_create" in [
+            t["function"]["name"] for t in stream_env.provider.calls[0]["tools"]
+        ]
+
+        created = [
+            b for b in await _rows(stream_env, Book, owner_id=stream_env.user_id)
+            if b.name == "旅行"
+        ]
+        assert len(created) == 1
+        # 服务端权威直写必须自己登 sync change，否则别的设备 pull 不到
+        changes = await _rows(stream_env, SyncChange, entity_id=created[0].id)
+        assert [str(c.operation) for c in changes] == ["insert"]
+
+    async def test_a_device_op_hangs_instead_of_executing(self, stream_env: StreamEnv):
+        """``meta_set`` 的执行位置在设备：服务端**只挂起**，不参与审批策略的判定
+        （没有执行通道时它也只是挂起——这里连执行通道都在，仍然一次不执行）。"""
+        from src.models.sync import SyncChange
+
+        before = len(await _rows(stream_env, SyncChange))
+        stream_env.provider.reset([
+            _tool_turn(_call("meta_set", {"key": "default_book"}, id="w1")),
+            _text("请在手机上确认。"),
+        ])
+        _, body = await stream_env.turn("默认用这个账本", contract_version=2)
+
+        proposal = payload_of(body, "confirm")["proposal"]
+        assert proposal["contractVersion"] == 2
+        assert proposal["action"] == "meta_set"
+        assert proposal["payload"]["bookId"] == stream_env.book_id
+
+        done = payload_of(body, "done")
+        assert [p["proposalId"] for p in done["proposals"]] == [proposal["proposalId"]]
+        assert done["executions"] == []
+        assert len(await _rows(stream_env, SyncChange)) == before, "设备 op 不动服务端数据"

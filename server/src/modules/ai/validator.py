@@ -201,3 +201,17 @@ def canonical_op(action: str) -> str | None:
     if action in V2_OPS:
         return action
     return _V1_ACTION_ALIASES.get(action)
+
+
+#: 别名表的**反向索引**：v2 op → 它在 v1 车道上的动作名（可能多于一个：
+#: ``transaction_add`` 同时对应 ``add_tx`` 与 ``add_tx_batch``）。没有 v1 形态的
+#: op 不在表里——它们只能出现在 v2 车道。本索引与别名表同源，不另立一份映射。
+_V1_ACTIONS_BY_OP: dict[str, tuple[str, ...]] = {}
+for _v1_name, _op in _V1_ACTION_ALIASES.items():
+    if _op is not None:
+        _V1_ACTIONS_BY_OP[_op] = (*_V1_ACTIONS_BY_OP.get(_op, ()), _v1_name)
+
+
+def v1_actions_for_op(op: str) -> tuple[str, ...]:
+    """v2 op → 它的 v1 动作名（空元组＝v1 车道承载不了这个 op）。"""
+    return _V1_ACTIONS_BY_OP.get(op, ())

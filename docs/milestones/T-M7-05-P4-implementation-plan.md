@@ -13,7 +13,7 @@
 | 卡 | 内容 | 状态 | 完成日 | 提交 | 备注 |
 |---|---|---|---|---|---|
 | **05a** | ActionProposal v2 契约（文档/协议先行） | ✅ 完成 | 2026-09-19 | `ab7b1c3` | 批次 1；v1 文件一字未改，双读车道判定＝`contractVersion` 在场与否；服务端接线归 05b（见 §六） |
-| **05b** | 全量工具：记账与账户账本域 | ⏳ 未开始 | | | 批次 2 |
+| **05b** | 全量工具：记账与账户账本域 | ✅ 完成 | 2026-09-20 | 见 §六 | 批次 2；含 05a 交接的**服务端接线**（校验器分流 + execute 放行 + payload 授权 + 读协商字段）；6 域 / 27 个工具；v1 车道仍 = P1 的 15 个 |
 | **05c** | 全量工具：预算存钱、定时、角色域 | ⏳ 未开始 | | | 批次 3 |
 | **05d** | 全量工具：分析与其余服务端域 | ⏳ 未开始 | | | 批次 4 |
 | **05e** | 设备能力通道：服务端协议与 loop 暂停/恢复 | ✅ 完成 | 2026-09-19 | `ec05120` | 批次 2；服务端侧全部交付，客户端执行器归 05f；开关默认关闭（`AI_DEVICE_CHANNEL_ENABLED`） |
@@ -167,11 +167,11 @@ cd app && npx tsc --noEmit                       # 0 错
 
 | # | 挂账 | 来源 | 落卡 |
 |---|---|---|---|
-| 1 | **工具全集归 P4**——约 79 条桥命令对应的工具集（P1 只交付 15 个 / 3 域） | 02c 职责边界 | **05b / 05c / 05d** |
+| 1 | **工具全集归 P4**——约 79 条桥命令对应的工具集（P1 只交付 15 个 / 3 域）。**记账域与账户账本域已闭环（05b）**：15 → 27 个工具 / 6 域；预算存钱与定时角色归 05c、分析与其余服务端域归 05d | 02c 职责边界 | **05c / 05d** |
 | 2 | ~~**`device_request` 无生产者**~~——**服务端侧已闭环（05e，`ec05120`）**：两类协议 + 首个生产者 + 上行端点；残留只剩客户端执行器与渲染路径 | `stream.py:34,72` | **05f** |
 | 3 | **`routing` 阶段无生产者**——`stream.py` 现注释「属域路由，P4 才有」 | `stream.py:30` | **05g**（+ P2 03c 的占位） |
 | 4 | **域路由归 P4**（架构 §12.2 已定第 2 项；P1 的「快路径」由 loop 自然产生，不额外路由） | 架构 §12.2 | **05g** |
-| 5 | **R-PROD-17（工具集过大降低选择准确率）**——`tools.py` 的域分组已就位，**评估分组策略与预路由准确率**是 P4 的下一步 | `risk-register.md` | **05g**（+ 05b–05d 的真实调用抽样） |
+| 5 | **R-PROD-17（工具集过大降低选择准确率）**——`tools.py` 的域分组已就位。**05b 已交首个 27 工具的真实抽样**（首调 70% / 两步 93% / **零例选错写工具**，`server/scripts/probe_tool_selection.py` 可重跑）；**评估分组策略与预路由准确率**仍是 05g 的下一步 | `risk-register.md` | **05g**（+ 05c / 05d 的抽样） |
 | 6 | **`icon.pick` / 设备类能力**属设备能力通道 | 架构 §3.2 映射表 | **05f** |
 | 7 | **`ai_agent_step_timeout_seconds=20` 是初值**（02d 实测深档单步 5–7 s，真实分布待统计） | 02g / 02g-2 §五 | **收口**（全量工具与设备通道接上后按真实分布校准） |
 | 8 | **会话级配额数值（50 轮 / 500k token）与合并窗参数均为初始值** | 02f / 02g-2 §五 | **收口**（按真实使用分布校准） |
@@ -309,6 +309,87 @@ cd app && npx tsc --noEmit                       # 0 错
   stream.py / routes.py / schemas.py）。
 下一项未阻塞任务：**05f**（客户端执行器与设备工具接线——直接消费本卡的帧与端点，
   是打开开关的前置）；工具全量化面为 05b（记账与账户账本域）/ 05c / 05d。
+```
+
+### 05b 全量工具：记账与账户账本域 + 服务端接线（2026-09-20）
+
+```text
+任务编号：T-M7-05b（P4 批次 2）
+完成范围 / 明确未做：
+  完成——① **记账域与账户账本域全量 CRUD**：12 个新工具（transaction_update /
+  transaction_delete / category_create|update|archive / account_create|update|archive /
+  book_create|update|delete / meta_set），工具集 15 → 27；② **域拆分**：P1 的
+  `ledger` 域按操作面拆成 category / account / book，另立 meta 域（6 域，每域 ≤8）；
+  ③ **05a 交接的服务端接线全部落地**：契约车道（注入面 + 组装面）、校验器分流、
+  payload 级授权（组装 / /ai/validate / /ai/execute 三处同一函数）、execute 放行
+  （op → 执行体表）、读协商字段（/ai/agent 的 proposal_contract_version）；
+  ④ 写工具产出的草案统一为**规范 v2 形状**，v1 信封由组装器按车道装出（旧客户端
+  行为逐字不变）；⑤ 真实调用抽样（R-PROD-17 数据点）。
+  未做（刻意，非遗漏）——① 预算 / 定时 / 角色 / 分析等其余域的工具（05c / 05d）；
+  ② 域路由与预路由（05g）；③ Skill 封装（05h）；④ **客户端渲染与执行 v2 提案的
+  路径**（R-PROD-31，P4 收口裁决）；⑤ 设备能力通道（05e 服务端已交付，客户端执行器
+  归 05f）——本卡只把 meta_set 登记为设备 op 并让它挂起。
+修改的文档、契约与代码：
+  server/src/modules/ai/tools.py（+12 工具 / 域拆分 / 车道过滤 / 定位条件 schema）、
+  authorization.py（**新**：payload 级授权，fail-closed）、
+  proposal_ops.py（**新**：op → 执行体表 + sync 登记）、
+  agent.py（车道组装 + 授权 + 设备 op 直挂 + _affected_count）、
+  service.py（validate_proposal 分流 + execute_proposal 的 v2 分支）、
+  validator.py（别名表的反向索引 v1_actions_for_op）、
+  routes.py（/ai/agent 读协商字段 + /ai/validate 的 v2 授权）、
+  schemas.py（proposal_contract_version: Literal[1,2] = 1）、
+  stream.py（透传契约版本 + 12 条步骤卡文案）、
+  scripts/probe_tool_selection.py（**新**：真实调用抽样探针）、
+  tests/：test_ai_tools_crud.py（**新** 28 例）、test_ai_proposal_v2_execution.py
+  （**新** 20 例）、test_agent_stream.py::TestContractLane（**新** 5 例）、
+  test_ai_tools.py / test_ai_agent.py / test_ai_agent_approval.py（P1 期断言的
+  口径更新：写工具 op 集合、v1 车道注入面、草案形状——语义未放松）、
+  docs/architecture/ai-architecture.md（「服务端接线」新节 + 设备 op 口径）、
+  docs/architecture/ai-agent-architecture.md（§3.2 的 meta.set 执行位置**订正** + §7.2 域分组实况）、
+  docs/risk-register.md（R-PROD-17 数据点 + R-PROD-31 现状）
+验证命令与结果（**隔离子树 `git worktree` 内自洽**——主工作区当时有 05f 在途改动）：
+  cd server && python -m pytest tests/ -q          → 1344 passed / 37 skipped
+                                                    （05e 基线 1290 + 本卡 54）
+  cd app && npx tsc --noEmit                       → 0 错
+  cd app && npx vitest run                         → 84 文件 / 1327 passed
+  ./gradlew :app:testDebugUnitTest --rerun-tasks   → BUILD SUCCESSFUL，424 tests /
+                                                    0 失败（1 skip）
+  真实调用抽样（server/scripts/probe_tool_selection.py，车道 v2 / 27 工具 /
+  deepseek-flash / 27 用例）→ 首调命中 19/27 = 70%，两步内 25/27 = 93%，
+  **零例选错写工具**（详见 risk-register R-PROD-17 与下「开放风险」）
+数据/同步/AI/安全影响：
+  AI 协议面：契约文件（schema.json / schema-v2.json / 别名表 / fixtures）**一字未改**
+  ——本卡只接线与实现工具。**v1 车道的产出与 P1 逐字相同**：v1 客户端仍只注入 15 个
+  工具，记账草案装出的信封与 02c 一致（`test_v1_lane_carries_only_the_ops_it_can_execute`
+  与既有 v1 用例共同钉住）。
+  数据面：**零迁移、零新表**。服务端权威直写（v2 op 执行）每次写库都在同事务登一条
+  sync change——不登的话任何设备 pull 都看不到（T14-8 口径）。
+  安全：三条铁律不放松。**改 / 删 / 归档类工具只接受「定位条件」**（模型永不输出
+  UUID 延伸到「指向一个已有对象」这一面）；定位不唯一 → `ambiguous_transaction`，
+  报可行动的错、**绝不猜**；payload 级授权覆盖分类 / 账户 / 账本 / 交易四类目标
+  （交易目标额外校验**就在提案的账本里**）；**未登记授权规则的 op 一律拒绝**
+  （fail-closed）；`account_delete` 这类最高危 op **不在执行面里**（注册表成员身份
+  不是执行许可）。
+兼容与回退方式：
+  两条车道由客户端声明驱动（缺省 1）。**回退＝什么都不做**：不声明版本就永远走 v1
+  车道，行为与 P1 逐字相同；无数据迁移、无契约文件替换、无服务端开关。
+  **v1 车道的上限**：v1 客户端拿不到 05b 起的任何新工具——这是设计（声明字段天然
+  按客户端版本灰度），不是缺陷。
+开放风险与责任人：
+  ① **R-PROD-31 现在站在门口**（客户端声明版本 + 渲染/执行分派两件事都没人认领）：
+  v2 车道已有生产者，但客户端一侧未接 → 现阶段无人能用到 v2 提案。**不构成故障**
+  （旧 APK 走 v1 车道）。责任人：P4 收口裁决；
+  ② **R-PROD-17 残余收窄为「多走一步」**：真实抽样 27 例中零例选错写工具，残余 2 例
+  分别表现为「拿到流水后又查了一次」与「删账本前转为文字征询」——后者在破坏性最强的
+  op 上偏保守，需人工判断是否可接受（已记入 risk-register）。责任人：05g；
+  ③ **回执字段语义扩张**：`AIExecuteProposalResponse.transaction_ids` 在 v2 车道上装的是
+  「影响的实体 id」，字段名沿用以免动既有回执契约——等 R-PROD-31 有消费方时再谈改名。
+  ④ **`meta_set` 的执行位置在设备**（工具在服务端、执行在客户端）：服务端只挂起；
+  真正执行它的是 05f 的执行器。**开 05f 之前它是个「挂了但没人执行」的提案**——与
+  reminder_set 同形。
+下一项未阻塞任务：**05c**（预算存钱 / 定时 / 角色三域——沿用本卡的注册表与执行体范式：
+  工具 → authorization 的授权规则 → proposal_ops 的执行体，三处同时表态）与 **05f**
+  （客户端执行器：消费 05e 的设备帧 + 本卡登记的设备 op）。
 ```
 
 ---

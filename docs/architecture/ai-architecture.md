@@ -91,7 +91,7 @@ v1 是**固定 action 集**（`add_tx` / `add_tx_batch` / `query` / `report` / `
 | `book_create` | 账户账本 | `POST /books` | 05b |
 | `book_update` | 账户账本 | `PATCH /books/{id}` | 05b |
 | `book_delete` | 账户账本 | `DELETE /books/{id}` | 05b |
-| `meta_set` | 账户账本 / 角色 / 用户设定 | `meta.set`（按 payload 的 key 分默认账本 / 默认账户 / 当前角色 / 小组件配置 / 用户画像五个域） | 05b / 05c / 05d |
+| `meta_set` | 账户账本 / 角色 / 用户设定 | `meta.set`（按 payload 的 key 分默认账本 / 默认账户 / 当前角色 / 小组件配置 / 用户画像五个域）。**执行位置＝设备**（见下「设备能力通道不是 ActionProposal」）| 05b / 05c / 05d |
 | `budget_set` | 预算存钱 | `PUT /budgets/{period}`（UPSERT） | 05c |
 | `budget_set_category` | 预算存钱 | `PUT /budgets/{period}/category/{id}`（UPSERT） | 05c |
 | `budget_delete` | 预算存钱 | 桥 `budget.delete` | 05c |
@@ -138,12 +138,33 @@ v1 是**固定 action 集**（`add_tx` / `add_tx_batch` / `query` / `report` / `
 | 环节 | 规则 |
 |---|---|
 | 声明 | 新客户端在 `POST /ai/agent` 上带 `proposal_contract_version: 2`。**字段缺省＝1**（旧 APK 什么都不带） |
-| 产出 | 按声明选车道：v1 → 只产出 v1 可承载的 op（三个有别名者 + `config` 那条本地链路）；v2 → 产出 v2 信封与规范 op |
-| **v1 车道产不出 v2-only op** | 这是**实现约束，不是建议**：loop 不得把 v2 提案塞给 v1 客户端（旧校验器会整条判无效，卡片不出、写入静默失败）。05b 起新增的工具在 v1 车道上要么不可用、要么降级为一句说明 |
+| 产出 | 按声明选车道：v1 → 只产出 v1 可承载的 op（记账一个 op，见下）；v2 → 产出 v2 信封与规范 op |
+| **v1 车道产不出 v2-only op** | 这是**实现约束，不是建议**：loop 不得把 v2 提案塞给 v1 客户端（旧校验器会整条判无效，卡片不出、写入静默失败）。05b 落地为**注入面过滤**：v1 车道只注入 `V1_LANE_OPS` 对应的写工具（其余写工具模型**看不见**），组装面另有一道闸（手工注入了也装不进 v1 信封） |
 | 回退 | 不产 v2 就是回退——服务端按声明降级即可，**无数据迁移、无契约文件替换**；旧 APK 内嵌 v1 schema，不受影响 |
 | 灰度 | 声明字段天然按客户端版本灰度：新 APK 走 v2，未升级的走 v1，服务端不需要第二套开关 |
 
-> **接线状态（2026-09-19，诚实记录）：** 05a 交付的是契约三件套（schema / TS 校验器 / Python 校验器）、fixtures 与判定逻辑本身。`/ai/validate` 与 `/ai/execute` 目前仍只走 v1 车道（`execute_proposal` 只认 `add_tx` / `add_tx_batch`），**`proposal_contract_version` 字段也还没有读取方**——服务端接线随首个产出 v2 提案的卡（**05b**）落地。在此之前不产出任何 v2 提案，因此这段空档不会造成旧客户端行为变化。
+### 服务端接线（T-M7-05b 落地）
+
+05a 的契约到此**两头接上**：`proposal_contract_version` 有了读取方，两条车道在
+校验、授权与执行三处都分流。
+
+| 环节 | 实现 | 口径 |
+|---|---|---|
+| 声明 | `POST /ai/agent` 的 `proposal_contract_version: Literal[1, 2] = 1` | 缺省 1＝旧 APK；值非法直接 422（**不猜**） |
+| 注入面 | `tools.tools_for_domains(domains, contract_version=…)` | **v1 车道 = P1 的 15 个工具**（逐字不变）；v2 = 全量 27 个。读工具与车道无关 |
+| 组装面 | `agent.assemble_proposal(draft, contract_version=…)` | 工具产出**规范草案**（`{action: <v2 op>, payload}`），由组装器按车道装信封；v1 只装得进记账 op（payload 的 `transactions` 抬到根上，动作名按条数在 `add_tx` / `add_tx_batch` 之间选） |
+| 校验 | `AIService.validate_proposal` 按 `contractVersion` 在场与否分流 | v1 逐字沿用（schema → 幻觉 → 低置信）；v2 只校验信封 + 低置信，**payload 的 id 不在这一层对拍**（要查库） |
+| 授权 | `authorization.authorize_payload`（loop 组装、`/ai/validate`、`/ai/execute` **三处同一个函数**） | 每个 id 都必须落在服务端自己的查询里：分类属于本人且在本账本或全局、未归档；账户属于本人且未归档；账本属于本人且未软删；交易未软删**且就在提案的账本里**。**未登记授权规则的 op 一律拒绝**（fail-closed：默认放行会让「忘了登记」变成静默的越权面） |
+| 执行 | `proposal_ops.execute_op` 的 op → 执行体表 | **注册表成员身份不是执行许可**：不在表里的 op 一律 400（含最高危的 `account_delete`）；执行位置在设备的 op（`meta_set`）另有自己的拒绝码。每次写入**同事务登一条 sync change**（T14-8 口径） |
+
+**v2 提案走的是与 v1 同一条安全门**：组装 → 校验 → 授权 → 审批四值 → 执行
+（含 TOCTOU 重校验），02e/03e 的路径一行未改——v2 换的是**信封与 op 命名空间**，
+不是门。
+
+**回执字段的一处语义扩张（诚实记录）：** `AIExecuteProposalResponse.transaction_ids`
+在 v2 车道上装的是「本次 op 影响的**实体** id」（改 / 归档是同一 id 的新版本，
+新建是新 id），字段名沿用是为了不动既有回执契约。等 R-PROD-31（客户端渲染 v2
+提案的路径）落定、真有消费方时再谈改名。
 
 ### payload 的所有权（本契约最重要的一处取舍）
 
@@ -151,7 +172,7 @@ v1 是**固定 action 集**（`add_tx` / `add_tx_batch` / `query` / `report` / `
 
 理由：把 op 的字段再写进契约＝给同一件事造第二个事实源，两份必然漂移；而工具注册表本来就随工具走，是唯一会与实现同步的那一份。
 
-**代价（已知并接受）：** 客户端不做 payload 级授权。**结构通过不是执行许可**——payload 里的分类 / 账户 / 目标是否属于当前用户与账本，由服务端在**组装与执行时**施加（同 §7.4 的 TOCTOU 重校验）。这与 v1 的 `ProposalValidationContext` 并不冲突：v1 的上下文校验存在，是因为 v1 的提案由客户端组装（ADR-003）；v2 的提案由服务端 loop 组装。
+**代价（已知并接受）：** 客户端不做 payload 级授权。**结构通过不是执行许可**——payload 里的分类 / 账户 / 目标是否属于当前用户与账本，由服务端在**组装与执行时**施加（同 §7.4 的 TOCTOU 重校验）。这与 v1 的 `ProposalValidationContext` 并不冲突：v1 的上下文校验存在，是因为 v1 的提案由客户端组装（ADR-003）；v2 的提案由服务端 loop 组装，但 `/ai/validate` 与 `/ai/execute` 是**客户端可达**的端点——授权在那里做，理由不是「谁组装的」，而是「谁能打到这个端点」。**05b 已按此落地**（`authorization.py`，见上「服务端接线」表）。
 
 **fixtures 里的 payload 内容只是信封用法的示例，不是字段契约**——判据在工具注册表。
 
@@ -160,6 +181,14 @@ v1 是**固定 action 集**（`add_tx` / `add_tx_batch` / `query` / `report` / `
 架构 §4.3 的设备能力通道（刷新小组件、触感、分享、权限申请、语音转写、图片选择、图标选择）走的是 `device_request` 事件与上行回传，**不产生提案**：它们是「任务里的设备动作」，不是「待审批的写库」。
 
 只有 **`reminder_set`** 两头都沾——它写的是用户的提醒配置（因此要过审批门，进注册表），执行体在设备上（因此 05f 接客户端执行器）。op 的执行位置由**客户端按 op 分派**（05f 的分派表），不写进信封。
+
+**`meta_set` 同理（T-M7-05b 核对实现后的结论）。** 它写的是设备本地的 `sync_meta`——默认账本 / 默认账户 / 小组件配置 / 用户画像都是本地展示元数据，桥命令 `meta.set` 的注释明写「不加实体列、**不上行**」，服务端没有这些键的存储位置（`BridgeProtocol.kt`）。因此：
+
+- 工具（语义侧）在 **05b/05c/05d**：谁拥有那几个 key，谁就写它的枚举与描述；
+- 执行（动作侧）在**设备**，由 05f 的执行器按 op 分派，与设备类桥命令同一套；
+- 服务端 loop 对它的处置是**只挂起、不执行**（`tools.DEVICE_EXECUTED_OPS`；`execute_op` 另有 `ai_device_op_not_executable` 拒绝码，防止客户端把它投到 `/ai/execute`）。
+
+> **对架构 §3.2 的一处订正（05b 落地时发现）：** 该表把「账户账本 → `meta.set(默认项)`」的执行位置标为**服务端**，与实现不符（见上）。同一行的「用户设定 → `meta.set(user_profile)`（注入 AI context）」同样如此：`user_profile` 也在 `sync_meta` 白名单里，注入走的是**客户端**把它带进 `/ai/interpret` 的 `context` 字段（T11-6），不是服务端读取。订正已写入 `ai-agent-architecture.md` §3.2。
 
 ### 设备能力通道协议（T-M7-05e）
 

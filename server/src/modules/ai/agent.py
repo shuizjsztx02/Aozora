@@ -108,6 +108,29 @@
 挂起**发生在一次工具批次内部**，因此与取消的关系与 02d 的既定口径一致：取消的
 检查点在 Step 入口，不会切断批次（不变式 1）；客户端断连时被取消的是整个工作
 协程，``DeviceChannel.wait`` 的 ``finally`` 注销挂起条目——**不留悬挂请求**。
+
+契约车道（T-M7-05b）
+-------------------
+工具的草案是**规范形状**（``{"action": <v2 op>, "payload": {...}}``，见
+``tools.py``）；装进哪条车道由**客户端声明的契约版本**决定（05a 的
+``proposal_contract_version``，缺省 1）：
+
+- **v2 车道**：信封 = ``{contractVersion: 2, action: <op>, payload, ...}``。
+- **v1 车道**：只有记账 op 装得进去（v1 的写形状只有根上的 ``transactions``，
+  且 ``/ai/execute`` 的 v1 分支只认它的两个别名），payload 里的 ``transactions``
+  因此被抬到根上、动作名按条数在 ``add_tx`` / ``add_tx_batch`` 之间选。
+  **其余写 op 在 v1 车道上一律不可注入**（``tools.V1_LANE_OPS``）——让模型看见
+  一个产不出可用提案的工具等于给它一条死路。
+
+车道在**两个地方**同时生效，缺一不可：注入面（:func:`tools_for_domains`）与
+组装面（:func:`assemble_proposal`）。前者让模型看不见装不进去的工具，后者保证
+即便有人手工注入了也装不进 v1 信封（纵深防御）。
+
+另有一类 op 与车道无关：**执行位置在设备的 op**（``tools.DEVICE_EXECUTED_OPS``，
+当前 ``meta_set``）。它们照样产出提案、照样过校验与授权，但服务端**不执行**——
+``_handle_proposal`` 对它们直接走挂起分支，不参与审批策略的判定（在 loop 里问
+一次批准换不来任何东西，服务端没有可执行的落点），提案随 ``confirm`` 帧与
+``done.proposals`` 交回客户端，由它在设备上执行（05f 的执行器按 op 分派）。
 """
 
 from __future__ import annotations
@@ -123,6 +146,7 @@ from datetime import UTC, date, datetime
 from enum import StrEnum
 from typing import TYPE_CHECKING, Any, Protocol
 
+from .authorization import authorize_payload
 from .context import ProposalValidationContext
 from .devices import (
     NEEDS_RESULT,
@@ -150,9 +174,12 @@ from .provider import (
 )
 from .service import AIService
 from .tools import (
+    DEVICE_EXECUTED_OPS,
     DOMAINS,
     ERR_INVALID_ARGUMENTS,
     ERR_UNKNOWN_TOOL,
+    PROPOSAL_CONTRACT_V1,
+    PROPOSAL_CONTRACT_V2,
     Tool,
     ToolContext,
     ToolOutcome,
@@ -161,6 +188,7 @@ from .tools import (
     to_openai_tools,
     tools_for_domains,
 )
+from .validator import canonical_op, v1_actions_for_op
 
 if TYPE_CHECKING:
     from src.models.user import User
@@ -190,6 +218,9 @@ ERR_APPROVAL_REJECTED = "approval_rejected"
 ERR_APPROVAL_UNAVAILABLE = "approval_unavailable"
 ERR_APPROVAL_CANCELLED = "approval_cancelled"
 ERR_EXECUTION_FAILED = "execution_failed"
+#: 工具产出的 op 装不进本轮的契约车道（05b）。模型看不见这类工具（注入面已经
+#: 滤过），所以正常路径上不会出现——这是纵深防御的那一层。
+ERR_OP_NOT_ON_LANE = "op_not_on_contract_lane"
 
 #: 设备通道（05e）的错误码。四种结局都是**工具级结果**——不新增 ``StopReason``
 #: （ADR-010 决策 4）：模型拿到码之后该做的是向用户解释，不是终结这一轮。
@@ -220,6 +251,10 @@ _LOOP_ERROR_MESSAGES: dict[str, str] = {
     ERR_DEVICE_FAILED: "设备操作执行失败，本次没有完成。可以换一种做法，或向用户说明。",
     ERR_DEVICE_TIMEOUT: (
         "用户没有在限时内完成这个设备操作，本次没有拿到结果。不要重复发起，先向用户说明。"
+    ),
+    ERR_OP_NOT_ON_LANE: (
+        "当前客户端版本不支持这个操作，本次没有写入。请告知用户需要升级 App 后再试，"
+        "或改用工具清单里已有的工具完成用户想做的事。"
     ),
 }
 
@@ -621,10 +656,46 @@ class ServiceProposalExecutor:
         )
 
 
-def assemble_proposal(draft: Mapping[str, Any]) -> dict[str, Any]:
-    """草案 → 完整 ActionProposal（补齐 02c 留给本层的三个治理字段）。
+def _v1_envelope(op: str, payload: Mapping[str, Any]) -> dict[str, Any] | None:
+    """规范 op + payload → **v1 信封的动作名与根字段**；承载不了时 ``None``。
 
-    三个字段**无条件覆写**，不是「缺省才填」——草案（乃至模型）自带的一律作废：
+    v1 的写形状只有根上的 ``transactions``（``schema.json``），可承载的 op 因此
+    等于别名表里**有 v1 名字**的那些（``v1_actions_for_op`` 非空）。这个判据与
+    ``tools.V1_LANE_OPS`` 是同一件事的两面：前者是组装面的闸门，后者是注入面的。
+    """
+    if not v1_actions_for_op(op):
+        return None
+    if op == "transaction_add":
+        transactions = list(payload.get("transactions") or [])
+        # 单条与批量在 v2 里是同一个 op，在 v1 里是两个动作名。按条数选：客户端
+        # 对两者走同一条路径（``use-assistant`` 同判 add_tx / add_tx_batch），
+        # 因此这里的选择在行为上等价，也让 v1 车道的产出与 02c 逐字一致。
+        # 空列表不在这里拦——契约的 ``minItems: 1`` 会在校验那一步判它无效，
+        # 本函数只负责装信封（一处判定，两处规定必然漂移）。
+        return {
+            "action": "add_tx_batch" if len(transactions) > 1 else "add_tx",
+            "transactions": transactions,
+        }
+    return None
+
+
+def assemble_proposal(
+    draft: Mapping[str, Any],
+    *,
+    contract_version: int,
+) -> dict[str, Any] | None:
+    """草案 → 完整 ActionProposal（按车道装信封 + 补齐 02c 留给本层的治理字段）。
+
+    返回 ``None`` ＝ **这份草案装不进这条车道**（op 在 v1 里没有形态）。调用方
+    按一条可纠正的错误结果处理，**不挂起也不执行**。
+
+    两个信封（05a 的两条车道，判定＝ ``contractVersion`` 在场与否）：
+
+    - ``contract_version=2``：``{contractVersion: 2, action: <op>, payload: {...}}``
+    - ``contract_version=1``：``{action: add_tx|add_tx_batch, transactions: [...]}``
+      （payload 里的字段**抬到根上**——v1 契约的写形状就是根上的 ``transactions``）
+
+    三个治理字段**无条件覆写**，不是「缺省才填」——草案（乃至模型）自带的一律作废：
 
     - ``proposalId``：服务端生成。它同时是 ``execute_proposal`` 的幂等键，
       因此**绝不允许**由草案指定。
@@ -634,13 +705,35 @@ def assemble_proposal(draft: Mapping[str, Any]) -> dict[str, Any]:
     - ``requiresConfirmation``：恒为 ``True``。凡是组装完还要交回调用方的提案，
       都必须经用户确认——自动执行掉的那条路径不会把它交回调用方。
 
-    草案里的其它未知字段不在这里清洗：契约的 ``additionalProperties: false``
-    会在下一步的校验里直接判 ``proposal_rejected``，那是更靠得住的一道门。
+    草案里的其它字段一律**丢弃**：信封按车道**从零构造**（只取 action / payload /
+    message / warnings），草案（乃至将来某个手搓调用方）多给的键不会流进契约——
+    这比「透传后靠 ``additionalProperties: false`` 拦」更靠前一道，也让 05a 的
+    「v2 只校验信封」不至于被夹带的字段穿透。
     """
-    proposal = dict(draft)
-    warnings = proposal.get("warnings") or []
+    payload = draft.get("payload")
+    payload = payload if isinstance(payload, Mapping) else {}
+    op = canonical_op(str(draft.get("action") or ""))
+
+    if contract_version == PROPOSAL_CONTRACT_V2:
+        if op is None:
+            return None
+        envelope: dict[str, Any] = {"contractVersion": PROPOSAL_CONTRACT_V2, "action": op}
+        envelope["payload"] = dict(payload)
+    else:
+        if op is None:
+            return None
+        v1_fields = _v1_envelope(op, payload)
+        if v1_fields is None:
+            return None
+        envelope = v1_fields
+
+    proposal: dict[str, Any] = {
+        **envelope,
+        "message": str(draft.get("message") or ""),
+        "warnings": list(draft.get("warnings") or []),
+    }
     proposal["proposalId"] = f"agent-{uuid.uuid4().hex}"
-    proposal["confidence"] = _WARNED_CONFIDENCE if warnings else 1.0
+    proposal["confidence"] = _WARNED_CONFIDENCE if proposal["warnings"] else 1.0
     proposal["requiresConfirmation"] = True
     return proposal
 
@@ -657,12 +750,30 @@ def confirm_reason(*, step: int, confidence: float) -> str | None:
     - ``confidence < CONFIDENCE_THRESHOLD`` → 强制确认（架构 §7.4 的「低置信出
       确认卡」）。P1 的置信度只有两档（``1.0`` / 带 ``warnings`` 的 ``0.8``），
       该表的「高风险」一类尚无信号源，等有分类器时再作为第三个理由加在这里。
+
+    **设备类 op（``tools.DEVICE_EXECUTED_OPS``）不走这里**——它们不参与审批策略的
+    判定，而是在 :meth:`AgentLoop._handle_proposal` 里直接挂起（服务端执行不了
+    它们，问一次批准没有任何意义）。
     """
     if step >= 2:
         return "multi_step"
     if confidence < CONFIDENCE_THRESHOLD:
         return "low_confidence"
     return None
+
+
+def _affected_count(proposal: Mapping[str, Any]) -> int:
+    """一份提案**影响几样东西**（进 ``executed`` 结果，给客户端报账用）。
+
+    两条车道的写形状不同：v1 与 v2 的记账 op 都是「一批交易」（v1 在根上、v2 在
+    ``payload`` 里），其余 v2 op（新建分类 / 归档账户……）一次只动一个对象。
+    """
+    payload = proposal.get("payload")
+    source: Mapping[str, Any] = payload if isinstance(payload, Mapping) else proposal
+    transactions = source.get("transactions")
+    if isinstance(transactions, list) and transactions:
+        return len(transactions)
+    return 1
 
 
 def validation_context_for(ctx: ToolContext) -> ProposalValidationContext:
@@ -858,11 +969,18 @@ class AgentLoop:
         observer: AgentObserver | None = None,
         sink: MessageSink | None = None,
         device: DeviceChannel | None = None,
+        contract_version: int = PROPOSAL_CONTRACT_V1,
     ) -> None:
         """
         ``today`` 由调用方按**用户本地时区**给出（服务端不猜用户在东八区还是
         别处）——模型的 ``bizDate`` 全靠它换算「今天 / 昨天」。
-        ``tools`` 默认注入 P1 全部三个域；P4 的域路由只需改这一个参数。
+        ``tools`` 默认注入本车道可用的全部域；P4 的域路由只需改这一个参数。
+
+        ``contract_version`` 是**客户端声明的契约版本**（05a 的
+        ``proposal_contract_version``，缺省 1）。它决定两件事，且两件都必须一致：
+        注入哪些写工具（:func:`tools_for_domains`）与提案装进哪条信封
+        （:func:`assemble_proposal`）。**缺省 v1**：忘了传就得到「旧客户端那一套」，
+        与 P1 逐字一致（fail-closed）。
 
         ``approver`` / ``executor`` 是写路径的两个通道（02e），缺省均为 ``None``：
 
@@ -893,11 +1011,15 @@ class AgentLoop:
         self._today = today
         self._max_tokens = max_tokens
         self._device = device
+        self._contract_version = contract_version
         #: 显式给出 ``tools`` 时**只**用给出的清单（P4 域路由的入口，05g）；缺省 =
-        #: 三个服务端域 + （通道在位时的）设备能力。
+        #: **本车道可用**的服务端域（05b 的契约车道过滤）+（通道在位时的）设备能力。
         self._tools: list[Tool | DeviceTool] = (
             list(tools) if tools is not None
-            else [*tools_for_domains(DOMAINS), *(device_tools() if device else [])]
+            else [
+                *tools_for_domains(DOMAINS, contract_version=contract_version),
+                *(device_tools() if device else []),
+            ]
         )
         #: 只有被注入的工具才可执行——模型幻觉出一个存在于注册表但本轮没注入的
         #: 工具名时，必须拒绝（P4 的域路由一旦开启，这就是隔离边界）。
@@ -1307,7 +1429,7 @@ class AgentLoop:
             # 一个提案 = 一次写操作（02d 决策 2）：草案一产出就计数，与它最终被
             # 自动执行、被拒还是挂起无关——写预算防的是「模型反复试图写库」。
             self._writes += 1
-            return await self._handle_proposal(outcome.data)
+            return await self._handle_proposal(outcome.data, tool=tool)
         return outcome
 
     async def _device_call(
@@ -1381,12 +1503,20 @@ class AgentLoop:
 
     # -- 内部：写路径（02e）----------------------------------------------
 
-    async def _handle_proposal(self, draft: dict[str, Any]) -> ToolOutcome:
-        """组装 → 校验 → 按策略放行 / 挂起（架构 §7.3、§7.4）。
+    async def _handle_proposal(
+        self, draft: dict[str, Any], *, tool: Tool | None = None,
+    ) -> ToolOutcome:
+        """组装 → 校验 → 授权 → 按策略放行 / 挂起（架构 §7.3、§7.4）。
 
         返回值是**回喂模型**的结果。三条铁律在这里合流：治理字段由本层生成、
         提案必须过 ``AIService.validate_proposal``（与会话内权威集合对拍）、
-        执行只走 ``self._executor``（其内部还自带一次 TOCTOU 重校验）。
+        v2 提案还要过 payload 级授权、执行只走 ``self._executor``（其内部还自带
+        一次 TOCTOU 重校验）。
+
+        ``tool`` 是产出这份草案的注册表条目（05b）：op 以**注册表声明**为准
+        （``tool.proposal_action``），不以草案自报的 ``action`` 为准——草案是模型
+        那条路径的产物，注册表才是服务端的事实源。缺省时退回草案自报值（直接
+        调用本方法的老测试与将来的更轻调用方）。
         """
         if self._cancelled:
             # 本回合已被取消（用户按了取消，或审批里回了 cancelled）。同一步里
@@ -1394,7 +1524,24 @@ class AgentLoop:
             # 落地一笔写入，是取消语义最糟的破法。批次仍然配对完整（不变式 1）。
             return _failure_outcome(ERR_APPROVAL_CANCELLED)
 
-        proposal = assemble_proposal(draft)
+        op = canonical_op(
+            str(tool.proposal_action if tool is not None else draft.get("action") or ""),
+        )
+        proposal = assemble_proposal(draft, contract_version=self._contract_version)
+        if proposal is None:
+            # 这个 op 装不进本轮的契约车道。注入面已经滤过一遍（模型看不见装不
+            # 进去的工具），所以走到这里说明有人在工具面之外注入了它——既不
+            # 执行也不挂起，回一条可纠正的错误。
+            logger.warning(
+                "agent proposal outside the contract lane",
+                extra={
+                    "op": op,
+                    "contract_version": self._contract_version,
+                    "outcome": ERR_OP_NOT_ON_LANE,
+                },
+            )
+            return _failure_outcome(ERR_OP_NOT_ON_LANE, action=op)
+
         verdict = AIService.validate_proposal(proposal, validation_context_for(self._ctx))
         if not verdict["valid"]:
             # 02c 已保证 id 出自服务端上下文，走到这里说明工具层出了新问题，或有人
@@ -1411,21 +1558,49 @@ class AgentLoop:
             )
             return _failure_outcome(ERR_PROPOSAL_REJECTED, paths=paths)
 
+        if proposal.get("contractVersion") == PROPOSAL_CONTRACT_V2 and op is not None:
+            # payload 级授权（05b）。v2 契约**只校验信封**，payload 里的 id 是否
+            # 属于本人 / 本账本由这里施加——与 ``/ai/validate`` / ``/ai/execute``
+            # 同一个函数，三处口径不许漂移。
+            auth_errors = await authorize_payload(
+                self._ctx.db,
+                user_id=self._ctx.user_id,
+                book_id=self._ctx.book_id,
+                op=op,
+                payload=proposal.get("payload"),
+            )
+            if auth_errors:
+                paths = [str(e.get("path")) for e in auth_errors][:4]
+                logger.warning(
+                    "agent proposal payload not authorized",
+                    extra={"op": op, "paths": paths, "outcome": ERR_PROPOSAL_REJECTED},
+                )
+                return _failure_outcome(ERR_PROPOSAL_REJECTED, paths=paths)
+
         reason = confirm_reason(step=self._steps, confidence=proposal["confidence"])
 
-        # 1) 单 Step + 高置信 + 有执行通道 → 沿用快路径策略：直接执行（撤销窗在
+        # 1) 设备类 op（执行位置在设备）：**一律挂起**，不参与审批策略，也永不
+        #    走执行通道。理由不是安全而是能力：服务端没有它的存储位置（见
+        #    ``tools.DEVICE_EXECUTED_OPS``），在 loop 里问一次批准除了多一次征询
+        #    什么也换不来——真正执行它的是客户端（05f 的执行器按 op 分派），
+        #    批准也随之在客户端的确认卡上做（03e 的审批四值）。
+        if op is not None and op in DEVICE_EXECUTED_OPS:
+            self._proposals.append(proposal)
+            return ToolOutcome.proposal(proposal)
+
+        # 2) 单 Step + 高置信 + 有执行通道 → 沿用快路径策略：直接执行（撤销窗在
         #    客户端，回执里的 undo_window_seconds 即 PR-2 的那扇窗）。
         if reason is None and self._executor is not None:
             return await self._execute(proposal, confirmation_token="")
 
-        # 2) 无人可问（没执行通道，或没审批通道）→ **挂起**，交回调用方走确认卡。
+        # 3) 无人可问（没执行通道，或没审批通道）→ **挂起**，交回调用方走确认卡。
         #    这不是「视为拒绝」：把「没接通道」判成拒绝会让 P1 的确认卡路径自我
         #    堵死。「视为拒绝」只留给审批通道真的给了 unavailable。
         if self._executor is None or not self._gate.has_approver:
             self._proposals.append(proposal)
             return ToolOutcome.proposal(proposal)
 
-        # 3) 必须确认：问一次，只有 allowed-once 会落到执行。
+        # 4) 必须确认：问一次，只有 allowed-once 会落到执行。
         #    （前两个分支已覆盖「reason is None」的全部去向，故此处必有理由。）
         assert reason is not None
         decision = await self._gate.ask(
@@ -1489,7 +1664,7 @@ class AgentLoop:
         return ToolOutcome.result({
             "status": "executed",
             "action": proposal.get("action"),
-            "count": len(proposal.get("transactions") or []),
+            "count": _affected_count(proposal),
             "undoWindowSeconds": receipt.get("undo_window_seconds"),
         })
 

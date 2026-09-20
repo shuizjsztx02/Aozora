@@ -190,7 +190,7 @@ from .conversation import (
 from .devices import DEVICE_TOOLS, device_channel
 from .provider import ProviderError, ReasoningLevel, ToolCallingProvider
 from .service import AIService
-from .tools import ToolContext, ToolOutcome, load_tool_context
+from .tools import PROPOSAL_CONTRACT_V1, ToolContext, ToolOutcome, load_tool_context
 
 logger = logging.getLogger(__name__)
 
@@ -290,6 +290,8 @@ def format_frame(event: EventType | str, payload: Mapping[str, Any]) -> str:
 TOOL_PROGRESS: dict[str, str] = {
     "transaction_add": "正在记账…",
     "transaction_add_batch": "正在批量记账…",
+    "transaction_update": "正在修改这笔记录…",
+    "transaction_delete": "正在删除这笔记录…",
     "transaction_list": "正在查询流水…",
     "transaction_recent": "正在查询最近的记录…",
     "transaction_summary": "正在汇总收支…",
@@ -300,9 +302,19 @@ TOOL_PROGRESS: dict[str, str] = {
     "budget_overspent": "正在检查超支的分类…",
     "account_list": "正在查询账户…",
     "account_balances": "正在核算账户余额…",
+    "account_create": "正在新建账户…",
+    "account_update": "正在修改账户…",
+    "account_archive": "正在归档账户…",
     "book_list": "正在查询账本…",
     "book_detail": "正在查看账本详情…",
+    "book_create": "正在新建账本…",
+    "book_update": "正在修改账本…",
+    "book_delete": "正在删除账本…",
     "category_list": "正在查询分类…",
+    "category_create": "正在新建分类…",
+    "category_update": "正在修改分类…",
+    "category_archive": "正在归档分类…",
+    "meta_set": "正在设置默认项…",
 }
 
 #: 设备能力的步骤卡文案（T-M7-05e）。与 ``TOOL_PROGRESS`` 是同一件事的两半：
@@ -440,12 +452,17 @@ async def agent_event_stream(
     request_id: str,
     user_input: str,
     today: date,
+    contract_version: int = PROPOSAL_CONTRACT_V1,
 ) -> AsyncIterator[str]:
     """把一轮 agent 跑成 SSE 帧流。
 
     调用方（``routes.py``）已完成前置检查——开关、入参、会话与账本归属、日配额
     与会话配额——所以这里的一切失败都发生在响应头之后，一律以 ``error`` 帧收尾
     （HTTP 状态码此时已经发出，改不了了）。
+
+    ``contract_version`` 是客户端声明的 ActionProposal 契约版本（05b 接的线，
+    缺省 1），原样交给 loop：它决定注入哪些写工具、提案装进哪条信封。本层不做
+    任何判定，**只透传**。
 
     **session 由工作协程自建自关**、不从端点传进来：端点那份是请求作用域的短命
     session（用完即关），而流式生成器有可能**一次都没被迭代**（响应头发送就失败
@@ -462,6 +479,7 @@ async def agent_event_stream(
         request_id=request_id,
         user_input=user_input,
         today=today,
+        contract_version=contract_version,
     ))
     pending: asyncio.Future[Any] | None = None
     #: 待发的 delta 缓冲与其冲刷时刻（见 :data:`_DELTA_MERGE_SECONDS`）。
@@ -548,6 +566,7 @@ async def _run_turn(
     request_id: str,
     user_input: str,
     today: date,
+    contract_version: int,
 ) -> None:
     """取得一轮的 session，跑完它，**保证**队列里留下一个终止项。
 
@@ -566,6 +585,7 @@ async def _run_turn(
             queue=queue, session=session, observer=observer, provider=provider,
             cfg=cfg, user=user, book_id=book_id, conversation_id=conversation_id,
             request_id=request_id, user_input=user_input, today=today,
+            contract_version=contract_version,
         )
     except asyncio.CancelledError:
         raise
@@ -594,6 +614,7 @@ async def _execute_turn(
     request_id: str,
     user_input: str,
     today: date,
+    contract_version: int,
 ) -> None:
     """一轮的全部工作：装载 → 跑 loop（**逐事件落库**）→ 记用量 → 发尾帧。
 
@@ -623,7 +644,7 @@ async def _execute_turn(
     try:
         result = await _build_loop(
             provider, ctx, cfg, observer, session, user, book_id, writer,
-            request_id=request_id, today=today,
+            request_id=request_id, today=today, contract_version=contract_version,
         ).run(user_input, history=history, summary=conversation.summary)
     except Exception as exc:  # noqa: BLE001 — 运行期失败一律以 error 帧收尾
         logger.warning(
@@ -702,6 +723,7 @@ def _build_loop(
     *,
     request_id: str,
     today: date,
+    contract_version: int,
 ) -> AgentLoop:
     """组装 loop：注入观察者、**执行通道**与**逐事件落库通道**，但不接审批通道。
 
@@ -726,6 +748,7 @@ def _build_loop(
         observer=observer,
         sink=writer,
         device=device_channel() if cfg.ai_device_channel_enabled else None,
+        contract_version=contract_version,
         executor=ServiceProposalExecutor(
             AIService(session, provider, cfg),
             user=user, request_id=request_id, book_id=book_id,

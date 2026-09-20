@@ -1,10 +1,11 @@
-"""T-M7-02c: Agent 工具注册表测试。
+"""T-M7-02c / T-M7-05b: Agent 工具注册表测试。
 
-验收映射（docs/milestones/production-execution-plan.md T-M7-02c）：
+验收映射（docs/milestones/production-execution-plan.md T-M7-02c、T-M7-05b）：
 - 工具参数 schema 与 action 枚举无冲突 → TestRegistryContract / TestWriteTools
 - 每域工具数 ≤8                    → TestRegistryContract
 - 未知工具名走降级契约              → TestArgumentValidation
-- 全量注入（约 70 个）被明确排除     → TestRegistryContract
+- **写工具的 op 服务端执行得了**（05b 起是 v2 注册表 + 执行面）→ TestRegistryContract
+- **v1 车道只承载它装得下的写 op**（旧客户端行为不变）→ TestRegistryContract
 """
 
 from __future__ import annotations
@@ -24,8 +25,11 @@ from src.models.budget import Budget, BudgetType
 from src.models.ledger import Account, Book, Category, CategoryKind, Transaction, TxSource, TxType
 from src.models.user import User
 from src.modules.ai import tools as T
+from src.modules.ai.agent import assemble_proposal
 from src.modules.ai.context import ProposalValidationContext
+from src.modules.ai.proposal_ops import SERVER_EXECUTED_OPS
 from src.modules.ai.service import AIService
+from src.modules.ai.validator import V2_OPS
 
 _REPO_ROOT = Path(__file__).resolve().parents[2]
 _SCHEMA_PATH = _REPO_ROOT / "contracts" / "action-proposal" / "schema.json"
@@ -33,10 +37,25 @@ _SCHEMA_PATH = _REPO_ROOT / "contracts" / "action-proposal" / "schema.json"
 with open(_SCHEMA_PATH, "r", encoding="utf-8") as _f:
     _ACTION_ENUM: set[str] = set(json.load(_f)["properties"]["action"]["enum"])
 
-#: ``AIService.execute_proposal`` 实际放行的 action（service.py 的
-#: ``action not in ("add_tx", "add_tx_batch")`` 分支）。写工具的 proposal_action
-#: 必须落在这里——落在枚举内但服务端执行不了，等于把提案送进死路。
-_EXECUTABLE_ACTIONS: set[str] = {"add_tx", "add_tx_batch"}
+#: **05b 落地的写 op**：记账域（transaction_update / transaction_delete）与账户
+#: 账本域（category.* / account.* / book.*）的全量 CRUD + 默认项，外加 P1 的
+#: ``transaction_add``（单条与批量是同一个 op）。写工具的 proposal_action 必须
+#: 落在这里——多一个就是越界（05c / 05d 的域），少一个就是没做完。
+_WRITE_OPS_05B: set[str] = {
+    "transaction_add",
+    "transaction_update",
+    "transaction_delete",
+    "category_create",
+    "category_update",
+    "category_archive",
+    "account_create",
+    "account_update",
+    "account_archive",
+    "book_create",
+    "book_update",
+    "book_delete",
+    "meta_set",
+}
 
 
 # ── 无 DB 的上下文 ─────────────────────────────────────────────────────────
@@ -125,11 +144,9 @@ class TestRegistryContract:
             assert count <= T.MAX_TOOLS_PER_DOMAIN, f"{domain} 有 {count} 个工具"
             assert count > 0, f"{domain} 是空域"
 
-    def test_p1_catalog_stays_minimal(self):
-        """P1 只交付「够验证的域」；全量（约 70 个命令）明确排除在 P1 之外。"""
-        assert T.MAX_TOOLS_P1 < 70
-        assert len(T.TOOLS) <= T.MAX_TOOLS_P1
-        assert 10 <= len(T.TOOLS) <= 15, "P1 最小集的目标规模是 10–15 个"
+    def test_write_tools_cover_exactly_the_05b_ops(self):
+        """写工具的 op 集合 = 05b 的交付面（越界与缺项都要在这里现形）。"""
+        assert {t.proposal_action for t in T.TOOLS if t.kind == "write"} == _WRITE_OPS_05B
 
     def test_descriptions_are_reviewed_chinese(self):
         """description 是模型可见的唯一语义来源，必须是人写的中文而非占位符。
@@ -158,23 +175,45 @@ class TestRegistryContract:
                 assert tool.proposal_action is None, tool.name
 
     def test_write_tools_declare_an_executable_contract_action(self):
-        write_tools = [t for t in T.TOOLS if t.kind == "write"]
-        assert write_tools, "P1 至少要有记账写工具，否则 loop 无法验证多步写场景"
-        for tool in write_tools:
-            assert tool.proposal_action in _ACTION_ENUM, (
-                f"{tool.name} 的 action 不在 contracts/action-proposal/schema.json 的枚举内"
-            )
-            assert tool.proposal_action in _EXECUTABLE_ACTIONS, (
-                f"{tool.name} 的 action 服务端执行不了（execute_proposal 只认 "
-                f"{sorted(_EXECUTABLE_ACTIONS)}）"
-            )
+        """写工具的 action 必须是 **v2 op**，且服务端真的执行得了它（05b 改口径）。
 
-    def test_writes_are_confined_to_the_transaction_domain(self):
-        """P1 边界：预算 / 账户账本的写操作走客户端本地 config 链路，
-        迁到服务端属 ActionProposal v2（架构 §11.2），归 P4。"""
-        for tool in T.TOOLS:
-            if tool.kind == "write":
-                assert tool.domain == T.DOMAIN_TRANSACTION, tool.name
+        02c 的判据是「落在 ``schema.json`` 的 v1 枚举内且 execute_proposal 认它」；
+        v2 把两件事拆开了：``proposal_action`` 是 op 注册表成员（``V2_OPS``），
+        而**能不能执行**由执行面（``proposal_ops.EXECUTORS``）与设备面
+        （``DEVICE_EXECUTED_OPS``）表态。落在注册表里但两边都不认的 op，等于把
+        提案送进死路——本用例守的就是那条死路。
+        """
+        write_tools = [t for t in T.TOOLS if t.kind == "write"]
+        assert write_tools, "写工具集为空，这条约束就成了空转"
+        for tool in write_tools:
+            assert tool.proposal_action in V2_OPS, (
+                f"{tool.name} 的 action 不是 v2 op 注册表成员"
+            )
+            assert tool.proposal_action in SERVER_EXECUTED_OPS | T.DEVICE_EXECUTED_OPS, (
+                f"{tool.name} 的 op 服务端执行不了、也不在设备 op 表里——提案会进死路"
+            )
+        # v1 的动作名不是 v2 成员，写工具一个都不该用（用别名 = 装不进 v2 车道）
+        assert not any(t.proposal_action in _ACTION_ENUM for t in write_tools)
+
+    def test_v1_lane_carries_only_the_ops_it_can_execute(self):
+        """**旧客户端行为不变**（05b 的硬约束）：v1 车道 = P1 的 15 个工具。
+
+        v1 的写形状只有根上的 ``transactions``，且 ``/ai/execute`` 的 v1 分支只认
+        它的两个别名，所以 v1 车道只注入 ``V1_LANE_OPS`` 对应的写工具；读工具与
+        车道无关。多注入一个的后果不是「少个功能」而是「模型看得见、写不进去」。
+        """
+        v1 = T.tools_for_domains(T.DOMAINS, contract_version=T.PROPOSAL_CONTRACT_V1)
+        v2 = T.tools_for_domains(T.DOMAINS, contract_version=T.PROPOSAL_CONTRACT_V2)
+
+        assert v2 == list(T.TOOLS), "v2 车道注入全量"
+        assert len(v1) == 15, "v1 车道 = P1 的 15 个工具"
+        assert {t.proposal_action for t in v1 if t.kind == "write"} == set(T.V1_LANE_OPS)
+        assert (
+            {t.name for t in v1 if t.kind == "read"}
+            == {t.name for t in v2 if t.kind == "read"}
+        ), "读工具不进客户端校验器，与车道无关"
+        # 未知版本按 v1 处理（fail-closed：宁可少注入）
+        assert T.tools_for_domains(T.DOMAINS, contract_version=7) == v1
 
     def test_get_tool_unknown_returns_none(self):
         assert T.get_tool("transaction_add") is not None
@@ -186,15 +225,15 @@ class TestRegistryContract:
         assert only_budget
         assert {t.domain for t in only_budget} == {T.DOMAIN_BUDGET}
 
-        subset = T.tools_for_domains([T.DOMAIN_TRANSACTION, T.DOMAIN_LEDGER])
-        assert {t.domain for t in subset} == {T.DOMAIN_TRANSACTION, T.DOMAIN_LEDGER}
+        subset = T.tools_for_domains([T.DOMAIN_TRANSACTION, T.DOMAIN_ACCOUNT])
+        assert {t.domain for t in subset} == {T.DOMAIN_TRANSACTION, T.DOMAIN_ACCOUNT}
 
     def test_tools_for_domains_ignores_unknown_domain(self):
         assert T.tools_for_domains(["nope"]) == []
         assert T.tools_for_domains([T.DOMAIN_BUDGET, "nope"])
 
     def test_to_openai_tools_shape(self):
-        payload = T.to_openai_tools(T.tools_for_domains([T.DOMAIN_LEDGER]))
+        payload = T.to_openai_tools(T.tools_for_domains([T.DOMAIN_ACCOUNT]))
         assert payload
         for entry in payload:
             assert entry["type"] == "function"
@@ -320,8 +359,8 @@ class TestWriteTools:
 
         assert outcome.kind == "proposal"
         draft = outcome.data
-        assert draft["action"] == "add_tx"
-        item = draft["transactions"][0]
+        assert draft["action"] == "transaction_add"
+        item = draft["payload"]["transactions"][0]
         assert item["categoryId"] == ctx.resolve_category("expense", "餐饮")
         assert item["amountCents"] == 1250
         assert item["bizDate"] == "2026-09-18"
@@ -329,14 +368,14 @@ class TestWriteTools:
 
     async def test_add_without_account_omits_account_id(self):
         outcome = await T.invoke_tool("transaction_add", _ctx(), dict(_VALID_ADD))
-        assert "accountId" not in outcome.data["transactions"][0]
+        assert "accountId" not in outcome.data["payload"]["transactions"][0]
 
     async def test_add_with_account_resolves_it(self):
         ctx = _ctx()
         outcome = await T.invoke_tool(
             "transaction_add", ctx, {**_VALID_ADD, "accountName": "招行卡"},
         )
-        assert outcome.data["transactions"][0]["accountId"] == ctx.account_names["招行卡"]
+        assert outcome.data["payload"]["transactions"][0]["accountId"] == ctx.account_names["招行卡"]
 
     async def test_unknown_category_degrades_before_proposing(self):
         outcome = await T.invoke_tool(
@@ -359,9 +398,9 @@ class TestWriteTools:
             "transaction_add_batch", ctx, {"transactions": [dict(_VALID_ADD), second]},
         )
         assert outcome.kind == "proposal"
-        assert outcome.data["action"] == "add_tx_batch"
-        assert [i["amountCents"] for i in outcome.data["transactions"]] == [1250, 3000]
-        assert outcome.data["transactions"][1]["categoryId"] == ctx.resolve_category("expense", "交通")
+        assert outcome.data["action"] == "transaction_add"
+        assert [i["amountCents"] for i in outcome.data["payload"]["transactions"]] == [1250, 3000]
+        assert outcome.data["payload"]["transactions"][1]["categoryId"] == ctx.resolve_category("expense", "交通")
 
     async def test_batch_rejects_empty_list(self):
         outcome = await T.invoke_tool(
@@ -377,22 +416,42 @@ class TestWriteTools:
             assert key not in outcome.data
 
     async def test_completed_draft_passes_the_action_proposal_contract(self):
-        """写工具的产出补全治理字段后，必须通过既有的提案校验（含账本上下文）。"""
+        """写工具的产出装进 **v1 信封**后，必须通过既有的提案校验（含账本上下文）。
+
+        05b 的草案是规范 v2 形状；v1 信封由组装器按车道装出来（与 P1 的产出逐字
+        相同），因此「旧客户端行为不变」这条在这里被钉住。
+        """
         ctx = _ctx()
         outcome = await T.invoke_tool(
             "transaction_add", ctx, {**_VALID_ADD, "accountName": "招行卡"},
         )
         proposal = {
-            **outcome.data,
-            "proposalId": str(uuid.uuid4()),
+            **assemble_proposal(outcome.data, contract_version=1),
             "confidence": 0.95,
             "requiresConfirmation": False,
         }
+        assert proposal["action"] == "add_tx"
+        assert proposal["transactions"] == outcome.data["payload"]["transactions"]
+
         validation_ctx = ProposalValidationContext(
             category_ids=_all_category_ids(ctx),
             account_ids=frozenset(ctx.account_names.values()),
         )
         result = AIService.validate_proposal(proposal, validation_ctx)
+        assert result == {"valid": True, "errors": [], "verdict": "accepted"}
+
+    async def test_the_same_draft_passes_the_v2_envelope_lane(self):
+        """同一份草案在 v2 车道上的信封也过校验（**一份草案两种车道**）。"""
+        ctx = _ctx()
+        outcome = await T.invoke_tool("transaction_add", ctx, dict(_VALID_ADD))
+        proposal = {
+            **assemble_proposal(outcome.data, contract_version=2),
+            "confidence": 0.95,
+        }
+        assert proposal["contractVersion"] == 2
+        assert proposal["payload"]["transactions"] == outcome.data["payload"]["transactions"]
+
+        result = AIService.validate_proposal(proposal, ProposalValidationContext())
         assert result == {"valid": True, "errors": [], "verdict": "accepted"}
 
     async def test_draft_with_a_foreign_category_id_is_caught_downstream(self):
@@ -401,8 +460,7 @@ class TestWriteTools:
         ctx = _ctx()
         outcome = await T.invoke_tool("transaction_add", ctx, dict(_VALID_ADD))
         proposal = {
-            **outcome.data,
-            "proposalId": str(uuid.uuid4()),
+            **assemble_proposal(outcome.data, contract_version=1),
             "confidence": 0.95,
             "requiresConfirmation": False,
         }
@@ -640,13 +698,13 @@ class TestToolContextLoading:
             "type": "expense", "amountCents": 100,
             "categoryName": "其他", "bizDate": "2026-09-18",
         })
-        assert expense.data["transactions"][0]["categoryId"] == str(seeded["misc_expense"].id)
+        assert expense.data["payload"]["transactions"][0]["categoryId"] == str(seeded["misc_expense"].id)
 
         income = await T.invoke_tool("transaction_add", ctx, {
             "type": "income", "amountCents": 100,
             "categoryName": "其他", "bizDate": "2026-09-18",
         })
-        assert income.data["transactions"][0]["categoryId"] == str(seeded["misc_income"].id)
+        assert income.data["payload"]["transactions"][0]["categoryId"] == str(seeded["misc_income"].id)
 
     async def test_a_duplicate_account_name_is_reported_as_ambiguous(self, seeded):
         """重名账户的**写入**必须唯一解——报 ``ambiguous_account`` 让模型请用户
@@ -880,7 +938,7 @@ class TestBudgetReadTools:
             "type": "expense", "amountCents": 100,
             "categoryName": "交通", "bizDate": "2026-09-18",
         })
-        assert outcome.data["transactions"][0]["categoryId"] == str(seeded["traffic"].id)
+        assert outcome.data["payload"]["transactions"][0]["categoryId"] == str(seeded["traffic"].id)
 
         # 预算与读过滤都不受影响
         listed = await T.invoke_tool("budget_list", reloaded, {"period": "2026-09"})

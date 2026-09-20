@@ -224,11 +224,20 @@ class AIAgentRequest(BaseModel):
     server creates a conversation, returning its id in the ``done`` frame
     for the client to reuse. ``book_id`` scopes the whole turn (tool
     context, system prompt, writes) and must belong to the caller.
+
+    ``proposal_contract_version`` is the client's ActionProposal contract
+    declaration (T-M7-05b; contract in ``ai-architecture.md``). **Default
+    1** — an old APK sends nothing and gets the v1 lane, byte-for-byte the
+    P1 behaviour. A v2 client declares 2 and gets the v2 envelope, the
+    full 05b tool set and v2-only ops. There is no server-side switch:
+    the declaration is the rollout knob (05a: 「声明字段天然按客户端版本
+    灰度」).
     """
 
     input: str = Field(min_length=1, max_length=MAX_INPUT_CHARS)
     book_id: str = Field(min_length=1)
     conversation_id: str | None = None
+    proposal_contract_version: Literal[1, 2] = 1
 
 
 # ─── T-M7-03a: 会话列表 / 重命名 / 删除 / 事件读取 ─────────────────────────
