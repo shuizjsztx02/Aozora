@@ -504,6 +504,10 @@ async def stream_env():
         ai_agent_heartbeat_seconds=0.05,
         ai_agent_step_timeout_seconds=5.0,
         ai_daily_quota_guest=20,
+        # 设备通道的**类默认**钉在关闭（用例要开就自己 set_config 覆盖，见
+        # TestDeviceChannel）。不钉的话本机 .env 打开它时，``tools_for_domains``
+        # 的注入面会多出设备工具，契约车道两条断言一并变红。
+        ai_device_channel_enabled=False,
     )
     set_config(cfg)
     reset_engine()

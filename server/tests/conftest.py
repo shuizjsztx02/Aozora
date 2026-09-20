@@ -51,6 +51,13 @@ def _test_config():
         # 配额测试按 get_config().ai_daily_quota_guest 逐行 seed 用量，生产默认值
         # 临时提额期间（2026-09-11 联测）测试面必须钉回 20，勿删。
         ai_daily_quota_guest=20,
+        # 两个 AI 闸门同理必须钉死：``Settings`` 对**未显式赋值**的字段仍会读
+        # ambient ``.env``，所以本机把 ``AI_AGENT_ENABLED`` / ``AI_DEVICE_CHANNEL_ENABLED``
+        # 打开做真机联调时，闸门与契约车道两类断言（``test_agent_stream``）会集体
+        # 变红——那是测试被环境污染，不是回归。默认形态＝关闭，用例要打开时自己
+        # 显式覆盖（见 ``stream_env`` 与 ``TestDeviceChannel``）。
+        ai_agent_enabled=False,
+        ai_device_channel_enabled=False,
     )
     set_config(settings)
     yield
