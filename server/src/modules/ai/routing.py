@@ -1,0 +1,278 @@
+"""T-M7-05g: 域路由（决定这一轮**注入哪些工具域**）。
+
+架构依据 §7.2（域分组：单域 5–8 个工具，域是注入单位）与 §12.2 已定表第 2 项
+（P1 不做域路由、归 P4——域扩展到全量工具时才需要）。风险登记 R-PROD-17。
+
+**与入口推理分级是两件事**（架构 §12.2 的「易混淆点」）：本模块决定**注入哪些
+工具**；``agent.classify_reasoning`` 决定**推理开销档位**（thinking 开关必须在
+进入模型前定下来）。两者都在 ``AgentLoop.run()`` 里用同一句用户输入算一次，但
+判据、产物、失败后果全不相同，因此**各写各的、不合并实现**。
+
+为什么是规则而不是轻量模型
+--------------------------
+方案对比与决策见 ``docs/adr/ADR-011-domain-routing.md``。结论落在三条硬约束上：
+
+① **不额外调用模型**（架构 §12.2 已定第 2 项：简单输入的快路径由 loop 自然产生，
+   步数即复杂度）。轻量分类器会给**每一轮**加一次模型调用——记账 App 的绝大多数
+   输入是简单输入，这笔开销正好花在最不该花的地方；且它自己也会错，还要再兜底。
+② **决策必须在进入第一步之前完成**：模型请求的 ``tools`` 载荷一旦发出就无法收回
+   （``AgentLoop`` 的注入面在 ``run()`` 里定下来）。
+③ **可解释、可测**：词表命中是确定性的，误路由/漏注入因此能被**离线**量出来
+   （``scripts/probe_tool_selection.py --routing``），不依赖模型与网络。
+
+兜底：**宁可多注入，不可少注入**
+--------------------------------
+没命中任何信号 → 注入**全部域**（:data:`~.tools.DOMAINS`），即 P1 的注入面。
+这是刻意的误差方向，两边的代价不对称：
+
+- **漏注入**（该给的域没给）= 能力消失。模型只能回一句「这个我做不了」，
+  用户看到的是**功能不见了**。
+- **误注入**（多给了几个域）= 选择面变宽。R-PROD-17 的实测口径下（54 个工具
+  全量注入）首调仍有 71%、两步内 90%，多注入的代价是**准确率**而非可用性。
+
+因此凡是不确定的输入——闲聊、指代（「那改成 6000 吧」）、词表没覆盖的新说法
+——一律退回全量。**这条不是保守，是把「不确定」与「确定不用」分开**：只有明确
+认出域时才收窄。
+
+词表的维护面（下一步的债，已登记 R-PROD-17）
+------------------------------------------
+信号是**手写的中文短语**，覆盖度靠实测（探针的用例集就是第一批语料）。**新域上线
+时必须同时补词**——:func:`unrouteable_domains` + 用例
+（``test_every_domain_has_at_least_one_signal``）把「有域没有信号」变成一次可见的
+失败。真实语料里的**漏配**形态是静默的（表现为退化成全量注入，用户无感），只能
+靠 ``matched=False`` 的比例在生产上观察。
+"""
+
+from __future__ import annotations
+
+from dataclasses import dataclass
+
+from .tools import (
+    DOMAIN_ACCOUNT,
+    DOMAIN_ANALYSIS,
+    DOMAIN_BOOK,
+    DOMAIN_BUDGET,
+    DOMAIN_CATEGORY,
+    DOMAIN_EXPORT,
+    DOMAIN_HELP,
+    DOMAIN_META,
+    DOMAIN_PERSONA,
+    DOMAIN_PRIVACY,
+    DOMAIN_SAVINGS,
+    DOMAIN_SCHEDULED,
+    DOMAIN_SECURITY,
+    DOMAIN_SYNC,
+    DOMAIN_TRANSACTION,
+    DOMAINS,
+)
+
+# ---------------------------------------------------------------------------
+# 词表
+# ---------------------------------------------------------------------------
+
+#: **(信号, 它指向的域)**。一个信号可以指向多个域——这不是含糊，是**近义工具
+#: 分属两域**时必须有的表达（见下面「花了 / 支出」一组）。
+#:
+#: 取舍原则：
+#:
+#: - **名词优先**。「预算 / 分类 / 存钱」这类词一旦出现，用户的意图几乎无歧义。
+#: - **动词只做同域短句**，不做单字。「删」跨七个域（删交易 / 删预算 / 归档账户…），
+#:   单字动词会把「删账本」错路由成记账域——**漏注入**，正是要避免的方向。
+#: - **跨域的近义信号指向两域**（`transaction_summary` 与 `stats_monthly` 在
+#:   「这个月花了多少」这种输入上都是正确答案）。指向一域就是一次漏注入。
+_SIGNALS: tuple[tuple[str, tuple[str, ...]], ...] = (
+    # ── 记账流水（transaction）──
+    ("记一笔", (DOMAIN_TRANSACTION,)),
+    ("记账", (DOMAIN_TRANSACTION,)),
+    ("记上", (DOMAIN_TRANSACTION,)),
+    ("记下", (DOMAIN_TRANSACTION,)),
+    ("记了", (DOMAIN_TRANSACTION,)),
+    ("记录", (DOMAIN_TRANSACTION,)),
+    ("记错", (DOMAIN_TRANSACTION,)),
+    ("记重", (DOMAIN_TRANSACTION,)),
+    ("补记", (DOMAIN_TRANSACTION,)),
+    ("一笔", (DOMAIN_TRANSACTION,)),
+    ("两笔", (DOMAIN_TRANSACTION,)),
+    ("几笔", (DOMAIN_TRANSACTION,)),
+    ("这笔", (DOMAIN_TRANSACTION,)),
+    ("那笔", (DOMAIN_TRANSACTION,)),
+    ("流水", (DOMAIN_TRANSACTION,)),
+    ("报销", (DOMAIN_TRANSACTION,)),
+    # ── 记账 × 分析（近义工具分属两域，指一域就是漏注入）──
+    ("花了", (DOMAIN_TRANSACTION, DOMAIN_ANALYSIS)),
+    ("花销", (DOMAIN_TRANSACTION, DOMAIN_ANALYSIS)),
+    ("开销", (DOMAIN_TRANSACTION, DOMAIN_ANALYSIS)),
+    ("支出", (DOMAIN_TRANSACTION, DOMAIN_ANALYSIS)),
+    ("收入", (DOMAIN_TRANSACTION, DOMAIN_ANALYSIS)),
+    ("收支", (DOMAIN_TRANSACTION, DOMAIN_ANALYSIS)),
+    ("消费", (DOMAIN_TRANSACTION, DOMAIN_ANALYSIS)),
+    # ── 分类（category）──
+    ("分类", (DOMAIN_CATEGORY,)),
+    ("类别", (DOMAIN_CATEGORY,)),
+    ("类目", (DOMAIN_CATEGORY,)),
+    # ── 账户（account）──
+    ("账户", (DOMAIN_ACCOUNT,)),
+    ("账号", (DOMAIN_ACCOUNT,)),
+    ("银行卡", (DOMAIN_ACCOUNT,)),
+    ("信用卡", (DOMAIN_ACCOUNT,)),
+    ("卡", (DOMAIN_ACCOUNT,)),
+    ("钱包", (DOMAIN_ACCOUNT,)),
+    ("余额", (DOMAIN_ACCOUNT,)),
+    ("支付宝", (DOMAIN_ACCOUNT,)),
+    ("微信支付", (DOMAIN_ACCOUNT,)),
+    # ── 账本（book）──
+    ("账本", (DOMAIN_BOOK,)),
+    ("账簿", (DOMAIN_BOOK,)),
+    # ── 预算（budget）──
+    ("预算", (DOMAIN_BUDGET,)),
+    # ── 存钱（savings）──
+    ("存钱", (DOMAIN_SAVINGS,)),
+    ("存款", (DOMAIN_SAVINGS,)),
+    ("储蓄", (DOMAIN_SAVINGS,)),
+    ("攒", (DOMAIN_SAVINGS,)),
+    ("基金", (DOMAIN_SAVINGS,)),
+    # ── 定时（scheduled）──
+    ("定时", (DOMAIN_SCHEDULED,)),
+    ("自动记", (DOMAIN_SCHEDULED,)),
+    ("房租", (DOMAIN_SCHEDULED,)),
+    ("周期", (DOMAIN_SCHEDULED,)),
+    ("重复记账", (DOMAIN_SCHEDULED,)),
+    # ── 角色（persona）──
+    ("角色", (DOMAIN_PERSONA,)),
+    ("人设", (DOMAIN_PERSONA,)),
+    ("人格", (DOMAIN_PERSONA,)),
+    ("跟我聊", (DOMAIN_PERSONA,)),
+    ("陪我聊", (DOMAIN_PERSONA,)),
+    ("聊天风格", (DOMAIN_PERSONA,)),
+    # ── 默认项（meta，执行位置在设备）──
+    ("默认", (DOMAIN_META,)),
+    # ── 分析（analysis）──
+    ("分析", (DOMAIN_ANALYSIS,)),
+    ("统计", (DOMAIN_ANALYSIS,)),
+    ("报表", (DOMAIN_ANALYSIS,)),
+    ("报告", (DOMAIN_ANALYSIS,)),
+    ("趋势", (DOMAIN_ANALYSIS,)),
+    ("概览", (DOMAIN_ANALYSIS,)),
+    ("总览", (DOMAIN_ANALYSIS,)),
+    ("占比", (DOMAIN_ANALYSIS,)),
+    ("对比", (DOMAIN_ANALYSIS,)),
+    # ── 导出（export）──
+    ("导出", (DOMAIN_EXPORT,)),
+    ("备份", (DOMAIN_EXPORT,)),
+    # ── 反馈与隐私（privacy）──
+    ("反馈", (DOMAIN_PRIVACY,)),
+    ("意见", (DOMAIN_PRIVACY,)),
+    ("建议", (DOMAIN_PRIVACY,)),
+    ("隐私", (DOMAIN_PRIVACY,)),
+    ("同意", (DOMAIN_PRIVACY,)),
+    # ── 安全账号（security）──
+    ("注销", (DOMAIN_SECURITY,)),
+    ("删号", (DOMAIN_SECURITY,)),
+    ("昵称", (DOMAIN_SECURITY,)),
+    ("叫我", (DOMAIN_SECURITY,)),
+    # ── 同步（sync）──
+    ("同步", (DOMAIN_SYNC,)),
+    ("云端", (DOMAIN_SYNC,)),
+    ("上传", (DOMAIN_SYNC,)),
+    # ── 产品帮助（help，05i）──
+    # 这一组与其它组不同：信号不是**名词**（哪类数据），而是**问法**（在问怎么
+    # 用）。它要覆盖的是**既有数据域信号、又是在问功能**的输入——「预算怎么用」
+    # （预算 → budget）、「导出在哪」（导出 → export）、「支持语音记账吗」
+    # （记账 → transaction）。没有这一组，这类输入会收窄到数据域，模型手里
+    # 只剩「去做」的工具，于是对「支持吗」只能凭印象答。
+    #
+    # 泛问句（支持 / 能不能 / 可以吗）也在这一组里，代价是**误注入**：它们会把
+    # help 域带进「能不能把这一笔删了」这种纯操作请求。这笔交换是按模块头
+    # 「宁可多注入」的误差方向做的——help 域只有 1 个**无数据访问**的工具，
+    # 误注入的代价是选择面宽一点；而漏注入的代价是模型对产品能力**编答案**。
+    ("怎么用", (DOMAIN_HELP,)),
+    ("怎么设置", (DOMAIN_HELP,)),
+    ("怎么弄", (DOMAIN_HELP,)),
+    ("怎么改", (DOMAIN_HELP,)),
+    ("怎么换", (DOMAIN_HELP,)),
+    ("怎么删", (DOMAIN_HELP,)),
+    ("怎么看", (DOMAIN_HELP,)),
+    ("是什么意思", (DOMAIN_HELP,)),
+    ("为什么要", (DOMAIN_HELP,)),
+    ("在哪", (DOMAIN_HELP,)),
+    ("帮助", (DOMAIN_HELP,)),
+    ("教程", (DOMAIN_HELP,)),
+    ("使用说明", (DOMAIN_HELP,)),
+    ("支持", (DOMAIN_HELP,)),
+    ("能不能", (DOMAIN_HELP,)),
+    ("可以吗", (DOMAIN_HELP,)),
+)
+
+#: 大小写不敏感的拉丁信号（中文信号走子串匹配，两者共用一张表）。
+_LATIN_SIGNALS: tuple[tuple[str, tuple[str, ...]], ...] = (
+    ("csv", (DOMAIN_EXPORT,)),
+    ("excel", (DOMAIN_EXPORT,)),
+)
+
+_ALL_SIGNALS: tuple[tuple[str, tuple[str, ...]], ...] = _SIGNALS + _LATIN_SIGNALS
+
+
+def unrouteable_domains() -> frozenset[str]:
+    """**没有任何信号**的域（正常应为空）。
+
+    它存在的意义是让「新增域时忘了补词」变成一次**可见的失败**，由用例钉住
+    （``test_every_domain_has_a_signal``，与 ``stream.TOOL_PROGRESS`` 的
+    「每个工具都要有步骤卡文案」同一范式）。
+
+    **不在导入期报错**是刻意的：一个模块级的 ``raise`` 会让整个服务端起不来
+    （爆炸半径远大于「新域暂时路由不到」），而它要防的只是配置疏漏——那是用例
+    该回答的问题，不是运行期该拒绝的请求。漏配的真实后果只是该域**只能靠兜底
+    注入**（``matched=False`` 时全量），功能不消失、只是选择面变宽。
+    """
+    return frozenset(DOMAINS) - {d for _, targets in _ALL_SIGNALS for d in targets}
+
+
+@dataclass(frozen=True)
+class RoutingDecision:
+    """一次域选择的结果。
+
+    ``matched=False`` 表示**没有命中任何信号**、退回全量注入（见模块头「兜底」）。
+    它与「命中了但恰好命中全部域」是两件事：前者说明词表没覆盖这句输入
+    （生产上值得观察的比例），后者说明这句话真的横跨很多东西。
+    """
+
+    #: 要注入的域（按 :data:`~.tools.DOMAINS` 的顺序，确定性输出）
+    domains: tuple[str, ...]
+    #: 是否命中信号（``False`` = 兜底全量）
+    matched: bool
+    #: 命中的信号短语（仅观测用：日志、用例、探针。**不进模型上下文**）
+    signals: tuple[str, ...]
+
+
+def route_domains(text: str) -> RoutingDecision:
+    """按词表选域（纯函数、无 IO、**不调用模型**）。
+
+    只认**这一轮的用户输入**，不看历史：
+
+    - 指代性的追问（「那改成 6000 吧」）本来就命中不了信号 → 兜底全量，能力不受影响；
+    - 拿历史来路由会把决策变成非确定（同一句话在不同会话里路由到不同域），
+      而它要换来的只是「少注入几个域」——不划算。
+
+    ``text`` 为空（或全空白）时同样兜底全量：空输入没有可路由的信息。
+    """
+    raw = (text or "").strip()
+    if not raw:
+        return RoutingDecision(domains=DOMAINS, matched=False, signals=())
+
+    lowered = raw.lower()
+    hits: list[str] = []
+    matched: set[str] = set()
+    for signal, targets in _ALL_SIGNALS:
+        if signal in lowered:
+            hits.append(signal)
+            matched.update(targets)
+
+    if not matched:
+        return RoutingDecision(domains=DOMAINS, matched=False, signals=())
+
+    return RoutingDecision(
+        # 按 DOMAINS 归一化顺序：同一组域在帧载荷、日志与用例里逐字可比。
+        domains=tuple(domain for domain in DOMAINS if domain in matched),
+        matched=True,
+        signals=tuple(hits),
+    )

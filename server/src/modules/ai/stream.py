@@ -21,15 +21,16 @@
 八类事件与生产者
 ----------------
 架构 §8.1 的八类事件全部由 :class:`EventType` 定义、由 :func:`format_frame`
-格式化（各有用例），但 loop 实际产出几类**取决于闸门**：P1 形态下是六类
-（``device_request`` 无生产者、``routing`` 属域路由），05e 打开设备通道
+格式化（各有用例），但 loop 实际产出几类**取决于闸门**：P1 形态下是七类
+（``device_request`` 无生产者），05e 打开设备通道
 （``ai_device_channel_enabled``）后多出 ``device_request`` 一类。
 
 ========================  ================================================
 事件                      生产者
 ========================  ================================================
-``phase``                 loop 的 Step 入口（``thinking``）与工具批次入口
-                          （``tool_calling``）。``routing`` 属域路由，P4 才有
+``phase``                 ``routing``：loop 的第一个 Step 入口（域选择，
+                          T-M7-05g，一轮一次，``step`` = 0）；``thinking``：
+                          每个 Step 入口；``tool_calling``：工具批次入口
 ``tool_call``             工具批次里每个调用**执行前**（名字 + 人类可读文案）
 ``tool_result``           同一次调用结束后（**摘要，不含原始数据**）
 ``confirm``               写提案**挂起**时（02e 决策 2），载荷为完整提案
@@ -74,7 +75,9 @@
 事件             载荷字段
 ===============  ============================================================
 ``phase``        ``phase``（thinking / routing / tool_calling）、``step``、
-                 ``reasoning``*（fast / medium / deep，仅供客户端显示「深度思考」）
+                 ``reasoning``*（fast / medium / deep，仅供客户端显示「深度思考」）、
+                 ``domains``* / ``matched``*（**仅 ``routing`` 帧**，T-M7-05g：
+                 这一轮注入的域与是否命中词表；客户端可忽略）
 ``tool_call``    ``tool``、``step``、``message``（人类可读文案）
 ``tool_result``  ``tool``、``step``、``status``（ok / error）、
                  ``code``* / ``message``*（仅 ``status="error"``，安全枚举码）
@@ -165,7 +168,7 @@ import contextlib
 import json
 import logging
 import uuid
-from collections.abc import AsyncIterator, Mapping
+from collections.abc import AsyncIterator, Iterable, Mapping
 from datetime import date
 from enum import StrEnum
 from typing import Any
@@ -215,13 +218,22 @@ class EventType(StrEnum):
 class Phase(StrEnum):
     """``phase`` 帧的阶段标识（架构 §8.1）。
 
-    ``ROUTING`` 未被 P1 使用——域路由是 P4 的事（P1 三域全量注入，没有「先选
-    域」这一步）。保留取值是为了让 02h/02i 的解析器一次写对。
+    ``ROUTING`` 自 T-M7-05g 起**有生产者**（域路由，``AgentLoop`` 的第一个 Step
+    入口发一次、一轮一次）：选择这一轮注入哪些工具域。它的 ``step`` 是
+    :data:`ROUTING_STEP`（0）——域选择不属于任何一个 Step。
     """
 
     THINKING = "thinking"
     ROUTING = "routing"
     TOOL_CALLING = "tool_calling"
+
+
+#: ``routing`` 帧的 ``step``（T-M7-05g）：0 = 「第 0 步：决定注入面」。
+#:
+#: 用 1 会让这一帧在客户端被紧随其后的 ``thinking`` 覆盖（投影按 ``step`` 归并），
+#: 03c 预留的那一行「正在理解你的需求…」就永远不出现——这是**协议层的取值决定
+#: 渲染结果**，因此写在这里而不是留给客户端判。
+ROUTING_STEP = 0
 
 
 class DeltaChannel(StrEnum):
@@ -404,6 +416,23 @@ class QueueObserver:
     def step_started(self, *, step: int, level: ReasoningLevel) -> None:
         self._queue.put_nowait((EventType.PHASE, {
             "phase": Phase.THINKING, "step": step, "reasoning": str(level),
+        }))
+
+    def routed(self, *, domains: Iterable[str], matched: bool) -> None:
+        """域选择的结果（T-M7-05g）——架构 §8.1 的 ``phase: routing``。
+
+        ``step`` 恒为 :data:`ROUTING_STEP`（0）：域选择发生在**进入 loop 之前**，
+        它不属于任何一个 Step。给 0 而不是 1 是渲染要求——客户端按 ``step`` 把
+        同类帧归并进同一条，用 1 会被紧随其后的 ``thinking`` 覆盖掉，那一行就
+        永远看不见（03c 的占位文案「正在理解你的需求…」因此失效）。
+
+        ``domains`` / ``matched`` 是**给人和日志看的**（客户端只认 ``phase`` 与
+        ``step``，多余字段一律忽略）：前者是这一轮将要注入的域，``matched=False``
+        说明词表没认出这句输入、退回了全量注入。
+        """
+        self._queue.put_nowait((EventType.PHASE, {
+            "phase": Phase.ROUTING, "step": ROUTING_STEP,
+            "domains": list(domains), "matched": matched,
         }))
 
     def step_finished(
@@ -769,6 +798,9 @@ def _build_loop(
     关闭时传 ``None``——loop 因此不注入设备能力、不产出 ``device_request`` 帧，
     行为与 P1 逐字相同。开启时用**进程内单例**：上行端点靠 ``request_id`` 找回
     挂起的那一轮，两处必须是同一张表（``devices.device_channel``）。
+
+    **不传 ``tools``**：注入面交给域路由（T-M7-05g）按本轮输入决定——显式传
+    ``tools`` 会绕过它（那是用例与探针的精确复现入口，不是生产路径）。
     """
     return AgentLoop(
         provider,

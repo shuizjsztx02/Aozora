@@ -140,7 +140,7 @@ import json
 import logging
 import re
 import uuid
-from collections.abc import Mapping, Sequence
+from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import UTC, date, datetime
 from enum import StrEnum
@@ -172,6 +172,7 @@ from .provider import (
     ToolCall,
     ToolCallingProvider,
 )
+from .routing import RoutingDecision, route_domains
 from .service import AIService
 from .tools import (
     DEVICE_EXECUTED_OPS,
@@ -908,6 +909,16 @@ class AgentObserver(Protocol):
     ``step`` 是 1 起的 Step 序号（与 ``confirm_reason`` 的判定量同一个数）。
     """
 
+    def routed(self, *, domains: Iterable[str], matched: bool) -> None:
+        """本轮选定的工具域（T-M7-05g，架构 §8.1 的 ``phase: routing``）。
+
+        在**第一个 Step 入口**、``step_started`` **之前**调用一次（一轮只一次）：
+        决策在 ``run()`` 里就做完了，这个钩子只是把结果送出去。``domains`` 是
+        将要注入的域（``matched=False`` 时是全部域，即退回 P1 的注入面）。
+
+        **显式给了 ``tools`` 的调用方不会收到它**——那时没有做过选择。
+        """
+
     def step_started(self, *, step: int, level: ReasoningLevel) -> None: ...
 
     def step_finished(
@@ -985,7 +996,11 @@ class AgentLoop:
         """
         ``today`` 由调用方按**用户本地时区**给出（服务端不猜用户在东八区还是
         别处）——模型的 ``bizDate`` 全靠它换算「今天 / 昨天」。
-        ``tools`` 默认注入本车道可用的全部域；P4 的域路由只需改这一个参数。
+
+        ``tools`` 是**注入面的显式覆盖**（用例的精确复现、探针的对照组）：给了它
+        就只用它、且**不做域路由**。缺省（``None``）＝ 按**本轮输入**选域
+        （:func:`routing.route_domains`，T-M7-05g）+ 契约车道过滤（05b）+
+        通道在位时的设备能力。
 
         ``contract_version`` 是**客户端声明的契约版本**（05a 的
         ``proposal_contract_version``，缺省 1）。它决定两件事，且两件都必须一致：
@@ -1023,26 +1038,22 @@ class AgentLoop:
         self._max_tokens = max_tokens
         self._device = device
         self._contract_version = contract_version
-        #: 显式给出 ``tools`` 时**只**用给出的清单（P4 域路由的入口，05g）；缺省 =
-        #: **本车道可用**的服务端域（05b 的契约车道过滤）+（通道在位时的）设备能力。
-        self._tools: list[Tool | DeviceTool] = (
-            list(tools) if tools is not None
-            else [
-                *tools_for_domains(DOMAINS, contract_version=contract_version),
-                *(device_tools() if device else []),
-            ]
+        #: 设备能力（通道在位时）。**域路由与它无关**：路由选的是**服务端工具域**，
+        #: 设备能力是一张独立的短清单（6 个，见 ``devices``），任何路由结果都带上。
+        self._device_tools: list[DeviceTool] = list(device_tools()) if device else []
+        #: 显式给出 ``tools`` 时**只**用给出的清单，**且不做域路由**（05g）：调用方
+        #: 已经决定了注入面（用例的精确复现、探针的对照组）。缺省则由域路由按
+        #: **本轮输入**选域，见 :meth:`run`。
+        self._fixed_tools: list[Tool | DeviceTool] | None = (
+            list(tools) if tools is not None else None
         )
-        #: 只有被注入的工具才可执行——模型幻觉出一个存在于注册表但本轮没注入的
-        #: 工具名时，必须拒绝（P4 的域路由一旦开启，这就是隔离边界）。
-        self._advertised = {tool.name for tool in self._tools}
-        #: 两份清单各生成各的（设备能力不是 ``Tool``：没有 handler、没有
-        #: proposal_action），形状由 ``devices.to_openai_tools`` 的用例钉住一致。
-        self._openai_tools = [
-            *to_openai_tools([t for t in self._tools if not isinstance(t, DeviceTool)]),
-            *device_to_openai_tools(
-                [t for t in self._tools if isinstance(t, DeviceTool)]
-            ),
-        ]
+        #: 本轮的路由结果（05g）。``__init__`` 先摆成「全量兜底」——与 P1 的注入面
+        #: 逐字相同；真正的决策在 :meth:`run`。
+        self._route = RoutingDecision(domains=DOMAINS, matched=False, signals=())
+        self._inject(
+            self._fixed_tools if self._fixed_tools is not None
+            else self._default_tools(DOMAINS),
+        )
         self._limits = limits or AgentLimits()
         self._approver = approver
         self._executor = executor
@@ -1066,6 +1077,34 @@ class AgentLoop:
         self._prompt_tokens = 0
         self._completion_tokens = 0
         self._summary = ""
+
+    # -- 注入面 ---------------------------------------------------------
+
+    def _default_tools(self, domains: Iterable[str]) -> list[Tool | DeviceTool]:
+        """给定域上的服务端工具（已按契约车道过滤）+ 通道在位时的设备能力。"""
+        return [
+            *tools_for_domains(domains, contract_version=self._contract_version),
+            *self._device_tools,
+        ]
+
+    def _inject(self, tools: Sequence[Tool | DeviceTool]) -> None:
+        """设定注入面：工具清单、可执行集合与 provider 载荷**三者同源**。
+
+        ``_advertised`` 是隔离边界：模型报出一个存在于注册表、但本轮**没有注入**
+        的工具名时必须拒绝（域路由一开启，漏注入的域就靠这一层拦住，见
+        :meth:`_run_tools`）。三者分开赋值就会出现「载荷收窄了、可执行集合没收」
+        这类只在真实链路上暴露的失配，因此只留这一个入口。
+        """
+        self._tools = list(tools)
+        self._advertised = {tool.name for tool in self._tools}
+        #: 两份清单各生成各的（设备能力不是 ``Tool``：没有 handler、没有
+        #: proposal_action），形状由 ``devices.to_openai_tools`` 的用例钉住一致。
+        self._openai_tools = [
+            *to_openai_tools([t for t in self._tools if not isinstance(t, DeviceTool)]),
+            *device_to_openai_tools(
+                [t for t in self._tools if isinstance(t, DeviceTool)]
+            ),
+        ]
 
     # -- 外部控制 -------------------------------------------------------
 
@@ -1109,6 +1148,12 @@ class AgentLoop:
         ]
         self._delta_start = len(self._messages)
         self._entry_level = classify_reasoning(user_input)
+        if self._fixed_tools is None:
+            # 域选择（T-M7-05g）：**与上一行的推理分级是两件事**（架构 §12.2 的
+            # 「易混淆点」）——它决定注入哪些工具，不影响推理档位，两份判据也各写
+            # 各的。没命中任何信号时退回全量注入（routing 模块头的「兜底」）。
+            self._route = route_domains(user_input)
+            self._inject(self._default_tools(self._route.domains))
         # 本轮输入**先落库**再发第一次请求（04b）：断在模型请求里时，日志里至少
         # 有用户的这句话——恢复后的下一轮因此知道刚才在问什么，而不是从零开始。
         # 它是本轮的**第一次**写入，轮号在这里分配（后面各批挂在同一个轮号上）。
@@ -1150,6 +1195,15 @@ class AgentLoop:
             # 中途输入与它所属的 Step 同批落库：它在下一次模型请求里就会被看见，
             # 落在日志里也不该晚于那次请求。
             await self._emit(drained)
+        # 域选择的通知落在**第一个 Step 的入口**（T-M7-05g）：决策本身在 ``run()``
+        # 里就做完了，这里只是把它送出去。**必须在 ``step_started`` 之前**，帧序
+        # 因此是 ``routing`` → ``thinking``；也**必须**在这里而不是 ``run()`` 里——
+        # 那里紧接着还有一次用户输入的落库（一次 DB 往返），先发帧会让客户端在
+        # 「这一轮真的开始跑了」之前就收到 phase。
+        if self._steps == 0 and self._fixed_tools is None:
+            self._notify(
+                "routed", domains=self._route.domains, matched=self._route.matched,
+            )
         # 入口判浅、实际多步时在此升级：走到第 2 个 Step 就说明任务比入口判断的
         # 复杂（架构 §4.6），后续步骤一律「深」档，入口误判不再致命。
         level = ReasoningLevel.DEEP if self._steps >= 1 else self._entry_level

@@ -768,7 +768,9 @@ class TestHardBoundaries:
         bad = _tool_turn(_call("transaction_add", {"type": "expense"}, id="e"))
         good = _tool_turn(_call("account_list", {}, id="g"))
         provider = ScriptedProvider([bad, good, bad, _text("好了")])
-        result = await _loop(provider).run("记一笔")
+        # 输入同时点到两个域（记账 / 账户）——两次调用因此都在注入面内。本用例量的
+        # 是硬边界的计数，不是域路由（05g），故用**跨域**的输入而不是显式 `tools=`。
+        result = await _loop(provider).run("记一笔，再看看账户")
 
         assert result.stop_reason is StopReason.COMPLETED
         assert result.steps == 4
@@ -785,7 +787,8 @@ class TestHardBoundaries:
             _call("account_list", {}, id="good"),
         )
         provider = ScriptedProvider([mixed, mixed, _text("好了")])
-        result = await _loop(provider).run("记一笔")
+        # 同上：跨域输入，两次调用都在注入面内（05g 的域路由）。
+        result = await _loop(provider).run("记一笔，再看看账户")
 
         assert result.stop_reason is StopReason.COMPLETED
         assert result.steps == 3, "两个混合步之后仍应继续（无进展计数被清零）"

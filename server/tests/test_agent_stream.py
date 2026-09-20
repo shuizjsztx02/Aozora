@@ -636,6 +636,7 @@ class TestStreamEvents:
 
         assert response.status_code == 200
         assert event_names(body) == [
+            "phase",        # 域选择（routing，step 0；T-M7-05g）
             "phase",        # step 1 入口（thinking）
             "phase",        # 工具批次入口（tool_calling）
             "tool_call",
@@ -643,6 +644,47 @@ class TestStreamEvents:
             "phase",        # step 2 入口
             "delta",
             "done",
+        ]
+
+    async def test_routing_frame_precedes_thinking_and_carries_the_domains(
+        self, stream_env: StreamEnv,
+    ):
+        """``phase: routing`` 的生产者（T-M7-05g）。
+
+        三件事一起钉住：① 它是**第一帧**（域选择发生在第一个模型请求之前）；
+        ② ``step`` 是 0——用 1 会被紧随其后的 ``thinking`` 覆盖，03c 预留的那行
+        「正在理解你的需求…」就永远看不见；③ 载荷带 ``domains`` / ``matched``。
+        """
+        stream_env.provider.reset([
+            _tool_turn(_call("budget_list", _budget_args())),
+            _text("没有预算。"),
+        ])
+        _, body = await stream_env.turn("看看预算")
+
+        first = parse_frames(body)[0]
+        assert first[0] == "phase"
+        assert first[1] == {
+            "phase": "routing", "step": 0,
+            "domains": ["budget"], "matched": True,
+        }
+        # 紧随其后就是第一个 Step 的 thinking（路由收窄的是注入面，不是档位）
+        assert parse_frames(body)[1][1]["phase"] == "thinking"
+
+    async def test_routing_frame_reports_the_fallback(self, stream_env: StreamEnv):
+        """没命中任何信号 → 全量注入，帧上如实报 ``matched: false``。
+
+        客户端只认 ``phase`` / ``step``（多余字段一律忽略），这两个字段是给日志
+        与人看的：生产上 ``matched=false`` 的比例就是词表覆盖率。
+        """
+        stream_env.provider.reset([_text("你好呀！")])
+        _, body = await stream_env.turn("你好")
+
+        routing_frame = parse_frames(body)[0][1]
+        assert routing_frame["matched"] is False
+        assert routing_frame["domains"] == list(DOMAINS)
+        # 兜底 = P1 的注入面：旧客户端看到的工具清单一个不少
+        assert [t["function"]["name"] for t in stream_env.provider.calls[0]["tools"]] == [
+            tool.name for tool in tools_for_domains(DOMAINS, contract_version=1)
         ]
 
     async def test_headers_disable_buffering(self, stream_env: StreamEnv):
@@ -708,10 +750,16 @@ class TestStreamEvents:
         _, body = await stream_env.turn("看看预算")
 
         phases = [p for name, p in parse_frames(body) if name == "phase"]
+        # 首帧是 routing（域选择，05g）：它不在任何一个 Step 里（step = 0），
+        # **不带** reasoning——档位只属于 thinking。
+        assert phases[0]["phase"] == "routing" and phases[0]["step"] == 0
+        assert "reasoning" not in phases[0]
         assert [p["reasoning"] for p in phases if p["phase"] == "thinking"] == [
             "fast", "deep",
         ]
-        assert phases[1]["phase"] == "tool_calling"
+        assert [p["phase"] for p in phases] == [
+            "routing", "thinking", "tool_calling", "thinking",
+        ]
 
     async def test_done_payload_shape(self, stream_env: StreamEnv):
         stream_env.provider.reset([
@@ -736,7 +784,8 @@ class TestStreamEvents:
         _, body = await stream_env.turn("你好")
 
         assert payload_of(body, "delta")["text"] == "你好呀，今天想记点什么？"
-        assert event_names(body) == ["phase", "delta", "done"]
+        # 两帧 phase：routing（域选择，step 0）+ step 1 入口
+        assert event_names(body) == ["phase", "phase", "delta", "done"]
 
     async def test_empty_answer_emits_no_delta(self, stream_env: StreamEnv):
         """空回答（thinking 吃光 token 的形态）不该发一个空气泡——
@@ -744,7 +793,7 @@ class TestStreamEvents:
         stream_env.provider.reset([_text("")])
         _, body = await stream_env.turn("你好")
 
-        assert event_names(body) == ["phase", "done"]
+        assert event_names(body) == ["phase", "phase", "done"]
         assert payload_of(body, "done")["stop_reason"] == "empty_response"
 
     async def test_device_request_has_no_p1_producer(self, stream_env: StreamEnv):
@@ -952,6 +1001,7 @@ class TestIncrements:
         _, body = await stream_env.turn("看看预算")
 
         assert event_names(body) == [
+            "phase",        # routing（域选择，step 0）
             "phase",        # step 1 入口
             "delta",        # 「我先查一下。」——冲在工具事件前面
             "phase",        # 工具批次入口
@@ -1059,7 +1109,7 @@ class TestHeartbeat:
             releaser.cancel()
 
         # 注释帧被解析器忽略，事件序列仍然干净
-        assert event_names(body) == ["phase", "delta", "done"]
+        assert event_names(body) == ["phase", "phase", "delta", "done"]
 
 
 # ── 4. 逐条下发（直连 ASGI）──────────────────────────────────────────────
@@ -1398,7 +1448,8 @@ class TestFailure:
         response, body = await stream_env.turn("你好")
 
         assert response.status_code == 200  # 响应头早已发出，失败只能走帧
-        assert event_names(body) == ["phase", "error"]
+        # routing 帧在 provider 调用**之前**就发出去了，因此失败轮也带着它
+        assert event_names(body) == ["phase", "phase", "error"]
         error = payload_of(body, "error")
         assert error["code"] == "ai_unavailable"
         # 会话索引在前置检查里已提交 → 失败帧也带 id，客户端不必重开会话

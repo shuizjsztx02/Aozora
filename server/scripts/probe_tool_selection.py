@@ -22,10 +22,22 @@
 - **05b / 05c / 05d 的用例分开记账**（``CASES`` / ``CASES_05C`` / ``CASES_05D``）：
   扩域之后要看的不只是总准确率，还有「新工具会不会被同域的读工具或近义工具抢走」。
 
+三种跑法
+--------
+- **默认（全量注入）**：`tools_for_domains(DOMAINS)` —— 05b/05c/05d 的历史口径，
+  域路由的**对照组**。
+- **``--routing``（域路由开启）**：每个用例按 ``routing.route_domains(utterance)``
+  只注入被选中的域（T-M7-05g 的生产形态）。与默认跑法在同一会话里各跑一次，
+  才能把「收窄注入面」的效果与模型的自身波动分开。
+- **``--offline``（零模型调用）**：只量路由本身——**漏注入率**（该给的域没给，
+  能力消失）/ **误路由率**（多给了域，只是选择面变宽）/ **兜底比例**
+  （词表没认出来 → 全量）。这一档不需要 API key，可以随时重跑。
+
 用法::
 
-    cd server && python scripts/probe_tool_selection.py            # 全部用例
-    cd server && python scripts/probe_tool_selection.py --lane 1   # 量 v1 车道
+    cd server && python scripts/probe_tool_selection.py --offline   # 只看路由
+    cd server && python scripts/probe_tool_selection.py --routing   # 路由 + 真实调用
+    cd server && python scripts/probe_tool_selection.py            # 对照组（全量注入）
 
 结果打印成表格（用例 / 期望 / 实际 / 是否命中）并给出分组准确率。**它不写库、
 不落任何状态**，可以随时重跑。
@@ -43,6 +55,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from src.common.config import get_config  # noqa: E402
+from src.modules.ai import routing  # noqa: E402
 from src.modules.ai import tools as T  # noqa: E402
 from src.modules.ai.agent import AgentLoop  # noqa: E402
 from src.modules.ai.provider import DeepSeekProvider, ToolCallingProvider  # noqa: E402
@@ -297,6 +310,15 @@ class _NullProvider(ToolCallingProvider):
         raise NotImplementedError
 
 
+def _all_cases() -> list[tuple[str, str, str]]:
+    """``(分组, 用户原话, 期望工具)``——分组就是分批报准确率的依据。"""
+    return [
+        *[("05b", utterance, expected) for utterance, expected in CASES],
+        *[("05c", utterance, expected) for utterance, expected in CASES_05C],
+        *[("05d", utterance, expected) for utterance, expected in CASES_05D],
+    ]
+
+
 def _tool_context() -> T.ToolContext:
     return T.ToolContext(
         db=None,  # 探针不执行工具
@@ -371,27 +393,40 @@ async def main() -> int:
     parser = argparse.ArgumentParser(description="工具选择准确率抽样（R-PROD-17）")
     parser.add_argument("--lane", type=int, default=2, choices=(1, 2))
     parser.add_argument("--limit", type=int, default=0, help="只跑前 N 个用例（冒烟用）")
+    parser.add_argument(
+        "--routing", action="store_true",
+        help="域路由开启（每个用例只注入被选中的域，T-M7-05g 的生产形态）",
+    )
+    parser.add_argument(
+        "--offline", action="store_true",
+        help="只量域路由本身（漏注入 / 误路由 / 兜底），**不调用模型**、不需要 API key",
+    )
     args = parser.parse_args()
+
+    if args.offline:
+        return _report_routing()
 
     cfg = get_config()
     if not cfg.ai_agent_provider_api_key:
         print("缺少 AI_AGENT_PROVIDER_API_KEY（server/.env）", file=sys.stderr)
         return 2
 
-    tools = T.tools_for_domains(T.DOMAINS, contract_version=args.lane)
+    lane_tools = T.tools_for_domains(T.DOMAINS, contract_version=args.lane)
     loop = AgentLoop(
         _NullProvider(),
         _tool_context(),
         model=cfg.ai_agent_provider_model,
         timeout=60.0,
         today=date(2026, 9, 18),
-        tools=tools,
+        tools=lane_tools,
         contract_version=args.lane,
     )
     system = loop._system_message()["content"]  # noqa: SLF001 — 探针要的就是真实系统提示
-    payload = T.to_openai_tools(tools)
+    full_payload = T.to_openai_tools(lane_tools)
 
-    print(f"车道 v{args.lane}：注入 {len(tools)} 个工具，模型 {cfg.ai_agent_provider_model}")
+    mode = "域路由开启" if args.routing else "全量注入（对照组）"
+    print(f"车道 v{args.lane}：{mode}，全量 {len(lane_tools)} 个工具，"
+          f"模型 {cfg.ai_agent_provider_model}")
     print(f"{'用例':<34} {'期望':<22} {'实际（两步）':<34} 首调 序列")
     print("-" * 104)
 
@@ -399,19 +434,21 @@ async def main() -> int:
         cfg.ai_agent_provider_api_key, cfg.ai_agent_provider_base_url,
     )
     results: list[tuple[str, bool, bool]] = []
-    cases = CASES[: args.limit] if args.limit else CASES
-    cases_05c = CASES_05C[: args.limit] if args.limit else CASES_05C
-    cases_05d = CASES_05D[: args.limit] if args.limit else CASES_05D
-    n_05b = len(cases)
-    n_05c = len(cases_05c)
+    cases = _all_cases()
+    if args.limit:
+        cases = cases[: args.limit]
     try:
-        for offset, (utterance, expected) in enumerate(cases + cases_05c + cases_05d):
-            if offset < n_05b:
-                group = "05b"
-            elif offset < n_05b + n_05c:
-                group = "05c"
-            else:
-                group = "05d"
+        for group, utterance, expected in cases:
+            # 路由开启时，这一轮模型看到的工具**就是生产上会看到的那一份**
+            # （路由的注入面与 ``AgentLoop`` 的缺省注入同一个函数）。
+            payload = full_payload
+            marker = ""
+            if args.routing:
+                decision = routing.route_domains(utterance)
+                payload = T.to_openai_tools(
+                    T.tools_for_domains(decision.domains, contract_version=args.lane),
+                )
+                marker = f"[{len(decision.domains)}域]"
             names = await _sequence(
                 provider, system=system, tools=payload,
                 model=cfg.ai_agent_provider_model, utterance=utterance,
@@ -422,7 +459,7 @@ async def main() -> int:
             results.append((group, first_hit, seq_hit))
             print(
                 f"{utterance:<34} {expected:<22} {' -> '.join(names) or '-':<34} "
-                f"{'命中' if first_hit else '未中'} {'命中' if seq_hit else '未中'}"
+                f"{'命中' if first_hit else '未中'} {'命中' if seq_hit else '未中'} {marker}"
             )
     finally:
         await provider.aclose()
@@ -445,6 +482,65 @@ async def main() -> int:
         )
     missed = [r for r in results if not r[2]]
     return 0 if not missed else 1
+
+
+def _report_routing() -> int:
+    """离线量域路由（**零模型调用**）：漏注入 / 误路由 / 兜底。
+
+    判据来自探针自己的用例——每条用例的「期望工具」就是这条输入的正确答案，
+    它的 ``domain`` 因此是这一轮**必须注入**的域：
+
+    - **漏注入**：该域不在路由结果里 → 模型看不到能完成这件事的工具（**能力
+      消失**，本轮唯一不可接受的形态，退出码非 0）；
+    - **误路由**：路由结果里除它之外的域 → 只是选择面变宽（准确率代价）；
+    - **兜底**：没命中任何信号（``matched=False``）→ 退化成全量注入。
+    """
+    print("域路由离线口径（零模型调用）：漏注入 / 误路由 / 兜底")
+    print(f"{'用例':<34} {'期望':<22} {'路由':<26} 结论")
+    print("-" * 104)
+    missed_injection: list[str] = []
+    over_routed = 0
+    fallbacks = 0
+    domain_counts: list[int] = []
+    tool_counts: list[int] = []
+    for group, utterance, expected in _all_cases():
+        tool = T.get_tool(expected)
+        assert tool is not None, expected
+        decision = routing.route_domains(utterance)
+        routed = set(decision.domains)
+        domain_counts.append(len(routed))
+        tool_counts.append(
+            len(T.tools_for_domains(decision.domains, contract_version=2)),
+        )
+        if tool.domain not in routed:
+            verdict = f"[MISS] 漏注入（{tool.domain} 没给）"
+            missed_injection.append(f"{group}｜{utterance}")
+        elif not decision.matched:
+            verdict = "[FALLBACK] 兜底（全量注入）"
+            fallbacks += 1
+        elif len(routed) > 1:
+            verdict = f"[EXTRA] 误路由（多给 {len(routed) - 1} 域）"
+            over_routed += 1
+        else:
+            verdict = "[OK] 恰好一域"
+        print(
+            f"{utterance:<34} {expected:<22} {','.join(decision.domains):<26} {verdict}"
+        )
+    total = len(domain_counts)
+    print("-" * 104)
+    print(f"用例 {total} 条")
+    print(f"漏注入：{len(missed_injection)} 条" + (f" → {missed_injection}" if missed_injection else ""))
+    print(f"误路由（多给域）：{over_routed} 条；兜底（全量）：{fallbacks} 条")
+    print(
+        f"平均注入 {sum(domain_counts) / total:.1f} 个域 / "
+        f"{sum(tool_counts) / total:.1f} 个工具"
+        f"（全量 {len(T.DOMAINS)} 域 / "
+        f"{len(T.tools_for_domains(T.DOMAINS, contract_version=2))} 工具）"
+    )
+    for group in ("05b", "05c", "05d"):
+        subset = [n for (g, _, _), n in zip(_all_cases(), domain_counts) if g == group]
+        print(f"  {group} 组平均 {sum(subset) / len(subset):.1f} 个域")
+    return 1 if missed_injection else 0
 
 
 if __name__ == "__main__":
