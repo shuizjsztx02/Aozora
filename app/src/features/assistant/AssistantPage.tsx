@@ -12,7 +12,7 @@
  * 用户头像 = meta['avatar_uri']（同批顺路读），均走 CategoryIcon、圆形带玻璃外框
  */
 
-import { useState, useRef, useEffect, useCallback, useMemo } from 'react'
+import { useState, useRef, useEffect, useLayoutEffect, useCallback, useMemo } from 'react'
 import { useNavigate } from 'react-router'
 import { PageHeader } from '../../components/Layout'
 import { CategoryIcon } from '../../components/CategoryIcon'
@@ -423,8 +423,18 @@ export function AssistantPage() {
   }, [bridge, bookId, imageSubmitting, appendAssistantMessage])
 
   // 自动滚动到底部
-  useEffect(() => {
-    scrollRef.current?.scrollTo({ top: scrollRef.current.scrollHeight, behavior: 'smooth' })
+  // T17-3（REQ-65）：挂在**布局阶段**，首帧就定位到尾部——否则浏览器会先画出
+  // 「列表顶部」（scrollTop=0）那一帧，再演一遍从第一条滚到底的平滑动画。
+  // 行为判据：首帧、或剩余距离超过一屏（服务端会话正文异步补进来）→ 瞬移；
+  // 只有尾部小增量（会话中追加消息）才平滑跟动。
+  const didInitScrollRef = useRef(false)
+  useLayoutEffect(() => {
+    const el = scrollRef.current
+    if (!el) return
+    const firstFrame = !didInitScrollRef.current
+    didInitScrollRef.current = true
+    const far = el.scrollHeight - el.scrollTop - el.clientHeight > el.clientHeight
+    el.scrollTo({ top: el.scrollHeight, behavior: firstFrame || far ? 'auto' : 'smooth' })
   }, [messages, phase, imageState, pendingOp, pendingConfig])
 
   // T9-8（REQ-16）：MainActivity 注入 --ime-bottom-px 后派发合成 resize →
