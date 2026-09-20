@@ -217,3 +217,49 @@ A 机部署有直接影响的结论：
 
 **执行顺序建议不变**：§二 步骤 0（B 机转储）→ 步骤 1–4 → 步骤 5 验证。
 步骤 5.3 的判据在本次复核中已被实测确认有效（A 机当前 `/ai/agent` = 404）。
+
+---
+
+## 八、执行记录（✅ 2026-09-20 已执行）
+
+本节记录本方案在 **A 机测试实例**上的实际执行结果，供后续更新对照。
+
+| 步骤 | 结果 |
+|---|---|
+| 0 · B 机转储 | ✅ `/root/aozora_test_before_m7.dump`（69K），`pg_restore -l` 列出 **46 个表条目**，备份有效 |
+| 1 · 代码推送 | ✅ 本地 → A 机裸库 `/root/git/aozora.git`：`e0c8805..984181a`（**A 机的 `origin` 直接指向该裸库，故不依赖 github**） |
+| 2 · A 机 pull | ✅ 工作库 `42913ec` → **`984181a`**（一次拿到 144 个提交） |
+| 3 · `.env` agent 凭据 | ✅ **无需操作**——A 机 `.env` 第 31 行已配置 `AI_AGENT_PROVIDER_API_KEY`（只读核验：长度 35、`sk-` 前缀、非占位符） |
+| 4 · 部署 | ✅ `a-deploy.sh test`：镜像重建 → 容器 Recreated/Started → **5 个迁移全部执行**（0016 → 0017 → 0018 → 0019 → 0020 → **0021**）→ health/ready 通过 |
+| 5 · 验证 | ✅ 见下 |
+
+**验证实测数据（⑤）：**
+
+| 项 | 结果 |
+|---|---|
+| `alembic current` | **`0021_user_preferences (head)`** |
+| `127.0.0.1:18080/api/v1/health/ready` | `{"status":"ready","checks":{"database":"ok"}}` |
+| `POST /api/v1/ai/agent`（内网） | **401**（此前 404）→ **agent 路径已开启** |
+| `116.62.196.255/aozora-api/...` health | **200** |
+| 经 nginx 的 `POST /ai/agent` | **401**（路径可达） |
+| 容器 | `aozora-api-test Up (healthy)` |
+
+**真实 AI 调用（探针指向 A 机公网入口，三轮全 200 + SSE）：**
+
+- v2 车道「把 2026-09 的整体预算设为 3000 元」→ `budget_set` 执行 **ok**，
+  `done.executions` 非空（带 `transaction_ids` + `proposal_id`）、**`writes=1`** → 真实落库；
+- v2 车道「我这个月一共花了多少」→ `stats_monthly` **ok**；
+- 说明 **DeepSeek 凭据有效、服务端 loop 与真实 provider 链路通**。
+
+> **对 R-PROD-22 第 (1) 项的旁证**：上述三轮均以 `text/event-stream` 正常收到完整帧序列
+> （`phase → tool_call → tool_result → delta → done`），**未观察到 nginx 缓冲整段响应**。
+> 这为「应用层 `X-Accel-Buffering: no` 生效」补了一条**生产环境实测**，但**逐帧时延**
+> 仍需真机走查确认（第 9 项的完整口径）。
+
+**本轮执行后仍待办：**
+
+1. **客户端 APK 需重新构建并分发**——服务端闸门已开，但客户端 `AI_AGENT_CLIENT_ENABLED`
+   在已分发的旧 APK 里仍是 `false`（见 §七 第 1 条）。**不同步这一步，真机仍然用不上 agent。**
+2. **A 机 nginx 尾斜杠（R-PROD-24）**——本次**未 reload nginx**（容器重建不触碰该配置），
+   问题仍潜伏；下次 reload 前须修掉 `api.conf` 里 `proxy_pass` 的多余尾斜杠。
+3. `api-prod` 未启用（域名/备案/HTTPS 未落地），与本方案预期的「本轮不动」一致。
