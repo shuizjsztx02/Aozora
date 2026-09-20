@@ -16,7 +16,7 @@
 | **05b** | 全量工具：记账与账户账本域 | ⏳ 未开始 | | | 批次 2 |
 | **05c** | 全量工具：预算存钱、定时、角色域 | ⏳ 未开始 | | | 批次 3 |
 | **05d** | 全量工具：分析与其余服务端域 | ⏳ 未开始 | | | 批次 4 |
-| **05e** | 设备能力通道：服务端协议与 loop 暂停/恢复 | ⏳ 未开始 | | | 批次 2；**协议部分可跨期提前开工** |
+| **05e** | 设备能力通道：服务端协议与 loop 暂停/恢复 | ✅ 完成 | 2026-09-19 | `ec05120` | 批次 2；服务端侧全部交付，客户端执行器归 05f；开关默认关闭（`AI_DEVICE_CHANNEL_ENABLED`） |
 | **05f** | 设备能力通道：客户端执行器与设备工具接线 | ⏳ 未开始 | | | 批次 3 |
 | **05g** | 域路由与预路由 | ⏳ 未开始 | | | 批次 5 |
 | **05h** | Skill 封装与按需加载 | ⏳ 未开始 | | | 批次 4 |
@@ -168,7 +168,7 @@ cd app && npx tsc --noEmit                       # 0 错
 | # | 挂账 | 来源 | 落卡 |
 |---|---|---|---|
 | 1 | **工具全集归 P4**——约 79 条桥命令对应的工具集（P1 只交付 15 个 / 3 域） | 02c 职责边界 | **05b / 05c / 05d** |
-| 2 | **`device_request` 无生产者**——八类事件里唯一没有发射路径的一类 | `stream.py:34,72` | **05e / 05f** |
+| 2 | ~~**`device_request` 无生产者**~~——**服务端侧已闭环（05e，`ec05120`）**：两类协议 + 首个生产者 + 上行端点；残留只剩客户端执行器与渲染路径 | `stream.py:34,72` | **05f** |
 | 3 | **`routing` 阶段无生产者**——`stream.py` 现注释「属域路由，P4 才有」 | `stream.py:30` | **05g**（+ P2 03c 的占位） |
 | 4 | **域路由归 P4**（架构 §12.2 已定第 2 项；P1 的「快路径」由 loop 自然产生，不额外路由） | 架构 §12.2 | **05g** |
 | 5 | **R-PROD-17（工具集过大降低选择准确率）**——`tools.py` 的域分组已就位，**评估分组策略与预路由准确率**是 P4 的下一步 | `risk-register.md` | **05g**（+ 05b–05d 的真实调用抽样） |
@@ -232,6 +232,83 @@ cd app && npx tsc --noEmit                       # 0 错
      （已记入 ADR-009「已知残余 3」与 **R-PROD-31**，责任人未指派）。
 下一项未阻塞任务：05b（记账与账户账本域）与 05e（设备通道服务端）——批次 2，
   两卡不同文件面，可并行。
+```
+
+### 05e 设备能力通道：服务端协议与 loop 暂停/恢复（2026-09-19，`ec05120`）
+
+```text
+任务编号：T-M7-05e（P4 批次 2，服务端侧）
+完成范围 / 明确未做：
+  完成——① 设备能力目录（6 个能力：单向 haptic.feedback / widget.refresh /
+  share.text，需结果 permissions.request / image.pick / voice.transcribe）；
+  ② `device_request` 帧（八类事件里的**首个生产者**）与完整信封；
+  ③ 需结果类的**进程内挂起表**（devices.DeviceChannel）+ loop 的挂起/恢复；
+  ④ 上行端点 `POST /ai/device-result`（404 覆盖四种「回不去」的情形）；
+  ⑤ 超时与取消的收敛（不留悬挂请求）；⑥ `AgentObserver.device_request` 扩展；
+  ⑦ 开关与超时两项配置；⑧ ADR-010 + 契约文档 + 架构同步 + R-PROD-34/35 +
+  D-PROD-16；⑨ 顺手改正 stream.py 把设备通道写成「归 P2」的笔误（实为 P4）。
+  未做（刻意，非遗漏）——① **客户端执行器与「能力名 → 桥命令」的分派表**（05f）；
+  ② 设备工具**只登记不接线**（开关默认关闭，模型看不到它们，行为与 P1 逐字相同）；
+  ③ `StopReason` **不新增取值**（ADR-010 决策 4：设备失败是工具级结果）；
+  ④ **不接 `device_request` 日志事件生产者**（决策 5：配对的 tool 结果已留档）；
+  ⑤ 域路由与预路由（05g）；⑥ 设备工具的选择准确率实测（随 05f 走查）。
+修改的文档、契约与代码：
+  server/src/modules/ai/devices.py（**新**：协议 / 目录 / 挂起表）、
+  agent.py（观察者钩子 + `AgentLoop(device=…)` + `_device_call` + 4 个错误码）、
+  stream.py（帧载荷 + 观察者 + `_build_loop` 接线 + 步骤卡文案 + 笔误改正）、
+  routes.py + schemas.py（上行端点）、config.py（`ai_device_channel_enabled` /
+  `ai_device_timeout_seconds`）、conversation.py（事件表注释）、
+  tests/test_ai_device_channel.py（**新**，45 例）、
+  tests/test_agent_stream.py（帧级 3 例 + 既有用例的注释）、
+  tests/test_ai_proposal_v2_parity.py（**顺手修**：缺文件末尾换行，非本卡范围）、
+  docs/adr/ADR-010-device-capability-channel.md（**新**）、
+  docs/architecture/ai-architecture.md（设备能力通道协议小节）、
+  docs/architecture/ai-agent-architecture.md（§4.3 / §6.2 / §8.1 / §8.4 / §12.2）、
+  docs/risk-register.md（R-PROD-34 / 35）、docs/APP-CONTEXT.md（D-PROD-16）
+验证命令与结果：
+  cd server && python -m pytest tests/ -q          → 1290 passed / 37 skipped
+                                                    （基线 1242 + 本卡 48）
+  cd server && ruff check src/ tests/              → 全绿
+  cd app && npx tsc --noEmit                       → 0 错
+  cd app && npx vitest run                         → 84 文件 / 1327 passed
+  ./gradlew :app:testDebugUnitTest --rerun-tasks   → BUILD SUCCESSFUL，424 tests /
+                                                    0 失败（1 skip）
+  新增用例：test_ai_device_channel.py 45 例（协议 / 目录 / 单向 / 暂停恢复 /
+  四个失败结局 / 串行配对 / 超时 / 取消 / 归属 / 端点）；帧级 3 例在
+  test_agent_stream.py::TestDeviceChannel（真 SSE 链路上的挂起 → 上行 → 恢复）
+数据/同步/AI/安全影响：
+  AI 协议面：**八类事件与其余七类的载荷一字未改**（本卡只补生产者与回传通道，
+  遵卡面职责边界）；新增一条上行端点 `POST /ai/device-result`。
+  **数据面零改动**：不建表、不迁移、不写事件日志（ADR-010 决策 5）。
+  安全：三条铁律不放松——设备回传的 `data` 经 `_without_ids` 剥掉内部 id 才回喂
+  模型（用例钉住 attachmentId 不出现在下一次模型请求里）；上行端点按 user_id 校验
+  归属，别人的 request id 与不存在的 id 一律 404（**不是 403**，不泄漏存在性）；
+  设备失败只回安全枚举码，不含设备侧原文。Token 不出 Kotlin 层（ADR-003 不变）。
+兼容与回退方式：
+  开关 `AI_DEVICE_CHANNEL_ENABLED` **默认 false** → 与 P1 逐字相同（模型看不到
+  设备能力、不产出 `device_request` 帧）。回退＝关掉开关：无数据迁移、无契约文件
+  替换、无客户端改动（现有客户端本来就只把该帧原样留存、不渲染）。
+开放风险与责任人：
+  ① **R-PROD-34**：挂起态是进程内单例——多 worker 时回传可能落到另一个进程
+     （等满超时窗才收敛）、进程重启会丢掉挂起请求（上行拿 404），两种失效形态都
+     **不会错写数据**；生产若改多实例，必须先换共享存储。责任人：部署执行者 /
+     M7 收口；
+  ② **R-PROD-35**：05f 就位前不可端到端（开关默认关闭故不构成故障）；开启时点与
+     逐能力走查（权限 / 图片 / 语音 / 分享 / 触感 / 小组件）归 05f；
+  ③ 设备工具的选择准确率（R-PROD-17 口径）未实测——本卡只登记 6 个能力，实测数据
+     随 05f 的端到端走查取得；
+  ④ `device_request` 帧在客户端**没有渲染路径**（`use-assistant-stream` 只把它原样
+     留存进 `deviceRequests`），归 05f。
+并发会话记要（供下一卡参考）：
+  本卡施工期间工作区同时存在另一会话的 **05b 在途改动**（`tools.py` 的契约车道
+  过滤 `tool_supports_contract`），一度使 11 条既有用例变红（工具集断言与写路径）。
+  **归因方式**：在干净 HEAD 的 `git worktree` 上复跑同一组用例（144 passed），再
+  把本卡改动拷进去复跑（144 passed）→ 确认失败与 05b 在途改动同源、本卡零回归；
+  该改动随后从工作区移除，最终全量 1290/37 与干净树一致。本卡提交与其**零交集**
+  （文件面不重叠：它改 tools.py / validator.py，本卡改 devices.py / agent.py /
+  stream.py / routes.py / schemas.py）。
+下一项未阻塞任务：**05f**（客户端执行器与设备工具接线——直接消费本卡的帧与端点，
+  是打开开关的前置）；工具全量化面为 05b（记账与账户账本域）/ 05c / 05d。
 ```
 
 ---
