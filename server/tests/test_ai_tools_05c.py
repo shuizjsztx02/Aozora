@@ -1,6 +1,6 @@
 """T-M7-05c: 预算存钱 / 定时 / 角色三域的工具（16 个新工具）。
 
-验收映射（``docs/milestones/T-M7-05P4-implementation-plan.md`` §三 05c）：
+验收映射（``docs/milestones/T-M7-05-P4-implementation-plan.md`` §三 05c）：
 - 三域各 ≤8 个工具、写工具的 op 都是 v2 注册表成员 → ``test_ai_tools.py`` 的注册表契约
 - 写操作一律产出**规范草案**（v2 op + payload），经组装器进审批门 → 全文件
 - **模型永不输出 UUID**：改 / 删 / 归档只按名字定位，名→id 走 ``ToolContext``

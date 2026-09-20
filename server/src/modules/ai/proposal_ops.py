@@ -59,19 +59,20 @@ from src.modules.books.schemas import BookCreate, BookUpdate
 from src.modules.books.service import BookService
 from src.modules.categories.schemas import CategoryCreate, CategoryUpdate
 from src.modules.categories.service import CategoryService
+
 # 三域的**字段规则只有一份**，在 sync.service 里（实体上行 push 走的同一条门）。
 # 这里 import 私有名是有意的：把它抄成第二份必然漂移——同一份 payload 从 sync
 # 进来合法、从 AI 进来非法（或反过来）是最难查的一类不一致。05c 只统一**对外
 # 的错误码**（见 ``_checked``）。
 from src.modules.sync.service import (  # noqa: PLC2701 - 见上
     _RULE_REPEATS,
+    _require_bool,
+    _require_int_in_range,
     _validate_amount_cents,
     _validate_current_cents,
     _validate_name,
     _validate_note,
     _validate_savings_period,
-    _require_bool,
-    _require_int_in_range,
 )
 from src.modules.transactions.schemas import TransactionUpdate
 from src.modules.transactions.service import TransactionService
