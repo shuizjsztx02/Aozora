@@ -179,12 +179,14 @@ class Settings(BaseSettings):
     # Daily quota for GUEST users only; ACTIVE users have no daily cap
     # (product decision 2026-09-06). Counted per calendar day in the
     # user's own timezone (User.timezone).
-    # 联测临时提额（2026-09-11，T15 真机+模拟器回归多句连测）——原值 20。
-    # **T-M7-02f 领取时按用户明确指示保持 100000 不变**（该值仍被用于人工
-    # 联测，改回 20 会打断测试）；卡面「前置动作」因此未执行，已在交付记录
-    # 里登记为挂账项，由 M7 收口时统一恢复。测试面配额由 conftest 钉死。
+    # 联测临时提额（2026-09-11，T15 真机+模拟器回归多句连测）原值 20，
+    # **T-M7 收口时恢复**（2026-09-20）——提额是给人工联测用的，留在默认值里
+    # 等于把「游客一天 20 次」这个产品决策悄悄作废。
+    # 两个部署实例由 compose 显式接管：api-test 走 ``TEST_AI_QUOTA``（默认
+    # 100000，继续方便连测），api-prod 走 ``PROD_AI_QUOTA``（默认 20）。
+    # 本机真机联调同理——在未跟踪的 ``server/.env`` 里覆盖，不改代码。
     ai_daily_quota_guest: int = Field(
-        default=100000,
+        default=20,
         gt=0,
         validation_alias=AliasChoices("AI_DAILY_QUOTA_GUEST", "ai_daily_quota_guest"),
     )
