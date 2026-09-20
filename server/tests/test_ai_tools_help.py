@@ -18,8 +18,8 @@ import re
 import pytest
 
 from src.modules.ai import help as H
-from src.modules.ai import tools as T
 from src.modules.ai import stream as S
+from src.modules.ai import tools as T
 
 #: 语料里**不许出现**的措辞。它们都是「对未来的承诺」——帮助里出现一句产品
 #: 做不到的话，模型会照着它向用户承诺，而那句承诺没有任何代码兜底。
