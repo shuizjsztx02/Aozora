@@ -177,23 +177,23 @@ PROPOSAL_CONTRACTS: tuple[int, ...] = (PROPOSAL_CONTRACT_V1, PROPOSAL_CONTRACT_V
 V1_LANE_OPS: frozenset[str] = frozenset({"transaction_add"})
 
 #: **执行位置在设备的 op**：服务端不执行，提案一律挂起、由客户端在设备上执行
-#: （05f 的执行器按 op 分派）。``meta_set`` 写的是设备本地的 ``sync_meta``
-#: （默认账本 / 默认账户 / 小组件配置 / 用户画像都是本地展示元数据，桥命令
-#: ``meta.set`` 明写「不上行」），服务端没有这些键的存储位置。
+#: （05f 的执行器按 op 分派）。
+#:
+#: T-M7-05j：``meta_set`` **移出本集合**——偏好项上云后，服务端有这些键的存储
+#: 位置（``user_preferences`` 表），``meta_set`` 由服务端直接执行（见
+#: ``proposal_ops._execute_meta_set``），AI 改默认账本 / 默认账户 / 小组件配置 /
+#: 用户画像现在真的落库、真的进 sync change，不再只是"挂起后在设备上执行"。
+#:
 #: ``persona_switch``（05c）同理：**当前角色指针**是 ``sync_meta`` 的
 #: ``active_persona_id`` 键（``BridgeProtocol.kt``：角色表已上云，指针不上行），
-#: 换角色＝在设备上写这一个本地键。
-#: 05d 再加两个，判据同构——**服务端缺的是「设备身份」，不是存储位置**：
-#: ``consent_record`` 的同意记录按 ``device_id`` 存（``user_consents.device_id``，
-#: 设计上允许注册前打点），而 ``/ai/agent`` 的请求里没有设备标识，服务端**认不出
-#: 这是哪台设备**；写到「最近活跃的那台」会让另一台该弹的同意框不再弹，是错答案。
-#: ``sync_trigger`` 的语义是「让**这台设备**立刻跑一次同步」，而 push / pull 都由
-#: 设备发起，服务端没有任何主动触发的通道。两者客户端都已有现成桥命令
-#: （``consent.record`` / ``sync.trigger``），执行体落在设备侧。
+#: 换角色＝在设备上写这一个本地键——它**刻意留在这里**（角色指针是"当前选中哪一
+#: 个"，不是用户偏好本身，跨设备一致语义与默认账本不同；05j 收窄时保留现状）。
+#: 05d 的 ``consent_record`` / ``sync_trigger`` 同样留在这里——判据同构：
+#: 服务端缺的是「设备身份」，不是存储位置（详见每条的注释）。
 #: ``reminder_set`` 同类（桥 ``reminder.set``），但**不在本卡范围**——它归 05f 的
 #: 设备执行器，见 ``docs/milestones/T-M7-05-P4-implementation-plan.md`` §五 挂账项。
 DEVICE_EXECUTED_OPS: frozenset[str] = frozenset({
-    "meta_set", "persona_switch", "consent_record", "sync_trigger",
+    "persona_switch", "consent_record", "sync_trigger",
 })
 
 #: **不可自动执行的 op**：即使单 Step + 高置信，也必须过确认卡（架构 §7.4 的
@@ -1997,26 +1997,29 @@ async def _handle_book_delete(ctx: ToolContext, params: dict[str, Any]) -> ToolO
 
 
 # ---------------------------------------------------------------------------
-# meta 域 —— 写工具（T-M7-05b；执行位置＝设备）
+# meta 域 —— 写工具（T-M7-05b；T-M7-05j：执行位置从设备迁回服务端）
 # ---------------------------------------------------------------------------
 
 
 async def _handle_meta_set(ctx: ToolContext, params: dict[str, Any]) -> ToolOutcome:
-    """写一个本地 meta 键（当前只覆盖「默认账本 / 默认账户」两个键）。
+    """写一个偏好键（服务端执行；T-M7-05j 上云后 AI 改默认项 / 用户画像真的落库）。
 
-    **执行位置是设备，不是服务端**：这两个键存在设备本地的 ``sync_meta`` 里
-    （``BridgeProtocol.kt`` 的 ``meta.set`` 明写「不加实体列、不上行」），服务端
-    没有它们的落点。因此本工具产出的提案在服务端**只挂起、不执行**，由客户端在
-    设备上执行（``DEVICE_EXECUTED_OPS``；05f 的执行器按 op 分派）。
+    05b 时期这两个键（默认账本 / 默认账户）存在设备本地的 ``sync_meta`` 里，桥
+    命令 ``meta.set`` 明写「不上行」，所以 ``meta_set`` 是 ``DEVICE_EXECUTED_OPS``
+    的一员——提案在服务端只挂起、由客户端在设备上执行。05j 把偏好键送上云后，
+    服务端有了 ``user_preferences`` 表作为这些键的云端权威，``meta_set`` 改走
+    服务端执行路径（同 ``persona_*`` / ``budget_*`` 的 ``proposal_ops`` 范式）。
 
-    当前角色 / 小组件配置 / 用户画像三个键同样是设备本地量，由 05c / 05d 按各自
-    的卡表态——它们不是服务端存储，扩的是同一个工具的 key 集合。**05c 的表态是
-    「不并进这个枚举」**：「当前角色」在 v2 注册表里有自己的 op
-    （``persona_switch``，见角色域的 ``_handle_persona_switch``），它同样是设备
-    执行、同样写一个本地键，但**换角色是一个独立动作**——塞进 ``meta_set`` 的
-    key 枚举会让模型在两个近义工具之间挑，而 §7.2 的经验上限正是在讲这件事。
-    小组件配置 / 用户画像（05d）继续按此判断：有专属语义的键给它自己的 op，
-    纯偏好三元组才走 ``meta_set``。
+    **当前角色 / 小组件配置 / 用户画像四个键的取舍**：
+
+    - ``default_book`` / ``default_account``（05b）：UI 的默认指针，跨设备一致
+      符合直觉。AI 改默认项走这两键。
+    - ``widget_config`` / ``user_profile``（05d 登记成扩展键候选）：现在它们
+      上云后 AI 才改得了——这是 05j 的真目标。
+    - **当前角色**仍走 ``persona_switch``（05c，单独 op，不并进本工具的 key
+      枚举——理由见 ``_handle_persona_switch`` 注释）。
+    - **设备自管量**（``sync_cursor`` / ``master_book_id`` / ``budget_carryover``
+      / ``personas_seeded`` 等）**永远不进工具**：它们的语义只属于当前设备。
     """
     key = str(params["key"])
     if key == "default_book":
@@ -2026,7 +2029,7 @@ async def _handle_meta_set(ctx: ToolContext, params: dict[str, Any]) -> ToolOutc
         payload: dict[str, Any] = {"key": key, "bookId": str(book_id)}
         label = params.get("bookName") or "当前账本"
         message = f"把默认账本设为「{label}」"
-    else:  # default_account
+    elif key == "default_account":
         account_name = params.get("accountName")
         if not account_name:
             return ToolOutcome.failure(ERR_INVALID_ARGUMENTS, argument="accountName")
@@ -2036,6 +2039,29 @@ async def _handle_meta_set(ctx: ToolContext, params: dict[str, Any]) -> ToolOutc
         payload = {"key": key, "accountId": account_id}
         label = str(account_name)
         message = f"把默认账户设为「{label}」"
+    elif key == "widget_config":
+        # 小组件配置：模型直接给出 JSON 字符串（与客户端 ``MetaWhitelist`` 校验
+        # 的 JSON object 形态一致）。这里只做**非空字符串**的轻校验——严格形态
+        # 校验留给执行体（``proposal_ops._execute_meta_set``），与 05b 的账本 /
+        # 账户 id 校验路径对齐（handler 不重复做 payload 的形状校验）。
+        raw = params.get("config")
+        if not isinstance(raw, str) or not raw:
+            return ToolOutcome.failure(ERR_INVALID_ARGUMENTS, argument="config")
+        payload = {"key": key, "value": raw}
+        message = "更新小组件配置"
+    elif key == "user_profile":
+        # 用户画像：模型给出的 JSON 字符串（称呼 / 职业 / 节奏 / 风格等，
+        # 字段由客户端 ``UserSettingsPage`` 定义；服务端同样只透传）。
+        raw = params.get("profile")
+        if not isinstance(raw, str) or not raw:
+            return ToolOutcome.failure(ERR_INVALID_ARGUMENTS, argument="profile")
+        payload = {"key": key, "value": raw}
+        message = "更新用户画像"
+    else:
+        return ToolOutcome.failure(
+            ERR_INVALID_ARGUMENTS,
+            argument=f"Unsupported key: {key}",
+        )
 
     return ToolOutcome.proposal({
         "action": "meta_set",
@@ -2569,8 +2595,8 @@ async def _handle_persona_switch(ctx: ToolContext, params: dict[str, Any]) -> To
     """切换**当前聊天角色**。
 
     **执行位置是设备**：当前角色指针是 ``sync_meta`` 的 ``active_persona_id`` 键
-    （本地展示元数据，桥 ``meta.set`` 不上行），服务端没有它的落点——与
-    ``meta_set`` 同一类，提案只挂起、由客户端在设备上执行（``DEVICE_EXECUTED_OPS``）。
+    （本地展示元数据，桥 ``meta.set`` 不上行），服务端没有它的落点——提案只
+    挂起、由客户端在设备上执行（``DEVICE_EXECUTED_OPS``）。
     """
     resolved = _resolve_persona(ctx, str(params["personaName"]))
     if isinstance(resolved, ToolOutcome):
@@ -4077,24 +4103,34 @@ TOOLS: tuple[Tool, ...] = (
         ),
         handler=_handle_persona_switch,
     ),
-    # ── meta 域（执行位置＝设备）─────────────────────────────────────────
+    # ── meta 域（T-M7-05j：执行位置从设备迁回服务端）─────────────────────
     Tool(
         name="meta_set",
         domain=DOMAIN_META,
         kind="write",
         proposal_action="meta_set",
         description=(
-            "设置本地偏好：默认账本（记账时默认用哪个账本）与默认账户（新记录默认"
-            "挂在哪个账户上）。用户说「默认用旅行账本」「以后都记在招行卡上」时用它。"
-            "**这只改默认值，不动任何已有记录。** 要新增 / 修改账本或账户本身，请用"
-            "book_* / account_* 那几个工具。"
+            "设置用户级偏好：默认账本（记账时默认用哪个账本）/ 默认账户（新记录默认"
+            "挂在哪个账户上）/ 小组件配置（桌面小组件的显示选项 JSON）/ 用户画像"
+            "（AI 注入上下文的个人信息 JSON）。用户说「默认用旅行账本」「以后都记"
+            "在招行卡上」「把我的风格设成保守型」时用它。**这只改默认值 / 配置，"
+            "不动任何已有记录。** 要新增 / 修改账本或账户本身，请用 book_* / "
+            "account_* 那几个工具。**当前角色**请用 persona_switch（单独 op，不"
+            "与本工具混用，理由见 §7.2 经验上限）。"
         ),
         parameters=_object_schema(
             {
                 "key": {
                     "type": "string",
-                    "enum": ["default_book", "default_account"],
-                    "description": "default_book=默认账本，default_account=默认账户。",
+                    "enum": [
+                        "default_book", "default_account",
+                        "widget_config", "user_profile",
+                    ],
+                    "description": (
+                        "default_book=默认账本；default_account=默认账户；"
+                        "widget_config=小组件配置（同时传 config 字段，JSON 字符串）；"
+                        "user_profile=用户画像（同时传 profile 字段，JSON 字符串）。"
+                    ),
                 },
                 "bookName": {
                     "type": "string",
@@ -4103,6 +4139,14 @@ TOOLS: tuple[Tool, ...] = (
                 "accountName": {
                     "type": "string",
                     "description": "key=default_account 时填：选哪个账户，必须是现有账户的完整名称。",
+                },
+                "config": {
+                    "type": "string",
+                    "description": "key=widget_config 时填：小组件配置 JSON 字符串。",
+                },
+                "profile": {
+                    "type": "string",
+                    "description": "key=user_profile 时填：用户画像 JSON 字符串。",
                 },
             },
             required=["key"],

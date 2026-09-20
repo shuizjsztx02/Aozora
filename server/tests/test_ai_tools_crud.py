@@ -317,7 +317,7 @@ class TestBookWriteTools:
         assert outcome.data["code"] == T.ERR_UNKNOWN_BOOK
 
 
-# ── meta 域（执行位置＝设备）──────────────────────────────────────────────
+# ── meta 域（T-M7-05j：执行位置从设备迁回服务端）──────────────────────────
 
 
 class TestMetaSetTool:
@@ -350,7 +350,7 @@ class TestMetaSetTool:
         })
         assert unknown.data["code"] == T.ERR_UNKNOWN_ACCOUNT
 
-    def test_meta_set_is_declared_as_a_device_executed_op(self):
-        """服务端没有 ``sync_meta`` 的存储位置（桥 ``meta.set`` 明写「不上行」），
-        所以它只能挂起、由客户端在设备上执行（05f）。"""
-        assert "meta_set" in T.DEVICE_EXECUTED_OPS
+    def test_meta_set_is_no_longer_a_device_op(self):
+        """T-M7-05j：``meta_set`` 的执行位置已迁回服务端（偏好项上云，服务端有
+        ``user_preferences`` 表作为存储位置）。它不再在 ``DEVICE_EXECUTED_OPS`` 里。"""
+        assert "meta_set" not in T.DEVICE_EXECUTED_OPS

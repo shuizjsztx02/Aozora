@@ -59,6 +59,8 @@ from src.models.savings import SavingsGoal
 from src.models.scheduled import ScheduledRule
 from src.models.sync import SyncOperation
 from src.models.user import User
+# T-M7-05j: 偏好项上云——``meta_set`` 的执行体写这张表。
+from src.models.user_preference import UserPreference
 from src.modules.accounts.schemas import AccountCreate, AccountUpdate
 from src.modules.accounts.service import AccountService
 from src.modules.auth.schemas import UpdateProfileRequest
@@ -920,6 +922,102 @@ async def _execute_persona_archive(
 
 
 # ---------------------------------------------------------------------------
+# T-M7-05j: meta_set 服务端执行（偏好项上云）
+# ---------------------------------------------------------------------------
+
+
+#: meta_set payload 的 ``key`` → 值字段名。
+#: 默认账本 / 默认账户从 05b 起就带 ``bookId`` / ``accountId``（模型按名字 resolve
+#: 出 id 后填进 payload）；小组件配置 / 用户画像由模型直传 JSON 字符串（字段名
+#: ``value``——handler 把模型给的 ``config`` / ``profile`` 原样放进 ``value``）。
+_META_VALUE_FIELD: dict[str, str] = {
+    "default_book": "bookId",
+    "default_account": "accountId",
+    "widget_config": "value",
+    "user_profile": "value",
+}
+
+#: 工具名 ``key`` → 真正落到 ``user_preferences`` 表的 ``key``。
+#: 工具的 ``key`` 是动作名（``default_book`` / ``default_account``）；sync_meta
+#: 里的本地键名带 ``_id`` 后缀（``default_book_id`` / ``default_account_id``）
+#: ——客户端 pull 到 sync change 后按这个键名回灌，必须与 ``MetaWhitelist`` 对齐。
+_META_STORAGE_KEY: dict[str, str] = {
+    "default_book": "default_book_id",
+    "default_account": "default_account_id",
+    "widget_config": "widget_config",
+    "user_profile": "user_profile",
+}
+
+
+async def _execute_meta_set(
+    db: AsyncSession, *, user_id: uuid.UUID, book_id: uuid.UUID, payload: dict[str, Any],
+) -> OpReceipt:
+    """写一个偏好键进 ``user_preferences`` 表（云端权威）并登一条 sync change。
+
+    05b 时期 ``meta_set`` 的执行位置在设备——服务端没有这些键的存储位置，提案
+    只挂起、由客户端在设备上写 ``sync_meta``。05j 把偏好键送上云后，服务端有
+    ``user_preferences`` 表作权威：本执行体按 ``(user_id, key)`` upsert 一行，
+    同事务登一条 sync change（口径 2：服务端权威直写必须自己登记）——其它设备
+    pull 到这条 change 后把值回灌进本地 ``sync_meta`` 的同名键。
+
+    **幂等**：命中 ``(user_id, key)`` 已存在时不覆盖 ``id``（行的 UUID 身份不
+    变），只更新 ``value`` 与 ``version``——与 05c 的 ``budget_set`` 同模式（UPSERT
+    语义）。
+    """
+    key = payload.get("key")
+    if not isinstance(key, str) or key not in _META_VALUE_FIELD:
+        raise AppException(
+            400, "ai_invalid_payload",
+            f"Invalid preference key: {key}",
+        )
+    value_field = _META_VALUE_FIELD[key]
+    new_value = payload.get(value_field)
+    if not isinstance(new_value, str) or not new_value:
+        raise AppException(
+            400, "ai_invalid_payload", f"Missing or invalid {value_field}",
+        )
+    # 长度上限与 sync.service 的 push 路径对齐（16KB）——handler 已做轻校验，
+    # 这里是防客户端伪造 payload 的第二道门。
+    if len(new_value) > 16_000:
+        raise AppException(400, "ai_invalid_payload", "value too long")
+
+    # 落到 ``user_preferences`` 表的键名：工具名 ``default_book`` → sync_meta
+    # 本地键名 ``default_book_id``（客户端 pull 后按此回灌，与 ``MetaWhitelist`` 对齐）。
+    storage_key = _META_STORAGE_KEY[key]
+
+    # 按 (user_id, storage_key) upsert：命中已存在则更新 value + version++；未命中则新建。
+    existing_result = await db.execute(
+        select(UserPreference).where(
+            UserPreference.user_id == user_id,
+            UserPreference.key == storage_key,
+        )
+    )
+    existing = existing_result.scalar_one_or_none()
+    if existing is not None:
+        existing.value = new_value
+        existing.version += 1
+        await db.flush()
+        pref_id = existing.id
+        pref_version = existing.version
+        operation = "update"
+    else:
+        pref = UserPreference(
+            user_id=user_id, key=storage_key, value=new_value,
+        )
+        db.add(pref)
+        await db.flush()
+        pref_id = pref.id
+        pref_version = pref.version
+        operation = "insert"
+
+    await _register_change(
+        db, user_id=user_id, entity_type="user_preference",
+        entity_id=pref_id, operation=operation, version=pref_version,
+    )
+    return OpReceipt(entity_type="user_preference", entity_ids=[pref_id])
+
+
+# ---------------------------------------------------------------------------
 # 05d：其余服务端域（导出 / 反馈 / 账号）
 # ---------------------------------------------------------------------------
 #
@@ -1050,14 +1148,17 @@ EXECUTORS: dict[str, Callable[..., Awaitable[OpReceipt]]] = {
     "persona_create": _execute_persona_create,
     "persona_update": _execute_persona_update,
     "persona_archive": _execute_persona_archive,
-    # ``persona_switch`` **不在这里**：它的执行位置在设备（当前角色指针是
-    # ``sync_meta`` 的本地键），与 ``meta_set`` 同类，见 ``DEVICE_EXECUTED_OPS``。
+    # T-M7-05j：``meta_set`` 从 ``DEVICE_EXECUTED_OPS`` 迁入——偏好项上云后，
+    # 服务端有这些键的存储位置（``user_preferences`` 表）。
+    "meta_set": _execute_meta_set,
+    # ``persona_switch`` 不在这里：它的执行位置在设备（当前角色指针是
+    # ``sync_meta`` 的本地键），见 ``DEVICE_EXECUTED_OPS``。
     # ── T-M7-05d：其余服务端域 ─────────────────────────────────────────
     "export_create": _execute_export_create,
     "feedback_submit": _execute_feedback_submit,
     "auth_update_profile": _execute_auth_update_profile,
     "account_deletion_request": _execute_account_deletion_request,
-    # ``consent_record`` / ``sync_trigger`` 的执行位置在设备（同 ``meta_set``），
+    # ``consent_record`` / ``sync_trigger`` 的执行位置在设备（见 ``DEVICE_EXECUTED_OPS``），
     # ``account_delete`` 刻意不接线（见上）。
 }
 

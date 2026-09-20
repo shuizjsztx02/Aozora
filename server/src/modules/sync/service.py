@@ -28,6 +28,7 @@ from src.models.persona import ChatPersona
 from src.models.savings import SavingsGoal
 from src.models.scheduled import ScheduledRule
 from src.models.sync import SyncOperation
+from src.models.user_preference import SYNCABLE_KEYS, UserPreference
 
 from .repository import ARCHIVED_TYPES, SyncRepository
 from .schemas import (
@@ -50,6 +51,10 @@ _ARCHIVED_TYPES = ARCHIVED_TYPES
 # 幂等返回现有版本（云端权威优先），而不是 IntegrityError → conflict 垃圾队列。
 _MIGRATION_IDEMPOTENT_TYPES = frozenset({
     "savings_goal", "scheduled_rule", "chat_persona",
+    # T-M7-05j: 偏好项的上行迁移同理——旧版本客户端把 sync_meta 里的偏好键
+    # 仅存本地，升级后多设备推同一批 (user_id, key) 不能互踩。命中已存在行时
+    # 不覆盖（云端权威优先），记一条 update 变更让发起方按云端值合并回本地。
+    "user_preference",
 })
 
 # 定时规则的可变枚举（应用层校验，避免 DB CheckConstraint 报 IntegrityError
@@ -434,6 +439,33 @@ class SyncService:
             await self.db.flush()
             return persona.id, persona.version
 
+        # ── T-M7-05j: 偏好项上云 ─────────────────────────────────────────
+        # 与三实体不同：偏好没有 ``owner_id`` 列（用 user_id 归属），也没有
+        # archived_at / deleted_at——清除＝删行。push 的 ``entity_id`` 由客户端
+        # 取上行行的 ``id``（首次 insert 时客户端自生成 UUID 当 entity_id，与服务端
+        # 分配一致）。
+        if entity_type == "user_preference":
+            key = payload.get("key")
+            if not isinstance(key, str) or key not in SYNCABLE_KEYS:
+                raise AppException(
+                    422, "validation_error",
+                    f"Invalid preference key: {key}",
+                )
+            value = payload.get("value")
+            if not isinstance(value, str):
+                raise AppException(
+                    422, "validation_error", "value must be a string",
+                )
+            # 校验值长度（与客户端 MetaWhitelist 的 4KB/8KB 上限对齐留余量）。
+            if len(value) > 16_000:
+                raise AppException(
+                    422, "validation_error", "value too long",
+                )
+            # 命中已存在（幂等上行迁移）由调用方在 _MIGRATION_IDEMPOTENT_TYPES
+            # 分支里处理——走到这里是真 insert。
+            pref = await self._upsert_preference(user_id, entity_id, key, value)
+            return pref.id, pref.version
+
         raise AppException(422, "validation_error", f"Unknown entity_type: {entity_type}")
 
     # -- Update -----------------------------------------------------------
@@ -628,6 +660,21 @@ class SyncService:
                 _validate_note(payload["persona"], field="persona")
                 entity.persona = payload["persona"]
 
+        # ── T-M7-05j: 偏好项上云 ─────────────────────────────────────────
+        # 偏好的 update 只允许改 ``value``（``key`` 是行身份的一部分）。
+        elif entity_type == "user_preference":
+            if "value" in payload:
+                new_value = payload["value"]
+                if not isinstance(new_value, str):
+                    raise AppException(
+                        422, "validation_error", "value must be a string",
+                    )
+                if len(new_value) > 16_000:
+                    raise AppException(
+                        422, "validation_error", "value too long",
+                    )
+                entity.value = new_value
+
         else:
             raise AppException(422, "validation_error", f"Unknown entity_type: {entity_type}")
 
@@ -666,13 +713,21 @@ class SyncService:
         # conflict so the client re-syncs rather than re-mutates.
         already_deleted = (
             (entity_type in _ARCHIVED_TYPES and entity.archived_at is not None)
-            or (entity_type not in _ARCHIVED_TYPES and entity.deleted_at is not None)
+            or (
+                entity_type not in _ARCHIVED_TYPES
+                and entity_type != "user_preference"  # 偏好无 deleted_at
+                and entity.deleted_at is not None
+            )
         )
         if already_deleted:
             raise _Conflict(entity.version)
 
         now = datetime.now(UTC)
-        if entity_type in _ARCHIVED_TYPES:
+        if entity_type == "user_preference":
+            # 偏好项无软删——清除即物理删。幂等：不存在时上面 get_entity 已返
+            # 回 404（不会落到此分支），多设备同键 delete 由 version conflict 挡住。
+            await self.db.delete(entity)
+        elif entity_type in _ARCHIVED_TYPES:
             entity.archived_at = now
         else:
             # book, transaction, budget use deleted_at
@@ -711,6 +766,34 @@ class SyncService:
         acc = await self.repo.get_account(acc_id, user_id)
         if acc is None:
             raise AppException(404, "not_found", "Account not found")
+
+    # T-M7-05j: 偏好项 upsert（insert 与幂等上行迁移共用）。
+    # 命中 (user_id, key) 已存在时**不覆盖**（云端权威优先）——与三实体的幂等语义
+    # 一致。调用方（insert 分支）在命中已存在时已经走 _MIGRATION_IDEMPOTENT_TYPES
+    # 路径返回 "applied"，本 helper 只在真 insert 时被调用。
+    async def _upsert_preference(
+        self,
+        user_id: uuid.UUID,
+        entity_id: uuid.UUID,
+        key: str,
+        value: str,
+    ) -> UserPreference:
+        # 先查是否已存在（按 user_id + key）——命中则直接返回现有行（不覆盖）。
+        existing_result = await self.db.execute(
+            select(UserPreference).where(
+                UserPreference.user_id == user_id,
+                UserPreference.key == key,
+            )
+        )
+        existing = existing_result.scalar_one_or_none()
+        if existing is not None:
+            return existing
+        pref = UserPreference(
+            id=entity_id, user_id=user_id, key=key, value=value,
+        )
+        self.db.add(pref)
+        await self.db.flush()
+        return pref
 
     # ------------------------------------------------------------------
     # Pull
@@ -781,6 +864,8 @@ class SyncService:
         savings_goals = [_serialize_entity(g) for g in entities["savings_goals"]]
         scheduled_rules = [_serialize_entity(r) for r in entities["scheduled_rules"]]
         chat_personas = [_serialize_entity(p) for p in entities["chat_personas"]]
+        # T-M7-05j: 偏好项上云。
+        user_preferences = [_serialize_entity(p) for p in entities["user_preferences"]]
 
         # legacy checksum 的输入保持五个列表不变 —— 旧客户端的重算必须继续命中。
         checksum = compute_bootstrap_checksum(
@@ -800,6 +885,7 @@ class SyncService:
             savings_goals=savings_goals,
             scheduled_rules=scheduled_rules,
             chat_personas=chat_personas,
+            user_preferences=user_preferences,
             cursor=cursor,
         )
 
@@ -812,6 +898,7 @@ class SyncService:
             savings_goals=savings_goals,
             scheduled_rules=scheduled_rules,
             chat_personas=chat_personas,
+            user_preferences=user_preferences,
             cursor=cursor,
             checksum=checksum,
             checksum_v2=checksum_v2,
@@ -1081,6 +1168,16 @@ def _serialize_entity(entity: object) -> dict:
             "updated_at": entity.updated_at.isoformat(),
             "archived_at": entity.archived_at.isoformat() if entity.archived_at else None,
         }
+    # ── T-M7-05j: 偏好项上云 ──────────────────────────────────────────────
+    # 与三实体不同：无 created_at/updated_at（VersionedMixin 不带 audit 时间戳）、
+    # 无 archived_at——简洁的 (key, value, version) 三元组。
+    if isinstance(entity, UserPreference):
+        return {
+            "id": str(entity.id),
+            "key": entity.key,
+            "value": entity.value,
+            "version": entity.version,
+        }
     raise TypeError(f"Cannot serialize {type(entity)}")
 
 
@@ -1138,13 +1235,20 @@ def compute_bootstrap_checksum_v2(
     savings_goals: list[dict],
     scheduled_rules: list[dict],
     chat_personas: list[dict],
+    user_preferences: list[dict] | None = None,
     cursor: int,
 ) -> str:
-    """T-M7-01 checksum — all eight lists + cursor, for current clients."""
+    """T-M7-01 checksum — all eight lists + cursor, for current clients.
+
+    T-M7-05j: 增加 ``user_preferences``（默认 None，向后兼容旧调用方）。
+    旧调用方（包括测试 fixture）继续拿到同一份 hash；新调用方传偏好列表后，
+    hash 覆盖九类列表。
+    """
     return _compute_checksum(
         [
             books, categories, accounts, transactions, budgets,
             savings_goals, scheduled_rules, chat_personas,
+            user_preferences or [],
         ],
         cursor,
     )

@@ -491,14 +491,15 @@ class TestV2PayloadAuthorization:
             assert resp.json()["code"] == "ai_proposal_rejected", op
 
     def test_a_device_op_is_not_executable_on_the_server(self, v2_env):
-        """``meta_set`` 写的是设备本地的 ``sync_meta``（桥 ``meta.set`` 明写「不上行」）
-        ——服务端没有落点，客户端应当在设备上执行它，而不是打这个端点。"""
+        """``sync_trigger`` 的执行位置在设备（T-M7-05j 后 ``meta_set`` 已迁回
+        服务端执行，不再是设备 op）——服务端没有落点，客户端应当在设备上执行
+        它，而不是打这个端点。"""
         c, _ = v2_env
         user = _guest(v2_env)
         book_id = _mk_book(c, user)
 
         resp = _execute(v2_env, user, book_id, _v2(
-            "meta_set", {"key": "default_book", "bookId": str(book_id)},
+            "sync_trigger", {},
         ))
         assert resp.status_code == 400
         assert resp.json()["code"] == "ai_device_op_not_executable"
@@ -529,14 +530,17 @@ class TestExecutorRegistry:
         assert exc.value.code == "ai_unsupported_action"
 
     async def test_a_device_op_is_refused_with_its_own_code(self):
-        """设备类 op 的拒绝理由与「不支持」不同：它在设备上执行，不是没人实现。"""
+        """设备类 op 的拒绝理由与「不支持」不同：它在设备上执行，不是没人实现。
+
+        T-M7-05j：``meta_set`` 已迁回服务端执行，不再是设备 op；本用例改用
+        ``sync_trigger`` 作设备 op 的探针。"""
         from src.common.errors import AppException
         from src.modules.ai.proposal_ops import execute_op
 
         with pytest.raises(AppException) as exc:
             await execute_op(
                 None, user_id=uuid.uuid4(), book_id=uuid.uuid4(),
-                op="meta_set", payload={"key": "default_book"},
+                op="sync_trigger", payload={},
             )
         assert exc.value.code == "ai_device_op_not_executable"
 
@@ -567,3 +571,119 @@ class TestV2Idempotency:
         assert first.status_code == second.status_code == 200
         assert first.json()["transaction_ids"] == second.json()["transaction_ids"]
         assert len(_rows(factory, Book, name="旅行")) == 1, "重复确认不得重复建账本"
+
+
+# ---------------------------------------------------------------------------
+# T-M7-05j：meta_set 服务端执行（偏好项上云）
+# ---------------------------------------------------------------------------
+
+
+class TestV2MetaSet:
+    """meta_set 的执行体现在是服务端——``proposal_ops._execute_meta_set``。"""
+
+    def test_meta_set_upserts_a_user_preference_and_registers_sync_change(
+        self, v2_env,
+    ):
+        """meta_set 写进 user_preferences 表、登一条 sync change。"""
+        from src.models.sync import SyncChange
+        from src.models.user_preference import UserPreference
+
+        c, factory = v2_env
+        user = _guest(v2_env)
+        book_id = _mk_book(c, user)
+
+        before = len(_rows(factory, SyncChange))
+        resp = _execute(v2_env, user, book_id, _v2(
+            "meta_set", {"key": "default_book", "bookId": str(book_id)},
+        ))
+        assert resp.status_code == 200, resp.text
+
+        prefs = _rows(factory, UserPreference, user_id=uuid.UUID(user["id"]))
+        assert len(prefs) == 1
+        # 工具 key ``default_book`` 落到表里变成 sync_meta 的本地键名
+        # ``default_book_id``——与客户端 ``MetaWhitelist`` 对齐。
+        assert prefs[0].key == "default_book_id"
+        assert prefs[0].value == str(book_id)
+
+        changes = _rows(factory, SyncChange)
+        assert len(changes) == before + 1
+        assert changes[-1].entity_type == "user_preference"
+        assert str(changes[-1].operation) in ("insert", "SyncOperation.INSERT")
+
+    def test_meta_set_updates_existing_row_bumps_version(self, v2_env):
+        """同键第二次 meta_set → 更新 value、version++。"""
+        from src.models.user_preference import UserPreference
+
+        c, factory = v2_env
+        user = _guest(v2_env)
+        book_a = _mk_book(c, user, name="A")
+        book_b = _mk_book(c, user, name="B")
+
+        _execute(v2_env, user, book_a, _v2(
+            "meta_set", {"key": "default_book", "bookId": str(book_a)},
+        ))
+        _execute(v2_env, user, book_b, _v2(
+            "meta_set", {"key": "default_book", "bookId": str(book_b)},
+        ))
+
+        prefs = _rows(
+            factory, UserPreference,
+            user_id=uuid.UUID(user["id"]), key="default_book_id",
+        )
+        assert len(prefs) == 1
+        assert prefs[0].value == str(book_b)
+        assert prefs[0].version == 2
+
+    def test_meta_set_widget_config_accepts_a_json_string(self, v2_env):
+        """widget_config 接受 JSON 字符串（value 字段）。"""
+        from src.models.user_preference import UserPreference
+
+        c, factory = v2_env
+        user = _guest(v2_env)
+        book_id = _mk_book(c, user)
+
+        resp = _execute(v2_env, user, book_id, _v2(
+            "meta_set", {
+                "key": "widget_config",
+                "value": '{"showBalance": true, "theme": "dark"}',
+            },
+        ))
+        assert resp.status_code == 200, resp.text
+        prefs = _rows(factory, UserPreference, user_id=uuid.UUID(user["id"]))
+        assert len(prefs) == 1
+        assert prefs[0].key == "widget_config"
+        assert prefs[0].value == '{"showBalance": true, "theme": "dark"}'
+
+    def test_meta_set_rejects_unknown_key(self, v2_env):
+        """未在工具 key 枚举里的 key → 400。"""
+        c, _ = v2_env
+        user = _guest(v2_env)
+        book_id = _mk_book(c, user)
+
+        resp = _execute(v2_env, user, book_id, _v2(
+            "meta_set", {"key": "sync_cursor", "value": "42"},
+        ))
+        assert resp.status_code == 400
+        assert resp.json()["code"] == "ai_invalid_payload"
+
+    def test_meta_set_authorizes_foreign_book_id(self, v2_env):
+        """别人账本的 id 打到本端点 → 403（payload 授权把 bookId 过归属校验）。"""
+        c, _ = v2_env
+        alice = _guest(v2_env)
+        alice_book = _mk_book(c, alice)
+
+        bob_resp = c.post("/auth/guest", json={
+            "device_id": "v2-device-bob", "nickname": "bob",
+        }).json()
+        bob = {"id": bob_resp["user_id"], "token": bob_resp["tokens"]["access_token"]}
+        bob_book = _mk_book(c, bob, name="Bob 的账本")
+
+        resp = c.post(
+            "/ai/execute",
+            json={"proposal": _v2(
+                "meta_set", {"key": "default_book", "bookId": str(alice_book)},
+            ), "book_id": str(bob_book), "confirmation_token": "confirm"},
+            headers=_auth(bob),
+        )
+        assert resp.status_code == 403
+        assert resp.json()["code"] == "ai_proposal_rejected"

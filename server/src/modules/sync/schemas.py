@@ -18,7 +18,8 @@ class MutationItem(BaseModel):
     mutation_id: uuid.UUID
     entity_type: str = Field(
         pattern=r"^(book|category|account|transaction|budget"
-                r"|savings_goal|scheduled_rule|chat_persona)$",
+                r"|savings_goal|scheduled_rule|chat_persona"
+                r"|user_preference)$",
     )
     operation: str = Field(
         pattern=r"^(insert|update|delete)$",
@@ -124,6 +125,10 @@ class BootstrapResponse(BaseModel):
     savings_goals: list[dict[str, Any]] = []
     scheduled_rules: list[dict[str, Any]] = []
     chat_personas: list[dict[str, Any]] = []
+    # T-M7-05j: 偏好项上云。每行一个键（``{id, key, value, version}``），
+    # 客户端 pull 后把每个键回灌进本地 ``sync_meta`` 的同名键。旧客户端忽略
+    # 未知键，与三实体上云的 ``savings_goals`` 等同处理。
+    user_preferences: list[dict[str, Any]] = []
     cursor: int
     checksum: str = ""
     checksum_v2: str = ""

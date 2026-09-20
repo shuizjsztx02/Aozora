@@ -34,6 +34,8 @@ class TestMigrationConsistency:
             "0016_cloud_entities", "0017_conversation_events",
             "0018_conversation_event_turns",
             "0019_conversation_index",
+            "0020_conversation_event_log",
+            "0021_user_preferences",
         ):
             try:
                 m = importlib.import_module(f"src.migrations.versions.{rev}")
@@ -76,6 +78,8 @@ class TestMigrationConsistency:
             "0016_cloud_entities", "0017_conversation_events",
             "0018_conversation_event_turns",
             "0019_conversation_index",
+            "0020_conversation_event_log",
+            "0021_user_preferences",
         ):
             try:
                 m = importlib.import_module(f"src.migrations.versions.{rev}")
@@ -139,7 +143,7 @@ class TestMigrationConsistency:
             )
 
     def test_23_tables_registered(self):
-        """The schema must define exactly 23 tables.
+        """The schema must define exactly 24 tables.
 
         T-M4-02b added ``proposal_idempotency`` (migration 0008) for AI
         execute dedup, bringing the total from 13 to 14.
@@ -153,8 +157,11 @@ class TestMigrationConsistency:
         cloud-authoritative.
         T-M7-02f added ``ai_conversation_events`` (migration 0017), 22 → 23 —
         the minimal conversation event log backing multi-turn context.
+        T-M7-05j added ``user_preferences`` (migration 0021), 23 → 24 — the
+        user-level preference keys (default_book / default_account / widget /
+        profile) that migrate from device-local ``sync_meta`` to cloud.
         """
-        assert len(Base.metadata.tables) == 23
+        assert len(Base.metadata.tables) == 24
 
     def test_transaction_note_column_bounded(self):
         """N-13: transactions.note must be bounded at the DB layer too.

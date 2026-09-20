@@ -1731,21 +1731,21 @@ class TestContractLane:
         assert [str(c.operation) for c in changes] == ["insert"]
 
     async def test_a_device_op_hangs_instead_of_executing(self, stream_env: StreamEnv):
-        """``meta_set`` 的执行位置在设备：服务端**只挂起**，不参与审批策略的判定
+        """``sync_trigger`` 的执行位置在设备（T-M7-05j 后 ``meta_set`` 已迁回
+        服务端执行，不再是设备 op）：服务端**只挂起**，不参与审批策略的判定
         （没有执行通道时它也只是挂起——这里连执行通道都在，仍然一次不执行）。"""
         from src.models.sync import SyncChange
 
         before = len(await _rows(stream_env, SyncChange))
         stream_env.provider.reset([
-            _tool_turn(_call("meta_set", {"key": "default_book"}, id="w1")),
-            _text("请在手机上确认。"),
+            _tool_turn(_call("sync_trigger", {}, id="w1")),
+            _text("已在手机上确认。"),
         ])
-        _, body = await stream_env.turn("默认用这个账本", contract_version=2)
+        _, body = await stream_env.turn("同步一下", contract_version=2)
 
         proposal = payload_of(body, "confirm")["proposal"]
         assert proposal["contractVersion"] == 2
-        assert proposal["action"] == "meta_set"
-        assert proposal["payload"]["bookId"] == stream_env.book_id
+        assert proposal["action"] == "sync_trigger"
 
         done = payload_of(body, "done")
         assert [p["proposalId"] for p in done["proposals"]] == [proposal["proposalId"]]

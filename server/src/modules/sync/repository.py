@@ -13,6 +13,7 @@ from src.models.mutation import MutationIdempotency
 from src.models.persona import ChatPersona
 from src.models.savings import SavingsGoal
 from src.models.scheduled import ScheduledRule
+from src.models.user_preference import UserPreference
 from src.models.sync import SyncChange, SyncOperation
 
 # T-M7-01: 实体类型 → 软删语义。归档型（archived_at）与删除型（deleted_at）在
@@ -206,6 +207,12 @@ class SyncRepository:
         )
         chat_personas = list(personas_result.scalars().all())
 
+        # T-M7-05j: 偏好项上云。无 archived_at / deleted_at——全量返回即可。
+        prefs_result = await self.db.execute(
+            select(UserPreference).where(UserPreference.user_id == user_id)
+        )
+        user_preferences = list(prefs_result.scalars().all())
+
         return {
             "books": books,
             "categories": categories,
@@ -215,6 +222,7 @@ class SyncRepository:
             "savings_goals": savings_goals,
             "scheduled_rules": scheduled_rules,
             "chat_personas": chat_personas,
+            "user_preferences": user_preferences,
         }
 
     # -- Entity reads (for ownership verification) -------------------------
@@ -301,6 +309,20 @@ class SyncRepository:
         result = await self.db.execute(select(ChatPersona).where(*conditions))
         return result.scalar_one_or_none()
 
+    # T-M7-05j: 偏好项无软删（清除＝物理删）——``include_deleted`` 形参与其它
+    # get_* 方法对齐（调用方按统一接口调），本表忽略即可。
+    async def get_user_preference(
+        self, pref_id: uuid.UUID, user_id: uuid.UUID, include_deleted: bool = False,
+    ) -> UserPreference | None:
+        del include_deleted  # 偏好无软删；参数仅为接口对齐
+        result = await self.db.execute(
+            select(UserPreference).where(
+                UserPreference.id == pref_id,
+                UserPreference.user_id == user_id,
+            )
+        )
+        return result.scalar_one_or_none()
+
     # -- Internal -----------------------------------------------------------
 
     async def _read_entity(
@@ -327,6 +349,9 @@ class SyncRepository:
             return await self.get_scheduled_rule(entity_id, user_id, include_deleted)
         if entity_type == "chat_persona":
             return await self.get_chat_persona(entity_id, user_id, include_deleted)
+        # T-M7-05j: 偏好项无软删。
+        if entity_type == "user_preference":
+            return await self.get_user_preference(entity_id, user_id, include_deleted)
         return None
 
     # -- F-M3-3: Batch entity loads for pull (N+1 elimination) ---------------
@@ -406,6 +431,15 @@ class SyncRepository:
         elif entity_type == "chat_persona":
             stmt = select(ChatPersona).where(ChatPersona.id.in_(entity_ids))
             stmt = _apply_conditions(stmt, ChatPersona)
+            rows = await self.db.execute(stmt)
+            entities = {e.id: e for e in rows.scalars().all()}
+        # T-M7-05j: 偏好项无 archived_at / deleted_at——``base_conditions`` 里
+        # 只有 owner 校验（此处 user_id 通过外键 = user_id 校验归属）。
+        elif entity_type == "user_preference":
+            stmt = select(UserPreference).where(
+                UserPreference.id.in_(entity_ids),
+                UserPreference.user_id == user_id,
+            )
             rows = await self.db.execute(stmt)
             entities = {e.id: e for e in rows.scalars().all()}
         else:

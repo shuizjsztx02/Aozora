@@ -86,8 +86,9 @@ _PAYLOAD_ID_FIELDS: dict[str, tuple[tuple[str, str], ...]] = {
     "book_create": (),
     "book_update": (("bookId", _BOOK),),
     "book_delete": (("bookId", _BOOK),),
-    # meta_set：默认项指向的对象同样要属于本人（执行体在设备上，但提案的
-    # payload 是服务端组装/可被客户端伪造的，授权口径不因执行位置放松）。
+    # meta_set：默认项指向的对象同样要属于本人（执行体现在是服务端——T-M7-05j
+    # 偏好项上云——但提案 payload 是服务端组装/可被客户端伪造的，授权口径不因
+    # 执行位置放松；widget_config / user_profile 两个新 key 没有 id 要授权）。
     "meta_set": (("bookId", _BOOK), ("accountId", _ACCOUNT)),
     # ── T-M7-05c：预算存钱 / 定时 / 角色 ────────────────────────────────
     # 预算的账本来自提案信封（``book_id``，端点已校验归属），payload 里只有
