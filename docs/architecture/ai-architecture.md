@@ -161,6 +161,16 @@ v1 是**固定 action 集**（`add_tx` / `add_tx_batch` / `query` / `report` / `
 （含 TOCTOU 重校验），02e/03e 的路径一行未改——v2 换的是**信封与 op 命名空间**，
 不是门。
 
+**05c 续接（2026-09-20）：** 预算存钱 / 定时 / 角色三域的 12 个写 op 按**同一范式**
+接了进来（工具 → `authorization` 的授权规则 → `proposal_ops` 的执行体，**三处同时
+表态**；`test_every_server_executed_op_is_also_authorized` 拦住半截接线）。授权表新增
+三类目标：`savings_goal` / `chat_persona`（用户级，按 `owner_id`）与
+`scheduled_rule`（**账本级**，额外要求 `book_id` 对得上——与 `transaction` 同口径）。
+`persona_switch` 是**设备执行**的 op（当前角色指针是设备本地的 `sync_meta` 键），
+与 `meta_set` 同类：工具与授权在服务端，执行在客户端，`/ai/execute` 报
+`ai_device_op_not_executable`。**三实体的离线语义**（写入即云端权威 + 同事务登
+sync change，设备上线后 pull 到）写在 `proposal_ops.py` 的文件头。
+
 **回执字段的一处语义扩张（诚实记录）：** `AIExecuteProposalResponse.transaction_ids`
 在 v2 车道上装的是「本次 op 影响的**实体** id」（改 / 归档是同一 id 的新版本，
 新建是新 id），字段名沿用是为了不动既有回执契约。等 R-PROD-31（客户端渲染 v2

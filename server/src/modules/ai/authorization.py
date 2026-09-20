@@ -22,7 +22,13 @@ v1 的 ``ProposalValidationContext``（categoryIds / accountIds）对拍的是**
 ``account``                               属于本用户、未归档
 ``book``                                  属于本用户、未软删
 ``transaction``                           未软删、属于本用户，**且就在提案的账本里**
+``savings_goal``                          属于本用户、未归档（**用户级**，不分账本）
+``scheduled_rule``                        属于本用户、未归档，**且就在提案的账本里**
+``chat_persona``                          属于本用户、未归档（**用户级**，不分账本）
 ========================================  ==========================================
+
+后三行是 05c 加的（T-M7-01 上云的三实体）。归属范围与 ``sync`` 的实现一致：
+存钱目标与角色按 ``owner_id``（用户级），定时规则按 ``book_id``（账本级）。
 
 「本账本」这一条对分类是有意的收窄：账本 A 的分类不该被账本 B 的提案改到
 （``load_tool_context`` 的名字索引同样只装本账本分类 + 全局分类）。交易单列一条
@@ -44,12 +50,18 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from src.models.ledger import Account, Book, Category, Transaction
+from src.models.persona import ChatPersona
+from src.models.savings import SavingsGoal
+from src.models.scheduled import ScheduledRule
 
 #: id 目标的类型标签。
 _CATEGORY = "category"
 _ACCOUNT = "account"
 _BOOK = "book"
 _TRANSACTION = "transaction"
+_SAVINGS = "savings_goal"
+_SCHEDULED = "scheduled_rule"
+_PERSONA = "chat_persona"
 
 #: op → 该 op 的 payload 里需要授权的字段：``(取值路径, 目标类型)``。
 #: 路径只有两种写法：``字段名`` 与 ``数组字段[].子字段``。
@@ -77,6 +89,28 @@ _PAYLOAD_ID_FIELDS: dict[str, tuple[tuple[str, str], ...]] = {
     # meta_set：默认项指向的对象同样要属于本人（执行体在设备上，但提案的
     # payload 是服务端组装/可被客户端伪造的，授权口径不因执行位置放松）。
     "meta_set": (("bookId", _BOOK), ("accountId", _ACCOUNT)),
+    # ── T-M7-05c：预算存钱 / 定时 / 角色 ────────────────────────────────
+    # 预算的账本来自提案信封（``book_id``，端点已校验归属），payload 里只有
+    # 分类 / 期间——**空元组是明确表态**，不是遗漏（同 account_create）。
+    "budget_set": (),
+    "budget_set_category": (("categoryId", _CATEGORY),),
+    "budget_delete": (("categoryId", _CATEGORY),),
+    "savings_create": (),
+    "savings_update": (("savingsId", _SAVINGS),),
+    "savings_archive": (("savingsId", _SAVINGS),),
+    # 定时规则带账本归属：``bookId`` 由服务端按当前账本填，分类 / 账户要授权。
+    "scheduled_create": (("categoryId", _CATEGORY), ("accountId", _ACCOUNT)),
+    "scheduled_update": (
+        ("ruleId", _SCHEDULED),
+        ("categoryId", _CATEGORY),
+        ("accountId", _ACCOUNT),
+    ),
+    "scheduled_archive": (("ruleId", _SCHEDULED),),
+    "persona_create": (),
+    "persona_update": (("personaId", _PERSONA),),
+    "persona_archive": (("personaId", _PERSONA),),
+    # persona_switch 的执行位置在设备，payload 里的角色 id 同样要授权。
+    "persona_switch": (("personaId", _PERSONA),),
 }
 
 
@@ -160,6 +194,34 @@ async def _is_authorized(
                 Transaction.book_id == book_id,
                 Book.owner_id == user_id,
                 Book.deleted_at.is_(None),
+            ),
+        ) is not None
+    if kind == _SAVINGS:
+        # 存钱目标是用户级（``owner_id``，不分账本）——与账户同口径。
+        return await db.scalar(
+            select(SavingsGoal.id).where(
+                SavingsGoal.id == target,
+                SavingsGoal.owner_id == user_id,
+                SavingsGoal.archived_at.is_(None),
+            ),
+        ) is not None
+    if kind == _SCHEDULED:
+        # 定时规则**带账本归属**（``scheduled_rules.book_id``）——与交易同口径：
+        # 一个账本的对话不该改到另一个账本的规则。
+        return await db.scalar(
+            select(ScheduledRule.id).where(
+                ScheduledRule.id == target,
+                ScheduledRule.owner_id == user_id,
+                ScheduledRule.archived_at.is_(None),
+                ScheduledRule.book_id == book_id,
+            ),
+        ) is not None
+    if kind == _PERSONA:
+        return await db.scalar(
+            select(ChatPersona.id).where(
+                ChatPersona.id == target,
+                ChatPersona.owner_id == user_id,
+                ChatPersona.archived_at.is_(None),
             ),
         ) is not None
     return False

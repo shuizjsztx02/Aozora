@@ -3,7 +3,8 @@
 **为什么要有这个脚本**：架构 §7.2 的经验上限（单域 5–8 个工具）与 R-PROD-17
 （工具集过大降低选择准确率）都只能靠**真实调用**取证——MockTransport 不经过
 真实接口，测不出模型会不会在两个近义工具之间选错（02c 的点号命名事故就是这么
-漏掉的）。05b 把工具集从 15 扩到 27，正是这条风险最该被量一次的时刻。
+漏掉的）。05b 把工具集从 15 扩到 27、05c 再扩到 43（9 个域），每一步都是这条
+风险最该被量一次的时刻。
 
 口径
 ----
@@ -17,14 +18,16 @@
     「先 transaction_list 看清那一笔，再 transaction_update」是**正确**策略，
     计成选错会把策略误判成失误）。
   两个都没中的才是真正的选择错误。
-- 车道固定 v2（27 个工具全量注入），因为 05b 的新工具只出现在这条车道上。
+- 车道固定 v2（全量注入），因为 05b / 05c 的新工具只出现在这条车道上。
+- **05b 与 05c 的用例分开记账**（``CASES`` / ``CASES_05C``）：扩域之后要看的
+  不只是总准确率，还有「新工具会不会被同域的读工具或近义工具抢走」。
 
 用法::
 
     cd server && python scripts/probe_tool_selection.py            # 全部用例
-    cd server && python scripts/probe_tool_selection.py --lane 1   # 量 v1 的 15 个
+    cd server && python scripts/probe_tool_selection.py --lane 1   # 量 v1 车道
 
-结果打印成表格（用例 / 期望 / 实际 / 是否命中）并给出总准确率。**它不写库、
+结果打印成表格（用例 / 期望 / 实际 / 是否命中）并给出分组准确率。**它不写库、
 不落任何状态**，可以随时重跑。
 """
 
@@ -54,6 +57,11 @@ _CATEGORIES = {
 }
 _ACCOUNTS = {"招行卡": str(uuid.uuid4()), "现金": str(uuid.uuid4()), "饭卡": str(uuid.uuid4())}
 _BOOKS = {"日常": str(uuid.uuid4()), "旅行账本": str(uuid.uuid4())}
+#: T-M7-05c：三实体的名字索引（与假读结果里的名字逐字一致——对不上就会把
+#: 「模型在找那个目标」误判成「模型选错了工具」）。
+_SAVINGS = {"旅行基金": str(uuid.uuid4()), "相机基金": str(uuid.uuid4())}
+_SCHEDULED = {"房租": str(uuid.uuid4()), "早餐": str(uuid.uuid4())}
+_PERSONAS = {"小贝": str(uuid.uuid4()), "猫娘": str(uuid.uuid4())}
 
 #: (用户原话, 期望的工具)。期望值取「服务端真正能完成这件事」的那个工具。
 #: **today 固定为 2026-09-18**（周五）：用例里的「昨天 / 上周五 / 九月五号」都以此为准，
@@ -92,6 +100,36 @@ CASES: list[tuple[str, str]] = [
     # ── meta 域（默认项）──
     ("以后默认用旅行账本记账", "meta_set"),
     ("默认账户改成招行卡", "meta_set"),
+]
+
+#: **T-M7-05c 新增用例**（16 个新工具：预算写 / 存钱 / 定时 / 角色）。与 05b 的
+#: 用例一起跑但**分开记账**——要看的正是「新工具会不会被同域的读工具或近义工具
+#: 抢走」（域内工具数涨到 8 的预算域尤其值得量）。
+CASES_05C: list[tuple[str, str]] = [
+    # ── 预算域：写（与 budget_list / budget_status / budget_check 近义）──
+    ("这个月的整体预算改成 6000", "budget_set"),
+    ("给餐饮设个月度预算 1500", "budget_set_category"),
+    ("把九月的餐饮预算删掉", "budget_delete"),
+    ("我这个月有哪些预算", "budget_list"),
+    ("餐饮预算还剩多少", "budget_status"),
+    # ── 存钱域 ──
+    ("建一个存钱目标叫相机基金，目标 8000", "savings_create"),
+    ("旅行基金我再存 500", "savings_update"),
+    ("相机基金的目标金额改成 6000", "savings_update"),
+    ("旅行基金不攒了，归档掉", "savings_archive"),
+    ("我的存钱目标有哪些", "savings_list"),
+    # ── 定时域 ──
+    ("设置每个月一号自动记一笔房租 3000", "scheduled_create"),
+    ("房租那条定时记账改成 3500", "scheduled_update"),
+    ("早餐那条定时记账先暂停", "scheduled_update"),
+    ("房租规则不要了，删掉", "scheduled_archive"),
+    ("我有哪些定时记账", "scheduled_list"),
+    # ── 角色域 ──
+    ("再建一个角色叫猫娘，说话带喵", "persona_create"),
+    ("把猫娘的人设改得温柔一点", "persona_update"),
+    ("换成猫娘跟我聊", "persona_switch"),
+    ("猫娘这个角色不要了", "persona_archive"),
+    ("我有哪些聊天角色", "persona_list"),
 ]
 
 
@@ -134,6 +172,40 @@ _FAKE_READS: dict[str, dict] = {
     "book_detail": {"name": "旅行账本", "icon": None, "current": False,
                     "categoryCount": 3, "transactionCount": 12,
                     "firstBizDate": "2026-01-01", "lastBizDate": "2026-09-18"},
+    # ── T-M7-05c 三个读工具：假结果里的名字与 05c 用例逐字对得上 ──
+    "budget_list": {"period": "2026-09", "items": [
+        {"isOverall": True, "categoryName": None, "period": "2026-09",
+         "budgetCents": 500000, "spentCents": 320000, "remainingCents": 180000,
+         "pctUsed": 64.0, "exceeded": False},
+        {"isOverall": False, "categoryName": "餐饮", "period": "2026-09",
+         "budgetCents": 150000, "spentCents": 168000, "remainingCents": -18000,
+         "pctUsed": 112.0, "exceeded": True},
+    ]},
+    "budget_status": {"categoryName": "餐饮", "period": "2026-09", "hasBudget": True,
+                      "budgetCents": 150000, "spentCents": 168000,
+                      "remainingCents": -18000, "pctUsed": 112.0, "exceeded": True},
+    "savings_list": {"savings": [
+        {"name": "旅行基金", "targetCents": 800000, "currentCents": 200000,
+         "remainingCents": 600000, "progressPct": 25.0, "achieved": False,
+         "icon": "✈️", "periodValue": 3, "periodUnit": "month"},
+        {"name": "相机基金", "targetCents": 500000, "currentCents": 0,
+         "remainingCents": 500000, "progressPct": 0.0, "achieved": False,
+         "icon": None, "periodValue": None, "periodUnit": None},
+    ], "total": 2},
+    "scheduled_list": {"rules": [
+        {"name": "房租", "type": "expense", "amountCents": 300000, "categoryName": "餐饮",
+         "accountName": "招行卡", "repeat": "monthly", "startDate": "2026-01-01",
+         "endDate": None, "runHour": 8, "runMinute": 0, "enabled": True,
+         "includeInBudget": True, "note": "", "lastRunDate": "2026-09-01"},
+        {"name": "早餐", "type": "expense", "amountCents": 1500, "categoryName": "餐饮",
+         "accountName": None, "repeat": "daily", "startDate": "2026-06-01",
+         "endDate": None, "runHour": 7, "runMinute": 30, "enabled": True,
+         "includeInBudget": True, "note": "", "lastRunDate": "2026-09-18"},
+    ], "total": 2},
+    "persona_list": {"personas": [
+        {"name": "小贝", "avatar": "🐻", "persona": "你是小贝，一个温和的记账助手。"},
+        {"name": "猫娘", "avatar": "🐱", "persona": "你说话带喵。"},
+    ], "total": 2},
 }
 _FAKE_DEFAULT: dict = {"status": "ok", "note": "（探针的假结果）"}
 
@@ -167,6 +239,12 @@ def _tool_context() -> T.ToolContext:
         account_names_by_id={aid: name for name, aid in _ACCOUNTS.items()},
         book_names=_BOOKS,
         book_names_by_id={bid: name for name, bid in _BOOKS.items()},
+        savings_names=_SAVINGS,
+        savings_names_by_id={gid: name for name, gid in _SAVINGS.items()},
+        scheduled_names=_SCHEDULED,
+        scheduled_names_by_id={rid: name for name, rid in _SCHEDULED.items()},
+        persona_names=_PERSONAS,
+        persona_names_by_id={pid: name for name, pid in _PERSONAS.items()},
     )
 
 
@@ -249,11 +327,13 @@ async def main() -> int:
     provider = DeepSeekProvider(
         cfg.ai_agent_provider_api_key, cfg.ai_agent_provider_base_url,
     )
-    first_hits = 0
-    sequence_hits = 0
+    results: list[tuple[str, bool, bool]] = []
     cases = CASES[: args.limit] if args.limit else CASES
+    cases_05c = CASES_05C[: args.limit] if args.limit else CASES_05C
+    n_05b = len(cases)
     try:
-        for utterance, expected in cases:
+        for offset, (utterance, expected) in enumerate(cases + cases_05c):
+            group = "05b" if offset < n_05b else "05c"
             names = await _sequence(
                 provider, system=system, tools=payload,
                 model=cfg.ai_agent_provider_model, utterance=utterance,
@@ -261,8 +341,7 @@ async def main() -> int:
             first = names[0] if names else "-"
             first_hit = first == expected
             seq_hit = expected in names
-            first_hits += first_hit
-            sequence_hits += seq_hit
+            results.append((group, first_hit, seq_hit))
             print(
                 f"{utterance:<34} {expected:<22} {' -> '.join(names) or '-':<34} "
                 f"{'命中' if first_hit else '未中'} {'命中' if seq_hit else '未中'}"
@@ -270,11 +349,23 @@ async def main() -> int:
     finally:
         await provider.aclose()
 
-    total = len(cases)
     print("-" * 104)
-    print(f"首调命中 {first_hits}/{total} = {first_hits / total:.0%}")
-    print(f"两步内命中 {sequence_hits}/{total} = {sequence_hits / total:.0%}")
-    return 0 if sequence_hits == total else 1
+    for group, subset in (
+        ("全部", results),
+        ("05b（既有对照组）", [r for r in results if r[0] == "05b"]),
+        ("05c（本轮新增 16 个工具）", [r for r in results if r[0] == "05c"]),
+    ):
+        if not subset:
+            continue
+        first_hits = sum(r[1] for r in subset)
+        sequence_hits = sum(r[2] for r in subset)
+        total = len(subset)
+        print(
+            f"{group}：首调命中 {first_hits}/{total} = {first_hits / total:.0%}，"
+            f"两步内命中 {sequence_hits}/{total} = {sequence_hits / total:.0%}",
+        )
+    missed = [r for r in results if not r[2]]
+    return 0 if not missed else 1
 
 
 if __name__ == "__main__":

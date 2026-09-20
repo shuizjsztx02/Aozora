@@ -37,11 +37,12 @@ _SCHEMA_PATH = _REPO_ROOT / "contracts" / "action-proposal" / "schema.json"
 with open(_SCHEMA_PATH, "r", encoding="utf-8") as _f:
     _ACTION_ENUM: set[str] = set(json.load(_f)["properties"]["action"]["enum"])
 
-#: **05b 落地的写 op**：记账域（transaction_update / transaction_delete）与账户
-#: 账本域（category.* / account.* / book.*）的全量 CRUD + 默认项，外加 P1 的
-#: ``transaction_add``（单条与批量是同一个 op）。写工具的 proposal_action 必须
-#: 落在这里——多一个就是越界（05c / 05d 的域），少一个就是没做完。
-_WRITE_OPS_05B: set[str] = {
+#: **05b + 05c 落地的写 op**：记账域（transaction_update / transaction_delete）与
+#: 账户账本域（category.* / account.* / book.*）的全量 CRUD + 默认项（05b），
+#: 外加预算存钱 / 定时 / 角色三域（05c），以及 P1 的 ``transaction_add``（单条与
+#: 批量是同一个 op）。写工具的 proposal_action 必须落在这里——多一个就是越界
+#: （05d 的域），少一个就是没做完。
+_WRITE_OPS_05B_05C: set[str] = {
     "transaction_add",
     "transaction_update",
     "transaction_delete",
@@ -55,6 +56,20 @@ _WRITE_OPS_05B: set[str] = {
     "book_update",
     "book_delete",
     "meta_set",
+    # ── T-M7-05c ──
+    "budget_set",
+    "budget_set_category",
+    "budget_delete",
+    "savings_create",
+    "savings_update",
+    "savings_archive",
+    "scheduled_create",
+    "scheduled_update",
+    "scheduled_archive",
+    "persona_create",
+    "persona_update",
+    "persona_archive",
+    "persona_switch",
 }
 
 
@@ -144,9 +159,9 @@ class TestRegistryContract:
             assert count <= T.MAX_TOOLS_PER_DOMAIN, f"{domain} 有 {count} 个工具"
             assert count > 0, f"{domain} 是空域"
 
-    def test_write_tools_cover_exactly_the_05b_ops(self):
-        """写工具的 op 集合 = 05b 的交付面（越界与缺项都要在这里现形）。"""
-        assert {t.proposal_action for t in T.TOOLS if t.kind == "write"} == _WRITE_OPS_05B
+    def test_write_tools_cover_exactly_the_05b_and_05c_ops(self):
+        """写工具的 op 集合 = 05b + 05c 的交付面（越界与缺项都要在这里现形）。"""
+        assert {t.proposal_action for t in T.TOOLS if t.kind == "write"} == _WRITE_OPS_05B_05C
 
     def test_descriptions_are_reviewed_chinese(self):
         """description 是模型可见的唯一语义来源，必须是人写的中文而非占位符。
@@ -196,17 +211,22 @@ class TestRegistryContract:
         assert not any(t.proposal_action in _ACTION_ENUM for t in write_tools)
 
     def test_v1_lane_carries_only_the_ops_it_can_execute(self):
-        """**旧客户端行为不变**（05b 的硬约束）：v1 车道 = P1 的 15 个工具。
+        """**旧客户端写路径不变**（05b 的硬约束）：v1 车道只注入 ``V1_LANE_OPS`` 的写工具。
 
         v1 的写形状只有根上的 ``transactions``，且 ``/ai/execute`` 的 v1 分支只认
-        它的两个别名，所以 v1 车道只注入 ``V1_LANE_OPS`` 对应的写工具；读工具与
-        车道无关。多注入一个的后果不是「少个功能」而是「模型看得见、写不进去」。
+        它的两个别名，所以 v1 车道只注入 ``V1_LANE_OPS`` 对应的写工具；**读工具与
+        车道无关**（它们的结果只回喂模型，不进客户端校验器）——因此 v1 车道 = 全部
+        读工具 + ``transaction_add``。多注入一个写工具的后果不是「少个功能」而是
+        「模型看得见、写不进去」。
         """
         v1 = T.tools_for_domains(T.DOMAINS, contract_version=T.PROPOSAL_CONTRACT_V1)
         v2 = T.tools_for_domains(T.DOMAINS, contract_version=T.PROPOSAL_CONTRACT_V2)
 
         assert v2 == list(T.TOOLS), "v2 车道注入全量"
-        assert len(v1) == 15, "v1 车道 = P1 的 15 个工具"
+        assert {t.name for t in v1} == (
+            {t.name for t in T.TOOLS if t.kind == "read"}
+            | {t.name for t in T.TOOLS if t.proposal_action in T.V1_LANE_OPS}
+        ), "v1 车道 = 全部读工具 + V1_LANE_OPS 的写工具"
         assert {t.proposal_action for t in v1 if t.kind == "write"} == set(T.V1_LANE_OPS)
         assert (
             {t.name for t in v1 if t.kind == "read"}

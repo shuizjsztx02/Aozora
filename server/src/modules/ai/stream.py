@@ -314,6 +314,23 @@ TOOL_PROGRESS: dict[str, str] = {
     "category_create": "正在新建分类…",
     "category_update": "正在修改分类…",
     "category_archive": "正在归档分类…",
+    # ── T-M7-05c：预算写 / 存钱 / 定时 / 角色 ────────────────────────────
+    "budget_set": "正在设置预算…",
+    "budget_set_category": "正在设置分类预算…",
+    "budget_delete": "正在删除预算…",
+    "savings_list": "正在查询存钱目标…",
+    "savings_create": "正在新建存钱目标…",
+    "savings_update": "正在更新存钱目标…",
+    "savings_archive": "正在归档存钱目标…",
+    "scheduled_list": "正在查询定时记账…",
+    "scheduled_create": "正在新建定时记账…",
+    "scheduled_update": "正在修改定时记账…",
+    "scheduled_archive": "正在归档定时记账…",
+    "persona_list": "正在查询聊天角色…",
+    "persona_create": "正在新建聊天角色…",
+    "persona_update": "正在修改聊天角色…",
+    "persona_archive": "正在归档聊天角色…",
+    "persona_switch": "正在切换聊天角色…",
     "meta_set": "正在设置默认项…",
 }
 

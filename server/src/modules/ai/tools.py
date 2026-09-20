@@ -1,4 +1,4 @@
-"""T-M7-02c / T-M7-05b: Agent 工具注册表。
+"""T-M7-02c / T-M7-05b / T-M7-05c: Agent 工具注册表。
 
 工具是服务端 Agent 的能力面。**工具的 ``description`` 是模型可见的唯一语义
 来源**（架构 §7.1），因此这里的文案按「模型读到它会做什么」来写，而不是按
@@ -9,7 +9,11 @@
 - **P1（02c）** 交付最小集：15 个工具、3 个域，写工具只有记账的两个。
 - **P4（05b）** 把**记账域**（``transaction.*`` / ``category.*``）与**账户账本域**
   （``account.*`` / ``book.*`` / ``meta_set(默认项)``）扩到全量 CRUD：27 个工具、
-  6 个域（架构 §3.2 的覆盖度清单）。预算 / 定时 / 角色 / 分析等域归 05c / 05d。
+  6 个域（架构 §3.2 的覆盖度清单）。
+- **P4（05c）** 再加**预算存钱 / 定时 / 角色**三域（``budget.*`` 的写 +
+  ``savings.*`` / ``scheduled.*`` / ``persona.*``）：43 个工具、9 个域。这三类实体
+  已于 T-M7-01 上云，服务端 loop 从 05c 起才够得到它们（此前「仅本地」）。
+  分析 / 导出 / 安全账号等域仍归 05d。
 
 工具名一律用下划线，**不沿用桥命令的 ``domain.action`` 点号命名**——provider
 对 ``function.name`` 只接受 ``[a-zA-Z0-9_-]``，带点号会 400。约束、实测证据与
@@ -20,7 +24,9 @@
 05b 把 P1 的 ``ledger`` 域按操作面拆成 ``category`` / ``account`` / ``book`` 三域——
 「账户账本」合起来是 11 个工具，超过 §7.2 的单域上限（域是 05g 域路由的注入
 单位，工具数直接决定模型的选择准确率）。``meta`` 单列一域：它只有
-``meta_set`` 一个工具，而它的执行位置在**设备**（见下）。
+``meta_set`` 一个工具，而它的执行位置在**设备**（见下）。05c 的三个新域各自
+5 个以内（``savings`` 4 / ``scheduled`` 4 / ``persona`` 5），预算的写并进已有的
+``budget`` 域（5 读 + 3 写 = 8，正好到上限）。
 
 写工具与 ActionProposal v2 的对齐（本模块最关键的约束）
 -----------------------------------------------------
@@ -33,10 +39,11 @@ payload, ...}``；v1 车道 → 根上带 ``transactions`` 的 v1 信封（只�
 是同一个事实源。``Tool.proposal_action`` 是同一个 op 的注册表声明（05a 的
 ``canonical_op`` 把它翻成两条车道各自的动作名）。
 
-`_DEVICE_EXECUTED_OPS` 里的 op（当前只有 ``meta_set``）**服务端不执行**：它写的是
-设备本地的 ``sync_meta``（默认账本 / 默认账户是本地展示元数据，桥命令 ``meta.set``
-明写「不上行」，见 ``BridgeProtocol.kt``）。因此这类提案只能**挂起**、由客户端在
-设备上执行（05f 的执行器按 op 分派），服务端执行面（``/ai/execute``）对它报错。
+`_DEVICE_EXECUTED_OPS` 里的 op（``meta_set`` 与 05c 的 ``persona_switch``）**服务端
+不执行**：它们写的是设备本地的 ``sync_meta``（默认账本 / 默认账户 / **当前角色指针**
+都是本地展示元数据，桥命令 ``meta.set`` 明写「不上行」，见 ``BridgeProtocol.kt``）。
+因此这类提案只能**挂起**、由客户端在设备上执行（05f 的执行器按 op 分派），服务端
+执行面（``/ai/execute``）对它报错。
 
 铁律（架构 §7.4，agent 化不放松）
 1. 模型永不输出 UUID —— 工具参数只接受**对象名**，名→id 由本模块的确定性
@@ -74,6 +81,9 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from src.models.budget import Budget, BudgetType
 from src.models.ledger import Account, Book, Category, Transaction, TxType
+from src.models.persona import ChatPersona
+from src.models.savings import SavingsGoal
+from src.models.scheduled import ScheduledRule
 
 from .validator import _FORMAT_CHECKER
 
@@ -83,12 +93,16 @@ from .validator import _FORMAT_CHECKER
 
 #: 域标识。工具按域分组注入（架构 §7.2）。05b 起 6 个域——P1 的 ``ledger``
 #: 按操作面拆成 ``category`` / ``account`` / ``book``（合起来 11 个工具会越过
-#: §7.2 的单域上限）。
+#: §7.2 的单域上限）；05c 再加 ``savings`` / ``scheduled`` / ``persona`` 三域
+#: （三实体已于 T-M7-01 上云，服务端 loop 从 05c 起够得到它们）。
 DOMAIN_TRANSACTION = "transaction"
 DOMAIN_CATEGORY = "category"
 DOMAIN_ACCOUNT = "account"
 DOMAIN_BOOK = "book"
 DOMAIN_BUDGET = "budget"
+DOMAIN_SAVINGS = "savings"
+DOMAIN_SCHEDULED = "scheduled"
+DOMAIN_PERSONA = "persona"
 DOMAIN_META = "meta"
 
 DOMAINS: tuple[str, ...] = (
@@ -97,6 +111,9 @@ DOMAINS: tuple[str, ...] = (
     DOMAIN_ACCOUNT,
     DOMAIN_BOOK,
     DOMAIN_BUDGET,
+    DOMAIN_SAVINGS,
+    DOMAIN_SCHEDULED,
+    DOMAIN_PERSONA,
     DOMAIN_META,
 )
 
@@ -128,8 +145,11 @@ V1_LANE_OPS: frozenset[str] = frozenset({"transaction_add"})
 #: （05f 的执行器按 op 分派）。``meta_set`` 写的是设备本地的 ``sync_meta``
 #: （默认账本 / 默认账户 / 小组件配置 / 用户画像都是本地展示元数据，桥命令
 #: ``meta.set`` 明写「不上行」），服务端没有这些键的存储位置。
+#: ``persona_switch``（05c）同理：**当前角色指针**是 ``sync_meta`` 的
+#: ``active_persona_id`` 键（``BridgeProtocol.kt``：角色表已上云，指针不上行），
+#: 换角色＝在设备上写这一个本地键。
 #: ``reminder_set``（05f）与 ``widget.refresh`` 同类，届时并进本集合。
-DEVICE_EXECUTED_OPS: frozenset[str] = frozenset({"meta_set"})
+DEVICE_EXECUTED_OPS: frozenset[str] = frozenset({"meta_set", "persona_switch"})
 
 #: 单次批量的交易条数上限（``transaction_add_batch``）。执行是原子的，
 #: 上限保护单次写操作的影响面（架构 §4.4「单 Turn 最大写操作数」的下游）。
@@ -148,6 +168,14 @@ ERR_INVALID_PERIOD = "invalid_period"
 ERR_UNKNOWN_TRANSACTION = "unknown_transaction"
 ERR_AMBIGUOUS_TRANSACTION = "ambiguous_transaction"
 ERR_TARGET_ARCHIVED = "target_archived"
+ERR_UNKNOWN_SAVINGS = "unknown_savings"
+ERR_AMBIGUOUS_SAVINGS = "ambiguous_savings"
+ERR_UNKNOWN_SCHEDULED = "unknown_scheduled"
+ERR_AMBIGUOUS_SCHEDULED = "ambiguous_scheduled"
+ERR_UNKNOWN_PERSONA = "unknown_persona"
+ERR_AMBIGUOUS_PERSONA = "ambiguous_persona"
+ERR_UNKNOWN_BUDGET = "unknown_budget"
+ERR_BUDGET_INCOME_CATEGORY = "income_category_budget"
 
 _TOOL_ERROR_MESSAGES: dict[str, str] = {
     ERR_UNKNOWN_TOOL: "没有这个工具，请改用工具清单中已有的工具。",
@@ -173,6 +201,33 @@ _TOOL_ERROR_MESSAGES: dict[str, str] = {
         "把目标缩小到唯一一笔；也可以把候选逐条报给用户请他指明。不要自行猜测。"
     ),
     ERR_TARGET_ARCHIVED: "目标已归档，不能修改。请把它当成不存在处理。",
+    ERR_UNKNOWN_SAVINGS: (
+        "没有找到这个存钱目标。请先用 savings_list 确认目标的准确名称，"
+        "不要凭印象新建一个同名目标。"
+    ),
+    ERR_AMBIGUOUS_SAVINGS: (
+        "存在多个同名存钱目标，无法确定是哪一个。请向用户说明并请其指明，"
+        "不要自行猜测。"
+    ),
+    ERR_UNKNOWN_SCHEDULED: (
+        "没有找到这条定时记账规则。请先用 scheduled_list 确认规则的准确名称。"
+    ),
+    ERR_AMBIGUOUS_SCHEDULED: (
+        "存在多条同名定时规则，无法确定是哪一条。请向用户说明并请其指明，"
+        "不要自行猜测。"
+    ),
+    ERR_UNKNOWN_PERSONA: "没有找到这个角色。请先用 persona_list 确认角色的准确名称。",
+    ERR_AMBIGUOUS_PERSONA: (
+        "存在多个同名角色，无法确定是哪一个。请向用户说明并请其指明，不要自行猜测。"
+    ),
+    ERR_UNKNOWN_BUDGET: (
+        "这个月没有找到对应的预算项（总预算或该分类的预算都没设过）。"
+        "请先用 budget_list 或 budget_status 确认，不要凭空删。"
+    ),
+    ERR_BUDGET_INCOME_CATEGORY: (
+        "预算是花销的上限，只能设在支出分类上；这个名字是收入分类。"
+        "请确认用户想限制的是哪一项支出，或改用收入分类的名字重新确认。"
+    ),
 }
 
 ToolKind = Literal["read", "write"]
@@ -225,6 +280,20 @@ class ToolContext:
     #: 「名字不存在」，模型会被叫去查一份明明列着该名字的清单——没有可尝试的
     #: 下一步。与账户侧 ``ambiguous_account`` 同口径。
     book_names_by_id: Mapping[str, str] = field(default_factory=dict)
+    #: 以下三套（05c）与账户 / 账本同构：``*_names`` 只含**名字唯一**的对象
+    #: （写路径要唯一解），``*_names_by_id`` 不剔除重名（读路径按名字取全集）。
+    #: 三实体的名字都没有数据库唯一约束，重名是正常情形而不是脏数据。
+    #:
+    #: 归属范围各不相同，与 sync 的实体归属一致：存钱目标与角色是**用户级**
+    #: （``owner_id``，不分账本），定时规则带 ``book_id``，因此只装**本账本**的
+    #: 未归档规则——与 ``_budget_rows`` / ``transaction_*`` 同口径：一个账本的
+    #: 对话不该改到另一个账本的规则（那也正是 ``authorization`` 的判定）。
+    savings_names: Mapping[str, str] = field(default_factory=dict)
+    savings_names_by_id: Mapping[str, str] = field(default_factory=dict)
+    scheduled_names: Mapping[str, str] = field(default_factory=dict)
+    scheduled_names_by_id: Mapping[str, str] = field(default_factory=dict)
+    persona_names: Mapping[str, str] = field(default_factory=dict)
+    persona_names_by_id: Mapping[str, str] = field(default_factory=dict)
 
     def resolve_category(self, kind: str, name: str) -> str | None:
         """按（收支类型, 分类名）解析。同名跨类型时由 ``kind`` 消歧。"""
@@ -254,6 +323,24 @@ class ToolContext:
         """某名字对应的全部账本 id —— 重名判定用。"""
         return tuple(
             bid for bid, bname in self.book_names_by_id.items() if bname == name
+        )
+
+    def savings_ids_named(self, name: str) -> tuple[str, ...]:
+        """某名字对应的全部存钱目标 id —— 读过滤与重名判定用。"""
+        return tuple(
+            gid for gid, gname in self.savings_names_by_id.items() if gname == name
+        )
+
+    def scheduled_ids_named(self, name: str) -> tuple[str, ...]:
+        """某名字对应的全部定时规则 id —— 读过滤与重名判定用。"""
+        return tuple(
+            rid for rid, rname in self.scheduled_names_by_id.items() if rname == name
+        )
+
+    def persona_ids_named(self, name: str) -> tuple[str, ...]:
+        """某名字对应的全部角色 id —— 读过滤与重名判定用。"""
+        return tuple(
+            pid for pid, pname in self.persona_names_by_id.items() if pname == name
         )
 
 
@@ -409,6 +496,31 @@ async def load_tool_context(
         ).order_by(Book.name, Book.id).limit(_OBJECT_NAME_LIMIT),
     )
     books = book_rows.all()
+    # T-M7-05c：三实体（T-M7-01 上云）的名字索引。存钱目标与角色按 owner 过滤
+    # （用户级，不分账本）；定时规则按**本账本**过滤（``scheduled_rules.book_id``）
+    # ——与预算 / 交易的账本收窄同口径。
+    savings_rows = await db.execute(
+        select(SavingsGoal.name, SavingsGoal.id).where(
+            SavingsGoal.owner_id == user_id,
+            SavingsGoal.archived_at.is_(None),
+        ).order_by(SavingsGoal.name, SavingsGoal.id).limit(_OBJECT_NAME_LIMIT),
+    )
+    savings = savings_rows.all()
+    scheduled_rows = await db.execute(
+        select(ScheduledRule.name, ScheduledRule.id).where(
+            ScheduledRule.owner_id == user_id,
+            ScheduledRule.book_id == book_id,
+            ScheduledRule.archived_at.is_(None),
+        ).order_by(ScheduledRule.name, ScheduledRule.id).limit(_OBJECT_NAME_LIMIT),
+    )
+    scheduled = scheduled_rows.all()
+    persona_rows = await db.execute(
+        select(ChatPersona.name, ChatPersona.id).where(
+            ChatPersona.owner_id == user_id,
+            ChatPersona.archived_at.is_(None),
+        ).order_by(ChatPersona.name, ChatPersona.id).limit(_OBJECT_NAME_LIMIT),
+    )
+    personas = persona_rows.all()
     return ToolContext(
         db=db,
         user_id=user_id,
@@ -419,6 +531,12 @@ async def load_tool_context(
         account_names_by_id={str(aid): name for name, aid in accounts},
         book_names=_unique_name_map((name, str(bid)) for name, bid in books),
         book_names_by_id={str(bid): name for name, bid in books},
+        savings_names=_unique_name_map((name, str(gid)) for name, gid in savings),
+        savings_names_by_id={str(gid): name for name, gid in savings},
+        scheduled_names=_unique_name_map((name, str(rid)) for name, rid in scheduled),
+        scheduled_names_by_id={str(rid): name for name, rid in scheduled},
+        persona_names=_unique_name_map((name, str(pid)) for name, pid in personas),
+        persona_names_by_id={str(pid): name for name, pid in personas},
     )
 
 
@@ -681,6 +799,39 @@ def _resolve_book(ctx: ToolContext, name: str | None) -> uuid.UUID | ToolOutcome
 
 def _normalize_note(raw: Any) -> str:
     return raw if isinstance(raw, str) else ""
+
+
+def _resolve_savings(ctx: ToolContext, name: str) -> str | ToolOutcome:
+    """存钱目标名 → id。重名时 ``ambiguous_savings``（可行动：请用户指明）。
+
+    与 ``_resolve_account`` 同形：名字没有唯一约束，写入必须唯一解。
+    """
+    resolved = ctx.savings_names.get(name)
+    if resolved is not None:
+        return resolved
+    if len(ctx.savings_ids_named(name)) > 1:
+        return ToolOutcome.failure(ERR_AMBIGUOUS_SAVINGS, argument=name)
+    return ToolOutcome.failure(ERR_UNKNOWN_SAVINGS, argument=name)
+
+
+def _resolve_scheduled(ctx: ToolContext, name: str) -> str | ToolOutcome:
+    """定时规则名 → id（**只在本账本的未归档规则里找**，见 ``ToolContext``）。"""
+    resolved = ctx.scheduled_names.get(name)
+    if resolved is not None:
+        return resolved
+    if len(ctx.scheduled_ids_named(name)) > 1:
+        return ToolOutcome.failure(ERR_AMBIGUOUS_SCHEDULED, argument=name)
+    return ToolOutcome.failure(ERR_UNKNOWN_SCHEDULED, argument=name)
+
+
+def _resolve_persona(ctx: ToolContext, name: str) -> str | ToolOutcome:
+    """角色名 → id。重名时 ``ambiguous_persona``。"""
+    resolved = ctx.persona_names.get(name)
+    if resolved is not None:
+        return resolved
+    if len(ctx.persona_ids_named(name)) > 1:
+        return ToolOutcome.failure(ERR_AMBIGUOUS_PERSONA, argument=name)
+    return ToolOutcome.failure(ERR_UNKNOWN_PERSONA, argument=name)
 
 
 # ---------------------------------------------------------------------------
@@ -1789,7 +1940,13 @@ async def _handle_meta_set(ctx: ToolContext, params: dict[str, Any]) -> ToolOutc
     设备上执行（``DEVICE_EXECUTED_OPS``；05f 的执行器按 op 分派）。
 
     当前角色 / 小组件配置 / 用户画像三个键同样是设备本地量，由 05c / 05d 按各自
-    的卡扩这个枚举——它们不是服务端存储，扩的是同一个工具的 key 集合。
+    的卡表态——它们不是服务端存储，扩的是同一个工具的 key 集合。**05c 的表态是
+    「不并进这个枚举」**：「当前角色」在 v2 注册表里有自己的 op
+    （``persona_switch``，见角色域的 ``_handle_persona_switch``），它同样是设备
+    执行、同样写一个本地键，但**换角色是一个独立动作**——塞进 ``meta_set`` 的
+    key 枚举会让模型在两个近义工具之间挑，而 §7.2 的经验上限正是在讲这件事。
+    小组件配置 / 用户画像（05d）继续按此判断：有专属语义的键给它自己的 op，
+    纯偏好三元组才走 ``meta_set``。
     """
     key = str(params["key"])
     if key == "default_book":
@@ -1814,6 +1971,545 @@ async def _handle_meta_set(ctx: ToolContext, params: dict[str, Any]) -> ToolOutc
         "action": "meta_set",
         "payload": payload,
         "message": message,
+        "warnings": [],
+    })
+
+
+# ---------------------------------------------------------------------------
+# 预算域 —— 写工具（T-M7-05c）
+# ---------------------------------------------------------------------------
+
+
+def _resolve_budget_category(ctx: ToolContext, name: str) -> str | ToolOutcome:
+    """支出分类名 → id（**预算只能设在支出分类上**）。
+
+    预算的「已用」口径是支出（``_spent_by_category`` 只统计 ``TxType.EXPENSE``），
+    设在收入分类上等于给它一个永远为 0 的进度条——用户看不出来的陷阱。所以这里
+    明确拒绝并说清原因，而不是「记下了但没用」。
+    """
+    resolved = ctx.resolve_category("expense", name)
+    if resolved is not None:
+        return resolved
+    if ctx.resolve_category("income", name) is not None:
+        return ToolOutcome.failure(ERR_BUDGET_INCOME_CATEGORY, argument=name)
+    return ToolOutcome.failure(ERR_UNKNOWN_CATEGORY, argument=name)
+
+
+async def _budget_row(
+    ctx: ToolContext, period: str, category_id: uuid.UUID | None,
+) -> Budget | None:
+    """某月的**总预算**（``category_id is None``）或**某分类的预算**；没有则 ``None``。
+
+    只认月度预算：预算工具的参数只有 ``YYYY-MM``（``_PERIOD_SCHEMA``），年度预算
+    不在这条路径上——与 P1 的五个读工具同口径。
+    """
+    conditions = [
+        Budget.book_id == ctx.book_id,
+        Budget.budget_type == BudgetType.MONTHLY,
+        Budget.period == period,
+        Budget.deleted_at.is_(None),
+        Budget.category_id.is_(None) if category_id is None else Budget.category_id == category_id,
+    ]
+    return await ctx.db.scalar(select(Budget).where(*conditions).order_by(Budget.id))
+
+
+async def _handle_budget_set(ctx: ToolContext, params: dict[str, Any]) -> ToolOutcome:
+    period = str(params["period"])
+    if _resolve_period(period) is None:
+        return ToolOutcome.failure(ERR_INVALID_PERIOD, argument=period)
+    amount = int(params["amountCents"])
+
+    payload: dict[str, Any] = {"period": period, "amountCents": amount}
+    existing = await _budget_row(ctx, period, None)
+    note = ""
+    if existing is not None:
+        # 改已有的总预算 → 带上服务端读到的版本（乐观并发，与 05b 的改类 op 同口径）。
+        payload["version"] = int(existing.version)
+        note = f"（原来是 ¥{_format_yuan(existing.amount_cents)}）"
+    return ToolOutcome.proposal({
+        "action": "budget_set",
+        "payload": payload,
+        "message": f"把 {period} 的整体预算设为 ¥{_format_yuan(amount)}{note}",
+        "warnings": [],
+    })
+
+
+async def _handle_budget_set_category(ctx: ToolContext, params: dict[str, Any]) -> ToolOutcome:
+    period = str(params["period"])
+    if _resolve_period(period) is None:
+        return ToolOutcome.failure(ERR_INVALID_PERIOD, argument=period)
+    category_name = str(params["categoryName"])
+    category_id = _resolve_budget_category(ctx, category_name)
+    if isinstance(category_id, ToolOutcome):
+        return category_id
+    amount = int(params["amountCents"])
+
+    payload: dict[str, Any] = {
+        "period": period, "categoryId": category_id, "amountCents": amount,
+    }
+    existing = await _budget_row(ctx, period, uuid.UUID(category_id))
+    note = ""
+    if existing is not None:
+        payload["version"] = int(existing.version)
+        note = f"（原来是 ¥{_format_yuan(existing.amount_cents)}）"
+    return ToolOutcome.proposal({
+        "action": "budget_set_category",
+        "payload": payload,
+        "message": f"把「{category_name}」{period} 的预算设为 ¥{_format_yuan(amount)}{note}",
+        # 覆盖已有额度会让「这个月还能花多少」当场变化，用户未必料到。
+        "warnings": ([f"覆盖 {period} 已有的分类预算"] if existing is not None else []),
+    })
+
+
+async def _handle_budget_delete(ctx: ToolContext, params: dict[str, Any]) -> ToolOutcome:
+    period = str(params["period"])
+    if _resolve_period(period) is None:
+        return ToolOutcome.failure(ERR_INVALID_PERIOD, argument=period)
+
+    category_name = params.get("categoryName")
+    if category_name:
+        category_id = _resolve_budget_category(ctx, str(category_name))
+        if isinstance(category_id, ToolOutcome):
+            return category_id
+        existing = await _budget_row(ctx, period, uuid.UUID(category_id))
+        if existing is None:
+            # 「删一个不存在的东西」不该产出一张必然失败的确认卡。
+            return ToolOutcome.failure(ERR_UNKNOWN_BUDGET, argument=str(category_name))
+        payload: dict[str, Any] = {"period": period, "categoryId": category_id}
+        message = f"删掉「{category_name}」{period} 的预算"
+    else:
+        existing = await _budget_row(ctx, period, None)
+        if existing is None:
+            return ToolOutcome.failure(ERR_UNKNOWN_BUDGET, argument=period)
+        payload = {"period": period}
+        message = f"删掉 {period} 的整体预算"
+
+    return ToolOutcome.proposal({
+        "action": "budget_delete",
+        "payload": payload,
+        "message": message,
+        "warnings": ["删除后这个月不再有这项预算，已记录的交易不受影响。"],
+    })
+
+
+# ---------------------------------------------------------------------------
+# 存钱域 —— 读 / 写（T-M7-05c；实体已上云，T-M7-01）
+# ---------------------------------------------------------------------------
+
+
+async def _handle_savings_list(ctx: ToolContext, params: dict[str, Any]) -> ToolOutcome:
+    """列出全部**未归档**的存钱目标（用户级，不分账本）。结果里不含 id。"""
+    rows = await ctx.db.execute(
+        select(SavingsGoal).where(
+            SavingsGoal.owner_id == ctx.user_id,
+            SavingsGoal.archived_at.is_(None),
+        ).order_by(SavingsGoal.name, SavingsGoal.id).limit(_OBJECT_NAME_LIMIT),
+    )
+    items: list[dict[str, Any]] = []
+    for goal in rows.scalars().all():
+        items.append({
+            "name": goal.name,
+            "targetCents": goal.target_cents,
+            "currentCents": goal.current_cents,
+            # 进度与「还差多少」都在这算：铁律 2，模型不做金额算术。
+            "remainingCents": max(goal.target_cents - goal.current_cents, 0),
+            "progressPct": (
+                round(goal.current_cents / goal.target_cents * 100, 1)
+                if goal.target_cents else 0.0
+            ),
+            "achieved": goal.current_cents >= goal.target_cents,
+            "icon": goal.icon,
+            "periodValue": goal.period_value,
+            "periodUnit": goal.period_unit,
+        })
+    return ToolOutcome.result({"savings": items, "total": len(items)})
+
+
+async def _handle_savings_create(ctx: ToolContext, params: dict[str, Any]) -> ToolOutcome:
+    name = str(params["name"])
+    payload: dict[str, Any] = {"name": name, "targetCents": int(params["targetCents"])}
+    if params.get("icon"):
+        payload["icon"] = str(params["icon"])
+    period = _savings_period_payload(params)
+    if isinstance(period, ToolOutcome):
+        return period
+    payload.update(period)
+
+    detail = f"目标 ¥{_format_yuan(int(params['targetCents']))}"
+    if payload.get("periodValue") and payload.get("periodUnit"):
+        detail += f"，{payload['periodValue']} 个{'月' if payload['periodUnit'] == 'month' else '周'}内存到"
+    return ToolOutcome.proposal({
+        "action": "savings_create",
+        "payload": payload,
+        "message": f"新建存钱目标「{name}」（{detail}）",
+        "warnings": [],
+    })
+
+
+def _savings_period_payload(params: Mapping[str, Any]) -> dict[str, Any] | ToolOutcome:
+    """存款期限的两个字段 → payload 片段（**成对**：要么都给，要么都不给）。
+
+    客户端与服务端的既有口径都是「value / unit 必须成对，值或 null 一起下发」
+    （``Repository.requireValidSavingsPeriod`` / sync 的 ``_validate_savings_period``）。
+    只给一半是模型把两个字段当成两个独立可选项的典型误用，这里挡在产出之前。
+    """
+    has_value = "periodValue" in params
+    has_unit = "periodUnit" in params
+    if has_value != has_unit:
+        return ToolOutcome.failure(
+            ERR_INVALID_ARGUMENTS, argument="periodValue/periodUnit",
+        )
+    if not has_value:
+        return {}
+    return {"periodValue": params["periodValue"], "periodUnit": params["periodUnit"]}
+
+
+async def _handle_savings_update(ctx: ToolContext, params: dict[str, Any]) -> ToolOutcome:
+    resolved = _resolve_savings(ctx, str(params["savingsName"]))
+    if isinstance(resolved, ToolOutcome):
+        return resolved
+    version = await _current_version(ctx, SavingsGoal, uuid.UUID(resolved))
+    if version is None:
+        return ToolOutcome.failure(ERR_UNKNOWN_SAVINGS, argument=params["savingsName"])
+    if params.get("addAmountCents") is not None and params.get("currentCents") is not None:
+        # 「在现有基础上加 N」与「直接改成 N」是两件事——同时给没有合理优先级，
+        # 挡在产出之前（执行面还有一道同样的闸，那是防伪造 payload 的）。
+        return ToolOutcome.failure(
+            ERR_INVALID_ARGUMENTS, argument="addAmountCents/currentCents",
+        )
+
+    payload: dict[str, Any] = {"savingsId": resolved, "version": int(version)}
+    notes: list[str] = []
+    if params.get("newName"):
+        payload["name"] = str(params["newName"])
+        notes.append(f"改名为「{params['newName']}」")
+    if params.get("targetCents") is not None:
+        payload["targetCents"] = int(params["targetCents"])
+        notes.append(f"目标额改为 ¥{_format_yuan(int(params['targetCents']))}")
+    if params.get("icon"):
+        payload["icon"] = str(params["icon"])
+        notes.append("更换图标")
+    if params.get("addAmountCents") is not None:
+        # **存入**：金额在服务端读当前值后累加（铁律 2——模型不读旧值、不做加法，
+        # 也就没有「模型算错了」和「两个人同时存、后写的覆盖先写的」两种错法）。
+        payload["addAmountCents"] = int(params["addAmountCents"])
+        notes.append(f"存入 ¥{_format_yuan(int(params['addAmountCents']))}")
+    if params.get("currentCents") is not None:
+        payload["currentCents"] = int(params["currentCents"])
+        notes.append(f"已存金额直接改为 ¥{_format_yuan(int(params['currentCents']))}")
+    period = _savings_period_payload(params)
+    if isinstance(period, ToolOutcome):
+        return period
+    if period:
+        payload.update(period)
+        if period["periodValue"] is None:
+            notes.append("去掉存款期限")
+        else:
+            notes.append("调整存款期限")
+    if len(payload) == 2:  # 只有 savingsId + version → 没有任何改动
+        return ToolOutcome.failure(ERR_INVALID_ARGUMENTS, argument="changes")
+
+    return ToolOutcome.proposal({
+        "action": "savings_update",
+        "payload": payload,
+        "message": f"修改存钱目标「{params['savingsName']}」：{'、'.join(notes)}",
+        "warnings": [],
+    })
+
+
+async def _handle_savings_archive(ctx: ToolContext, params: dict[str, Any]) -> ToolOutcome:
+    resolved = _resolve_savings(ctx, str(params["savingsName"]))
+    if isinstance(resolved, ToolOutcome):
+        return resolved
+
+    return ToolOutcome.proposal({
+        "action": "savings_archive",
+        "payload": {"savingsId": resolved},
+        "message": f"归档存钱目标「{params['savingsName']}」（不再出现在存钱页）",
+        "warnings": ["归档后这个目标不再出现在存钱页，已存入的进度记录也不再可见。"],
+    })
+
+
+# ---------------------------------------------------------------------------
+# 定时域 —— 读 / 写（T-M7-05c；实体已上云，T-M7-01）
+# ---------------------------------------------------------------------------
+
+#: 规则重复方式 → 人话（进提案 message）。
+_REPEAT_LABELS: dict[str, str] = {
+    "daily": "每天",
+    "weekly": "每周",
+    "monthly": "每月",
+    "yearly": "每年",
+}
+
+
+def _rule_schedule_text(params: Mapping[str, Any]) -> str:
+    """重复方式 + 起点 → 「每月，从 2026-10-01 起」这样的片段。"""
+    repeat = _REPEAT_LABELS.get(str(params.get("repeat")), str(params.get("repeat")))
+    text = f"{repeat}，从 {params.get('startDate')} 起"
+    if params.get("endDate"):
+        text += f" 到 {params['endDate']} 止"
+    return text
+
+
+async def _handle_scheduled_list(ctx: ToolContext, params: dict[str, Any]) -> ToolOutcome:
+    """列出**本账本**未归档的定时记账规则（与预算 / 交易的账本收窄同口径）。"""
+    rows = await ctx.db.execute(
+        select(ScheduledRule).where(
+            ScheduledRule.owner_id == ctx.user_id,
+            ScheduledRule.book_id == ctx.book_id,
+            ScheduledRule.archived_at.is_(None),
+        ).order_by(ScheduledRule.name, ScheduledRule.id).limit(_OBJECT_NAME_LIMIT),
+    )
+    items: list[dict[str, Any]] = []
+    for rule in rows.scalars().all():
+        items.append({
+            "name": rule.name,
+            "type": rule.type,
+            "amountCents": rule.amount_cents,
+            "categoryName": ctx.category_name_of(rule.category_id),
+            "accountName": (
+                ctx.account_names_by_id.get(str(rule.account_id)) if rule.account_id else None
+            ),
+            "repeat": rule.repeat,
+            "startDate": rule.start_date.isoformat(),
+            "endDate": rule.end_date.isoformat() if rule.end_date else None,
+            "runHour": rule.run_hour,
+            "runMinute": rule.run_minute,
+            "enabled": rule.enabled,
+            "includeInBudget": rule.include_in_budget,
+            "note": rule.note,
+            "lastRunDate": rule.last_run_date.isoformat() if rule.last_run_date else None,
+        })
+    return ToolOutcome.result({"rules": items, "total": len(items)})
+
+
+def _scheduled_rule_payload(
+    ctx: ToolContext, params: Mapping[str, Any], *, fallback_kind: str = "expense",
+) -> dict[str, Any] | ToolOutcome:
+    """规则的可写字段 → payload 片段（创建与修改共用，两处的解析口径因此一致）。
+
+    ``fallback_kind`` 是**解析分类时用的收支类型**：改类工具没带 ``type`` 时，
+    用规则**当前**的类型（改分类名而不改收支类型是常规操作，缺了它会把收入规则
+    的分类按支出侧解析——同名的两个分类会挂错）。
+    """
+    payload: dict[str, Any] = {}
+    if params.get("type"):
+        payload["type"] = str(params["type"])
+    # 创建用 ``name``、修改用 ``newName``（改类工具不能沿用必填的 ``name`` 语义）。
+    if params.get("name") or params.get("newName"):
+        payload["name"] = str(params.get("name") or params.get("newName"))
+    if params.get("amountCents") is not None:
+        payload["amountCents"] = int(params["amountCents"])
+    if params.get("categoryName"):
+        # 分类按**规则的收支类型**解析：同名的支出 / 收入分类是两个分类，
+        # 只按名字解析会把「每月记一笔收入」挂到支出分类上。
+        kind = str(params.get("type") or fallback_kind)
+        category_id = _resolve_category(ctx, kind, str(params["categoryName"]))
+        if isinstance(category_id, ToolOutcome):
+            return category_id
+        payload["categoryId"] = category_id
+    if params.get("accountName"):
+        account_id = _resolve_account(ctx, str(params["accountName"]))
+        if isinstance(account_id, ToolOutcome):
+            return account_id
+        payload["accountId"] = account_id
+    if params.get("repeat"):
+        payload["repeat"] = str(params["repeat"])
+    if params.get("startDate"):
+        payload["startDate"] = str(params["startDate"])
+    if "endDate" in params:
+        payload["endDate"] = params["endDate"]
+    if params.get("note") is not None:
+        payload["note"] = str(params["note"])
+    if params.get("includeInBudget") is not None:
+        payload["includeInBudget"] = bool(params["includeInBudget"])
+    if params.get("enabled") is not None:
+        payload["enabled"] = bool(params["enabled"])
+    if params.get("runHour") is not None:
+        payload["runHour"] = int(params["runHour"])
+    if params.get("runMinute") is not None:
+        payload["runMinute"] = int(params["runMinute"])
+    return payload
+
+
+async def _handle_scheduled_create(ctx: ToolContext, params: dict[str, Any]) -> ToolOutcome:
+    payload = _scheduled_rule_payload(ctx, params)
+    if isinstance(payload, ToolOutcome):
+        return payload
+    name = str(params["name"])
+    kind = _tx_verb(str(params["type"]))
+    return ToolOutcome.proposal({
+        "action": "scheduled_create",
+        "payload": payload,
+        "message": (
+            f"新建定时记账规则「{name}」：{_rule_schedule_text(params)}"
+            f"，{kind} ¥{_format_yuan(int(params['amountCents']))}"
+            f"（分类「{params['categoryName']}」）"
+        ),
+        "warnings": [],
+    })
+
+
+async def _handle_scheduled_update(ctx: ToolContext, params: dict[str, Any]) -> ToolOutcome:
+    resolved = _resolve_scheduled(ctx, str(params["ruleName"]))
+    if isinstance(resolved, ToolOutcome):
+        return resolved
+    current = (await ctx.db.execute(
+        select(ScheduledRule.type, ScheduledRule.version).where(
+            ScheduledRule.id == uuid.UUID(resolved),
+            ScheduledRule.owner_id == ctx.user_id,
+            ScheduledRule.archived_at.is_(None),
+        ),
+    )).first()
+    if current is None:
+        return ToolOutcome.failure(ERR_UNKNOWN_SCHEDULED, argument=params["ruleName"])
+    current_type, version = current
+
+    changes = _scheduled_rule_payload(ctx, params, fallback_kind=str(current_type))
+    if isinstance(changes, ToolOutcome):
+        return changes
+    if not changes:
+        return ToolOutcome.failure(ERR_INVALID_ARGUMENTS, argument="changes")
+
+    payload: dict[str, Any] = {"ruleId": resolved, "version": int(version), **changes}
+    notes: list[str] = []
+    if "name" in changes:
+        notes.append(f"改名为「{changes['name']}」")
+    if "amountCents" in changes:
+        notes.append(f"金额改为 ¥{_format_yuan(changes['amountCents'])}")
+    if "categoryId" in changes:
+        notes.append(f"分类改为「{params['categoryName']}」")
+    if "accountId" in changes:
+        notes.append(f"账户改为「{params['accountName']}」")
+    if "repeat" in changes or "startDate" in changes or "endDate" in changes:
+        notes.append("调整执行时间")
+    if "runHour" in changes or "runMinute" in changes:
+        notes.append("调整执行时刻")
+    if changes.get("enabled") is not None:
+        notes.append("启用" if changes["enabled"] else "暂停")
+    if "note" in changes:
+        notes.append("修改备注")
+    if "includeInBudget" in changes:
+        notes.append("计入预算" if changes["includeInBudget"] else "不计入预算")
+
+    return ToolOutcome.proposal({
+        "action": "scheduled_update",
+        "payload": payload,
+        "message": f"修改定时规则「{params['ruleName']}」：{'、'.join(notes)}",
+        "warnings": [],
+    })
+
+
+async def _handle_scheduled_archive(ctx: ToolContext, params: dict[str, Any]) -> ToolOutcome:
+    resolved = _resolve_scheduled(ctx, str(params["ruleName"]))
+    if isinstance(resolved, ToolOutcome):
+        return resolved
+
+    return ToolOutcome.proposal({
+        "action": "scheduled_archive",
+        "payload": {"ruleId": resolved},
+        "message": f"归档定时记账规则「{params['ruleName']}」（不再自动记账）",
+        "warnings": ["归档后这条规则不再自动记账，已经生成的记录仍然保留。"],
+    })
+
+
+# ---------------------------------------------------------------------------
+# 角色域 —— 读 / 写（T-M7-05c；实体已上云，T-M7-01）
+# ---------------------------------------------------------------------------
+
+
+async def _handle_persona_list(ctx: ToolContext, params: dict[str, Any]) -> ToolOutcome:
+    """列出全部**未归档**的聊天角色。
+
+    **结果里没有「当前角色」标记**：那个指针（``sync_meta.active_persona_id``）是
+    设备本地的，服务端看不到（``BridgeProtocol.kt``：角色表上云、指针不上行）。
+    用户问「现在用的是哪个角色」时，请如实说明要他在角色页上看，**不要猜**。
+    """
+    rows = await ctx.db.execute(
+        select(ChatPersona).where(
+            ChatPersona.owner_id == ctx.user_id,
+            ChatPersona.archived_at.is_(None),
+        ).order_by(ChatPersona.name, ChatPersona.id).limit(_OBJECT_NAME_LIMIT),
+    )
+    items = [
+        {"name": p.name, "avatar": p.avatar, "persona": p.persona}
+        for p in rows.scalars().all()
+    ]
+    return ToolOutcome.result({"personas": items, "total": len(items)})
+
+
+async def _handle_persona_create(ctx: ToolContext, params: dict[str, Any]) -> ToolOutcome:
+    name = str(params["name"])
+    payload: dict[str, Any] = {"name": name, "persona": _normalize_note(params.get("persona"))}
+    if params.get("avatar"):
+        payload["avatar"] = str(params["avatar"])
+    return ToolOutcome.proposal({
+        "action": "persona_create",
+        "payload": payload,
+        "message": f"新建聊天角色「{name}」",
+        "warnings": [],
+    })
+
+
+async def _handle_persona_update(ctx: ToolContext, params: dict[str, Any]) -> ToolOutcome:
+    resolved = _resolve_persona(ctx, str(params["personaName"]))
+    if isinstance(resolved, ToolOutcome):
+        return resolved
+    version = await _current_version(ctx, ChatPersona, uuid.UUID(resolved))
+    if version is None:
+        return ToolOutcome.failure(ERR_UNKNOWN_PERSONA, argument=params["personaName"])
+
+    payload: dict[str, Any] = {"personaId": resolved, "version": int(version)}
+    notes: list[str] = []
+    if params.get("newName"):
+        payload["name"] = str(params["newName"])
+        notes.append(f"改名为「{params['newName']}」")
+    if params.get("avatar"):
+        payload["avatar"] = str(params["avatar"])
+        notes.append("更换头像")
+    if params.get("persona") is not None:
+        payload["persona"] = str(params["persona"])
+        notes.append("修改人设描述")
+    if len(payload) == 2:
+        return ToolOutcome.failure(ERR_INVALID_ARGUMENTS, argument="changes")
+
+    return ToolOutcome.proposal({
+        "action": "persona_update",
+        "payload": payload,
+        "message": f"修改聊天角色「{params['personaName']}」：{'、'.join(notes)}",
+        "warnings": [],
+    })
+
+
+async def _handle_persona_archive(ctx: ToolContext, params: dict[str, Any]) -> ToolOutcome:
+    resolved = _resolve_persona(ctx, str(params["personaName"]))
+    if isinstance(resolved, ToolOutcome):
+        return resolved
+
+    return ToolOutcome.proposal({
+        "action": "persona_archive",
+        "payload": {"personaId": resolved},
+        "message": f"归档聊天角色「{params['personaName']}」",
+        "warnings": ["归档后这个角色不再出现在角色页。"],
+    })
+
+
+async def _handle_persona_switch(ctx: ToolContext, params: dict[str, Any]) -> ToolOutcome:
+    """切换**当前聊天角色**。
+
+    **执行位置是设备**：当前角色指针是 ``sync_meta`` 的 ``active_persona_id`` 键
+    （本地展示元数据，桥 ``meta.set`` 不上行），服务端没有它的落点——与
+    ``meta_set`` 同一类，提案只挂起、由客户端在设备上执行（``DEVICE_EXECUTED_OPS``）。
+    """
+    resolved = _resolve_persona(ctx, str(params["personaName"]))
+    if isinstance(resolved, ToolOutcome):
+        return resolved
+
+    return ToolOutcome.proposal({
+        "action": "persona_switch",
+        "payload": {"personaId": resolved},
+        "message": f"把当前聊天角色切换为「{params['personaName']}」",
         "warnings": [],
     })
 
@@ -2106,6 +2802,82 @@ TOOLS: tuple[Tool, ...] = (
         ),
         parameters=_object_schema({"period": _PERIOD_SCHEMA}, required=["period"]),
         handler=_handle_budget_overspent,
+    ),
+    Tool(
+        name="budget_set",
+        domain=DOMAIN_BUDGET,
+        kind="write",
+        proposal_action="budget_set",
+        description=(
+            "设置某个月的**整体预算**（这个月全部支出的上限，不分分类）。用户说"
+            "「这个月总共只能花 5000」「九月整体预算改成 6000」时用它。金额单位"
+            "是分，换算由你完成。这个月已经设过就覆盖，没设过就新建。只想限制"
+            "某一类（餐饮、交通等）请用 budget_set_category。"
+        ),
+        parameters=_object_schema(
+            {
+                "period": _PERIOD_SCHEMA,
+                "amountCents": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "maximum": 9007199254740991,
+                    "description": "预算额度，单位是分（1 元 = 100 分）。",
+                },
+            },
+            required=["period", "amountCents"],
+        ),
+        handler=_handle_budget_set,
+    ),
+    Tool(
+        name="budget_set_category",
+        domain=DOMAIN_BUDGET,
+        kind="write",
+        proposal_action="budget_set_category",
+        description=(
+            "设置某个月**某个分类**的预算（如「餐饮每月 1500」）。用户说「给餐饮"
+            "设个预算」「这个月交通预算是 300」时用它。分类名必须与现有分类完全"
+            "一致，且**必须是支出分类**——预算是花销上限，收入分类没有「已用」。"
+            "这个月该分类已经设过就覆盖，没设过就新建。整体预算请用 budget_set。"
+        ),
+        parameters=_object_schema(
+            {
+                "period": _PERIOD_SCHEMA,
+                "categoryName": {
+                    "type": "string",
+                    "description": "分类名，必须是现有**支出**分类的完整名称。",
+                },
+                "amountCents": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "maximum": 9007199254740991,
+                    "description": "预算额度，单位是分（1 元 = 100 分）。",
+                },
+            },
+            required=["period", "categoryName", "amountCents"],
+        ),
+        handler=_handle_budget_set_category,
+    ),
+    Tool(
+        name="budget_delete",
+        domain=DOMAIN_BUDGET,
+        kind="write",
+        proposal_action="budget_delete",
+        description=(
+            "删除某个月的预算：只给 period 表示删**整体预算**，再给 categoryName "
+            "表示删**该分类的预算**。用户说「把这个月的总预算去掉」「餐饮预算不要"
+            "了」时用它。删掉的是预算本身，已记录的交易和统计不受影响。"
+            "要改额度（而不是删掉）请用 budget_set / budget_set_category。"
+        ),
+        parameters=_object_schema({
+            "period": _PERIOD_SCHEMA,
+            "categoryName": {
+                "type": "string",
+                "description": (
+                    "要删的分类预算的分类名；**不填表示删整体预算**。"
+                ),
+            },
+        }, required=["period"]),
+        handler=_handle_budget_delete,
     ),
     # ── 账户域 ──────────────────────────────────────────────────────────
     Tool(
@@ -2437,6 +3209,472 @@ TOOLS: tuple[Tool, ...] = (
             required=["categoryName", "kind"],
         ),
         handler=_handle_category_archive,
+    ),
+    # ── 存钱域（T-M7-05c）───────────────────────────────────────────────
+    Tool(
+        name="savings_list",
+        domain=DOMAIN_SAVINGS,
+        kind="read",
+        description=(
+            "列出全部存钱目标（名称、目标金额、已存金额、还差多少、进度百分比、"
+            "图标、存款期限）。用户问「我的存钱目标有哪些」「旅行基金存到多少了」"
+            "时用它。存钱目标是用户级的，不分账本。"
+        ),
+        parameters=_object_schema({}),
+        handler=_handle_savings_list,
+    ),
+    Tool(
+        name="savings_create",
+        domain=DOMAIN_SAVINGS,
+        kind="write",
+        proposal_action="savings_create",
+        description=(
+            "新建一个存钱目标（如「旅行基金，目标 8000」）。用户说「我想攒钱买个"
+            "相机」「建一个存钱目标」时用它。金额单位是分，换算由你完成。"
+            "用户提到期限（「三个月内存到 8000」）时给出 periodValue 与 periodUnit，"
+            "**两个必须一起给**。新建时不需要给已存金额，之后用 savings_update 存。"
+        ),
+        parameters=_object_schema(
+            {
+                "name": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 128,
+                    "description": "目标名称，用户怎么称呼它就怎么写。",
+                },
+                "targetCents": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "maximum": 9007199254740991,
+                    "description": "目标金额，单位是分（1 元 = 100 分）。",
+                },
+                "icon": {
+                    "type": "string",
+                    "maxLength": 64,
+                    "description": "图标标识；用户没提就不要填。",
+                },
+                "periodValue": {
+                    "type": ["integer", "null"],
+                    "minimum": 1,
+                    "description": "存款期限的数量（如「三个月」的 3）。给就要和 periodUnit 一起给。",
+                },
+                "periodUnit": {
+                    "type": ["string", "null"],
+                    "enum": ["week", "month", None],
+                    "description": "期限单位：week=周，month=月。给就要和 periodValue 一起给。",
+                },
+            },
+            required=["name", "targetCents"],
+        ),
+        handler=_handle_savings_create,
+    ),
+    Tool(
+        name="savings_update",
+        domain=DOMAIN_SAVINGS,
+        kind="write",
+        proposal_action="savings_update",
+        description=(
+            "修改一个已有存钱目标：改名、改目标金额、换图标、调整期限，以及"
+            "**存入 / 更正已存金额**。用户说「旅行基金存 500」「给相机目标存 2000」"
+            "时用 addAmountCents（服务端会在当前已存金额上累加，你**不要**自己去查"
+            "旧值再算总数）；用户说「我其实已经存了 3000」这种直接改数时用"
+            "currentCents。savingsName 必须与现有目标完全一致（先用 savings_list 核对）。"
+        ),
+        parameters=_object_schema(
+            {
+                "savingsName": {
+                    "type": "string",
+                    "description": "要修改的目标名，必须与现有目标完全一致。",
+                },
+                "newName": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 128,
+                    "description": "新的目标名；不改名字就不要填。",
+                },
+                "targetCents": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "maximum": 9007199254740991,
+                    "description": "新的目标金额，单位是分；不改就不要填。",
+                },
+                "icon": {
+                    "type": "string",
+                    "maxLength": 64,
+                    "description": "新的图标标识；不换图标就不要填。",
+                },
+                "addAmountCents": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "maximum": 9007199254740991,
+                    "description": "**本次存入**的金额，单位是分。服务端累加，不要自己算总数。",
+                },
+                "currentCents": {
+                    "type": "integer",
+                    "minimum": 0,
+                    "maximum": 9007199254740991,
+                    "description": "把已存金额**直接改成**这个数（更正录错的进度）；单位是分。",
+                },
+                "periodValue": {
+                    "type": ["integer", "null"],
+                    "minimum": 1,
+                    "description": "新的期限数量；要与 periodUnit 一起给。两个都给 null 表示去掉期限。",
+                },
+                "periodUnit": {
+                    "type": ["string", "null"],
+                    "enum": ["week", "month", None],
+                    "description": "新的期限单位；要与 periodValue 一起给。两个都给 null 表示去掉期限。",
+                },
+            },
+            required=["savingsName"],
+        ),
+        handler=_handle_savings_update,
+    ),
+    Tool(
+        name="savings_archive",
+        domain=DOMAIN_SAVINGS,
+        kind="write",
+        proposal_action="savings_archive",
+        description=(
+            "归档（停用）一个存钱目标。用户说「旅行基金不攒了」「把这个目标删掉」"
+            "时用它。归档不是删除：目标不再出现在存钱页，进度记录也不再可见。"
+            "归档前请确认用户说的就是这个目标。"
+        ),
+        parameters=_object_schema(
+            {
+                "savingsName": {
+                    "type": "string",
+                    "description": "要归档的目标名，必须与现有目标完全一致。",
+                },
+            },
+            required=["savingsName"],
+        ),
+        handler=_handle_savings_archive,
+    ),
+    # ── 定时域（T-M7-05c）───────────────────────────────────────────────
+    Tool(
+        name="scheduled_list",
+        domain=DOMAIN_SCHEDULED,
+        kind="read",
+        description=(
+            "列出**当前账本**的定时记账规则（名称、收支类型、金额、分类、账户、"
+            "重复方式、起止日期、每天几点执行、是否启用、最近一次生成日期）。"
+            "用户问「我有哪些定时记账」「房租那条规则还在吗」时用它。"
+            "只列当前账本的规则，别的账本的规则不在这里。"
+        ),
+        parameters=_object_schema({}),
+        handler=_handle_scheduled_list,
+    ),
+    Tool(
+        name="scheduled_create",
+        domain=DOMAIN_SCHEDULED,
+        kind="write",
+        proposal_action="scheduled_create",
+        description=(
+            "新建一条定时记账规则（到期自动记一笔账，如「每个月 1 号自动记房租"
+            "3000」）。用户说「以后每天自动记一笔早餐 15」「设置每月自动记房租」"
+            "时用它。金额单位是分，换算由你完成；分类名必须与现有分类完全一致。"
+            "startDate 是首次生效日期，用户没说就从下个周期算起并在回复里说明。"
+        ),
+        parameters=_object_schema(
+            {
+                "name": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 64,
+                    "description": "规则名（如「房租」「早餐」），用户怎么叫它就怎么写。",
+                },
+                "type": _TX_TYPE_SCHEMA,
+                "amountCents": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "maximum": 9007199254740991,
+                    "description": "每次自动记录的金额，单位是分。",
+                },
+                "categoryName": {
+                    "type": "string",
+                    "description": "分类名，必须是与 type 同侧的现有分类的完整名称。",
+                },
+                "accountName": {
+                    "type": "string",
+                    "description": "账户名，必须是现有账户的完整名称；用户没提就省略。",
+                },
+                "repeat": {
+                    "type": "string",
+                    "enum": ["daily", "weekly", "monthly", "yearly"],
+                    "description": "重复方式：daily=每天、weekly=每周、monthly=每月、yearly=每年。",
+                },
+                "startDate": {
+                    **_BIZ_DATE_SCHEMA,
+                    "description": "首次生效日期 YYYY-MM-DD（含当天）。",
+                },
+                "endDate": {
+                    "type": ["string", "null"],
+                    "format": "date",
+                    "pattern": r"^\d{4}-\d{2}-\d{2}$",
+                    "description": "结束日期 YYYY-MM-DD（含当天）；一直重复就不要填。",
+                },
+                "runHour": {
+                    "type": "integer",
+                    "minimum": 0,
+                    "maximum": 23,
+                    "description": "每天几点生成（0-23），不填默认 8 点。",
+                },
+                "runMinute": {
+                    "type": "integer",
+                    "minimum": 0,
+                    "maximum": 59,
+                    "description": "生成时刻的分钟（0-59），不填默认 0 分。",
+                },
+                "note": {
+                    "type": "string",
+                    "maxLength": 2000,
+                    "description": "规则的备注（会拼进自动生成的记录的备注里）；没有就省略。",
+                },
+                "includeInBudget": {
+                    "type": "boolean",
+                    "description": "自动生成的记录是否计入预算，不填默认计入。",
+                },
+            },
+            required=["name", "type", "amountCents", "categoryName", "repeat", "startDate"],
+        ),
+        handler=_handle_scheduled_create,
+    ),
+    Tool(
+        name="scheduled_update",
+        domain=DOMAIN_SCHEDULED,
+        kind="write",
+        proposal_action="scheduled_update",
+        description=(
+            "修改一条已有的定时记账规则：金额、分类、账户、重复方式、起止日期、"
+            "执行时刻、备注、是否计入预算，以及**暂停 / 启用**（enabled=false 暂停）。"
+            "用户说「房租涨到 3500 了，改一下」「早餐那条先暂停」时用它。"
+            "ruleName 必须与现有规则完全一致（先用 scheduled_list 核对）。"
+            "已经生成的历史记录不受影响。要新建请用 scheduled_create。"
+        ),
+        parameters=_object_schema(
+            {
+                "ruleName": {
+                    "type": "string",
+                    "description": "要修改的规则名，必须与现有规则完全一致。",
+                },
+                "newName": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 64,
+                    "description": "新的规则名；不改名字就不要填。",
+                },
+                "type": _TX_TYPE_SCHEMA,
+                "amountCents": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "maximum": 9007199254740991,
+                    "description": "新的金额，单位是分；不改就不要填。",
+                },
+                "categoryName": {
+                    "type": "string",
+                    "description": "新的分类名；不换分类就不要填。改收支类型时请同时给 type。",
+                },
+                "accountName": {
+                    "type": "string",
+                    "description": "新的账户名；不换账户就不要填。",
+                },
+                "repeat": {
+                    "type": "string",
+                    "enum": ["daily", "weekly", "monthly", "yearly"],
+                    "description": "新的重复方式；不改就不要填。",
+                },
+                "startDate": {
+                    **_BIZ_DATE_SCHEMA,
+                    "description": "新的首次生效日期；不改就不要填。",
+                },
+                "endDate": {
+                    "type": ["string", "null"],
+                    "format": "date",
+                    "pattern": r"^\d{4}-\d{2}-\d{2}$",
+                    "description": "新的结束日期；给 null 表示改成一直重复。",
+                },
+                "runHour": {
+                    "type": "integer",
+                    "minimum": 0,
+                    "maximum": 23,
+                    "description": "新的执行小时（0-23）；不改就不要填。",
+                },
+                "runMinute": {
+                    "type": "integer",
+                    "minimum": 0,
+                    "maximum": 59,
+                    "description": "新的执行分钟（0-59）；不改就不要填。",
+                },
+                "note": {
+                    "type": "string",
+                    "maxLength": 2000,
+                    "description": "新的备注；清空就传空字符串。",
+                },
+                "includeInBudget": {
+                    "type": "boolean",
+                    "description": "是否计入预算；不改就不要填。",
+                },
+                "enabled": {
+                    "type": "boolean",
+                    "description": "false=暂停这条规则（不再自动记账），true=恢复。用户说「暂停 / 恢复」时给。",
+                },
+            },
+            required=["ruleName"],
+        ),
+        handler=_handle_scheduled_update,
+    ),
+    Tool(
+        name="scheduled_archive",
+        domain=DOMAIN_SCHEDULED,
+        kind="write",
+        proposal_action="scheduled_archive",
+        description=(
+            "归档（删掉）一条定时记账规则，之后不再自动记账。用户说「房租那条规则"
+            "删了吧」「不要自动记了」时用它——**只是暂时不想用请改用 "
+            "scheduled_update 的 enabled=false**，那更接近用户通常的意思。"
+            "已经生成的记录不受影响。"
+        ),
+        parameters=_object_schema(
+            {
+                "ruleName": {
+                    "type": "string",
+                    "description": "要归档的规则名，必须与现有规则完全一致。",
+                },
+            },
+            required=["ruleName"],
+        ),
+        handler=_handle_scheduled_archive,
+    ),
+    # ── 角色域（T-M7-05c）───────────────────────────────────────────────
+    Tool(
+        name="persona_list",
+        domain=DOMAIN_PERSONA,
+        kind="read",
+        description=(
+            "列出全部聊天角色（名称、头像、人设描述）。用户问「我有哪些角色」"
+            "「知性姐姐的人设是怎么写的」时用它。**它只读不改**：改人设用 "
+            "persona_update、换当前角色用 persona_switch——用户要的是「改」时，"
+            "列完清单还要把那个工具调下去。**结果里没有「当前角色」标记**"
+            "——那个指针存在设备本地，服务端看不到；用户问「现在用的是哪个角色」"
+            "时如实说明要他在角色页上看，不要猜。"
+        ),
+        parameters=_object_schema({}),
+        handler=_handle_persona_list,
+    ),
+    Tool(
+        name="persona_create",
+        domain=DOMAIN_PERSONA,
+        kind="write",
+        proposal_action="persona_create",
+        description=(
+            "新建一个聊天角色。用户说「再建一个角色叫猫娘」「加一个会毒舌的角色」"
+            "时用它。persona 是这个角色的人设描述（会作为系统提示注入对话），"
+            "用户怎么描述就怎么写，**不要替他编造人设**；他没说就留空并在回复里"
+            "说明人设是空的。"
+        ),
+        parameters=_object_schema(
+            {
+                "name": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 64,
+                    "description": "角色名，用户怎么称呼它就怎么写。",
+                },
+                "avatar": {
+                    "type": "string",
+                    "maxLength": 64,
+                    "description": "头像（一个 emoji 或短字符串）；用户没提就不要填。",
+                },
+                "persona": {
+                    "type": "string",
+                    "maxLength": 2000,
+                    "description": "人设描述原文；用户没说就省略或留空。",
+                },
+            },
+            required=["name"],
+        ),
+        handler=_handle_persona_create,
+    ),
+    Tool(
+        name="persona_update",
+        domain=DOMAIN_PERSONA,
+        kind="write",
+        proposal_action="persona_update",
+        description=(
+            "修改一个已有角色的名称、头像或人设描述。用户说「把猫娘改叫小猫咪」"
+            "「让知性姐姐说话再温柔些」（→ 改 persona）时用它。personaName 必须与"
+            "现有角色完全一致（先用 persona_list 核对）。**只改当前用哪个角色**请用 "
+            "persona_switch，那是另一件事。"
+        ),
+        parameters=_object_schema(
+            {
+                "personaName": {
+                    "type": "string",
+                    "description": "要修改的角色名，必须与现有角色完全一致。",
+                },
+                "newName": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 64,
+                    "description": "新的角色名；不改名字就不要填。",
+                },
+                "avatar": {
+                    "type": "string",
+                    "maxLength": 64,
+                    "description": "新的头像；不换头像就不要填。",
+                },
+                "persona": {
+                    "type": "string",
+                    "maxLength": 2000,
+                    "description": "新的人设描述（整段替换，不是追加）；不改就不要填。",
+                },
+            },
+            required=["personaName"],
+        ),
+        handler=_handle_persona_update,
+    ),
+    Tool(
+        name="persona_archive",
+        domain=DOMAIN_PERSONA,
+        kind="write",
+        proposal_action="persona_archive",
+        description=(
+            "归档（删掉）一个聊天角色。用户说「猫娘这个角色不要了」时用它。"
+            "归档后角色不再出现在角色页。归档前请确认用户说的就是这个角色。"
+        ),
+        parameters=_object_schema(
+            {
+                "personaName": {
+                    "type": "string",
+                    "description": "要归档的角色名，必须与现有角色完全一致。",
+                },
+            },
+            required=["personaName"],
+        ),
+        handler=_handle_persona_archive,
+    ),
+    Tool(
+        name="persona_switch",
+        domain=DOMAIN_PERSONA,
+        kind="write",
+        proposal_action="persona_switch",
+        description=(
+            "把**当前聊天角色**切换成某一个（之后聊天就用这个人设）。用户说"
+            "「换成猫娘」「用知性姐姐跟我聊」时用它。personaName 必须是现有角色"
+            "的完整名称（先用 persona_list 核对）。这只切当前用哪个角色，"
+            "不改角色本身的内容——那用 persona_update。"
+        ),
+        parameters=_object_schema(
+            {
+                "personaName": {
+                    "type": "string",
+                    "description": "要切换到的角色名，必须与现有角色完全一致。",
+                },
+            },
+            required=["personaName"],
+        ),
+        handler=_handle_persona_switch,
     ),
     # ── meta 域（执行位置＝设备）─────────────────────────────────────────
     Tool(

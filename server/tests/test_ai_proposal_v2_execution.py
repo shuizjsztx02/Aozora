@@ -460,8 +460,8 @@ class TestV2PayloadAuthorization:
         user = _guest(v2_env)
         book_id = _mk_book(c, user)
 
-        # budget_set 是注册表成员（05c 的域），但授权表与执行面都还没它
-        proposal = _v2("budget_set", {"period": "2026-09", "amountCents": 100})
+        # export_create 是注册表成员（05d 的域），但授权表与执行面都还没它
+        proposal = _v2("export_create", {})
         verdict = _validate(v2_env, user, book_id, proposal).json()
         assert verdict["valid"] is False
         assert verdict["verdict"] == "rejected_hallucination"
@@ -480,8 +480,8 @@ class TestV2PayloadAuthorization:
 
         for op, payload in (
             ("account_delete", {"confirm": True}),
-            ("budget_set", {"period": "2026-09", "amountCents": 100}),
             ("export_create", {}),
+            ("sync_trigger", {}),
         ):
             resp = _execute(v2_env, user, book_id, _v2(op, payload))
             assert resp.status_code == 403, op

@@ -1,11 +1,11 @@
-"""T-M7-05b: v2 op 的服务端执行面（``/ai/execute`` 与 loop 的执行器共用）。
+"""T-M7-05b / T-M7-05c: v2 op 的服务端执行面（``/ai/execute`` 与 loop 的执行器共用）。
 
 v2 的 op 注册表（``contracts/action-proposal/schema-v2.json``）有 34 个成员，
 但**能执行的只有登记在本模块的那些**——注册表成员身份是「这是一个提案」，
-不是「服务端会执行它」。05b 落地记账域与账户账本域，其余 op（预算 / 定时 /
-角色 / 导出 / 删号……）归 05c / 05d；**没登记的 op 一律 400**，包括
-``account_delete`` 这类最高危 op（它必须等 05d 连上「最严审批 + 不绕过既有删号
-流程」之后才能放行）。
+不是「服务端会执行它」。05b 落地记账域与账户账本域，05c 加上预算存钱 / 定时 /
+角色三域（T-M7-01 上云的三实体），其余 op（导出 / 反馈 / 隐私 / 账号 / 同步……
+归 05d）**没登记的一律 400**，包括 ``account_delete`` 这类最高危 op（它必须等
+05d 连上「最严审批 + 不绕过既有删号流程」之后才能放行）。
 
 三条口径
 --------
@@ -18,18 +18,40 @@ v2 的 op 注册表（``contracts/action-proposal/schema-v2.json``）有 34 个�
 3. **乐观并发只在 payload 带了 version 的 op 上生效**（改类 op）。归档 / 删除
    按对象身份（id）生效，与 REST 的同名端点同口径——不给用户一个他无法解决的
    失败模式。
+
+05c 的离线语义（三类实体在工具路径上的一条明确结论）
+---------------------------------------------------
+存钱目标 / 定时规则 / 角色**在设备上都有本地副本**（Room 表 + sync 参与双向
+同步）。AI 从服务端写它们时，写入的是**云端权威**，并同事务登一条 sync change
+（口径 2）——于是：
+
+- **设备在线**：下一次 pull 把这条变更合并进本地副本，用户在存钱页 / 定时页 /
+  角色页看到的就是 AI 刚做的那件事（与他自己在表单里做没有区别）。
+- **设备离线**：写入**照样成功**（服务端是权威，这条路径不依赖设备在线）；
+  设备恢复后 pull 到同一条变更。**不存在「离线时先写本地、上线再合并」的第二
+  条路径**——那会造出两个真相源。因此 AI 写入**不需要设备在场**，也不需要
+  05f 的设备执行器（那是给本地偏好项准备的，见 ``DEVICE_EXECUTED_OPS``）。
+- **定时规则的生成侧不变**：规则由设备上的引擎按 ``last_run_date`` 生成交易，
+  服务端只存规则本身；AI 改规则不触发任何补生成。
 """
 
 from __future__ import annotations
 
+import re
 import uuid
 from dataclasses import dataclass
+from datetime import UTC, date, datetime
 from typing import Any, Awaitable, Callable
 
 from pydantic import ValidationError
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from src.common.errors import AppException
+from src.models.budget import Budget, BudgetType
+from src.models.persona import ChatPersona
+from src.models.savings import SavingsGoal
+from src.models.scheduled import ScheduledRule
 from src.models.sync import SyncOperation
 from src.modules.accounts.schemas import AccountCreate, AccountUpdate
 from src.modules.accounts.service import AccountService
@@ -37,6 +59,20 @@ from src.modules.books.schemas import BookCreate, BookUpdate
 from src.modules.books.service import BookService
 from src.modules.categories.schemas import CategoryCreate, CategoryUpdate
 from src.modules.categories.service import CategoryService
+# 三域的**字段规则只有一份**，在 sync.service 里（实体上行 push 走的同一条门）。
+# 这里 import 私有名是有意的：把它抄成第二份必然漂移——同一份 payload 从 sync
+# 进来合法、从 AI 进来非法（或反过来）是最难查的一类不一致。05c 只统一**对外
+# 的错误码**（见 ``_checked``）。
+from src.modules.sync.service import (  # noqa: PLC2701 - 见上
+    _RULE_REPEATS,
+    _validate_amount_cents,
+    _validate_current_cents,
+    _validate_name,
+    _validate_note,
+    _validate_savings_period,
+    _require_bool,
+    _require_int_in_range,
+)
 from src.modules.transactions.schemas import TransactionUpdate
 from src.modules.transactions.service import TransactionService
 
@@ -102,6 +138,70 @@ async def _register_change(
         operation=SyncOperation(operation),
         version=version,
     )
+
+
+# ---------------------------------------------------------------------------
+# payload 取字段（T-M7-05c）
+# ---------------------------------------------------------------------------
+
+#: 预算期间（``YYYY-MM``）。与 ``budgets`` 路由的 ``Path(pattern=...)`` 同口径。
+_PERIOD_PATTERN = re.compile(r"^\d{4}-\d{2}$")
+
+
+def _checked(fn: Callable[..., Any], *args: Any) -> Any:
+    """跑一条 ``sync.service`` 的字段校验器，把它的 422 翻成 400 ``ai_invalid_payload``。
+
+    规则本身只有一份（见文件头的 import 说明）；这里统一的是**对外的错误码**：
+    v2 执行面把「payload 形状不对」一律报 400 ``ai_invalid_payload``（05b 的口径），
+    而不是让同一个形状在 sync 入口报 422、在 AI 入口报 400。
+    """
+    try:
+        return fn(*args)
+    except AppException:
+        raise AppException(400, "ai_invalid_payload", "Invalid proposal payload") from None
+
+
+def _text_field(payload: dict[str, Any], name: str) -> str:
+    """取一个**非空字符串**字段；缺失 / 类型不对 / 空串 → 400。"""
+    value = payload.get(name)
+    if not isinstance(value, str) or not value:
+        raise AppException(400, "ai_invalid_payload", f"Invalid {name}")
+    return value
+
+
+def _enum_field(payload: dict[str, Any], name: str, allowed: tuple[str, ...]) -> str:
+    value = payload.get(name)
+    if value not in allowed:
+        raise AppException(400, "ai_invalid_payload", f"Invalid {name}")
+    return str(value)
+
+
+def _date_field(payload: dict[str, Any], name: str) -> date:
+    """``YYYY-MM-DD`` → ``date``。**不存在的日期**（``2026-02-30``）也算形状不对。"""
+    raw = payload.get(name)
+    if not isinstance(raw, str):
+        raise AppException(400, "ai_invalid_payload", f"Invalid {name}")
+    try:
+        return date.fromisoformat(raw)
+    except ValueError:
+        raise AppException(400, "ai_invalid_payload", f"Invalid {name}") from None
+
+
+def _optional_uuid(payload: dict[str, Any], name: str) -> uuid.UUID | None:
+    """可空 id 字段：缺席 / ``null`` / 空串都当「没有」。"""
+    if payload.get(name) in (None, ""):
+        return None
+    return _uuid_field(payload, name)
+
+
+def _optional_text(payload: dict[str, Any], name: str) -> str | None:
+    """可空文本字段：缺席 / ``null`` → ``None``（表示「不动它」或「清空」）。"""
+    value = payload.get(name)
+    if value is None:
+        return None
+    if not isinstance(value, str):
+        raise AppException(400, "ai_invalid_payload", f"Invalid {name}")
+    return value
 
 
 # ---------------------------------------------------------------------------
@@ -320,6 +420,488 @@ async def _execute_book_delete(
     return OpReceipt(entity_type="book", entity_ids=[existing.id])
 
 
+# ---------------------------------------------------------------------------
+# 预算域（T-M7-05c）
+# ---------------------------------------------------------------------------
+
+
+async def _find_budget(
+    db: AsyncSession,
+    *,
+    book_id: uuid.UUID,
+    period: str,
+    category_id: uuid.UUID | None,
+) -> Budget | None:
+    """某月的总预算（``category_id is None``）或某分类的预算。
+
+    **过滤 ``deleted_at IS NULL``**：被删掉的预算行不能再被「UPSERT」到——
+    ``BudgetService.upsert_budget`` 的查询没有这个过滤，走它会让「删了再设」
+    改到那条已删的行上（行还在、版本涨了、金额变了，但用户永远看不到它）。
+    """
+    return await db.scalar(
+        select(Budget).where(
+            Budget.book_id == book_id,
+            Budget.budget_type == BudgetType.MONTHLY,
+            Budget.period == period,
+            Budget.deleted_at.is_(None),
+            Budget.category_id.is_(None) if category_id is None
+            else Budget.category_id == category_id,
+        ).order_by(Budget.id),
+    )
+
+
+async def _upsert_budget(
+    db: AsyncSession,
+    *,
+    user_id: uuid.UUID,
+    book_id: uuid.UUID,
+    payload: dict[str, Any],
+    category_id: uuid.UUID | None,
+) -> OpReceipt:
+    """预算的 UPSERT（``budget_set`` 与 ``budget_set_category`` 共用一个体）。
+
+    只处理**月度**预算（``budget_type=monthly``）：预算工具的期间参数是
+    ``YYYY-MM``，年度预算不在这条路径上（与读工具同口径）。
+    """
+    period = _text_field(payload, "period")
+    if not _PERIOD_PATTERN.match(period):
+        raise AppException(400, "ai_invalid_payload", "Invalid period")
+    amount = _int_field(payload, "amountCents")
+    _checked(_validate_amount_cents, amount)
+
+    existing = await _find_budget(
+        db, book_id=book_id, period=period, category_id=category_id,
+    )
+    if existing is None:
+        budget = Budget(
+            book_id=book_id,
+            budget_type=BudgetType.MONTHLY.value,
+            period=period,
+            amount_cents=amount,
+            category_id=category_id,
+        )
+        db.add(budget)
+        await db.flush()
+        operation = "insert"
+    else:
+        # 改已有的额度 → payload 带 version 时按乐观并发校验（口径 3）。
+        version = payload.get("version")
+        if version is not None:
+            if isinstance(version, bool) or not isinstance(version, int):
+                raise AppException(400, "ai_invalid_payload", "Invalid version")
+            if existing.version != version:
+                raise AppException(
+                    409, "version_conflict",
+                    f"Budget version mismatch: expected {version}, current {existing.version}",
+                )
+        existing.amount_cents = amount
+        existing.version += 1
+        await db.flush()
+        budget, operation = existing, "update"
+
+    await _register_change(
+        db, user_id=user_id, entity_type="budget", entity_id=budget.id,
+        operation=operation, version=budget.version,
+    )
+    return OpReceipt(entity_type="budget", entity_ids=[budget.id])
+
+
+async def _execute_budget_set(
+    db: AsyncSession, *, user_id: uuid.UUID, book_id: uuid.UUID, payload: dict[str, Any],
+) -> OpReceipt:
+    return await _upsert_budget(
+        db, user_id=user_id, book_id=book_id, payload=payload, category_id=None,
+    )
+
+
+async def _execute_budget_set_category(
+    db: AsyncSession, *, user_id: uuid.UUID, book_id: uuid.UUID, payload: dict[str, Any],
+) -> OpReceipt:
+    return await _upsert_budget(
+        db, user_id=user_id, book_id=book_id, payload=payload,
+        category_id=_uuid_field(payload, "categoryId"),
+    )
+
+
+async def _execute_budget_delete(
+    db: AsyncSession, *, user_id: uuid.UUID, book_id: uuid.UUID, payload: dict[str, Any],
+) -> OpReceipt:
+    """删一项预算（软删，与 sync 的 ``budget`` delete 同一条路：置 ``deleted_at``）。"""
+    period = _text_field(payload, "period")
+    if not _PERIOD_PATTERN.match(period):
+        raise AppException(400, "ai_invalid_payload", "Invalid period")
+    category_id = _optional_uuid(payload, "categoryId")
+
+    existing = await _find_budget(
+        db, book_id=book_id, period=period, category_id=category_id,
+    )
+    if existing is None:
+        raise AppException(404, "not_found", "Budget not found")
+    existing.deleted_at = datetime.now(UTC)
+    existing.version += 1
+    await db.flush()
+    await _register_change(
+        db, user_id=user_id, entity_type="budget", entity_id=existing.id,
+        operation="delete", version=existing.version,
+    )
+    return OpReceipt(entity_type="budget", entity_ids=[existing.id])
+
+
+# ---------------------------------------------------------------------------
+# 存钱域（T-M7-05c）
+# ---------------------------------------------------------------------------
+
+
+async def _get_savings(
+    db: AsyncSession, goal_id: uuid.UUID, user_id: uuid.UUID,
+) -> SavingsGoal:
+    goal = await db.scalar(
+        select(SavingsGoal).where(
+            SavingsGoal.id == goal_id,
+            SavingsGoal.owner_id == user_id,
+            SavingsGoal.archived_at.is_(None),
+        ),
+    )
+    if goal is None:
+        raise AppException(404, "not_found", "Savings goal not found")
+    return goal
+
+
+async def _execute_savings_create(
+    db: AsyncSession, *, user_id: uuid.UUID, book_id: uuid.UUID, payload: dict[str, Any],
+) -> OpReceipt:
+    name = _text_field(payload, "name")
+    _checked(_validate_name, name, 128, "name")
+    target = _int_field(payload, "targetCents")
+    _checked(_validate_amount_cents, target)
+    icon = _optional_text(payload, "icon")
+    if icon is not None:
+        _checked(_validate_name, icon, 64, "icon")
+    period_value, period_unit = _checked(
+        _validate_savings_period, payload.get("periodValue"), payload.get("periodUnit"),
+    )
+
+    goal = SavingsGoal(
+        owner_id=user_id, name=name, target_cents=target, current_cents=0,
+        icon=icon, period_value=period_value, period_unit=period_unit,
+    )
+    db.add(goal)
+    await db.flush()
+    await _register_change(
+        db, user_id=user_id, entity_type="savings_goal", entity_id=goal.id,
+        operation="insert", version=goal.version,
+    )
+    return OpReceipt(entity_type="savings_goal", entity_ids=[goal.id])
+
+
+async def _execute_savings_update(
+    db: AsyncSession, *, user_id: uuid.UUID, book_id: uuid.UUID, payload: dict[str, Any],
+) -> OpReceipt:
+    goal = await _get_savings(db, _uuid_field(payload, "savingsId"), user_id)
+    version = _int_field(payload, "version")
+    if goal.version != version:
+        raise AppException(
+            409, "version_conflict",
+            f"Savings goal version mismatch: expected {version}, current {goal.version}",
+        )
+    if "currentCents" in payload and "addAmountCents" in payload:
+        # 「直接改成 N」与「在现有基础上加 N」是两件事，同时给没有合理优先级。
+        raise AppException(
+            400, "ai_invalid_payload",
+            "currentCents and addAmountCents are mutually exclusive",
+        )
+
+    if "name" in payload:
+        name = _text_field(payload, "name")
+        _checked(_validate_name, name, 128, "name")
+        goal.name = name
+    if "targetCents" in payload:
+        target = _int_field(payload, "targetCents")
+        _checked(_validate_amount_cents, target)
+        goal.target_cents = target
+    if "icon" in payload:
+        icon = _optional_text(payload, "icon")
+        if icon is not None:
+            _checked(_validate_name, icon, 64, "icon")
+        goal.icon = icon
+    if "currentCents" in payload:
+        current = _int_field(payload, "currentCents")
+        _checked(_validate_current_cents, current)
+        goal.current_cents = current
+    if "addAmountCents" in payload:
+        # **存入**：在当前已存金额上累加（铁律 2——模型不读旧值、不做加法，
+        # 于是既没有「模型算错」，也没有「两人同时存、后写的覆盖先写的」）。
+        amount = _int_field(payload, "addAmountCents")
+        _checked(_validate_amount_cents, amount)
+        deposited = goal.current_cents + amount
+        _checked(_validate_current_cents, deposited)
+        goal.current_cents = deposited
+    if "periodValue" in payload or "periodUnit" in payload:
+        # 成对语义：两个都给（值或 null）；只给一半是形状不对。
+        goal.period_value, goal.period_unit = _checked(
+            _validate_savings_period, payload.get("periodValue"), payload.get("periodUnit"),
+        )
+
+    goal.version += 1
+    await db.flush()
+    await _register_change(
+        db, user_id=user_id, entity_type="savings_goal", entity_id=goal.id,
+        operation="update", version=goal.version,
+    )
+    return OpReceipt(entity_type="savings_goal", entity_ids=[goal.id])
+
+
+async def _execute_savings_archive(
+    db: AsyncSession, *, user_id: uuid.UUID, book_id: uuid.UUID, payload: dict[str, Any],
+) -> OpReceipt:
+    goal = await _get_savings(db, _uuid_field(payload, "savingsId"), user_id)
+    goal.archived_at = datetime.now(UTC)
+    goal.version += 1
+    await db.flush()
+    await _register_change(
+        db, user_id=user_id, entity_type="savings_goal", entity_id=goal.id,
+        operation="delete", version=goal.version,
+    )
+    return OpReceipt(entity_type="savings_goal", entity_ids=[goal.id])
+
+
+# ---------------------------------------------------------------------------
+# 定时域（T-M7-05c）
+# ---------------------------------------------------------------------------
+
+_RULE_TYPES = ("expense", "income")
+
+
+def _rule_writes(payload: dict[str, Any]) -> dict[str, Any]:
+    """规则的**可写字段** → ORM 列赋值（创建与修改共用，两处口径因此一致）。
+
+    只处理 payload 里**出现过**的键：缺省＝不动那一列（改类 op 的语义）。
+    """
+    writes: dict[str, Any] = {}
+    if "type" in payload:
+        writes["type"] = _enum_field(payload, "type", _RULE_TYPES)
+    if "name" in payload:
+        name = _text_field(payload, "name")
+        _checked(_validate_name, name, 64, "name")
+        writes["name"] = name
+    if "amountCents" in payload:
+        amount = _int_field(payload, "amountCents")
+        _checked(_validate_amount_cents, amount)
+        writes["amount_cents"] = amount
+    if "categoryId" in payload:
+        writes["category_id"] = _uuid_field(payload, "categoryId")
+    if "accountId" in payload:
+        writes["account_id"] = _optional_uuid(payload, "accountId")
+    if "includeInBudget" in payload:
+        writes["include_in_budget"] = _checked(
+            _require_bool, payload.get("includeInBudget"), "includeInBudget",
+        )
+    if "note" in payload:
+        note = payload.get("note")
+        _checked(_validate_note, note)
+        writes["note"] = note
+    if "repeat" in payload:
+        repeat = str(payload.get("repeat"))
+        if repeat not in _RULE_REPEATS:
+            raise AppException(400, "ai_invalid_payload", "Invalid repeat")
+        writes["repeat"] = repeat
+    if "startDate" in payload:
+        writes["start_date"] = _date_field(payload, "startDate")
+    if "endDate" in payload:
+        writes["end_date"] = (
+            None if payload.get("endDate") in (None, "") else _date_field(payload, "endDate")
+        )
+    if "enabled" in payload:
+        writes["enabled"] = _checked(_require_bool, payload.get("enabled"), "enabled")
+    if "runHour" in payload:
+        writes["run_hour"] = _checked(
+            _require_int_in_range, payload.get("runHour"), 0, 23, "runHour",
+        )
+    if "runMinute" in payload:
+        writes["run_minute"] = _checked(
+            _require_int_in_range, payload.get("runMinute"), 0, 59, "runMinute",
+        )
+    return writes
+
+
+async def _get_rule(
+    db: AsyncSession, rule_id: uuid.UUID, user_id: uuid.UUID, book_id: uuid.UUID,
+) -> ScheduledRule:
+    """规则必须属于本人、未归档、**且就在本轮的账本里**（与授权表同口径）。"""
+    rule = await db.scalar(
+        select(ScheduledRule).where(
+            ScheduledRule.id == rule_id,
+            ScheduledRule.owner_id == user_id,
+            ScheduledRule.archived_at.is_(None),
+            ScheduledRule.book_id == book_id,
+        ),
+    )
+    if rule is None:
+        raise AppException(404, "not_found", "Scheduled rule not found")
+    return rule
+
+
+async def _execute_scheduled_create(
+    db: AsyncSession, *, user_id: uuid.UUID, book_id: uuid.UUID, payload: dict[str, Any],
+) -> OpReceipt:
+    writes = _rule_writes(payload)
+    for required in ("type", "name", "amount_cents", "category_id", "repeat", "start_date"):
+        if required not in writes:
+            raise AppException(400, "ai_invalid_payload", f"Missing {required}")
+
+    # 与 sync 的 ``_apply_insert`` 同一套缺省值（``ScheduledRule`` 的列默认值）。
+    fields: dict[str, Any] = {
+        "note": "", "include_in_budget": True, "enabled": True,
+        "run_hour": 8, "run_minute": 0, "end_date": None,
+    }
+    fields.update(writes)
+    rule = ScheduledRule(owner_id=user_id, book_id=book_id, **fields)
+    db.add(rule)
+    await db.flush()
+    await _register_change(
+        db, user_id=user_id, entity_type="scheduled_rule", entity_id=rule.id,
+        operation="insert", version=rule.version,
+    )
+    return OpReceipt(entity_type="scheduled_rule", entity_ids=[rule.id])
+
+
+async def _execute_scheduled_update(
+    db: AsyncSession, *, user_id: uuid.UUID, book_id: uuid.UUID, payload: dict[str, Any],
+) -> OpReceipt:
+    rule = await _get_rule(db, _uuid_field(payload, "ruleId"), user_id, book_id)
+    version = _int_field(payload, "version")
+    if rule.version != version:
+        raise AppException(
+            409, "version_conflict",
+            f"Scheduled rule version mismatch: expected {version}, current {rule.version}",
+        )
+    writes = _rule_writes(payload)
+    if not writes:
+        raise AppException(400, "ai_invalid_payload", "No fields to update")
+    for key, value in writes.items():
+        setattr(rule, key, value)
+    # 成序校验按**更新后的最终值**判定（镜像 sync 的 ``_apply_update``）。
+    if rule.end_date is not None and rule.end_date < rule.start_date:
+        raise AppException(400, "ai_invalid_payload", "endDate must not precede startDate")
+
+    rule.version += 1
+    await db.flush()
+    await _register_change(
+        db, user_id=user_id, entity_type="scheduled_rule", entity_id=rule.id,
+        operation="update", version=rule.version,
+    )
+    return OpReceipt(entity_type="scheduled_rule", entity_ids=[rule.id])
+
+
+async def _execute_scheduled_archive(
+    db: AsyncSession, *, user_id: uuid.UUID, book_id: uuid.UUID, payload: dict[str, Any],
+) -> OpReceipt:
+    rule = await _get_rule(db, _uuid_field(payload, "ruleId"), user_id, book_id)
+    rule.archived_at = datetime.now(UTC)
+    rule.version += 1
+    await db.flush()
+    await _register_change(
+        db, user_id=user_id, entity_type="scheduled_rule", entity_id=rule.id,
+        operation="delete", version=rule.version,
+    )
+    return OpReceipt(entity_type="scheduled_rule", entity_ids=[rule.id])
+
+
+# ---------------------------------------------------------------------------
+# 角色域（T-M7-05c）
+# ---------------------------------------------------------------------------
+
+
+async def _get_persona(
+    db: AsyncSession, persona_id: uuid.UUID, user_id: uuid.UUID,
+) -> ChatPersona:
+    persona = await db.scalar(
+        select(ChatPersona).where(
+            ChatPersona.id == persona_id,
+            ChatPersona.owner_id == user_id,
+            ChatPersona.archived_at.is_(None),
+        ),
+    )
+    if persona is None:
+        raise AppException(404, "not_found", "Persona not found")
+    return persona
+
+
+async def _execute_persona_create(
+    db: AsyncSession, *, user_id: uuid.UUID, book_id: uuid.UUID, payload: dict[str, Any],
+) -> OpReceipt:
+    name = _text_field(payload, "name")
+    _checked(_validate_name, name, 64, "name")
+    avatar = _optional_text(payload, "avatar")
+    if avatar is not None:
+        _checked(_validate_name, avatar, 64, "avatar")
+    text = payload.get("persona", "")
+    _checked(_validate_note, text, "persona")
+
+    persona = ChatPersona(owner_id=user_id, name=name, avatar=avatar, persona=text)
+    db.add(persona)
+    await db.flush()
+    await _register_change(
+        db, user_id=user_id, entity_type="chat_persona", entity_id=persona.id,
+        operation="insert", version=persona.version,
+    )
+    return OpReceipt(entity_type="chat_persona", entity_ids=[persona.id])
+
+
+async def _execute_persona_update(
+    db: AsyncSession, *, user_id: uuid.UUID, book_id: uuid.UUID, payload: dict[str, Any],
+) -> OpReceipt:
+    persona = await _get_persona(db, _uuid_field(payload, "personaId"), user_id)
+    version = _int_field(payload, "version")
+    if persona.version != version:
+        raise AppException(
+            409, "version_conflict",
+            f"Persona version mismatch: expected {version}, current {persona.version}",
+        )
+
+    changed = False
+    if "name" in payload:
+        name = _text_field(payload, "name")
+        _checked(_validate_name, name, 64, "name")
+        persona.name = name
+        changed = True
+    if "avatar" in payload:
+        avatar = _optional_text(payload, "avatar")
+        if avatar is not None:
+            _checked(_validate_name, avatar, 64, "avatar")
+        persona.avatar = avatar
+        changed = True
+    if "persona" in payload:
+        text = payload.get("persona")
+        _checked(_validate_note, text, "persona")
+        persona.persona = text
+        changed = True
+    if not changed:
+        raise AppException(400, "ai_invalid_payload", "No fields to update")
+
+    persona.version += 1
+    await db.flush()
+    await _register_change(
+        db, user_id=user_id, entity_type="chat_persona", entity_id=persona.id,
+        operation="update", version=persona.version,
+    )
+    return OpReceipt(entity_type="chat_persona", entity_ids=[persona.id])
+
+
+async def _execute_persona_archive(
+    db: AsyncSession, *, user_id: uuid.UUID, book_id: uuid.UUID, payload: dict[str, Any],
+) -> OpReceipt:
+    persona = await _get_persona(db, _uuid_field(payload, "personaId"), user_id)
+    persona.archived_at = datetime.now(UTC)
+    persona.version += 1
+    await db.flush()
+    await _register_change(
+        db, user_id=user_id, entity_type="chat_persona", entity_id=persona.id,
+        operation="delete", version=persona.version,
+    )
+    return OpReceipt(entity_type="chat_persona", entity_ids=[persona.id])
+
+
 #: op → 执行体。**不在表里的 op 一律 400**（含 05c / 05d 尚未落地的 op 与最高危
 #: 的 ``account_delete``）——注册表成员身份不是执行许可。
 EXECUTORS: dict[str, Callable[..., Awaitable[OpReceipt]]] = {
@@ -334,6 +916,21 @@ EXECUTORS: dict[str, Callable[..., Awaitable[OpReceipt]]] = {
     "book_create": _execute_book_create,
     "book_update": _execute_book_update,
     "book_delete": _execute_book_delete,
+    # ── T-M7-05c：预算存钱 / 定时 / 角色 ────────────────────────────────
+    "budget_set": _execute_budget_set,
+    "budget_set_category": _execute_budget_set_category,
+    "budget_delete": _execute_budget_delete,
+    "savings_create": _execute_savings_create,
+    "savings_update": _execute_savings_update,
+    "savings_archive": _execute_savings_archive,
+    "scheduled_create": _execute_scheduled_create,
+    "scheduled_update": _execute_scheduled_update,
+    "scheduled_archive": _execute_scheduled_archive,
+    "persona_create": _execute_persona_create,
+    "persona_update": _execute_persona_update,
+    "persona_archive": _execute_persona_archive,
+    # ``persona_switch`` **不在这里**：它的执行位置在设备（当前角色指针是
+    # ``sync_meta`` 的本地键），与 ``meta_set`` 同类，见 ``DEVICE_EXECUTED_OPS``。
 }
 
 #: **服务端执行得了的 op 全集**：上面那张表 + ``transaction_add``。记账走的是
