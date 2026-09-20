@@ -74,6 +74,9 @@ class SyncEngine(
             //    三张表一起清空，本地独有数据只能靠此刻入队的 mutation 存活到 push。
             //    已上行过（meta 标记）时是空操作。
             repository.migrateCloudEntitiesUp()
+            // 3b. T-M7-05j: 存量本地偏好值一次性上行，同样必须先于 bootstrap 的
+            //     clearAllEntities（它清空 user_preferences 镜像表）。
+            repository.migratePreferencesUp()
 
             // 4. T-M3-03: 检测是否需要 bootstrap（新设备 / 清空 Room 后首次同步）
             if (needsBootstrap()) {
@@ -144,6 +147,8 @@ class SyncEngine(
                 ?: return@withLock handleAuthLost("user id missing before bootstrap")
             // T-M7-01: 同 runOnce —— 存量数据上行必须先于 bootstrap 的清空。
             repository.migrateCloudEntitiesUp()
+            // T-M7-05j: 偏好值同上（先于 user_preferences 镜像表的清空）。
+            repository.migratePreferencesUp()
             // P2-3: REBUILDING 状态区分常规 pull 与全量重建，前端可据此展示"重建中"
             emit(SyncState.REBUILDING, pendingCountSnapshot())
             runBootstrap(ownerId, forced = true)
@@ -267,7 +272,8 @@ class SyncEngine(
             "${response.transactions.size} transactions, ${response.budgets.size} budgets, " +
             "${response.savingsGoals.size} savings goals, " +
             "${response.scheduledRules.size} scheduled rules, " +
-            "${response.chatPersonas.size} chat personas")
+            "${response.chatPersonas.size} chat personas, " +
+            "${response.userPreferences.size} user preferences")
         repository.applyBootstrap(response, ownerId)
 
         // P0-1 修复：checksum 在 parseBootstrapResponse 中用原始 snake_case 数据重算，
@@ -277,10 +283,27 @@ class SyncEngine(
         // T-M7-01: 三实体上云后，服务端同时下发 legacy（五类）与 v2（八类）两个
         // checksum。当前客户端用 v2；连到旧服务端（无 checksum_v2）时回退 legacy，
         // 此时服务端也不会返回三个新列表，计数校验自然通过（0 == 0）。
-        val useV2 = response.checksumV2.isNotEmpty()
-        val declaredChecksum = if (useV2) response.checksumV2 else response.checksum
-        val computedChecksum = if (useV2) response.computedChecksumV2 else response.computedChecksum
-        val checksumLabel = if (useV2) "checksum_v2" else "checksum(legacy)"
+        //
+        // T-M7-05j: 车道变为 v3（九类）> v2（八类）> legacy（五类）。服务端**同时**
+        // 下发三个值（v2 的输入刻意不含偏好，否则 05j 之前构建的客户端会在下次
+        // bootstrap 判失配 → RETRYABLE 死循环），故按在场的高版本优先取用。
+        val useV3 = response.checksumV3.isNotEmpty()
+        val useV2 = !useV3 && response.checksumV2.isNotEmpty()
+        val declaredChecksum = when {
+            useV3 -> response.checksumV3
+            useV2 -> response.checksumV2
+            else -> response.checksum
+        }
+        val computedChecksum = when {
+            useV3 -> response.computedChecksumV3
+            useV2 -> response.computedChecksumV2
+            else -> response.computedChecksum
+        }
+        val checksumLabel = when {
+            useV3 -> "checksum_v3"
+            useV2 -> "checksum_v2"
+            else -> "checksum(legacy)"
+        }
         if (computedChecksum.isNotEmpty() && computedChecksum != declaredChecksum) {
             Log.e(TAG, "bootstrap $checksumLabel MISMATCH: computed=$computedChecksum server=$declaredChecksum")
             emit(SyncState.ERROR, pendingCountSnapshot(), lastError = "bootstrap checksum mismatch")
@@ -307,7 +330,9 @@ class SyncEngine(
             // T-M7-01: 三实体同口径（旧服务端返回空列表 → 期望 0，清空后本地也是 0）
             "savings_goals" to response.savingsGoals.size,
             "scheduled_rules" to response.scheduledRules.size,
-            "chat_personas" to response.chatPersonas.size
+            "chat_personas" to response.chatPersonas.size,
+            // T-M7-05j: 偏好行同口径（旧服务端返回空列表 → 期望 0）
+            "user_preferences" to response.userPreferences.size
         )
         val countMismatches = expected.entries.mapNotNull { (type, expectedCount) ->
             val actual = entities[type]?.size ?: 0

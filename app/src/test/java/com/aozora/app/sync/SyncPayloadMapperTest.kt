@@ -695,6 +695,118 @@ class SyncPayloadMapperTest {
         assertNull(SyncPayloadMapper.isoToEpochMillis("not-a-time"))
     }
 
+    // ─── T-M7-05j: 偏好项上云 ───
+
+    @Test
+    fun toMutationWire_acceptsUserPreferenceType() {
+        val pm = PendingMutationEntity(
+            mutationId = "m-pref", entityType = "user_preference", entityId = "p1",
+            operation = PendingMutationEntity.OP_INSERT,
+            payload = """{"key":"default_book_id","value":"b1"}""",
+            status = PendingMutationEntity.STATUS_PENDING, retryCount = 0,
+            createdAt = 1L, expectedVersion = null, lastError = null
+        )
+        val wire = SyncPayloadMapper.toMutationWire(pm)
+        assertEquals("user_preference", wire.entityType)
+        // push 方向的 camel→snake：key/value 同名透传（服务端 _apply_insert 直接下标读）
+        val payload = SyncPayloadMapper.toWirePayload(wire.payload)
+        assertEquals("default_book_id", payload.getString("key"))
+        assertEquals("b1", payload.getString("value"))
+    }
+
+    @Test
+    fun serverChange_toUserPreference_mapsFourColumns() {
+        val change = ServerChange(
+            entityType = "user_preference", entityId = "p1",
+            operation = SyncChangeOp.UPDATE, version = 4,
+            entityPayload = mapOf(
+                "id" to "p1", "key" to "book_order",
+                "value" to """["b1","b2"]""", "version" to "4"
+            )
+        )
+        val pref = change.toUserPreference()!!
+        assertEquals("p1", pref.id)
+        assertEquals("book_order", pref.key)
+        assertEquals("""["b1","b2"]""", pref.value)
+        assertEquals(4, pref.version)
+        // 非偏好类型 → null（同族 helper 的统一口径）
+        assertNull(change.copy(entityType = "book").toUserPreference())
+    }
+
+    @Test
+    fun parsePullResponse_acceptsUserPreferenceType() {
+        val json = """
+            {
+              "changes": [
+                {"entity_type": "user_preference", "entity_id": "p1", "operation": "insert",
+                 "version": 1, "entity": {"id": "p1", "key": "default_book_id", "value": "b1", "version": 1}},
+                {"entity_type": "user_preference", "entity_id": "p1", "operation": "delete",
+                 "version": 2, "entity": null}
+              ],
+              "cursor": 88, "has_more": false
+            }
+        """.trimIndent()
+        val response = SyncPayloadMapper.parsePullResponse(json)
+        assertEquals(2, response.changes.size)
+        assertEquals("default_book_id", response.changes[0].entityPayload["key"])
+        assertEquals("b1", response.changes[0].entityPayload["value"])
+        assertEquals(SyncChangeOp.DELETE, response.changes[1].operation)
+        // 删除变更不带 entity → payload 为空（key 只能靠本地镜像行反查）
+        assertTrue(response.changes[1].entityPayload.isEmpty())
+    }
+
+    @Test
+    fun parseBootstrapResponse_parsesUserPreferencesAndChecksumV3() {
+        val json = """
+            {
+              "books": [], "categories": [], "accounts": [], "transactions": [], "budgets": [],
+              "savings_goals": [], "scheduled_rules": [], "chat_personas": [],
+              "user_preferences": [
+                {"id": "44444444-4444-4444-8444-111111111111", "key": "default_book_id",
+                 "value": "77777777-7777-4777-8777-111111111111", "version": 1}
+              ],
+              "cursor": 42,
+              "checksum": "2cfcc3208403af4dde547253e4e0d23cf4e3ec1a5b90ef64caffe101020ef94e",
+              "checksum_v2": "2cfcc3208403af4dde547253e4e0d23cf4e3ec1a5b90ef64caffe101020ef94e",
+              "checksum_v3": "217cbdd5f5bdccea080d6356bc7419660e587bb929aaf0edbecefdd095d8cd55"
+            }
+        """.trimIndent()
+        val response = SyncPayloadMapper.parseBootstrapResponse(json)
+
+        assertEquals(1, response.userPreferences.size)
+        assertEquals("default_book_id", response.userPreferences[0]["key"])
+        assertEquals("77777777-7777-4777-8777-111111111111", response.userPreferences[0]["value"])
+
+        // 与 Python 侧 compute_bootstrap_checksum_v3 的真实输出逐字节一致
+        // （参考值生成脚本：同一输入 + cursor=42 调用服务端函数）
+        assertEquals(
+            "217cbdd5f5bdccea080d6356bc7419660e587bb929aaf0edbecefdd095d8cd55",
+            response.computedChecksumV3,
+        )
+        assertEquals(
+            "217cbdd5f5bdccea080d6356bc7419660e587bb929aaf0edbecefdd095d8cd55",
+            response.checksumV3,
+        )
+        // 有一条偏好行时 v3 必然不同于 v2/legacy（九类 vs 八类/五类）
+        assertNotEquals(response.computedChecksumV3, response.computedChecksumV2)
+        assertEquals(response.computedChecksum, response.computedChecksumV2)
+    }
+
+    @Test
+    fun parseBootstrapResponse_withoutPreferences_checksumV3EqualsV2() {
+        // 旧服务端（无 checksum_v3 / user_preferences）与"新服务端但账号没写过偏好"
+        // 两种情形在客户端侧同形：v3 ≡ v2，走哪条车道都得到同一个值。
+        val json = bootstrapJsonWithCloudEntities()
+        val response = SyncPayloadMapper.parseBootstrapResponse(json)
+        assertTrue(response.userPreferences.isEmpty())
+        assertEquals("", response.checksumV3)
+        assertEquals(response.computedChecksumV2, response.computedChecksumV3)
+        assertEquals(
+            "af2c8fda4bd60e312a63c654fa159b64a9982569762ba2d8be559c09c926c841",
+            response.computedChecksumV3,
+        )
+    }
+
     /** 与 Python 参考脚本同形的 bootstrap 响应（值刻意与 fixture 一致）。 */
     private fun bootstrapJsonWithCloudEntities(): String = """
         {

@@ -8,7 +8,10 @@ import org.json.JSONException
  * T9-5a（REQ-11 / 决策 #1）：meta.get / meta.set 的键白名单与值格式校验。
  *
  * 纯函数对象（不依赖 WebView），供 AozoraBridge handler 调用并可在 JVM 单测。
- * 存储一律 sync_meta：不加实体列（防 bootstrap 冲刷）、不上行（不污染 push 契约）。
+ * 存储一律 sync_meta：不加实体列（防 bootstrap 冲刷）。上行口径分两类：
+ * [SyncMetaEntity.SYNCABLE_PREFERENCE_KEYS] 那 6 个键 T-M7-05j 起**会上云**
+ * （写入时同事务入队 user_preference mutation，见 AozoraBridge.handleMetaSet）；
+ * 其余键（设备自管量）仍只存本地。
  * 非法输入统一抛 IllegalArgumentException → 桥统一转 invalid_input 错误响应。
  */
 object MetaWhitelist {

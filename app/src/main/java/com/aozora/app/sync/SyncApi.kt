@@ -136,7 +136,15 @@ data class BootstrapResponse(
     val checksumV2: String = "",
     val computedChecksum: String = "",
     /** T-M7-01: 八类重算值 —— 与 [checksumV2] 比对。 */
-    val computedChecksumV2: String = ""
+    val computedChecksumV2: String = "",
+    // T-M7-05j（偏好项上云）：追加在末尾，避免打断既有位置传参（androidTest 里
+    // 有 `BootstrapResponse(books, ..., cursor = ..., checksum = ...)` 的写法）。
+    /** 偏好行列表（`{id, key, value, version}`）；旧服务端不返回该键时为空列表。 */
+    val userPreferences: List<Map<String, String?>> = emptyList(),
+    /** T-M7-05j: 九类 + cursor 的 checksum；05j 之前的服务端为空串。 */
+    val checksumV3: String = "",
+    /** T-M7-05j: 九类重算值 —— 与 [checksumV3] 比对。 */
+    val computedChecksumV3: String = ""
 )
 
 /** HTTP 错误；包含状态码与响应体摘要。 */

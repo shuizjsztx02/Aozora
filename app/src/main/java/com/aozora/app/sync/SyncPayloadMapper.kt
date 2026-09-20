@@ -189,6 +189,8 @@ object SyncPayloadMapper {
         val serverChecksum = root.optString("checksum", "")
         // T-M7-01: 旧服务端无此键 → 空串，SyncEngine 回退到 legacy checksum 校验。
         val serverChecksumV2 = root.optString("checksum_v2", "")
+        // T-M7-05j: 05j 之前的服务端无此键 → 空串，SyncEngine 退回 v2。
+        val serverChecksumV3 = root.optString("checksum_v3", "")
         val cursor = root.optLong("cursor", 0L)
 
         val books = parseEntityListDual(root, "books")
@@ -200,6 +202,8 @@ object SyncPayloadMapper {
         val savingsGoals = parseEntityListDual(root, "savings_goals")
         val scheduledRules = parseEntityListDual(root, "scheduled_rules")
         val chatPersonas = parseEntityListDual(root, "chat_personas")
+        // T-M7-05j: 偏好项上云（旧服务端不返回该键 → 空列表）
+        val userPreferences = parseEntityListDual(root, "user_preferences")
 
         // P0-1: 用原始 snake_case Map 重算 checksum，与服务端算法输入一致
         val computedChecksum = BootstrapChecksum.compute(
@@ -212,6 +216,13 @@ object SyncPayloadMapper {
             savingsGoals = savingsGoals.snake, scheduledRules = scheduledRules.snake,
             chatPersonas = chatPersonas.snake, cursor = cursor
         )
+        val computedChecksumV3 = BootstrapChecksum.computeV3(
+            books = books.snake, categories = categories.snake, accounts = accounts.snake,
+            transactions = transactions.snake, budgets = budgets.snake,
+            savingsGoals = savingsGoals.snake, scheduledRules = scheduledRules.snake,
+            chatPersonas = chatPersonas.snake, userPreferences = userPreferences.snake,
+            cursor = cursor
+        )
 
         return BootstrapResponse(
             books = books.camel, categories = categories.camel, accounts = accounts.camel,
@@ -219,7 +230,9 @@ object SyncPayloadMapper {
             savingsGoals = savingsGoals.camel, scheduledRules = scheduledRules.camel,
             chatPersonas = chatPersonas.camel,
             cursor = cursor, checksum = serverChecksum, checksumV2 = serverChecksumV2,
-            computedChecksum = computedChecksum, computedChecksumV2 = computedChecksumV2
+            computedChecksum = computedChecksum, computedChecksumV2 = computedChecksumV2,
+            userPreferences = userPreferences.camel, checksumV3 = serverChecksumV3,
+            computedChecksumV3 = computedChecksumV3
         )
     }
 
@@ -269,6 +282,8 @@ object SyncPayloadMapper {
         "transaction", "book", "category", "account", "budget",
         // T-M7-01: 三实体上云
         "savings_goal", "scheduled_rule", "chat_persona",
+        // T-M7-05j: 偏好项上云（key/value 二元组，无归档）
+        "user_preference",
     )
 
     /**
@@ -385,6 +400,9 @@ object SyncPayloadMapper {
         "repeat" to "repeat",
         "enabled" to "enabled",
         "persona" to "persona",
+        // T-M7-05j: 偏好项的 key/value（同名；显式登记使 push 方向 camelToSnake 也走精确表）
+        "key" to "key",
+        "value" to "value",
         "version" to "version"
     )
 

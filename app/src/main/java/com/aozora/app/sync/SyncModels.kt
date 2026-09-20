@@ -169,6 +169,26 @@ data class ServerChange(
             archivedAt = archivedAt(), version = version
         )
     }
+
+    // ─── T-M7-05j: 偏好项上云 ───
+
+    /**
+     * 偏好行没有 archived_at/deleted_at，也没有时间戳列 —— 就是 (id, key, value, version)。
+     *
+     * 这里**不**按白名单过滤：服务端只发 SYNCABLE_KEYS 内的键，客户端再挡一次只会
+     * 把"未知键"变成 bootstrap 计数失配（RETRYABLE 死循环）。白名单口径统一放在
+     * 上行入队与 sync_meta 回灌两处（Repository）。
+     */
+    fun toUserPreference(): UserPreferenceEntity? {
+        if (entityType != "user_preference") return null
+        val id = entityPayload["id"] ?: return null
+        val key = entityPayload["key"] ?: return null
+        return UserPreferenceEntity(
+            id = id, key = key,
+            value = entityPayload["value"] ?: "",
+            version = version
+        )
+    }
 }
 
 /** 同步引擎状态（前端展示 + 桥接事件）。 */

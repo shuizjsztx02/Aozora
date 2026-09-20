@@ -14,6 +14,7 @@ import com.aozora.app.db.migrations.MIGRATION_5_6
 import com.aozora.app.db.migrations.MIGRATION_6_7
 import com.aozora.app.db.migrations.MIGRATION_7_8
 import com.aozora.app.db.migrations.MIGRATION_8_9
+import com.aozora.app.db.migrations.MIGRATION_9_10
 
 /**
  * Aozora Room 数据库。
@@ -31,6 +32,7 @@ import com.aozora.app.db.migrations.MIGRATION_8_9
  *        savings_goals 一并上云（D-PROD-03），Room 结构未变故无需新迁移。
  * - v9：scheduled_rules 新增 runHour/runMinute 执行时刻列（第十四轮 REQ-43，
  *        T14-5 决策 #1 唯一声明者；存量行默认 8/0=保持 08:00 语义）
+ * - v10：新增 user_preferences 表（T-M7-05j 偏好项上云；key 唯一索引）
  * 后续 migration 使用 MIGRATION_* 追加，不做破坏性 reset；缺失迁移时
  * Room 会拒绝打开并保留数据（fallbackToDestructiveMigration 未开启）。
  */
@@ -47,8 +49,9 @@ import com.aozora.app.db.migrations.MIGRATION_8_9
         SavingsGoalEntity::class,
         ScheduledRuleEntity::class,
         ChatPersonaEntity::class,
+        UserPreferenceEntity::class,
     ],
-    version = 9,
+    version = 10,
     exportSchema = true
 )
 abstract class AozoraDatabase : RoomDatabase() {
@@ -64,6 +67,7 @@ abstract class AozoraDatabase : RoomDatabase() {
     abstract fun savingsGoalDao(): SavingsGoalDao
     abstract fun scheduledRuleDao(): ScheduledRuleDao
     abstract fun chatPersonaDao(): ChatPersonaDao
+    abstract fun userPreferenceDao(): UserPreferenceDao
 
     companion object {
         const val DATABASE_NAME = "aozora.db"
@@ -80,7 +84,7 @@ abstract class AozoraDatabase : RoomDatabase() {
 
         internal fun open(context: Context, name: String = DATABASE_NAME): AozoraDatabase =
             Room.databaseBuilder(context.applicationContext, AozoraDatabase::class.java, name)
-                .addMigrations(MIGRATION_1_2, MIGRATION_2_3, MIGRATION_3_4, MIGRATION_4_5, MIGRATION_5_6, MIGRATION_6_7, MIGRATION_7_8, MIGRATION_8_9)
+                .addMigrations(MIGRATION_1_2, MIGRATION_2_3, MIGRATION_3_4, MIGRATION_4_5, MIGRATION_5_6, MIGRATION_6_7, MIGRATION_7_8, MIGRATION_8_9, MIGRATION_9_10)
                 .build()
 
         /** 仅用于测试：创建内存数据库，迁移同样应用 */
@@ -88,7 +92,7 @@ abstract class AozoraDatabase : RoomDatabase() {
             return Room.inMemoryDatabaseBuilder(
                 context.applicationContext,
                 AozoraDatabase::class.java
-            ).addMigrations(MIGRATION_1_2, MIGRATION_2_3, MIGRATION_3_4, MIGRATION_4_5, MIGRATION_5_6, MIGRATION_6_7, MIGRATION_7_8, MIGRATION_8_9).build()
+            ).addMigrations(MIGRATION_1_2, MIGRATION_2_3, MIGRATION_3_4, MIGRATION_4_5, MIGRATION_5_6, MIGRATION_6_7, MIGRATION_7_8, MIGRATION_8_9, MIGRATION_9_10).build()
         }
     }
 }

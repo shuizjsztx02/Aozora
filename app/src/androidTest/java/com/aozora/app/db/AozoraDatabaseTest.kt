@@ -62,7 +62,7 @@ class AozoraDatabaseTest {
         disk.close()
         val path = context.getDatabasePath(name).path
         // 以未知的更高版本模拟缺失 downgrade；只改 user_version 不会触发已有迁移的重复 DDL。
-        SQLiteDatabase.openDatabase(path, null, SQLiteDatabase.OPEN_READWRITE).use { it.version = 10 }
+        SQLiteDatabase.openDatabase(path, null, SQLiteDatabase.OPEN_READWRITE).use { it.version = 11 }
         val unsupported = AozoraDatabase.open(context, name)
         try {
             try { unsupported.transactionDao().getById("guard"); fail("missing migration accepted") }

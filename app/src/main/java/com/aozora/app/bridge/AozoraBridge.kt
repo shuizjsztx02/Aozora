@@ -467,7 +467,8 @@ class AozoraBridge(
             throw IllegalArgumentException("meta value must be a string")
         }
         MetaWhitelist.validateValue(key, value)
-        repository.setMeta(key, value)
+        // T-M7-05j: 白名单内的偏好键（6 个）还要同事务入队上行；其余键仍只写本地。
+        repository.setMetaWithPreferenceUpload(key, value)
         return BridgeResponse.success(requestId, JSONObject().put("success", true).toString())
     }
 

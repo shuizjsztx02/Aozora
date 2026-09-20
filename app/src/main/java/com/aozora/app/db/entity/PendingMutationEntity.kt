@@ -21,6 +21,7 @@ data class PendingMutationEntity(
     @PrimaryKey val mutationId: String,
     val entityType: String,     // "transaction" | "book" | "category" | "account" | "budget"
                                 // | "savings_goal" | "scheduled_rule" | "chat_persona"（T-M7-01 三实体上云）
+                                // | "user_preference"（T-M7-05j 偏好项上云；entityId = 服务端偏好行 id）
     val entityId: String,
     val operation: String,      // "insert" | "update" | "delete" | "archive"
     val payload: String,        // JSON 序列化的变更内容

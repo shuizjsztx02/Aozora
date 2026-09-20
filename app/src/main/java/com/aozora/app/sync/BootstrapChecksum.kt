@@ -75,6 +75,37 @@ object BootstrapChecksum {
         cursor,
     )
 
+    /**
+     * T-M7-05j: 九类实体 + cursor 的 checksum，与服务端
+     * `compute_bootstrap_checksum_v3` 对应。
+     *
+     * 前八类的拼接顺序与逐条序列化完全同 [computeV2]，只在其后追加
+     * `user_preferences` —— 三个算法共用 [computeOver]，不会各自漂移。
+     * 偏好列表为空时**与 [computeV2] 逐字节相同**（[computeOver] 对空列表不产出
+     * 分段），故没写过偏好的账号两条车道算出同一个值。
+     *
+     * 车道选择：服务端同时下发 v2（八类）与 v3（九类）；当前客户端用 v3，读不到
+     * v3 时才回退 v2（见 SyncEngine.runBootstrap）。
+     */
+    fun computeV3(
+        books: List<Map<String, Any?>>,
+        categories: List<Map<String, Any?>>,
+        accounts: List<Map<String, Any?>>,
+        transactions: List<Map<String, Any?>>,
+        budgets: List<Map<String, Any?>>,
+        savingsGoals: List<Map<String, Any?>>,
+        scheduledRules: List<Map<String, Any?>>,
+        chatPersonas: List<Map<String, Any?>>,
+        userPreferences: List<Map<String, Any?>>,
+        cursor: Long
+    ): String = computeOver(
+        listOf(
+            books, categories, accounts, transactions, budgets,
+            savingsGoals, scheduledRules, chatPersonas, userPreferences,
+        ),
+        cursor,
+    )
+
     /** 按给定顺序拼接各列表的确定性 JSON，末尾追加 `cursor:{cursor}`，取 SHA-256。 */
     private fun computeOver(
         entityLists: List<List<Map<String, Any?>>>,

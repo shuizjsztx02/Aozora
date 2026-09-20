@@ -481,4 +481,120 @@ class BootstrapChecksumTest {
         )
         assertEquals(expected, hash)
     }
+
+    // ─── T-M7-05j: 九类 checksum（computeV3） ───
+
+    /** 偏好行同服务端 `_serialize_entity(UserPreference)`：四个 snake_case 键，version 是真数字。 */
+    private val cloudPreference = mapOf(
+        "id" to "44444444-4444-4444-8444-111111111111",
+        "key" to "book_order",
+        "value" to """["aaa"]""",
+        "version" to 1,
+    )
+
+    /**
+     * 跨语言一致性：与服务端 `compute_bootstrap_checksum_v3` 对同一输入的输出逐字节
+     * 相同（参考值由 Python 侧真实函数生成）。
+     */
+    @Test
+    fun computeV3_matchesServerReferenceImplementation() {
+        val hash = BootstrapChecksum.computeV3(
+            books = emptyList(), categories = emptyList(), accounts = emptyList(),
+            transactions = emptyList(), budgets = emptyList(),
+            savingsGoals = listOf(cloudGoal), scheduledRules = listOf(cloudRule),
+            chatPersonas = listOf(cloudPersona),
+            userPreferences = listOf(cloudPreference), cursor = 42,
+        )
+        assertEquals(
+            "45d45a5f10c299925fb9cff048aee8c08c8ff13c50d84ec002a3b53c0516cb34",
+            hash,
+        )
+    }
+
+    /**
+     * 偏好值是**非 ASCII**时仍逐字节相同 —— 偏好值多是 JSON 文本（user_profile
+     * 存的就是中文称呼/风格），转义口径与 v2 共用 [computeOver]，此处钉住不漂移。
+     */
+    @Test
+    fun computeV3_nonAsciiValue_matchesServerReference() {
+        val hash = BootstrapChecksum.computeV3(
+            books = emptyList(), categories = emptyList(), accounts = emptyList(),
+            transactions = emptyList(), budgets = emptyList(),
+            savingsGoals = listOf(cloudGoal), scheduledRules = listOf(cloudRule),
+            chatPersonas = listOf(cloudPersona),
+            userPreferences = listOf(cloudPreference + ("value" to """{"称呼":"阿空"}""")),
+            cursor = 42,
+        )
+        assertEquals(
+            "b4ff71bd1c29f50164f4d0bdc115c9275bcebe6c49981e6020bed0f4fa3eed09",
+            hash,
+        )
+    }
+
+    /**
+     * 偏好列表为空时 v3 必须与 v2 完全相等 —— "没写过偏好的账号"在两条车道上
+     * 算出同一个值；这也是 05j 最初把偏好并进 v2 没被发现问题的原因
+     * （只有真正写过偏好行的账号才会失配）。既有的 v2 断言值不变。
+     */
+    @Test
+    fun computeV3_withEmptyPreferences_equalsV2() {
+        val v2 = BootstrapChecksum.computeV2(
+            books = emptyList(), categories = emptyList(), accounts = emptyList(),
+            transactions = emptyList(), budgets = emptyList(),
+            savingsGoals = listOf(cloudGoal), scheduledRules = listOf(cloudRule),
+            chatPersonas = listOf(cloudPersona), cursor = 42,
+        )
+        val v3 = BootstrapChecksum.computeV3(
+            books = emptyList(), categories = emptyList(), accounts = emptyList(),
+            transactions = emptyList(), budgets = emptyList(),
+            savingsGoals = listOf(cloudGoal), scheduledRules = listOf(cloudRule),
+            chatPersonas = listOf(cloudPersona), userPreferences = emptyList(), cursor = 42,
+        )
+        assertEquals(v2, v3)
+        assertEquals("af2c8fda4bd60e312a63c654fa159b64a9982569762ba2d8be559c09c926c841", v3)
+    }
+
+    /**
+     * 偏好列表：列表内顺序无关（按 id 排序），且**两条偏好**与"把两条并成一条"
+     * 必然不同 —— 九类拼接不能像"多值合并"那样塌掉。
+     */
+    @Test
+    fun computeV3_isOrderIndependentWithinPreferencesList() {
+        val prefA = mapOf(
+            "id" to "11111111-1111-4111-8111-111111111111",
+            "key" to "book_order", "value" to """["aa","bb"]""", "version" to 2,
+        )
+        val prefB = mapOf(
+            "id" to "22222222-2222-4222-8222-222222222222",
+            "key" to "user_profile", "value" to """{"称呼":"阿空"}""", "version" to 3,
+        )
+        val forward = BootstrapChecksum.computeV3(
+            books = emptyList(), categories = emptyList(), accounts = emptyList(),
+            transactions = emptyList(), budgets = emptyList(),
+            savingsGoals = emptyList(), scheduledRules = emptyList(),
+            chatPersonas = emptyList(), userPreferences = listOf(prefA, prefB), cursor = 42,
+        )
+        val reversed = BootstrapChecksum.computeV3(
+            books = emptyList(), categories = emptyList(), accounts = emptyList(),
+            transactions = emptyList(), budgets = emptyList(),
+            savingsGoals = emptyList(), scheduledRules = emptyList(),
+            chatPersonas = emptyList(), userPreferences = listOf(prefB, prefA), cursor = 42,
+        )
+        assertEquals(forward, reversed)
+        // Python 参考值：同一输入 + cursor=42
+        assertEquals(
+            "62969a225ac47c8d541a0bcb8ba272ceace189bfa56cfa082a15b1ed10a0f1ba",
+            forward,
+        )
+        // 少一条偏好必然改变哈希（v3 真的把偏好算进去了）
+        assertNotEquals(
+            forward,
+            BootstrapChecksum.computeV3(
+                books = emptyList(), categories = emptyList(), accounts = emptyList(),
+                transactions = emptyList(), budgets = emptyList(),
+                savingsGoals = emptyList(), scheduledRules = emptyList(),
+                chatPersonas = emptyList(), userPreferences = listOf(prefB), cursor = 42,
+            ),
+        )
+    }
 }

@@ -186,3 +186,30 @@ val MIGRATION_8_9: Migration = object : Migration(8, 9) {
         )
     }
 }
+
+/**
+ * T-M7-05j（偏好项上云）Room schema 迁移。
+ *
+ * v9 → v10：
+ * - 新增 user_preferences 表（服务端偏好行的本地镜像，见 UserPreferenceEntity）。
+ *   key 唯一索引不可省：Room 的 schema 校验按生成代码逐项比对索引，漏建即
+ *   "Migration didn't properly handle" 打开失败。
+ * - 存量本地偏好值**不在此处搬迁** —— sync_meta 里的 6 个白名单键原样留着，
+ *   由 Repository.migratePreferencesUp() 在首次同步时一次性入队上行（幂等标记）。
+ */
+val MIGRATION_9_10: Migration = object : Migration(9, 10) {
+    override fun migrate(db: SupportSQLiteDatabase) {
+        db.execSQL(
+            "CREATE TABLE IF NOT EXISTS `user_preferences` (" +
+                "`id` TEXT NOT NULL, " +
+                "`key` TEXT NOT NULL, " +
+                "`value` TEXT NOT NULL, " +
+                "`version` INTEGER NOT NULL, " +
+                "PRIMARY KEY(`id`))"
+        )
+        db.execSQL(
+            "CREATE UNIQUE INDEX IF NOT EXISTS `index_user_preferences_key` " +
+                "ON `user_preferences` (`key`)"
+        )
+    }
+}

@@ -245,6 +245,71 @@ class Repository(private val db: AozoraDatabase) {
         db.syncMetaDao().upsert(SyncMetaEntity(key, value))
     }
 
+    /**
+     * T-M7-05j（偏好项上云）：面向 UI/桥的写入口 —— 写 sync_meta，白名单内的键
+     * 同事务入队上行 mutation。
+     *
+     * 白名单 = [SyncMetaEntity.SYNCABLE_PREFERENCE_KEYS]（6 键，与服务端 SYNCABLE_KEYS
+     * 对应）；白名单外的键（avatar_uri / display_name / active_persona_id / 各类
+     * 迁移与预算标记）**保持原样只写本地**，一个都不上行。
+     *
+     * 这与 [setMeta] 的分工：setMeta 是"通用存取"（内部自管键也走它），本方法才是
+     * 用户可见偏好键的写路径。桥的 meta.set 走这里。
+     */
+    suspend fun setMetaWithPreferenceUpload(key: String, value: String) {
+        if (key !in SyncMetaEntity.SYNCABLE_PREFERENCE_KEYS) {
+            setMeta(key, value)
+            return
+        }
+        db.withTransaction {
+            setMeta(key, value)
+            enqueuePreferenceUpsert(key, value)
+        }
+    }
+
+    /**
+     * T-M7-05j：入队一条 user_preference 上行 mutation（本地镜像行同步维护）。
+     *
+     * 行 id 契约：镜像行的 id **就是服务端行 id**（pull/bootstrap 直接带回）。
+     * 本地首次写入时还没有镜像行 → 自铸 UUID 当 entityId —— 服务端 insert 用的是
+     * 客户端给的 entity_id（service.py `_upsert_preference`），故两侧 id 天然一致。
+     *
+     * 幂等/自愈：多设备撞同键时服务端不覆盖（返回既有行 id），回程 pull 的
+     * REPLACE upsert 按 key 唯一索引把本地自铸行换掉 → 之后的写会带正确的
+     * expectedVersion。
+     *
+     * 版本语义镜像既有实体：首次写 insert（expectedVersion=null，本地 version=1），
+     * 之后 update（expectedVersion=当前版本，本地 version+1）。
+     */
+    private suspend fun enqueuePreferenceUpsert(key: String, value: String) {
+        val current = db.userPreferenceDao().getByKey(key)
+        val id = current?.id ?: java.util.UUID.randomUUID().toString()
+        db.userPreferenceDao().upsert(
+            UserPreferenceEntity(
+                id = id, key = key, value = value,
+                version = (current?.version ?: 0) + 1
+            )
+        )
+        db.pendingMutationDao().insert(
+            PendingMutationEntity(
+                mutationId = java.util.UUID.randomUUID().toString(),
+                entityType = "user_preference",
+                entityId = id,
+                operation = if (current == null) PendingMutationEntity.OP_INSERT
+                else PendingMutationEntity.OP_UPDATE,
+                payload = JSONObject().apply {
+                    put("key", key)
+                    put("value", value)
+                }.toString(),
+                status = PendingMutationEntity.STATUS_PENDING,
+                retryCount = 0,
+                createdAt = System.currentTimeMillis(),
+                expectedVersion = current?.version,
+                lastError = null
+            )
+        )
+    }
+
     /** T10-3（决策 #4）：删除指定 meta 键（登出先清清身份键，双保险于 clearAllData）。 */
     suspend fun deleteMeta(key: String) {
         db.syncMetaDao().delete(key)
@@ -1197,7 +1262,9 @@ class Repository(private val db: AozoraDatabase) {
             // T-M7-01: 三实体上云（bootstrap 计数校验需要同一口径）
             "savings_goals" to db.savingsGoalDao().listActive().sortedBy { it.id },
             "scheduled_rules" to db.scheduledRuleDao().listActive().sortedBy { it.id },
-            "chat_personas" to db.chatPersonaDao().listActive().sortedBy { it.id }
+            "chat_personas" to db.chatPersonaDao().listActive().sortedBy { it.id },
+            // T-M7-05j: 偏好行无归档概念 → 全量即活跃
+            "user_preferences" to db.userPreferenceDao().listAll().sortedBy { it.id }
         )
     }
 
@@ -1227,6 +1294,10 @@ class Repository(private val db: AozoraDatabase) {
             db.savingsGoalDao().clearAll()
             db.scheduledRuleDao().clearAll()
             db.chatPersonaDao().clearAll()
+            // T-M7-05j: 偏好镜像行同属"云端权威"数据。注意 sync_meta 里的偏好值是
+            // 真身、不在此清空范围内 —— 本地的值由 migratePreferencesUp 入队上行，
+            // 云端快照里的值由 applyBootstrap 覆盖回 sync_meta。
+            db.userPreferenceDao().clearAll()
             // P2-2 注释：崩溃恢复锚点。若 applyBootstrap 未完成时崩溃，
             // cursor=0 + 无实体 ⇒ needsBootstrap()=true ⇒ 下次启动重试 bootstrap。
             db.syncMetaDao().upsert(
@@ -1268,6 +1339,37 @@ class Repository(private val db: AozoraDatabase) {
                 enqueueInsert("chat_persona", persona.id, chatPersonaToJson(persona))
             }
             setMeta(SyncMetaEntity.KEY_CLOUD_ENTITIES_UPLOADED, "1")
+        }
+    }
+
+    /**
+     * T-M7-05j: 存量本地偏好值一次性上行（旧版本客户端把 6 个白名单键只存 sync_meta，
+     * 从不上行；升级后云端没有这些行）。
+     *
+     * 契约（镜像 [migrateCloudEntitiesUp]）：
+     * - 标记 `preferences_uploaded_v1` 一旦写入即不再重复入队；标记与 mutation 在
+     *   同一 Room 事务内落盘，崩溃不会留下"标记已写但 mutation 未入队"。
+     * - **只上行实际存在的键**：book_order / account_order / widget_config /
+     *   user_profile 多数账号根本没写过，缺失即跳过（缺键不等于"空值"）。
+     * - `default_book_id` / `default_account_id` 用的就是它们在 sync_meta 里的存储键名。
+     * - 必须在 [clearAllEntities]（bootstrap 重建）之前调用 —— 它清空 user_preferences
+     *   镜像表，本地独有值只能靠已入队的 mutation 存活到 push 之后。
+     * - 服务端对该类的首推幂等（命中 (user_id, key) 已存在时不覆盖），第二台设备推
+     *   同一批键既不会冲突也不会覆盖云端副本。
+     * - 登出/删号走 clearAllData（clearAllTables），标记随 sync_meta 一并清空。
+     */
+    suspend fun migratePreferencesUp() {
+        if (getMeta(SyncMetaEntity.KEY_PREFERENCES_UPLOADED) == "1") return
+        db.withTransaction {
+            // 事务内二次检查：并发触发时以先落盘者为准
+            if (db.syncMetaDao().getValue(SyncMetaEntity.KEY_PREFERENCES_UPLOADED) == "1") {
+                return@withTransaction
+            }
+            for (key in SyncMetaEntity.SYNCABLE_PREFERENCE_KEYS) {
+                val value = db.syncMetaDao().getValue(key) ?: continue
+                enqueuePreferenceUpsert(key, value)
+            }
+            setMeta(SyncMetaEntity.KEY_PREFERENCES_UPLOADED, "1")
         }
     }
 
@@ -1342,6 +1444,12 @@ class Repository(private val db: AozoraDatabase) {
                     "bootstrap chat persona ${entity.id} has non-null archivedAt"
                 }
                 db.chatPersonaDao().upsertFromSync(entity)
+            }
+            // T-M7-05j: 偏好行（无归档/删除语义，故无 P2-1 断言）+ 值回灌 sync_meta
+            for (prefRaw in response.userPreferences) {
+                val entity = serverChangeMapToUserPreference(prefRaw) ?: continue
+                db.userPreferenceDao().upsert(entity)
+                applyPreferenceToMeta(entity.key, entity.value)
             }
             db.syncMetaDao().upsert(
                 SyncMetaEntity(SyncMetaEntity.KEY_CURSOR, response.cursor.toString())
@@ -1491,6 +1599,27 @@ class Repository(private val db: AozoraDatabase) {
                                 entity.avatar?.startsWith("data:") != true
                             ) localAvatar else entity.avatar
                             db.chatPersonaDao().upsertFromSync(entity.copy(avatar = mergedAvatar))
+                        }
+                    }
+                    // ─── T-M7-05j: 偏好项上云（delete → 物理删，镜像 budget 而非三实体） ───
+                    "user_preference" -> {
+                        if (change.operation == SyncChangeOp.DELETE) {
+                            // 服务端无软删，客户端同样物删。删除变更不带 entity，
+                            // 故先按 id 取本地镜像行拿 key，才能把 sync_meta 里的
+                            // 同名键一起清掉 —— 否则云端已无此行、本地却继续按旧值
+                            // 走（例如默认账本），两侧永久分叉。
+                            val local = db.userPreferenceDao().getById(change.entityId)
+                            db.userPreferenceDao().deleteById(change.entityId)
+                            if (local != null &&
+                                local.key in SyncMetaEntity.SYNCABLE_PREFERENCE_KEYS
+                            ) {
+                                db.syncMetaDao().delete(local.key)
+                            }
+                        } else {
+                            val entity = change.toUserPreference() ?: continue
+                            db.userPreferenceDao().upsert(entity)
+                            // 值回灌 sync_meta —— "AI 改了默认账本 → 本机 UI 跟着变"的路径
+                            applyPreferenceToMeta(entity.key, entity.value)
                         }
                     }
                 }
@@ -1783,6 +1912,32 @@ class Repository(private val db: AozoraDatabase) {
             archivedAt = isoToEpochMillis(map["archivedAt"]),
             version = version
         )
+    }
+
+    // ─── T-M7-05j: 偏好项 ───
+
+    private fun serverChangeMapToUserPreference(
+        map: Map<String, String?>
+    ): UserPreferenceEntity? {
+        val id = map["id"] ?: return null
+        val key = map["key"] ?: return null
+        return UserPreferenceEntity(
+            id = id, key = key,
+            value = map["value"] ?: "",
+            version = map["version"]?.toIntOrNull() ?: 1
+        )
+    }
+
+    /**
+     * T-M7-05j：把云端偏好值回灌本地 sync_meta —— 偏好值的真身在 sync_meta
+     * （user_preferences 表只是云端镜像），不写回的话"AI 改了默认账本"落不到 UI。
+     *
+     * **只写白名单 6 键**：服务端只发这些键，此处再挡一次是"白名单外一个都不动"
+     * 这条不变式的落点（设备自管量如 avatar_uri / display_name 永不被云端覆盖）。
+     */
+    private suspend fun applyPreferenceToMeta(key: String, value: String) {
+        if (key !in SyncMetaEntity.SYNCABLE_PREFERENCE_KEYS) return
+        db.syncMetaDao().upsert(SyncMetaEntity(key, value))
     }
 
     // ─── T-M5-04a: Consent ───
