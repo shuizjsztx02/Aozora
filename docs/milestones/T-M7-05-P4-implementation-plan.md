@@ -21,8 +21,8 @@
 | **05g** | 域路由与预路由 | ✅ 完成 | 2026-09-20 | `049b62d` | 批次 5；**规则词表**（不调模型）+ 未命中即全量（`ADR-011` / `D-PROD-17`）；`phase: routing` 生产者接通；实测：**漏注入 0/58**、注入面 **−85%**、准确率两臂无差异（见 §六） |
 | **05h** | Skill 封装与按需加载 | ✅ 完成 | 2026-09-20 | `f42c927` | 批次 4；**按域命中、按需注入**（收窄的注入面 / 本轮用过的域，取并集；全量注入不算命中）；未命中时系统提示**逐字不变**；实测域知识 **+144 tokens**、不命中 **0**（见 §六） |
 | **05i** | 帮助文档检索（**纳入 P4**；理财知识砍掉） | ✅ 完成 | 2026-09-20 | `a221b5e` | 批次 5；**产品帮助语料 28 条 + 确定性检索 + `help` 域读工具**（15 域 / 55 工具）；**理财知识（外部行情/产品/收益检索）按用户指令砍掉不做**；真实调用抽样 **10/10**（补问法信号前 6/10）；语料漂移风险 = **R-PROD-40** |
-| **05j** | **偏好项上云 + `meta_set` 服务端执行**（用户 2026-09-20 追加目标） | ⏳ 未开始 | | | **P4 追加项**；数据面先行（参考 T-M7-01 三实体上云），再让 AI 改默认项 / 当前角色 / 用户画像；在此之前 `meta_set` 的「设备执行」是**过渡态** |
-| **收口** | P4 四板 + 覆盖度清单逐项走查 | ⏳ 未开始 | | | 批次 6 |
+| **05j** | **偏好项上云 + `meta_set` 服务端执行**（用户 2026-09-20 追加目标） | ✅ 完成 | 2026-09-20 | `1134375` + `ab243a2` + 客户端数据面 | **P4 追加项**；两段都落地——① **数据面**：新可同步实体 `user_preference`（白名单 **6 键**，与客户端 `SYNCABLE_PREFERENCE_KEYS` 逐字对应；每键一行、无归档/软删、幂等首推）+ 迁移 `0021` + **bootstrap 车道新增 `checksum_v3`**（05j 最初把偏好并进 `checksum_v2`，那会让已构建的客户端在有偏好行时 bootstrap 失配 → 同步死循环，见 **R-PROD-42**）；② **AI 侧**：`meta_set` 从 `DEVICE_EXECUTED_OPS` 迁入服务端执行。客户端随 pull 应用 + 存量本地值一次性上行。见 §六 |
+| **收口** | P4 四板 + 覆盖度清单逐项走查 | ✅ 完成 | 2026-09-20 | `ab243a2` / `320d9c9` / `0fc2d38` / `d352475` / `68cc0c5` | 批次 6；**05a–05j 全部交付**（05j 两段在本轮补齐）。四板全绿；**发现并修复两个「规划里不可能生效」的缺陷**（bootstrap checksum 车道被 05j 撑破 → 同步死循环；生产 compose 未接线 AI Agent → `/ai/agent` 恒 404）；日配额默认值恢复 20；AI 遗留盘点与 A/B 更新方案另出文档；**R-PROD-31/37/38 裁决为一张有完整设计的尾卡**（本轮不开 v2 车道，理由见 §六） |
 
 **状态取值：** ⏳ 未开始 / 🔄 进行中 / ✅ 完成 / ⛔ 阻塞（阻塞须在本表备注列写明原因与解除条件）
 
@@ -1068,6 +1068,147 @@ cd app && npx tsc --noEmit                       # 0 错
   客户端渲染面）、R-PROD-40（语料漂移是否立卡）、**R-PROD-41（域知识的覆盖面谁守）**。
 ```
 
+
+### 05j 偏好项上云 + `meta_set` 服务端执行（2026-09-20，`1134375` + `ab243a2` + `925198c`）
+
+```text
+任务编号：T-M7-05j（P4 追加项，用户 2026-09-20 指定目标）
+完成范围 / 明确未做：
+  完成——两段都落地。① 数据面：新可同步实体 user_preference；② AI 侧：meta_set
+  从 DEVICE_EXECUTED_OPS 迁入服务端执行。客户端随 pull 应用 + 存量本地值一次性上行。
+  未做（刻意，非遗漏）——客户端无偏好删除入口（pull 的 DELETE 分支生产暂不可达，
+  只服务端与多设备场景的意义）；端到端真机走查待设备联测。
+
+关键设计决策（本卡新增）：
+  1. 每键一行、无 archived_at / deleted_at —— 清除即物理删。客户端同语义（物删镜像
+     行 + 清 sync_meta 同名键；删除变更不带 entity，只能先按 id 反查本地行的 key）。
+  2. 白名单 6 键（default_book_id / default_account_id / book_order / account_order /
+     widget_config / user_profile），服务端 SYNCABLE_KEYS 与客户端
+     SYNCABLE_PREFERENCE_KEYS 逐字对应。**设备自管量一个都不上行**：sync_cursor /
+     master_book_id / personas_seeded / budget_carryover(_mark) /
+     cloud_entities_uploaded_v1 / active_persona_id / avatar_uri / display_name。
+  3. 以服务端**行 id 为身份**：客户端首次写入自铸 UUID 当 entity_id，服务端直采用；
+     多设备撞同键时服务端不覆盖、返回既有行 id，回程 pull 的 REPLACE upsert 按
+     **key 唯一索引**换掉本地自铸行 —— 唯一索引是这条自愈路径的前提。
+  4. 偏好值的**真身在 sync_meta**：user_preferences 表只是云端镜像（记住行 id 与
+     version，update 才能带 expectedVersion）。这条是「AI 改默认账本 → 本机 UI 跟着变」
+     的落点。
+  5. 存量本地值一次性上行（标记 preferences_uploaded_v1），镜像
+     cloud_entities_uploaded_v1 的幂等契约：标记与 mutation 同事务 + 事务内二次检查，
+     且**只上行实际存在的键**（缺键 ≠ 空值）。
+  6. **★ bootstrap checksum 新增 v3 而不是扩展 v2**（见下「本卡踩中并修复的回归」）。
+
+本卡踩中并修复的回归（提交 ab243a2，风险册 R-PROD-42）：
+  05j 最初把 user_preferences 并进 compute_bootstrap_checksum_v2 的输入（八类 → 九类）。
+  而 checksum_v2 是**已构建客户端**的比对基准（SyncPayloadMapper.parseBootstrapResponse
+  + BootstrapChecksum.computeV2 只算八类），且 _compute_checksum 对**空列表不产出分段**
+  —— 所以：账号没有偏好行时两边算出同一个值、**问题完全不可见**；账号一旦有一行偏好
+  （AI 的 meta_set 就会写），服务端 hash 变、客户端算不出 → bootstrap checksum
+  mismatch → SyncOutcome.RETRYABLE → **整条同步链路死循环**。
+  schemas.py 自己的 docstring 早就写着这条规则（「predates T-M7-01 的客户端不得被切到
+  会失配的车道」），05j 违反了它；而 05j 的用例只钉住了「偏好为空时兼容」这一半，
+  恰好是问题不可见的那一半。
+  修法：compute_bootstrap_checksum_v2 恢复八类（与 05j 之前逐字节相同）+ 新增
+  compute_bootstrap_checksum_v3（九类）+ BootstrapResponse.checksum_v3；客户端按
+  v3 > v2 > legacy 择高。**零破坏**。
+
+  同轮另一处「规划里不可能生效」的缺陷（0fc2d38）：docker-compose.prod.yml 与
+  staging **一个 AI_AGENT_* 都没写** —— compose 不透传，容器里恒为 config.py 默认值，
+  于是 AI_AGENT_ENABLED 永远 false、/ai/agent 恒 404。也就是说「部署到 A 机后真机测
+  AI Agent」在配置层面根本不可能发生，而 agent 是 M7 的交付主体。已接线，且测试实例
+  按 TEST_AI_QUOTA 的既有惯例单独开放（TEST_AI_AGENT_ENABLED / TEST_AI_DEVICE_CHANNEL_ENABLED
+  默认 true）；顺带打开 AI_DEVICE_CHANNEL_ENABLED（ADR-010 决策 7 把开启时点归 P4 收口，
+  05f 的客户端执行器已交付）。
+
+验证命令与结果（合流后实测）：
+  cd app && npx tsc --noEmit                      → 0 错
+  cd app && npx vitest run                        → 84 files / 1337 passed
+  ./gradlew :app:testDebugUnitTest --rerun-tasks  → JVM 468 tests / 0 failures / 1 skipped
+                                                    （基线 439，+29 来自本卡）
+  cd server && python -m pytest tests/ -q         → 见收口记录
+  变异验证（客户端，已还原）：把 MIGRATION_9_10 的唯一索引改成非唯一 →
+    migration9To10_createsPreferenceTableAndKeepsData 精确报红
+    （IllegalStateException: Migration didn't properly handle: user_preferences(...)），
+    证明该用例真在跑 Room 的 v10 schema 校验，不是空转。
+  androidTest **只编译未执行** —— 另一会话正用模拟器做前端走查，装 APK 会干扰它。
+  服务端本卡测试：test_sync_user_preferences.py 15 例 + TestV2MetaSet 5 例。
+
+数据 / 同步 / AI / 安全影响：
+  数据——服务端新表 user_preferences（迁移 0021，纯新增）+ 客户端 Room v10
+  （MIGRATION_9_10）。**bootstrap 车道从两档变三档**（v3 新增，v2 语义不动）。
+  AI——meta_set 移出 DEVICE_EXECUTED_OPS 后，该集合从 4 个收窄到 3 个
+  （persona_switch / consent_record / sync_trigger），**R-PROD-37 的清单随之缩小一块**。
+  安全——三条铁律与审批门一行未动；授权口径不变（只是执行位置从设备迁回服务端）；
+  「设备自管量永不上行、永不可由 AI 改」由客户端守护用例钉住。
+
+兼容与回退方式：
+  兼容——旧客户端读 checksum_v2（八类，未变）继续可用；旧服务端不返回
+  user_preferences / checksum_v3 时客户端分别按空列表与空串处理，退回 v2 车道。
+  R-PROD-31 的 v2 提案渲染面**本轮未动**，故客户端仍不声明 proposal_contract_version，
+  服务端按 v1 产出、行为与 P1 逐字相同。
+  回退——服务端 downgrade 0021；客户端 Room 无 fallbackToDestructiveMigration，
+  降级需重装。
+
+开放风险与责任人：
+  R-PROD-37（收窄但未关闭）——consent_record / sync_trigger 不会上云，只能靠客户端分派。
+  R-PROD-42（新登记）——checksum 版本扩张的复发陷阱，责任人＝下一个新增可同步实体的卡。
+  端到端真机走查——责任人：本轮收口的真机联调。
+
+下一项未阻塞任务：批次 6 收口（见下）。
+交付：服务端 1134375 + 修正 ab243a2；客户端 925198c；部署接线 0fc2d38。
+```
+
+### 收口 · P4 四板 + 覆盖度与遗留裁决（✅ 2026-09-20）
+
+```text
+任务编号：T-M7-05（收口 / 批次 6）
+提交：ab243a2（P0 修正）/ 320d9c9 / 0fc2d38 / d352475 / bdf2ebf / 68cc0c5 / 925198c
+
+完成范围：
+- 四板全绿（安静环境串行实测，避让已知的资源争抢假失败）。
+- 05a–05j **全部交付**（05j 的两段在本轮补齐），P4 计划 §一 看板与
+  production-execution-plan.md 的 T-M7-05 表逐行对齐（此前 05a / 05b / 05c / 05h
+  的状态列停在「未开始」，05f 的状态列单元格内部自相矛盾；表里还缺 05j 整行）。
+- **发现并修复两个「规划里不可能生效」的缺陷**（都不是功能没做完，而是按现有配置
+  规划中的步骤物理上无法发生）：
+  ① bootstrap checksum 车道被 05j 撑破 → 已同步的客户端进同步死循环（ab243a2）；
+  ② 生产 compose 没接线 AI Agent 的环境变量 → /ai/agent 恒 404（0fc2d38）。
+- 收口动作：ai_daily_quota_guest 代码默认值恢复 20（320d9c9，两个部署实例由
+  compose 接管，不影响联测）。
+- AI agent 化的问题整理与遗留盘点：docs/review/T-M7-ai-agent-issues-2026-09-20.md
+  （R-PROD-15/17–41 逐条状态与去向 + 代码卫生扫描 + 文档一致性缺口 + R-PROD-31/37/38
+  的裁决与已验证设计）。
+- 服务端 → A/B 机更新方案：infra/deploy/prod/UPDATE-T-M7-05.md。
+- 服务可用性确认：本机 dev 服务 /api/v1/health → 200、/health/ready → 200
+  （database ok）；迁移链升至 0021_user_preferences。
+
+明确未做（每条都有理由，非遗漏）：
+1. **R-PROD-31 / 37（v2 提案的客户端渲染与执行分派）本轮不开** —— 客户端的契约
+   版本声明**就是灰度旋钮本身**，而声明 v2 会让服务端产出 v2 信封（op 在 action 上、
+   参数在 payload 里）；渲染面就位之前声明，会把**连记账都渲染不出来**，比现状更糟。
+   两者必须同时上线。渲染面是一次完整卡片级的改动（确认门的 PendingApproval.proposal
+   是 v1 形状、transactions 是根字段，v2 提案没有它 → 类型面外溢到
+   commitProposalInternal / editProposal / writeTransactions / withResolvedAccounts /
+   AssistantPage）。**裁决：转为一张有完整设计的尾卡**（含本轮验证过的实现要点：
+   契约层已在、ai.execute 在、每个 v2 工具都已产出人类可读 message、3 个设备 op 的
+   桥命令都已存在故不需新增通道），见 AI 问题整理文档 §四。
+2. **R-PROD-38（reminder_set 的工具体）同样不补** —— 它与上面同一条链：补上之后它就是
+   第 4 个设备执行 op，而设备 op 今天没有客户端分派路径，表现正是 R-PROD-37 的
+   「确认后显示已记录 0 笔交易」。架构 §3.2 的「提醒」行**显式记为「P4 不做」**
+   （范式见 05i 对理财知识的处理），并入同一张尾卡。
+3. **androidTest 套件未执行**（只编译通过）—— 另一会话正在用模拟器做前端走查，
+   装 APK 会干扰它。
+4. **A/B 机的实际部署未执行** —— 本轮交付的是**方案**（UPDATE-T-M7-05.md）；
+   按 RUNBOOK 的一贯口径，命令由执行人在服务器上运行。
+
+开放风险与责任人：
+  R-PROD-31 / 37 / 38 —— 转尾卡（边界与验收已写死，见 AI 问题整理文档 §四）。
+  R-PROD-42（新）—— checksum 版本扩张的复发陷阱，责任人＝下一个新增可同步实体的卡。
+  R-PROD-25 / 34 / 22 残余 —— 部署执行者（见更新方案 §五）。
+  R-PROD-15 / 17 残余 / 19 / 21 / 36 / 39 / 40 / 41 —— 测试期采集或既定立场（同上 §三）。
+
+下一项未阻塞任务：R-PROD-31 / 37 / 38 的尾卡（一次上线四个面）。
+```
 
 ## 七、参考
 
