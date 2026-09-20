@@ -66,8 +66,10 @@ DELIVERABLE_STATUSES: frozenset[str] = frozenset({
     STATUS_OK, STATUS_DENIED, STATUS_UNAVAILABLE, STATUS_FAILED,
 })
 
-#: 协议层的域标识。设备工具不参与 ``tools.py`` 的域注入，这个值只用于测试与
-#: 05g 域路由的将来接线（设备域是全注入还是按需，归域路由那一刻定）。
+#: 协议层的域标识。设备工具**不在**域路由的域清单里——``routing`` 只覆盖
+#: ``tools.DOMAINS``（05g 落地时未纳入设备域），设备能力在 ``AI_DEVICE_CHANNEL_ENABLED``
+#: 开启时由 ``agent._device_tools`` **全量**注入，与选域正交。这个值只用于测试与
+#: 协议层的域标注。
 DEVICE_DOMAIN = "device"
 
 

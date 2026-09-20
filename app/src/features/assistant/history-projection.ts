@@ -87,6 +87,19 @@ export function projectHistoryFromEvents(
       text,
     })
   }
+  // R-PROD-33：尾部的**孤立 user** 补一行中断标注。
+  //
+  // 流式中杀进程 / 断连的形态在服务端日志里就是「只剩一条 `user` 事件」——既没有
+  // 答案，也没有 `error` 事件（服务端的工作协程随断连取消，来不及写任何收尾）。
+  // 不补的话，重建出来的历史里那是一条「没有回答的问题」，用户会以为它被忽略了，
+  // 而不是「当时断了」；实时路径当场就会写同一句话，两边因此不一致。
+  //
+  // id 由那条 user 的消息 id 派生（不是新 `seq`），重建因此仍然**幂等**——同一批
+  // 事件重放两次不会长出两条标注。
+  const last = out[out.length - 1]
+  if (last?.role === 'user') {
+    out.push({ id: `${last.id}_interrupted`, role: 'assistant', text: INTERRUPTED_TURN_NOTE })
+  }
   return out
 }
 

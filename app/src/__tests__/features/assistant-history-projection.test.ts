@@ -95,8 +95,38 @@ describe('投影 B 重建 — 事件 → 消息列表', () => {
       item(5, 'approval_result', { proposalId: 'p-1', approved: true }),
       item(6, 'device_request', { kind: 'camera' }),
       item(7, 'security', { reason: 'cross_user_denied' }),
+      assistant(8, '好的'),
     ])
-    expect(out.map(m => m.text)).toEqual(['你好'])
+    expect(out.map(m => m.text)).toEqual(['你好', '好的'])
+  })
+
+  it('尾部的孤立 user 补一条中断标注（流式中杀进程：服务端只留下一条 user 事件）', () => {
+    const out = projectHistoryFromEvents([
+      user(1, '午饭 12.5'),
+      assistant(2, '已按 12.5 计入餐饮'),
+      user(3, '那晚饭呢'),
+    ])
+    expect(out.map(m => [m.role, m.text])).toEqual([
+      ['user', '午饭 12.5'],
+      ['assistant', '已按 12.5 计入餐饮'],
+      ['user', '那晚饭呢'],
+      ['assistant', INTERRUPTED_TURN_NOTE],
+    ])
+  })
+
+  it('补出的标注 id 由那条 user 派生 → 重建仍然幂等（重放不会长出两条）', () => {
+    const events = [user(1, '午饭 12.5')]
+    const twice = [projectHistoryFromEvents(events), projectHistoryFromEvents(events)]
+    expect(twice[0]!.map(m => m.id)).toEqual(['evt_1', 'evt_1_interrupted'])
+    expect(twice[0]!.map(m => m.id)).toEqual(twice[1]!.map(m => m.id))
+  })
+
+  it('尾部是 assistant / error 时**不**补标注（有答案或被中断已标注，两者都不该再说一次）', () => {
+    expect(projectHistoryFromEvents([user(1, 'a'), assistant(2, 'b')]).map(m => m.text))
+      .toEqual(['a', 'b'])
+    expect(projectHistoryFromEvents([
+      user(1, 'a'), item(2, 'error', { code: 'agent_failed', message: 'x' }),
+    ]).map(m => m.text)).toEqual(['a', INTERRUPTED_TURN_NOTE])
   })
 
   it('畸形载荷不炸：content 缺字段 / 不是字符串 → 不产消息', () => {
