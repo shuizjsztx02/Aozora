@@ -17,6 +17,11 @@
   **反馈与隐私同意**（``privacy``）、**安全账号**（``security``）、**同步**
   （``sync``）五域 11 个工具 → 54 个工具、14 个域。架构 §3.2 覆盖度清单到此
   除「提醒」（``reminder_set``，归 05f 的设备执行器，见 §五 挂账项）外**全部落地**。
+- **P4（05i）** 追加**产品帮助**域（``help``）一个读工具 ``help_search``：语料
+  与检索在 ``help.py``。它**不在架构 §3.2 的覆盖度清单里**——那张表列的是「读写
+  用户数据」的功能面，而「这个 App 怎么用」是**横切**问题（每一轮都可能问），
+  所以它既不属于任何数据域、也无法从用户的说法里可靠地路由过去（域路由的信号
+  是「名词指向哪类数据」，而「怎么导出」这类问句的信号是问句形态本身）。
 
 工具名一律用下划线，**不沿用桥命令的 ``domain.action`` 点号命名**——provider
 对 ``function.name`` 只接受 ``[a-zA-Z0-9_-]``，带点号会 400。约束、实测证据与
@@ -91,6 +96,8 @@ from src.models.scheduled import ScheduledRule
 from src.models.sync import SyncChange
 from src.models.user import User
 
+from .help import search as search_help
+from .help import topic_titles as help_topic_titles
 from .validator import _FORMAT_CHECKER
 
 # ---------------------------------------------------------------------------
@@ -120,6 +127,12 @@ DOMAIN_EXPORT = "export"
 DOMAIN_PRIVACY = "privacy"
 DOMAIN_SECURITY = "security"
 DOMAIN_SYNC = "sync"
+#: 05i 的产品帮助域。**它不是数据域**（上面十四个域都是「某一类用户数据的读写
+#: 面」），而是横切能力：语料是产品自己怎么用，跟当前账本、账户、流水全都无关。
+#: 单列一域仍然是对的——域是注入单位，而它有独立的信号（问句形态），混进任何
+#: 数据域都会让那个域的语义变浑（「导出」域里塞一个「怎么用导出」的工具，模型
+#: 在「导出一份 CSV」与「导出在哪里下载」之间就没有可分辨的边界了）。
+DOMAIN_HELP = "help"
 
 DOMAINS: tuple[str, ...] = (
     DOMAIN_TRANSACTION,
@@ -136,6 +149,7 @@ DOMAINS: tuple[str, ...] = (
     DOMAIN_PRIVACY,
     DOMAIN_SECURITY,
     DOMAIN_SYNC,
+    DOMAIN_HELP,
 )
 
 #: 架构 §7.2 的经验上限：单域工具数超过 8 会显著降低模型的选择准确率。
@@ -2870,6 +2884,38 @@ async def _handle_sync_trigger(ctx: ToolContext, params: dict[str, Any]) -> Tool
 
 
 # ---------------------------------------------------------------------------
+# 帮助域（05i）
+# ---------------------------------------------------------------------------
+
+
+async def _handle_help_search(ctx: ToolContext, params: dict[str, Any]) -> ToolOutcome:
+    """查产品帮助语料（纯函数，**不碰数据库、不看用户数据**）。
+
+    没命中时不返回空结果了事——把**全部条目标题**一并回给模型，它因此能就最
+    接近的那条澄清、或如实说「帮助里没有」。只回一句「没找到」会被模型转述成
+    「这个功能不存在」，那是比不知道更糟的答案。
+    """
+    matches = search_help(params["query"])
+    if not matches:
+        return ToolOutcome.result({
+            "matched": False,
+            "topics": [],
+            "availableTopics": help_topic_titles(),
+            "note": (
+                "产品帮助里没有这一条。如实告诉用户帮助里没有相关内容，"
+                "或按上面最接近的一条引导；不要凭印象补充功能细节。"
+            ),
+        })
+    return ToolOutcome.result({
+        "matched": True,
+        "topics": [
+            {"title": topic.title, "entry": topic.entry, "content": topic.body}
+            for topic in matches
+        ],
+    })
+
+
+# ---------------------------------------------------------------------------
 # 注册表
 # ---------------------------------------------------------------------------
 
@@ -4262,6 +4308,35 @@ TOOLS: tuple[Tool, ...] = (
         ),
         parameters=_object_schema({}),
         handler=_handle_sync_trigger,
+    ),
+    # ── 帮助域（05i）────────────────────────────────────────────────────
+    Tool(
+        name="help_search",
+        domain=DOMAIN_HELP,
+        kind="read",
+        description=(
+            "查这个 App 自己的用法：功能在哪里、怎么设置、有什么限制"
+            "（「怎么导出数据」「在哪改默认账户」「预算怎么用」「能不能语音记账」）。"
+            "用户问的是**产品怎么用**时先用它，不要凭印象回答；答案在返回的条目里，"
+            "照条目说，条目里没有的就如实说不知道。"
+            "它**不能**记账、查账或改任何数据（那些用别的工具），也**不回答理财问题**"
+            "——没有行情、产品或收益建议。"
+        ),
+        parameters=_object_schema(
+            {
+                "query": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 200,
+                    "description": (
+                        "用户的问题原话或其中的关键词，例如「怎么导出」「默认账户」"
+                        "「定时记账」。用中文，不要翻译成英文。"
+                    ),
+                },
+            },
+            required=["query"],
+        ),
+        handler=_handle_help_search,
     ),
 )
 

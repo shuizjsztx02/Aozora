@@ -344,6 +344,8 @@ TOOL_PROGRESS: dict[str, str] = {
     "account_deletion_request": "正在申请注销账号…",
     "sync_status": "正在检查同步状态…",
     "sync_trigger": "正在同步…",
+    # ── T-M7-05i：产品帮助 ──────────────────────────────────────────────
+    "help_search": "正在查产品帮助…",
 }
 
 #: 设备能力的步骤卡文案（T-M7-05e）。与 ``TOOL_PROGRESS`` 是同一件事的两半：
