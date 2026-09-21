@@ -420,6 +420,22 @@ const OP_SENTENCE_RE = /(改成|改为|记成|调成|删掉|删了|删除|删去
 const SLOW_THRESHOLD_MS = 12_000
 
 /**
+ * 这一轮输入**是否必须交给云端 AI**；返回 false 表示走本地快路径直接记账。
+ *
+ * 抽成导出的纯函数是为了让它可被**离线核验**：这个判据决定了「一句用户输入会不会
+ * 被本地 NLU 拦下来、AI 根本看不到」，是「AI 接管各类指令」这条路上最前置的一道
+ * 闸门。测试集（``server/scripts/ai_tool_matrix``）需要对每条用例算出它走哪条路，
+ * 而这个判据原先锁在 ``submitInput`` 内部、外部无从得知。抽出来**不改任何行为**——
+ * 四条判据与原先逐字相同，只是从内联表达式变成一次函数调用。
+ */
+export function needsAiRouting(text: string, localProposal: ActionProposal): boolean {
+  return OP_SENTENCE_RE.test(text)
+    || localProposal.confidence < CONFIDENCE_THRESHOLD
+    || localProposal.warnings.length > 0
+    || localProposal.action === 'chat'
+}
+
+/**
  * T12-8（REQ-30 / 决策 #7）：Kotlin Repository 校验/查询失败的英文异常消息 → 中文。
  * 桥回传时 message 原样透出（如 insertTransaction 撞 `entity IDs are required`），
  * 按子串匹配（动态后缀如 `book not found: <id>` 只匹配前段）。
@@ -1306,9 +1322,7 @@ export function useAssistant({
     // （「把昨天的午饭改成15块」被记成新的 ¥15）。命中操作句式必须送云端
     // intent v2；云端不可达时按 REQ-37 ④ canned，绝不以本地结果硬记。
     const looksLikeOp = OP_SENTENCE_RE.test(text)
-    const needsAI = looksLikeOp ||
-      localProposal.confidence < CONFIDENCE_THRESHOLD ||
-      localProposal.warnings.length > 0 || localProposal.action === 'chat'
+    const needsAI = needsAiRouting(text, localProposal)
 
     let finalProposal: ActionProposal = localProposal
 
