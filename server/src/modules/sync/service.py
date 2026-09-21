@@ -123,6 +123,28 @@ class SyncService:
                     status="conflict",
                 ))
                 continue
+            except AppException as exc:
+                # 尾卡诊断：**记实体类型与拒绝码，不记取值**（payload 里可能有用户
+                # 数据，id 是内部标识——与 ``authorize_payload`` 的脱敏口径一致）。
+                #
+                # 为什么需要它：这类异常**冒泡成整请求失败**——一次 push 可能带几十条
+                # mutation，而日志里只有一行 `POST /sync/push 404`，排查时看不到是哪
+                # 一条、为什么。真机「种子账本推不上去且静默终态」正是卡在这里：客户端
+                # 把整批标成终态失败（`failedMutations`，不再重试），服务端却没有留下
+                # 任何可归因的痕迹。
+                #
+                # 与 T-M7-01 修的「归档实体 update 毒丸」是**同一个模式的另一条路径**
+                # （那次只把归档实体那条转成了逐条 conflict，其余 AppException 仍冒泡）。
+                logger.warning(
+                    "sync push mutation rejected",
+                    extra={
+                        "entity_type": mutation.entity_type,
+                        "operation": mutation.operation,
+                        "code": exc.code,
+                        "status_code": exc.status_code,
+                    },
+                )
+                raise
             except (KeyError, ValueError, TypeError) as exc:
                 # Missing required payload field, or unparseable UUID /
                 # date / datetime / enum. Convert to 422 rather than 500.
