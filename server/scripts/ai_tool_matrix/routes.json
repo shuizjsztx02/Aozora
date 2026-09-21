@@ -1,0 +1,1651 @@
+[
+  {
+    "id": "TX-ADD-01",
+    "text": "记一笔 12.5 元的早餐",
+    "matched": true,
+    "signals": [
+      "记一笔",
+      "一笔"
+    ],
+    "domains": [
+      "transaction"
+    ],
+    "wanted_domains": [
+      "transaction"
+    ],
+    "missing_domains": []
+  },
+  {
+    "id": "TX-ADD-02",
+    "text": "昨天买奶茶花了 32 块",
+    "matched": true,
+    "signals": [
+      "花了"
+    ],
+    "domains": [
+      "transaction",
+      "analysis"
+    ],
+    "wanted_domains": [
+      "transaction"
+    ],
+    "missing_domains": []
+  },
+  {
+    "id": "TX-ADD-03",
+    "text": "在超市花了 25，用支付宝付的",
+    "matched": true,
+    "signals": [
+      "花了",
+      "支付宝"
+    ],
+    "domains": [
+      "transaction",
+      "account",
+      "analysis"
+    ],
+    "wanted_domains": [
+      "transaction"
+    ],
+    "missing_domains": []
+  },
+  {
+    "id": "TX-ADD-04",
+    "text": "刚收到工资 12000 到卡里",
+    "matched": true,
+    "signals": [
+      "卡"
+    ],
+    "domains": [
+      "account"
+    ],
+    "wanted_domains": [
+      "transaction"
+    ],
+    "missing_domains": [
+      "transaction"
+    ]
+  },
+  {
+    "id": "TX-ADD-05",
+    "text": "记一笔 50 的「纪念品」",
+    "matched": true,
+    "signals": [
+      "记一笔",
+      "一笔"
+    ],
+    "domains": [
+      "transaction"
+    ],
+    "wanted_domains": [],
+    "missing_domains": []
+  },
+  {
+    "id": "TX-BATCH-01",
+    "text": "把今天这几笔一起记上：早饭 8 块，午饭 22 块，晚饭 30 块",
+    "matched": true,
+    "signals": [
+      "记上",
+      "几笔"
+    ],
+    "domains": [
+      "transaction"
+    ],
+    "wanted_domains": [
+      "transaction"
+    ],
+    "missing_domains": []
+  },
+  {
+    "id": "TX-LIST-01",
+    "text": "查一下这个月的餐饮记录",
+    "matched": true,
+    "signals": [
+      "记录"
+    ],
+    "domains": [
+      "transaction"
+    ],
+    "wanted_domains": [
+      "transaction"
+    ],
+    "missing_domains": []
+  },
+  {
+    "id": "TX-LIST-02",
+    "text": "看看我在支付宝上有哪些支出",
+    "matched": true,
+    "signals": [
+      "支出",
+      "支付宝"
+    ],
+    "domains": [
+      "transaction",
+      "account",
+      "analysis"
+    ],
+    "wanted_domains": [
+      "account",
+      "transaction"
+    ],
+    "missing_domains": []
+  },
+  {
+    "id": "TX-RECENT-01",
+    "text": "我最近记了几笔",
+    "matched": true,
+    "signals": [
+      "记了",
+      "几笔"
+    ],
+    "domains": [
+      "transaction"
+    ],
+    "wanted_domains": [
+      "transaction"
+    ],
+    "missing_domains": []
+  },
+  {
+    "id": "TX-SUM-01",
+    "text": "这个月餐饮花了多少",
+    "matched": true,
+    "signals": [
+      "花了"
+    ],
+    "domains": [
+      "transaction",
+      "analysis"
+    ],
+    "wanted_domains": [
+      "analysis",
+      "transaction"
+    ],
+    "missing_domains": []
+  },
+  {
+    "id": "TX-SUM-02",
+    "text": "本月总支出是多少",
+    "matched": true,
+    "signals": [
+      "支出"
+    ],
+    "domains": [
+      "transaction",
+      "analysis"
+    ],
+    "wanted_domains": [
+      "analysis",
+      "transaction"
+    ],
+    "missing_domains": []
+  },
+  {
+    "id": "TX-UPD-01",
+    "text": "把便利店那笔改成 30 元",
+    "matched": true,
+    "signals": [
+      "那笔"
+    ],
+    "domains": [
+      "transaction"
+    ],
+    "wanted_domains": [
+      "transaction"
+    ],
+    "missing_domains": []
+  },
+  {
+    "id": "TX-UPD-02",
+    "text": "刚才那笔咖啡记成 32 了，改成 28",
+    "matched": true,
+    "signals": [
+      "那笔"
+    ],
+    "domains": [
+      "transaction"
+    ],
+    "wanted_domains": [
+      "transaction"
+    ],
+    "missing_domains": []
+  },
+  {
+    "id": "TX-DEL-01",
+    "text": "把夜宵那笔删掉",
+    "matched": true,
+    "signals": [
+      "那笔"
+    ],
+    "domains": [
+      "transaction"
+    ],
+    "wanted_domains": [
+      "transaction"
+    ],
+    "missing_domains": []
+  },
+  {
+    "id": "TX-DEL-02",
+    "text": "把打车的那笔删了",
+    "matched": true,
+    "signals": [
+      "那笔"
+    ],
+    "domains": [
+      "transaction"
+    ],
+    "wanted_domains": [
+      "transaction"
+    ],
+    "missing_domains": []
+  },
+  {
+    "id": "TX-NEG-01",
+    "text": "把所有的交易记录都删掉",
+    "matched": true,
+    "signals": [
+      "记录"
+    ],
+    "domains": [
+      "transaction"
+    ],
+    "wanted_domains": [],
+    "missing_domains": []
+  },
+  {
+    "id": "CAT-LIST-01",
+    "text": "我有哪些分类",
+    "matched": true,
+    "signals": [
+      "分类"
+    ],
+    "domains": [
+      "category"
+    ],
+    "wanted_domains": [
+      "category"
+    ],
+    "missing_domains": []
+  },
+  {
+    "id": "CAT-CREATE-01",
+    "text": "建一个支出分类叫数码",
+    "matched": true,
+    "signals": [
+      "支出",
+      "分类"
+    ],
+    "domains": [
+      "transaction",
+      "category",
+      "analysis"
+    ],
+    "wanted_domains": [
+      "category"
+    ],
+    "missing_domains": []
+  },
+  {
+    "id": "CAT-CREATE-02",
+    "text": "加个收入分类叫稿费",
+    "matched": true,
+    "signals": [
+      "收入",
+      "分类"
+    ],
+    "domains": [
+      "transaction",
+      "category",
+      "analysis"
+    ],
+    "wanted_domains": [
+      "category"
+    ],
+    "missing_domains": []
+  },
+  {
+    "id": "CAT-UPD-01",
+    "text": "把「宠物」这个分类改名叫猫主子",
+    "matched": true,
+    "signals": [
+      "分类"
+    ],
+    "domains": [
+      "category"
+    ],
+    "wanted_domains": [
+      "category"
+    ],
+    "missing_domains": []
+  },
+  {
+    "id": "CAT-UPD-02",
+    "text": "奖金那个分类改名成年终奖",
+    "matched": true,
+    "signals": [
+      "分类"
+    ],
+    "domains": [
+      "category"
+    ],
+    "wanted_domains": [
+      "category"
+    ],
+    "missing_domains": []
+  },
+  {
+    "id": "CAT-ARCH-01",
+    "text": "娱乐这个分类我不用了，归档掉",
+    "matched": true,
+    "signals": [
+      "分类"
+    ],
+    "domains": [
+      "category"
+    ],
+    "wanted_domains": [
+      "category"
+    ],
+    "missing_domains": []
+  },
+  {
+    "id": "CAT-ARCH-02",
+    "text": "临时这个分类删掉",
+    "matched": true,
+    "signals": [
+      "分类"
+    ],
+    "domains": [
+      "category"
+    ],
+    "wanted_domains": [
+      "category"
+    ],
+    "missing_domains": []
+  },
+  {
+    "id": "ACC-LIST-01",
+    "text": "我有哪些账户",
+    "matched": true,
+    "signals": [
+      "账户"
+    ],
+    "domains": [
+      "account"
+    ],
+    "wanted_domains": [
+      "account"
+    ],
+    "missing_domains": []
+  },
+  {
+    "id": "ACC-BAL-01",
+    "text": "看看我各账户的余额",
+    "matched": true,
+    "signals": [
+      "账户",
+      "余额"
+    ],
+    "domains": [
+      "account"
+    ],
+    "wanted_domains": [
+      "account"
+    ],
+    "missing_domains": []
+  },
+  {
+    "id": "ACC-CREATE-01",
+    "text": "新建一个账户叫云闪付",
+    "matched": true,
+    "signals": [
+      "账户"
+    ],
+    "domains": [
+      "account"
+    ],
+    "wanted_domains": [
+      "account"
+    ],
+    "missing_domains": []
+  },
+  {
+    "id": "ACC-UPD-01",
+    "text": "把花呗这个账户改名叫蚂蚁花呗",
+    "matched": true,
+    "signals": [
+      "账户"
+    ],
+    "domains": [
+      "account"
+    ],
+    "wanted_domains": [
+      "account"
+    ],
+    "missing_domains": []
+  },
+  {
+    "id": "ACC-ARCH-01",
+    "text": "招商卡这个账户我不用了，归档掉",
+    "matched": true,
+    "signals": [
+      "账户",
+      "卡"
+    ],
+    "domains": [
+      "account"
+    ],
+    "wanted_domains": [
+      "account"
+    ],
+    "missing_domains": []
+  },
+  {
+    "id": "ACC-NEG-01",
+    "text": "用现金记一笔 10 块的餐饮",
+    "matched": true,
+    "signals": [
+      "记一笔",
+      "一笔"
+    ],
+    "domains": [
+      "transaction"
+    ],
+    "wanted_domains": [
+      "transaction"
+    ],
+    "missing_domains": []
+  },
+  {
+    "id": "BOOK-LIST-01",
+    "text": "看看我有哪些账本",
+    "matched": true,
+    "signals": [
+      "账本"
+    ],
+    "domains": [
+      "book"
+    ],
+    "wanted_domains": [
+      "book"
+    ],
+    "missing_domains": []
+  },
+  {
+    "id": "BOOK-CREATE-01",
+    "text": "新建一个账本叫副业账本",
+    "matched": true,
+    "signals": [
+      "账本"
+    ],
+    "domains": [
+      "book"
+    ],
+    "wanted_domains": [
+      "book"
+    ],
+    "missing_domains": []
+  },
+  {
+    "id": "BOOK-DETAIL-01",
+    "text": "装修账本里有多少钱",
+    "matched": true,
+    "signals": [
+      "账本"
+    ],
+    "domains": [
+      "book"
+    ],
+    "wanted_domains": [
+      "book"
+    ],
+    "missing_domains": []
+  },
+  {
+    "id": "BOOK-UPD-01",
+    "text": "把装修账本改名叫新房",
+    "matched": true,
+    "signals": [
+      "账本"
+    ],
+    "domains": [
+      "book"
+    ],
+    "wanted_domains": [
+      "book"
+    ],
+    "missing_domains": []
+  },
+  {
+    "id": "BOOK-DEL-01",
+    "text": "旧账本不要了，删掉",
+    "matched": true,
+    "signals": [
+      "账本"
+    ],
+    "domains": [
+      "book"
+    ],
+    "wanted_domains": [
+      "book"
+    ],
+    "missing_domains": []
+  },
+  {
+    "id": "BUD-SET-01",
+    "text": "把 2026-09 的整体预算设为 3000 元",
+    "matched": true,
+    "signals": [
+      "预算"
+    ],
+    "domains": [
+      "budget"
+    ],
+    "wanted_domains": [
+      "budget"
+    ],
+    "missing_domains": []
+  },
+  {
+    "id": "BUD-SET-02",
+    "text": "这个月的总预算定成 5000",
+    "matched": true,
+    "signals": [
+      "预算"
+    ],
+    "domains": [
+      "budget"
+    ],
+    "wanted_domains": [
+      "budget"
+    ],
+    "missing_domains": []
+  },
+  {
+    "id": "BUD-SETCAT-01",
+    "text": "把餐饮的月度预算改成 1500",
+    "matched": true,
+    "signals": [
+      "预算"
+    ],
+    "domains": [
+      "budget"
+    ],
+    "wanted_domains": [
+      "budget"
+    ],
+    "missing_domains": []
+  },
+  {
+    "id": "BUD-SETCAT-02",
+    "text": "给餐饮设个月度预算 1500",
+    "matched": true,
+    "signals": [
+      "预算"
+    ],
+    "domains": [
+      "budget"
+    ],
+    "wanted_domains": [
+      "budget"
+    ],
+    "missing_domains": []
+  },
+  {
+    "id": "BUD-LIST-01",
+    "text": "我有哪些预算",
+    "matched": true,
+    "signals": [
+      "预算"
+    ],
+    "domains": [
+      "budget"
+    ],
+    "wanted_domains": [
+      "budget"
+    ],
+    "missing_domains": []
+  },
+  {
+    "id": "BUD-STATUS-01",
+    "text": "餐饮预算还剩多少",
+    "matched": true,
+    "signals": [
+      "预算"
+    ],
+    "domains": [
+      "budget"
+    ],
+    "wanted_domains": [
+      "budget"
+    ],
+    "missing_domains": []
+  },
+  {
+    "id": "BUD-CHECK-01",
+    "text": "我想买双 800 块的鞋，购物预算够吗",
+    "matched": true,
+    "signals": [
+      "预算"
+    ],
+    "domains": [
+      "budget"
+    ],
+    "wanted_domains": [
+      "budget"
+    ],
+    "missing_domains": []
+  },
+  {
+    "id": "BUD-SUM-01",
+    "text": "这个月预算执行得怎么样",
+    "matched": true,
+    "signals": [
+      "预算"
+    ],
+    "domains": [
+      "budget"
+    ],
+    "wanted_domains": [
+      "budget"
+    ],
+    "missing_domains": []
+  },
+  {
+    "id": "BUD-OVER-01",
+    "text": "哪些分类超预算了",
+    "matched": true,
+    "signals": [
+      "分类",
+      "预算"
+    ],
+    "domains": [
+      "category",
+      "budget"
+    ],
+    "wanted_domains": [
+      "budget"
+    ],
+    "missing_domains": []
+  },
+  {
+    "id": "BUD-DEL-01",
+    "text": "把餐饮的预算删掉",
+    "matched": true,
+    "signals": [
+      "预算"
+    ],
+    "domains": [
+      "budget"
+    ],
+    "wanted_domains": [
+      "budget"
+    ],
+    "missing_domains": []
+  },
+  {
+    "id": "BUD-NEG-01",
+    "text": "预算里包含房租吗",
+    "matched": true,
+    "signals": [
+      "预算",
+      "房租"
+    ],
+    "domains": [
+      "budget",
+      "scheduled"
+    ],
+    "wanted_domains": [
+      "budget",
+      "help"
+    ],
+    "missing_domains": [
+      "help"
+    ]
+  },
+  {
+    "id": "SAV-LIST-01",
+    "text": "看看我的攒钱计划",
+    "matched": true,
+    "signals": [
+      "攒"
+    ],
+    "domains": [
+      "savings"
+    ],
+    "wanted_domains": [
+      "savings"
+    ],
+    "missing_domains": []
+  },
+  {
+    "id": "SAV-CREATE-01",
+    "text": "我想存钱买镜头，目标 8000 块",
+    "matched": true,
+    "signals": [
+      "存钱"
+    ],
+    "domains": [
+      "savings"
+    ],
+    "wanted_domains": [
+      "savings"
+    ],
+    "missing_domains": []
+  },
+  {
+    "id": "SAV-UPD-01",
+    "text": "相机那个存钱目标改成一万",
+    "matched": true,
+    "signals": [
+      "存钱"
+    ],
+    "domains": [
+      "savings"
+    ],
+    "wanted_domains": [
+      "savings"
+    ],
+    "missing_domains": []
+  },
+  {
+    "id": "SAV-UPD-02",
+    "text": "往相机那个目标里再存 500",
+    "matched": false,
+    "signals": [],
+    "domains": [
+      "transaction",
+      "category",
+      "account",
+      "book",
+      "budget",
+      "savings",
+      "scheduled",
+      "persona",
+      "meta",
+      "analysis",
+      "export",
+      "privacy",
+      "security",
+      "sync",
+      "help",
+      "reminder"
+    ],
+    "wanted_domains": [
+      "savings"
+    ],
+    "missing_domains": []
+  },
+  {
+    "id": "SAV-ARCH-01",
+    "text": "相机那个存钱计划取消掉",
+    "matched": true,
+    "signals": [
+      "存钱"
+    ],
+    "domains": [
+      "savings"
+    ],
+    "wanted_domains": [
+      "savings"
+    ],
+    "missing_domains": []
+  },
+  {
+    "id": "SCH-LIST-01",
+    "text": "我有哪些定时记账规则",
+    "matched": true,
+    "signals": [
+      "记账",
+      "定时"
+    ],
+    "domains": [
+      "transaction",
+      "scheduled"
+    ],
+    "wanted_domains": [
+      "scheduled"
+    ],
+    "missing_domains": []
+  },
+  {
+    "id": "SCH-CREATE-01",
+    "text": "每年 1 月 1 号自动记一笔 600 的保险费",
+    "matched": true,
+    "signals": [
+      "记一笔",
+      "一笔",
+      "自动记"
+    ],
+    "domains": [
+      "transaction",
+      "scheduled"
+    ],
+    "wanted_domains": [
+      "scheduled"
+    ],
+    "missing_domains": []
+  },
+  {
+    "id": "SCH-CREATE-02",
+    "text": "每月 10 号自动记一笔 800 的物业费",
+    "matched": true,
+    "signals": [
+      "记一笔",
+      "一笔",
+      "自动记"
+    ],
+    "domains": [
+      "transaction",
+      "scheduled"
+    ],
+    "wanted_domains": [
+      "scheduled"
+    ],
+    "missing_domains": []
+  },
+  {
+    "id": "SCH-UPD-01",
+    "text": "把每周一那条交通费定时规则改成 250",
+    "matched": true,
+    "signals": [
+      "定时"
+    ],
+    "domains": [
+      "scheduled"
+    ],
+    "wanted_domains": [
+      "scheduled"
+    ],
+    "missing_domains": []
+  },
+  {
+    "id": "SCH-ARCH-01",
+    "text": "把交通费那条定时规则停掉",
+    "matched": true,
+    "signals": [
+      "定时"
+    ],
+    "domains": [
+      "scheduled"
+    ],
+    "wanted_domains": [
+      "scheduled"
+    ],
+    "missing_domains": []
+  },
+  {
+    "id": "SCH-NEG-01",
+    "text": "每月自动记一笔 500 的物业费，另外提醒我每周交房租",
+    "matched": true,
+    "signals": [
+      "记一笔",
+      "一笔",
+      "自动记",
+      "房租",
+      "提醒"
+    ],
+    "domains": [
+      "transaction",
+      "scheduled",
+      "reminder"
+    ],
+    "wanted_domains": [
+      "reminder",
+      "scheduled"
+    ],
+    "missing_domains": []
+  },
+  {
+    "id": "PER-LIST-01",
+    "text": "有哪些角色",
+    "matched": true,
+    "signals": [
+      "角色"
+    ],
+    "domains": [
+      "persona"
+    ],
+    "wanted_domains": [
+      "persona"
+    ],
+    "missing_domains": []
+  },
+  {
+    "id": "PER-CREATE-01",
+    "text": "新建一个角色叫阿福，说话简洁一点",
+    "matched": true,
+    "signals": [
+      "角色"
+    ],
+    "domains": [
+      "persona"
+    ],
+    "wanted_domains": [
+      "persona"
+    ],
+    "missing_domains": []
+  },
+  {
+    "id": "PER-UPD-01",
+    "text": "把小助手的人设改得再温和些",
+    "matched": true,
+    "signals": [
+      "人设"
+    ],
+    "domains": [
+      "persona"
+    ],
+    "wanted_domains": [
+      "persona"
+    ],
+    "missing_domains": []
+  },
+  {
+    "id": "PER-SWITCH-01",
+    "text": "切换到米粒",
+    "matched": false,
+    "signals": [],
+    "domains": [
+      "transaction",
+      "category",
+      "account",
+      "book",
+      "budget",
+      "savings",
+      "scheduled",
+      "persona",
+      "meta",
+      "analysis",
+      "export",
+      "privacy",
+      "security",
+      "sync",
+      "help",
+      "reminder"
+    ],
+    "wanted_domains": [
+      "persona"
+    ],
+    "missing_domains": []
+  },
+  {
+    "id": "PER-ARCH-01",
+    "text": "把小助手这个角色删掉",
+    "matched": true,
+    "signals": [
+      "角色"
+    ],
+    "domains": [
+      "persona"
+    ],
+    "wanted_domains": [
+      "persona"
+    ],
+    "missing_domains": []
+  },
+  {
+    "id": "META-01",
+    "text": "把默认账本设成旅行账本",
+    "matched": true,
+    "signals": [
+      "账本",
+      "默认"
+    ],
+    "domains": [
+      "book",
+      "meta"
+    ],
+    "wanted_domains": [
+      "meta"
+    ],
+    "missing_domains": []
+  },
+  {
+    "id": "META-02",
+    "text": "把默认账户改成支付宝",
+    "matched": true,
+    "signals": [
+      "账户",
+      "支付宝",
+      "默认"
+    ],
+    "domains": [
+      "account",
+      "meta"
+    ],
+    "wanted_domains": [
+      "meta"
+    ],
+    "missing_domains": []
+  },
+  {
+    "id": "ANA-M-01",
+    "text": "这个月我一共花了多少",
+    "matched": true,
+    "signals": [
+      "花了"
+    ],
+    "domains": [
+      "transaction",
+      "analysis"
+    ],
+    "wanted_domains": [
+      "analysis",
+      "transaction"
+    ],
+    "missing_domains": []
+  },
+  {
+    "id": "ANA-T-01",
+    "text": "最近半年的收支趋势",
+    "matched": true,
+    "signals": [
+      "收支",
+      "趋势"
+    ],
+    "domains": [
+      "transaction",
+      "analysis"
+    ],
+    "wanted_domains": [
+      "analysis"
+    ],
+    "missing_domains": []
+  },
+  {
+    "id": "EXP-LIST-01",
+    "text": "我之前导出过什么",
+    "matched": true,
+    "signals": [
+      "导出"
+    ],
+    "domains": [
+      "export"
+    ],
+    "wanted_domains": [
+      "export"
+    ],
+    "missing_domains": []
+  },
+  {
+    "id": "EXP-CREATE-01",
+    "text": "把我的数据导出成 CSV",
+    "matched": true,
+    "signals": [
+      "导出",
+      "csv"
+    ],
+    "domains": [
+      "export"
+    ],
+    "wanted_domains": [
+      "export"
+    ],
+    "missing_domains": []
+  },
+  {
+    "id": "PRI-STATUS-01",
+    "text": "我现在的隐私同意状态是什么",
+    "matched": true,
+    "signals": [
+      "隐私",
+      "同意"
+    ],
+    "domains": [
+      "privacy"
+    ],
+    "wanted_domains": [
+      "privacy"
+    ],
+    "missing_domains": []
+  },
+  {
+    "id": "PRI-FEEDBACK-01",
+    "text": "我要提个意见：希望支持语音记账",
+    "matched": true,
+    "signals": [
+      "记账",
+      "意见",
+      "支持"
+    ],
+    "domains": [
+      "transaction",
+      "privacy",
+      "help"
+    ],
+    "wanted_domains": [
+      "privacy"
+    ],
+    "missing_domains": []
+  },
+  {
+    "id": "PRI-CONSENT-01",
+    "text": "我同意最新的隐私政策",
+    "matched": true,
+    "signals": [
+      "隐私",
+      "同意"
+    ],
+    "domains": [
+      "privacy"
+    ],
+    "wanted_domains": [
+      "privacy"
+    ],
+    "missing_domains": []
+  },
+  {
+    "id": "SEC-PROFILE-01",
+    "text": "把我的昵称改成小明",
+    "matched": true,
+    "signals": [
+      "昵称"
+    ],
+    "domains": [
+      "security"
+    ],
+    "wanted_domains": [
+      "security"
+    ],
+    "missing_domains": []
+  },
+  {
+    "id": "SEC-DELETE-01",
+    "text": "我要注销账号",
+    "matched": true,
+    "signals": [
+      "账号",
+      "注销"
+    ],
+    "domains": [
+      "account",
+      "security"
+    ],
+    "wanted_domains": [
+      "security"
+    ],
+    "missing_domains": []
+  },
+  {
+    "id": "SEC-NEG-01",
+    "text": "帮我把密码改一下",
+    "matched": false,
+    "signals": [],
+    "domains": [
+      "transaction",
+      "category",
+      "account",
+      "book",
+      "budget",
+      "savings",
+      "scheduled",
+      "persona",
+      "meta",
+      "analysis",
+      "export",
+      "privacy",
+      "security",
+      "sync",
+      "help",
+      "reminder"
+    ],
+    "wanted_domains": [],
+    "missing_domains": []
+  },
+  {
+    "id": "SYN-STATUS-01",
+    "text": "同步状态怎么样",
+    "matched": true,
+    "signals": [
+      "同步"
+    ],
+    "domains": [
+      "sync"
+    ],
+    "wanted_domains": [
+      "sync"
+    ],
+    "missing_domains": []
+  },
+  {
+    "id": "SYN-TRIGGER-01",
+    "text": "现在手动同步一下",
+    "matched": true,
+    "signals": [
+      "同步"
+    ],
+    "domains": [
+      "sync"
+    ],
+    "wanted_domains": [
+      "sync"
+    ],
+    "missing_domains": []
+  },
+  {
+    "id": "SYN-STATUS-02",
+    "text": "我的数据都上传到云端了吗",
+    "matched": true,
+    "signals": [
+      "云端",
+      "上传"
+    ],
+    "domains": [
+      "sync"
+    ],
+    "wanted_domains": [
+      "sync"
+    ],
+    "missing_domains": []
+  },
+  {
+    "id": "REM-01",
+    "text": "提醒我明天早上八点交房租",
+    "matched": true,
+    "signals": [
+      "房租",
+      "提醒"
+    ],
+    "domains": [
+      "scheduled",
+      "reminder"
+    ],
+    "wanted_domains": [
+      "reminder"
+    ],
+    "missing_domains": []
+  },
+  {
+    "id": "REM-02",
+    "text": "每天晚上九点提醒我记账",
+    "matched": true,
+    "signals": [
+      "记账",
+      "提醒"
+    ],
+    "domains": [
+      "transaction",
+      "reminder"
+    ],
+    "wanted_domains": [
+      "reminder"
+    ],
+    "missing_domains": []
+  },
+  {
+    "id": "HELP-01",
+    "text": "怎么导出数据",
+    "matched": true,
+    "signals": [
+      "导出"
+    ],
+    "domains": [
+      "export"
+    ],
+    "wanted_domains": [
+      "help"
+    ],
+    "missing_domains": [
+      "help"
+    ]
+  },
+  {
+    "id": "HELP-02",
+    "text": "导出数据在哪",
+    "matched": true,
+    "signals": [
+      "导出",
+      "在哪"
+    ],
+    "domains": [
+      "export",
+      "help"
+    ],
+    "wanted_domains": [
+      "export",
+      "help"
+    ],
+    "missing_domains": []
+  },
+  {
+    "id": "HELP-03",
+    "text": "怎么用预算功能",
+    "matched": true,
+    "signals": [
+      "预算",
+      "怎么用"
+    ],
+    "domains": [
+      "budget",
+      "help"
+    ],
+    "wanted_domains": [
+      "help"
+    ],
+    "missing_domains": []
+  },
+  {
+    "id": "HELP-04",
+    "text": "支持语音记账吗",
+    "matched": true,
+    "signals": [
+      "记账",
+      "支持"
+    ],
+    "domains": [
+      "transaction",
+      "help"
+    ],
+    "wanted_domains": [
+      "help"
+    ],
+    "missing_domains": []
+  },
+  {
+    "id": "HELP-05",
+    "text": "怎么导入数据",
+    "matched": false,
+    "signals": [],
+    "domains": [
+      "transaction",
+      "category",
+      "account",
+      "book",
+      "budget",
+      "savings",
+      "scheduled",
+      "persona",
+      "meta",
+      "analysis",
+      "export",
+      "privacy",
+      "security",
+      "sync",
+      "help",
+      "reminder"
+    ],
+    "wanted_domains": [
+      "help"
+    ],
+    "missing_domains": []
+  },
+  {
+    "id": "HELP-06",
+    "text": "这个 App 怎么设置定期备份",
+    "matched": true,
+    "signals": [
+      "备份",
+      "怎么设置"
+    ],
+    "domains": [
+      "export",
+      "help"
+    ],
+    "wanted_domains": [
+      "help"
+    ],
+    "missing_domains": []
+  },
+  {
+    "id": "DEV-SHARE-01",
+    "text": "把这个月的账单分享给我朋友",
+    "matched": false,
+    "signals": [],
+    "domains": [
+      "transaction",
+      "category",
+      "account",
+      "book",
+      "budget",
+      "savings",
+      "scheduled",
+      "persona",
+      "meta",
+      "analysis",
+      "export",
+      "privacy",
+      "security",
+      "sync",
+      "help",
+      "reminder"
+    ],
+    "wanted_domains": [],
+    "missing_domains": []
+  },
+  {
+    "id": "DEV-VOICE-01",
+    "text": "我要用语音说一句话记一笔账",
+    "matched": true,
+    "signals": [
+      "记一笔",
+      "一笔"
+    ],
+    "domains": [
+      "transaction"
+    ],
+    "wanted_domains": [],
+    "missing_domains": []
+  },
+  {
+    "id": "DEV-IMG-01",
+    "text": "我想拍张发票的照片记一笔",
+    "matched": true,
+    "signals": [
+      "记一笔",
+      "一笔"
+    ],
+    "domains": [
+      "transaction"
+    ],
+    "wanted_domains": [],
+    "missing_domains": []
+  },
+  {
+    "id": "DEV-SIDE-01",
+    "text": "记一笔 9.9 元的餐饮",
+    "matched": true,
+    "signals": [
+      "记一笔",
+      "一笔"
+    ],
+    "domains": [
+      "transaction"
+    ],
+    "wanted_domains": [
+      "transaction"
+    ],
+    "missing_domains": []
+  },
+  {
+    "id": "CMP-01",
+    "text": "记一笔 88 元的餐饮，账户用现金，日期写 2026-09-15",
+    "matched": true,
+    "signals": [
+      "记一笔",
+      "一笔",
+      "账户"
+    ],
+    "domains": [
+      "transaction",
+      "account"
+    ],
+    "wanted_domains": [
+      "transaction"
+    ],
+    "missing_domains": []
+  },
+  {
+    "id": "CMP-02",
+    "text": "先查一下这个月餐饮花了多少，再把餐饮预算调到 2000",
+    "matched": true,
+    "signals": [
+      "花了",
+      "预算"
+    ],
+    "domains": [
+      "transaction",
+      "budget",
+      "analysis"
+    ],
+    "wanted_domains": [
+      "analysis",
+      "budget",
+      "transaction"
+    ],
+    "missing_domains": []
+  },
+  {
+    "id": "NEG-01",
+    "text": "你好呀",
+    "matched": false,
+    "signals": [],
+    "domains": [
+      "transaction",
+      "category",
+      "account",
+      "book",
+      "budget",
+      "savings",
+      "scheduled",
+      "persona",
+      "meta",
+      "analysis",
+      "export",
+      "privacy",
+      "security",
+      "sync",
+      "help",
+      "reminder"
+    ],
+    "wanted_domains": [],
+    "missing_domains": []
+  },
+  {
+    "id": "NEG-02",
+    "text": "帮我订一张明天去北京的机票",
+    "matched": false,
+    "signals": [],
+    "domains": [
+      "transaction",
+      "category",
+      "account",
+      "book",
+      "budget",
+      "savings",
+      "scheduled",
+      "persona",
+      "meta",
+      "analysis",
+      "export",
+      "privacy",
+      "security",
+      "sync",
+      "help",
+      "reminder"
+    ],
+    "wanted_domains": [],
+    "missing_domains": []
+  },
+  {
+    "id": "NEG-03",
+    "text": "那改成 6000 吧",
+    "matched": false,
+    "signals": [],
+    "domains": [
+      "transaction",
+      "category",
+      "account",
+      "book",
+      "budget",
+      "savings",
+      "scheduled",
+      "persona",
+      "meta",
+      "analysis",
+      "export",
+      "privacy",
+      "security",
+      "sync",
+      "help",
+      "reminder"
+    ],
+    "wanted_domains": [],
+    "missing_domains": []
+  },
+  {
+    "id": "NEG-04",
+    "text": "今天天气怎么样",
+    "matched": false,
+    "signals": [],
+    "domains": [
+      "transaction",
+      "category",
+      "account",
+      "book",
+      "budget",
+      "savings",
+      "scheduled",
+      "persona",
+      "meta",
+      "analysis",
+      "export",
+      "privacy",
+      "security",
+      "sync",
+      "help",
+      "reminder"
+    ],
+    "wanted_domains": [],
+    "missing_domains": []
+  },
+  {
+    "id": "GATE-01",
+    "text": "给餐饮设个月度预算 1500",
+    "matched": true,
+    "signals": [
+      "预算"
+    ],
+    "domains": [
+      "budget"
+    ],
+    "wanted_domains": [
+      "budget"
+    ],
+    "missing_domains": []
+  },
+  {
+    "id": "GATE-02",
+    "text": "存钱买相机，目标 8000",
+    "matched": true,
+    "signals": [
+      "存钱"
+    ],
+    "domains": [
+      "savings"
+    ],
+    "wanted_domains": [
+      "savings"
+    ],
+    "missing_domains": []
+  },
+  {
+    "id": "GATE-03",
+    "text": "每月 5 号自动记一笔 1500 的购物",
+    "matched": true,
+    "signals": [
+      "记一笔",
+      "一笔",
+      "自动记"
+    ],
+    "domains": [
+      "transaction",
+      "scheduled"
+    ],
+    "wanted_domains": [
+      "scheduled"
+    ],
+    "missing_domains": []
+  }
+]

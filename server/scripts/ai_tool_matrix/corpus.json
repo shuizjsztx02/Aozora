@@ -1,0 +1,1360 @@
+{
+  "version": 1,
+  "title": "T-M7 全域名 AI 工具执行测试集（17 域 / 62 工具）",
+  "note": "用例是**有状态且顺序敏感**的：同一域内先建后改，数组顺序即执行顺序。前置播种见 seed，另有若干用例自带 setup。",
+  "seed": {
+    "book": "测试总账本",
+    "books": [
+      {
+        "name": "旅行账本"
+      },
+      {
+        "name": "装修账本"
+      },
+      {
+        "name": "旧账本"
+      }
+    ],
+    "categories": [
+      {
+        "name": "餐饮",
+        "kind": "expense"
+      },
+      {
+        "name": "交通",
+        "kind": "expense"
+      },
+      {
+        "name": "夜宵",
+        "kind": "expense"
+      },
+      {
+        "name": "房租",
+        "kind": "expense"
+      },
+      {
+        "name": "购物",
+        "kind": "expense"
+      },
+      {
+        "name": "宠物",
+        "kind": "expense"
+      },
+      {
+        "name": "临时",
+        "kind": "expense"
+      },
+      {
+        "name": "物业费",
+        "kind": "expense"
+      },
+      {
+        "name": "工资",
+        "kind": "income"
+      },
+      {
+        "name": "奖金",
+        "kind": "income"
+      },
+      {
+        "name": "娱乐",
+        "kind": "expense"
+      },
+      {
+        "name": "保险费",
+        "kind": "expense"
+      }
+    ],
+    "accounts": [
+      {
+        "name": "现金"
+      },
+      {
+        "name": "支付宝"
+      },
+      {
+        "name": "花呗"
+      },
+      {
+        "name": "招商卡"
+      }
+    ],
+    "transactions": [
+      {
+        "type": "expense",
+        "amountCents": 1250,
+        "categoryName": "餐饮",
+        "bizDate": "today",
+        "note": "午饭"
+      },
+      {
+        "type": "expense",
+        "amountCents": 3800,
+        "categoryName": "交通",
+        "bizDate": "yesterday",
+        "note": "打车",
+        "accountName": "支付宝"
+      },
+      {
+        "type": "expense",
+        "amountCents": 4500,
+        "categoryName": "夜宵",
+        "bizDate": "today",
+        "note": "夜宵"
+      },
+      {
+        "type": "expense",
+        "amountCents": 2500,
+        "categoryName": "餐饮",
+        "bizDate": "today",
+        "note": "便利店"
+      },
+      {
+        "type": "expense",
+        "amountCents": 3200,
+        "categoryName": "餐饮",
+        "bizDate": "yesterday",
+        "note": "咖啡"
+      }
+    ],
+    "savings": [
+      {
+        "name": "相机",
+        "targetCents": 800000
+      }
+    ],
+    "scheduled": [
+      {
+        "name": "房租",
+        "type": "expense",
+        "amountCents": 300000,
+        "categoryName": "房租",
+        "repeat": "monthly",
+        "startDate": "2026-09-01"
+      },
+      {
+        "name": "交通费",
+        "type": "expense",
+        "amountCents": 20000,
+        "categoryName": "交通",
+        "repeat": "weekly",
+        "startDate": "2026-09-07"
+      }
+    ],
+    "personas": [
+      {
+        "name": "米粒",
+        "persona": "说话温柔、爱用颜文字"
+      },
+      {
+        "name": "小助手",
+        "persona": "回答简洁、直接给结论"
+      }
+    ],
+    "budgets": [
+      {
+        "categoryName": "餐饮",
+        "period": "2026-09",
+        "amountCents": 200000
+      }
+    ],
+    "note": "**播种口径**：凡被「改 / 删 / 归档」用例引用的对象都直接播在这里，不依赖更早的 create 用例。原因是服务端的 `confirm_reason`：先读再写（step≥2）只出确认卡、**不落库**——create 用例因此可能没真的建出对象，后续用例就会答「找不到 X」而看起来像模型缺陷（第一版语料正是这么误判了 5 条）。create 用例改用全新名字，与改/删目标不重叠。"
+  },
+  "cases": [
+    {
+      "id": "TX-ADD-01",
+      "domain": "transaction",
+      "layer": "core",
+      "text": "记一笔 12.5 元的早餐",
+      "expect": [
+        "transaction_add"
+      ],
+      "kind": "write",
+      "landing": "landed",
+      "note": "最直白形态；「记一笔」是路由强信号"
+    },
+    {
+      "id": "TX-ADD-02",
+      "domain": "transaction",
+      "layer": "para",
+      "text": "昨天买奶茶花了 32 块",
+      "expect": [
+        "transaction_add"
+      ],
+      "kind": "write",
+      "landing": "landed",
+      "note": "无「记一笔」的纯陈述句；相对日期「昨天」"
+    },
+    {
+      "id": "TX-ADD-03",
+      "domain": "transaction",
+      "layer": "para",
+      "text": "在超市花了 25，用支付宝付的",
+      "expect": [
+        "transaction_add"
+      ],
+      "kind": "write",
+      "landing": "landed",
+      "note": "附带账户名，测 accountName 抽取"
+    },
+    {
+      "id": "TX-ADD-04",
+      "domain": "transaction",
+      "layer": "para",
+      "text": "刚收到工资 12000 到卡里",
+      "expect": [
+        "transaction_add"
+      ],
+      "kind": "write",
+      "landing": "landed",
+      "note": "收入方向；「工资」是收入分类"
+    },
+    {
+      "id": "TX-ADD-05",
+      "domain": "transaction",
+      "layer": "boundary",
+      "text": "记一笔 50 的「纪念品」",
+      "expect": [],
+      "kind": "boundary",
+      "landing": "forbidden",
+      "note": "点名不存在的分类。**判据是「不得静默记到别的分类上」**"
+    },
+    {
+      "id": "TX-BATCH-01",
+      "domain": "transaction",
+      "layer": "core",
+      "text": "把今天这几笔一起记上：早饭 8 块，午饭 22 块，晚饭 30 块",
+      "expect": [
+        "transaction_add_batch",
+        "transaction_add"
+      ],
+      "kind": "write",
+      "landing": "landed",
+      "note": "批量记账；「记上」是路由信号"
+    },
+    {
+      "id": "TX-LIST-01",
+      "domain": "transaction",
+      "layer": "core",
+      "text": "查一下这个月的餐饮记录",
+      "expect": [
+        "transaction_list",
+        "transaction_summary"
+      ],
+      "kind": "read",
+      "landing": "na",
+      "note": "带分类过滤的列表查询"
+    },
+    {
+      "id": "TX-LIST-02",
+      "domain": "transaction",
+      "layer": "para",
+      "text": "看看我在支付宝上有哪些支出",
+      "expect": [
+        "transaction_list",
+        "account_balances"
+      ],
+      "kind": "read",
+      "landing": "na",
+      "note": "账户维度过滤；跨 account 域的词「支付宝」"
+    },
+    {
+      "id": "TX-RECENT-01",
+      "domain": "transaction",
+      "layer": "core",
+      "text": "我最近记了几笔",
+      "expect": [
+        "transaction_recent",
+        "transaction_list"
+      ],
+      "kind": "read",
+      "landing": "na",
+      "note": "「几笔」是路由信号，且指向 recent 而非 summary"
+    },
+    {
+      "id": "TX-SUM-01",
+      "domain": "transaction",
+      "layer": "core",
+      "text": "这个月餐饮花了多少",
+      "expect": [
+        "transaction_summary",
+        "stats_monthly"
+      ],
+      "kind": "read",
+      "landing": "na",
+      "note": "近义工具分属 transaction/analysis 两域，任一命中即正确"
+    },
+    {
+      "id": "TX-SUM-02",
+      "domain": "transaction",
+      "layer": "para",
+      "text": "本月总支出是多少",
+      "expect": [
+        "transaction_summary",
+        "stats_monthly"
+      ],
+      "kind": "read",
+      "landing": "na",
+      "note": "「总支出」不带分类过滤"
+    },
+    {
+      "id": "TX-UPD-01",
+      "domain": "transaction",
+      "layer": "core",
+      "text": "把便利店那笔改成 30 元",
+      "expect": [
+        "transaction_update"
+      ],
+      "kind": "write",
+      "landing": "produced",
+      "note": "locator 定位 + 改金额；「便利店」是播种的那一笔（唯一匹配）"
+    },
+    {
+      "id": "TX-UPD-02",
+      "domain": "transaction",
+      "layer": "para",
+      "text": "刚才那笔咖啡记成 32 了，改成 28",
+      "expect": [
+        "transaction_update"
+      ],
+      "kind": "write",
+      "landing": "produced",
+      "note": "「记成…了」是 OP_SENTENCE_RE 信号；口语自我纠正句式。「咖啡」是播种的那一笔（32 元 → 28）"
+    },
+    {
+      "id": "TX-DEL-01",
+      "domain": "transaction",
+      "layer": "core",
+      "text": "把夜宵那笔删掉",
+      "expect": [
+        "transaction_delete"
+      ],
+      "kind": "write",
+      "landing": "produced",
+      "note": "唯一匹配的 locator"
+    },
+    {
+      "id": "TX-DEL-02",
+      "domain": "transaction",
+      "layer": "boundary",
+      "text": "把打车的那笔删了",
+      "expect": [
+        "transaction_delete",
+        "transaction_list"
+      ],
+      "kind": "write",
+      "landing": "produced",
+      "note": "「打车」有两条（种子 + TX-ADD-02 的咖啡不是打车…此处仅种子一条）→ 单条应直接删"
+    },
+    {
+      "id": "TX-NEG-01",
+      "domain": "transaction",
+      "layer": "boundary",
+      "text": "把所有的交易记录都删掉",
+      "expect": [],
+      "kind": "boundary",
+      "landing": "forbidden",
+      "note": "无批量删除工具 → 应如实说明做不到，绝不允许静默清空"
+    },
+    {
+      "id": "CAT-LIST-01",
+      "domain": "category",
+      "layer": "core",
+      "text": "我有哪些分类",
+      "expect": [
+        "category_list"
+      ],
+      "kind": "read",
+      "landing": "na",
+      "note": "基础列表"
+    },
+    {
+      "id": "CAT-CREATE-01",
+      "domain": "category",
+      "layer": "core",
+      "text": "建一个支出分类叫数码",
+      "expect": [
+        "category_create"
+      ],
+      "kind": "write",
+      "landing": "produced",
+      "note": "kind=expense 从「支出」推出。**create 用例是终点**，后续用例不依赖它"
+    },
+    {
+      "id": "CAT-CREATE-02",
+      "domain": "category",
+      "layer": "para",
+      "text": "加个收入分类叫稿费",
+      "expect": [
+        "category_create"
+      ],
+      "kind": "write",
+      "landing": "produced",
+      "note": "kind=income；「加个」是口语说法。**create 用例是终点**"
+    },
+    {
+      "id": "CAT-UPD-01",
+      "domain": "category",
+      "layer": "core",
+      "text": "把「宠物」这个分类改名叫猫主子",
+      "expect": [
+        "category_update"
+      ],
+      "kind": "write",
+      "landing": "produced",
+      "note": "改名；「改名叫」"
+    },
+    {
+      "id": "CAT-UPD-02",
+      "domain": "category",
+      "layer": "para",
+      "text": "奖金那个分类改名成年终奖",
+      "expect": [
+        "category_update"
+      ],
+      "kind": "write",
+      "landing": "produced",
+      "note": "改名；省略「叫」"
+    },
+    {
+      "id": "CAT-ARCH-01",
+      "domain": "category",
+      "layer": "core",
+      "text": "娱乐这个分类我不用了，归档掉",
+      "expect": [
+        "category_archive"
+      ],
+      "kind": "write",
+      "landing": "produced",
+      "note": "归档。目标「娱乐」是**专属播种对象**——不与改名用例（CAT-UPD-01 的「宠物」）争用"
+    },
+    {
+      "id": "CAT-ARCH-02",
+      "domain": "category",
+      "layer": "para",
+      "text": "临时这个分类删掉",
+      "expect": [
+        "category_archive",
+        "category_update"
+      ],
+      "kind": "write",
+      "landing": "produced",
+      "note": "「删掉」在分类域只有归档一条路（无硬删工具）"
+    },
+    {
+      "id": "ACC-LIST-01",
+      "domain": "account",
+      "layer": "core",
+      "text": "我有哪些账户",
+      "expect": [
+        "account_list"
+      ],
+      "kind": "read",
+      "landing": "na",
+      "note": "基础列表"
+    },
+    {
+      "id": "ACC-BAL-01",
+      "domain": "account",
+      "layer": "core",
+      "text": "看看我各账户的余额",
+      "expect": [
+        "account_balances",
+        "account_list"
+      ],
+      "kind": "read",
+      "landing": "na",
+      "note": "「余额」是强信号"
+    },
+    {
+      "id": "ACC-CREATE-01",
+      "domain": "account",
+      "layer": "core",
+      "text": "新建一个账户叫云闪付",
+      "expect": [
+        "account_create"
+      ],
+      "kind": "write",
+      "landing": "produced",
+      "note": "「云闪付」是用户自造名，词表里没有。**create 用例是终点**：它是否真的落库取决于模型先不先读一次（step≥2 → 只出确认卡），故后续用例不依赖它"
+    },
+    {
+      "id": "ACC-UPD-01",
+      "domain": "account",
+      "layer": "core",
+      "text": "把花呗这个账户改名叫蚂蚁花呗",
+      "expect": [
+        "account_update"
+      ],
+      "kind": "write",
+      "landing": "produced",
+      "note": "改名"
+    },
+    {
+      "id": "ACC-ARCH-01",
+      "domain": "account",
+      "layer": "core",
+      "text": "招商卡这个账户我不用了，归档掉",
+      "expect": [
+        "account_archive"
+      ],
+      "kind": "write",
+      "landing": "produced",
+      "note": "归档。目标「招商卡」是**专属播种对象**——不依赖 ACC-UPD-01 的改名产出"
+    },
+    {
+      "id": "ACC-NEG-01",
+      "domain": "account",
+      "layer": "boundary",
+      "text": "用现金记一笔 10 块的餐饮",
+      "expect": [
+        "transaction_add"
+      ],
+      "kind": "write",
+      "landing": "landed",
+      "note": "「账户」词不出现在句子里但语义是账户归属；应归 transaction 而不是 account"
+    },
+    {
+      "id": "BOOK-LIST-01",
+      "domain": "book",
+      "layer": "core",
+      "text": "看看我有哪些账本",
+      "expect": [
+        "book_list"
+      ],
+      "kind": "read",
+      "landing": "na",
+      "note": "基础列表"
+    },
+    {
+      "id": "BOOK-CREATE-01",
+      "domain": "book",
+      "layer": "core",
+      "text": "新建一个账本叫副业账本",
+      "expect": [
+        "book_create"
+      ],
+      "kind": "write",
+      "landing": "produced",
+      "note": "新建账本。**create 用例是终点**（改/删目标是播种的「装修账本」）"
+    },
+    {
+      "id": "BOOK-DETAIL-01",
+      "domain": "book",
+      "layer": "core",
+      "text": "装修账本里有多少钱",
+      "expect": [
+        "book_detail",
+        "book_list"
+      ],
+      "kind": "read",
+      "landing": "na",
+      "note": "单账本详情；「多少」是 OP_SENTENCE_RE 信号"
+    },
+    {
+      "id": "BOOK-UPD-01",
+      "domain": "book",
+      "layer": "core",
+      "text": "把装修账本改名叫新房",
+      "expect": [
+        "book_update"
+      ],
+      "kind": "write",
+      "landing": "produced",
+      "note": "改名"
+    },
+    {
+      "id": "BOOK-DEL-01",
+      "domain": "book",
+      "layer": "core",
+      "text": "旧账本不要了，删掉",
+      "expect": [
+        "book_delete"
+      ],
+      "kind": "write",
+      "landing": "produced",
+      "note": "删账本（归档语义）；「删掉」是 OP_SENTENCE_RE 信号。目标「旧账本」是专属播种对象"
+    },
+    {
+      "id": "BUD-SET-01",
+      "domain": "budget",
+      "layer": "core",
+      "text": "把 2026-09 的整体预算设为 3000 元",
+      "expect": [
+        "budget_set"
+      ],
+      "kind": "write",
+      "landing": "produced",
+      "note": "整体预算（不带分类）"
+    },
+    {
+      "id": "BUD-SET-02",
+      "domain": "budget",
+      "layer": "para",
+      "text": "这个月的总预算定成 5000",
+      "expect": [
+        "budget_set"
+      ],
+      "kind": "write",
+      "landing": "produced",
+      "note": "口语「定成」；相对期间「这个月」"
+    },
+    {
+      "id": "BUD-SETCAT-01",
+      "domain": "budget",
+      "layer": "core",
+      "text": "把餐饮的月度预算改成 1500",
+      "expect": [
+        "budget_set_category"
+      ],
+      "kind": "write",
+      "landing": "produced",
+      "note": "分类预算；「改成」是 OP_SENTENCE_RE 信号（保证进 agent）"
+    },
+    {
+      "id": "BUD-SETCAT-02",
+      "domain": "budget",
+      "layer": "gate",
+      "text": "给餐饮设个月度预算 1500",
+      "expect": [
+        "budget_set_category"
+      ],
+      "kind": "write",
+      "landing": "produced",
+      "note": "★ 已知风险：无 OP_SENTENCE_RE 关键词 + 含金额与分类 → 设备端可能被本地 NLU 记成 1500 元支出（R-PROD-28 形态）"
+    },
+    {
+      "id": "BUD-LIST-01",
+      "domain": "budget",
+      "layer": "core",
+      "text": "我有哪些预算",
+      "expect": [
+        "budget_list"
+      ],
+      "kind": "read",
+      "landing": "na",
+      "note": "基础列表"
+    },
+    {
+      "id": "BUD-STATUS-01",
+      "domain": "budget",
+      "layer": "core",
+      "text": "餐饮预算还剩多少",
+      "expect": [
+        "budget_status",
+        "budget_list"
+      ],
+      "kind": "read",
+      "landing": "na",
+      "note": "单分类预算状态"
+    },
+    {
+      "id": "BUD-CHECK-01",
+      "domain": "budget",
+      "layer": "core",
+      "text": "我想买双 800 块的鞋，购物预算够吗",
+      "expect": [
+        "budget_check"
+      ],
+      "kind": "read",
+      "landing": "na",
+      "note": "假设性支出对预算的影响；「够吗」是疑问。分类必须与消费对象一致（买鞋→购物）"
+    },
+    {
+      "id": "BUD-SUM-01",
+      "domain": "budget",
+      "layer": "core",
+      "text": "这个月预算执行得怎么样",
+      "expect": [
+        "budget_summary",
+        "budget_list"
+      ],
+      "kind": "read",
+      "landing": "na",
+      "note": "整体预算概览"
+    },
+    {
+      "id": "BUD-OVER-01",
+      "domain": "budget",
+      "layer": "core",
+      "text": "哪些分类超预算了",
+      "expect": [
+        "budget_overspent",
+        "budget_summary"
+      ],
+      "kind": "read",
+      "landing": "na",
+      "note": "超支清单"
+    },
+    {
+      "id": "BUD-DEL-01",
+      "domain": "budget",
+      "layer": "core",
+      "text": "把餐饮的预算删掉",
+      "expect": [
+        "budget_delete"
+      ],
+      "kind": "write",
+      "landing": "produced",
+      "note": "删分类预算"
+    },
+    {
+      "id": "BUD-NEG-01",
+      "domain": "budget",
+      "layer": "boundary",
+      "text": "预算里包含房租吗",
+      "expect": [
+        "budget_list",
+        "budget_status",
+        "help_search"
+      ],
+      "kind": "read",
+      "landing": "na",
+      "note": "跨域混淆候选：「房租」是 scheduled 信号，但语义归 budget"
+    },
+    {
+      "id": "SAV-LIST-01",
+      "domain": "savings",
+      "layer": "core",
+      "text": "看看我的攒钱计划",
+      "expect": [
+        "savings_list"
+      ],
+      "kind": "read",
+      "landing": "na",
+      "note": "「攒」是路由信号"
+    },
+    {
+      "id": "SAV-CREATE-01",
+      "domain": "savings",
+      "layer": "core",
+      "text": "我想存钱买镜头，目标 8000 块",
+      "expect": [
+        "savings_create"
+      ],
+      "kind": "write",
+      "landing": "produced",
+      "note": "★ 含金额 8000 + 名词，本地 NLU 可能吞成支出。用「镜头」以免与播种的「相机」近名（近名会让后续 update 用例变成歧义澄清）"
+    },
+    {
+      "id": "SAV-UPD-01",
+      "domain": "savings",
+      "layer": "core",
+      "text": "相机那个存钱目标改成一万",
+      "expect": [
+        "savings_update"
+      ],
+      "kind": "write",
+      "landing": "produced",
+      "note": "改目标额；「一万」是中文数字"
+    },
+    {
+      "id": "SAV-UPD-02",
+      "domain": "savings",
+      "layer": "para",
+      "text": "往相机那个目标里再存 500",
+      "expect": [
+        "savings_update"
+      ],
+      "kind": "write",
+      "landing": "produced",
+      "note": "追加进度（addAmountCents）而非改目标额"
+    },
+    {
+      "id": "SAV-ARCH-01",
+      "domain": "savings",
+      "layer": "core",
+      "text": "相机那个存钱计划取消掉",
+      "expect": [
+        "savings_archive"
+      ],
+      "kind": "write",
+      "landing": "produced",
+      "note": "归档/取消"
+    },
+    {
+      "id": "SCH-LIST-01",
+      "domain": "scheduled",
+      "layer": "core",
+      "text": "我有哪些定时记账规则",
+      "expect": [
+        "scheduled_list"
+      ],
+      "kind": "read",
+      "landing": "na",
+      "note": "「定时」「记账」双信号"
+    },
+    {
+      "id": "SCH-CREATE-01",
+      "domain": "scheduled",
+      "layer": "core",
+      "text": "每年 1 月 1 号自动记一笔 600 的保险费",
+      "expect": [
+        "scheduled_create"
+      ],
+      "kind": "write",
+      "landing": "produced",
+      "note": "年重复；「保险费」是播种的分类（点名不存在的分类会让模型反问，那是环境不是模型）"
+    },
+    {
+      "id": "SCH-CREATE-02",
+      "domain": "scheduled",
+      "layer": "para",
+      "text": "每月 10 号自动记一笔 800 的物业费",
+      "expect": [
+        "scheduled_create"
+      ],
+      "kind": "write",
+      "landing": "produced",
+      "note": "月重复。**create 用例是终点**（播种的「房租」规则因此不会被撞重名）"
+    },
+    {
+      "id": "SCH-UPD-01",
+      "domain": "scheduled",
+      "layer": "core",
+      "text": "把每周一那条交通费定时规则改成 250",
+      "expect": [
+        "scheduled_update"
+      ],
+      "kind": "write",
+      "landing": "produced",
+      "note": "改金额；点名唯一定时规则"
+    },
+    {
+      "id": "SCH-ARCH-01",
+      "domain": "scheduled",
+      "layer": "core",
+      "text": "把交通费那条定时规则停掉",
+      "expect": [
+        "scheduled_archive"
+      ],
+      "kind": "write",
+      "landing": "produced",
+      "note": "★ 已知缺口：update 与 archive 域内近义，历史实测模型选了 update"
+    },
+    {
+      "id": "SCH-NEG-01",
+      "domain": "scheduled",
+      "layer": "boundary",
+      "text": "每月自动记一笔 500 的物业费，另外提醒我每周交房租",
+      "expect": [
+        "scheduled_create",
+        "reminder_set"
+      ],
+      "kind": "boundary",
+      "landing": "produced",
+      "note": "scheduled × reminder 双域并集；两件事应都被响应"
+    },
+    {
+      "id": "PER-LIST-01",
+      "domain": "persona",
+      "layer": "core",
+      "text": "有哪些角色",
+      "expect": [
+        "persona_list"
+      ],
+      "kind": "read",
+      "landing": "na",
+      "note": "「角色」是路由信号"
+    },
+    {
+      "id": "PER-CREATE-01",
+      "domain": "persona",
+      "layer": "core",
+      "text": "新建一个角色叫阿福，说话简洁一点",
+      "expect": [
+        "persona_create"
+      ],
+      "kind": "write",
+      "landing": "produced",
+      "note": "人设正文一起给。**create 用例是终点**（改/删目标是播种的「小助手」）"
+    },
+    {
+      "id": "PER-UPD-01",
+      "domain": "persona",
+      "layer": "core",
+      "text": "把小助手的人设改得再温和些",
+      "expect": [
+        "persona_update"
+      ],
+      "kind": "write",
+      "landing": "produced",
+      "note": "★ 已知缺口：历史实测只调 persona_list 就收尾（读后不落子）"
+    },
+    {
+      "id": "PER-SWITCH-01",
+      "domain": "persona",
+      "layer": "core",
+      "text": "切换到米粒",
+      "expect": [
+        "persona_switch"
+      ],
+      "kind": "device",
+      "landing": "proposal",
+      "note": "设备 op：服务端只挂起，客户端执行；executions 必须为空"
+    },
+    {
+      "id": "PER-ARCH-01",
+      "domain": "persona",
+      "layer": "core",
+      "text": "把小助手这个角色删掉",
+      "expect": [
+        "persona_archive"
+      ],
+      "kind": "write",
+      "landing": "produced",
+      "note": "归档（角色无硬删）"
+    },
+    {
+      "id": "META-01",
+      "domain": "meta",
+      "layer": "core",
+      "text": "把默认账本设成旅行账本",
+      "expect": [
+        "meta_set"
+      ],
+      "kind": "write",
+      "landing": "produced",
+      "note": "★ 已知缺口（§9.3 #4）：历史实测调了 book_list 就没下文。目标账本由 seed 建好，排除前置数据造成的假失败"
+    },
+    {
+      "id": "META-02",
+      "domain": "meta",
+      "layer": "para",
+      "text": "把默认账户改成支付宝",
+      "expect": [
+        "meta_set"
+      ],
+      "kind": "write",
+      "landing": "produced",
+      "note": "偏好项上云后由服务端执行（05j）"
+    },
+    {
+      "id": "ANA-M-01",
+      "domain": "analysis",
+      "layer": "core",
+      "text": "这个月我一共花了多少",
+      "expect": [
+        "stats_monthly",
+        "transaction_summary"
+      ],
+      "kind": "read",
+      "landing": "na",
+      "note": "月度统计"
+    },
+    {
+      "id": "ANA-T-01",
+      "domain": "analysis",
+      "layer": "core",
+      "text": "最近半年的收支趋势",
+      "expect": [
+        "stats_trends"
+      ],
+      "kind": "read",
+      "landing": "na",
+      "note": "区间趋势"
+    },
+    {
+      "id": "EXP-LIST-01",
+      "domain": "export",
+      "layer": "core",
+      "text": "我之前导出过什么",
+      "expect": [
+        "export_list"
+      ],
+      "kind": "read",
+      "landing": "na",
+      "note": "导出历史"
+    },
+    {
+      "id": "EXP-CREATE-01",
+      "domain": "export",
+      "layer": "core",
+      "text": "把我的数据导出成 CSV",
+      "expect": [
+        "export_create"
+      ],
+      "kind": "write",
+      "landing": "produced",
+      "note": "拉丁信号 csv 大小写不敏感"
+    },
+    {
+      "id": "PRI-STATUS-01",
+      "domain": "privacy",
+      "layer": "core",
+      "text": "我现在的隐私同意状态是什么",
+      "expect": [
+        "consent_status"
+      ],
+      "kind": "read",
+      "landing": "na",
+      "note": "同意状态查询"
+    },
+    {
+      "id": "PRI-FEEDBACK-01",
+      "domain": "privacy",
+      "layer": "core",
+      "text": "我要提个意见：希望支持语音记账",
+      "expect": [
+        "feedback_submit"
+      ],
+      "kind": "write",
+      "landing": "produced",
+      "note": "反馈提交"
+    },
+    {
+      "id": "PRI-CONSENT-01",
+      "domain": "privacy",
+      "layer": "core",
+      "text": "我同意最新的隐私政策",
+      "expect": [
+        "consent_record"
+      ],
+      "kind": "device",
+      "landing": "proposal",
+      "note": "设备 op：consent 落本地，服务端挂起"
+    },
+    {
+      "id": "SEC-PROFILE-01",
+      "domain": "security",
+      "layer": "core",
+      "text": "把我的昵称改成小明",
+      "expect": [
+        "auth_update_profile"
+      ],
+      "kind": "write",
+      "landing": "produced",
+      "note": "「昵称」是路由信号"
+    },
+    {
+      "id": "SEC-DELETE-01",
+      "domain": "security",
+      "layer": "boundary",
+      "text": "我要注销账号",
+      "expect": [
+        "account_deletion_request"
+      ],
+      "kind": "boundary",
+      "landing": "proposal",
+      "note": "★ 高风险：必须出确认卡、绝不能自动执行（executions 必须为空）"
+    },
+    {
+      "id": "SEC-NEG-01",
+      "domain": "security",
+      "layer": "boundary",
+      "text": "帮我把密码改一下",
+      "expect": [],
+      "kind": "boundary",
+      "landing": "forbidden",
+      "note": "能力外：没有改密码工具 → 应如实说明并指路"
+    },
+    {
+      "id": "SYN-STATUS-01",
+      "domain": "sync",
+      "layer": "core",
+      "text": "同步状态怎么样",
+      "expect": [
+        "sync_status"
+      ],
+      "kind": "read",
+      "landing": "na",
+      "note": "同步状态"
+    },
+    {
+      "id": "SYN-TRIGGER-01",
+      "domain": "sync",
+      "layer": "core",
+      "text": "现在手动同步一下",
+      "expect": [
+        "sync_trigger"
+      ],
+      "kind": "device",
+      "landing": "proposal",
+      "note": "设备 op：触发在本机，服务端挂起"
+    },
+    {
+      "id": "SYN-STATUS-02",
+      "domain": "sync",
+      "layer": "para",
+      "text": "我的数据都上传到云端了吗",
+      "expect": [
+        "sync_status"
+      ],
+      "kind": "read",
+      "landing": "na",
+      "note": "「云端」「上传」双信号"
+    },
+    {
+      "id": "REM-01",
+      "domain": "reminder",
+      "layer": "core",
+      "text": "提醒我明天早上八点交房租",
+      "expect": [
+        "reminder_set",
+        "device_request_permission"
+      ],
+      "kind": "device",
+      "landing": "na",
+      "note": "设备 op（服务端只挂起、客户端执行）。**设置提醒是两步**：先申请 POST_NOTIFICATIONS，拿到权限后才 `reminder_set`。无人值守的自动化环境里系统权限框会超时——此时「停在权限申请、不硬设提醒」是**正确**行为，故 expect 接受两者之一。完整路径（授权后真的设上提醒）**只能在真机上人工验**，属本测试集的已知盲区。",
+      "device_expect": [
+        "permissions.request"
+      ]
+    },
+    {
+      "id": "REM-02",
+      "domain": "reminder",
+      "layer": "para",
+      "text": "每天晚上九点提醒我记账",
+      "expect": [
+        "reminder_set",
+        "device_request_permission"
+      ],
+      "kind": "device",
+      "landing": "na",
+      "note": "设备 op（服务端只挂起、客户端执行）。**设置提醒是两步**：先申请 POST_NOTIFICATIONS，拿到权限后才 `reminder_set`。无人值守的自动化环境里系统权限框会超时——此时「停在权限申请、不硬设提醒」是**正确**行为，故 expect 接受两者之一。完整路径（授权后真的设上提醒）**只能在真机上人工验**，属本测试集的已知盲区。",
+      "device_expect": [
+        "permissions.request"
+      ]
+    },
+    {
+      "id": "HELP-01",
+      "domain": "help",
+      "layer": "core",
+      "text": "怎么导出数据",
+      "expect": [
+        "help_search"
+      ],
+      "kind": "read",
+      "landing": "na",
+      "note": "★ 已知缺口 R-PROD-39：词表缺「怎么+动词」，路由只给 export 不给 help"
+    },
+    {
+      "id": "HELP-02",
+      "domain": "help",
+      "layer": "core",
+      "text": "导出数据在哪",
+      "expect": [
+        "help_search",
+        "export_list"
+      ],
+      "kind": "read",
+      "landing": "na",
+      "note": "「在哪」是 help 信号 → 两域都注入"
+    },
+    {
+      "id": "HELP-03",
+      "domain": "help",
+      "layer": "core",
+      "text": "怎么用预算功能",
+      "expect": [
+        "help_search"
+      ],
+      "kind": "read",
+      "landing": "na",
+      "note": "「怎么用」是 help 信号"
+    },
+    {
+      "id": "HELP-04",
+      "domain": "help",
+      "layer": "core",
+      "text": "支持语音记账吗",
+      "expect": [
+        "help_search"
+      ],
+      "kind": "read",
+      "landing": "na",
+      "note": "「支持」「可以吗」类泛问句 → help 域"
+    },
+    {
+      "id": "HELP-05",
+      "domain": "help",
+      "layer": "core",
+      "text": "怎么导入数据",
+      "expect": [
+        "help_search"
+      ],
+      "kind": "read",
+      "landing": "na",
+      "note": "产品用法问题（原「分类是什么意思」是概念问题，模型自答合理，不构成 help_search 的必要性）"
+    },
+    {
+      "id": "HELP-06",
+      "domain": "help",
+      "layer": "boundary",
+      "text": "这个 App 怎么设置定期备份",
+      "expect": [
+        "help_search"
+      ],
+      "kind": "read",
+      "landing": "na",
+      "note": "产品帮助与「备份」（export 信号）交叉"
+    },
+    {
+      "id": "DEV-SHARE-01",
+      "domain": "device",
+      "layer": "device",
+      "text": "把这个月的账单分享给我朋友",
+      "expect": [
+        "device_share_text"
+      ],
+      "kind": "device",
+      "landing": "na",
+      "note": "单向设备能力：应出现 device_request 帧（capability=share.text）",
+      "device_expect": [
+        "share.text"
+      ]
+    },
+    {
+      "id": "DEV-VOICE-01",
+      "domain": "device",
+      "layer": "device",
+      "text": "我要用语音说一句话记一笔账",
+      "expect": [
+        "device_transcribe_voice",
+        "device_request_permission"
+      ],
+      "kind": "device",
+      "landing": "na",
+      "note": "需结果类：自动化环境无人应答会超时；重点看模型是否**先申请 RECORD_AUDIO**",
+      "device_expect": [
+        "permissions.request",
+        "voice.transcribe"
+      ]
+    },
+    {
+      "id": "DEV-IMG-01",
+      "domain": "device",
+      "layer": "device",
+      "text": "我想拍张发票的照片记一笔",
+      "expect": [
+        "device_pick_image",
+        "device_request_permission"
+      ],
+      "kind": "device",
+      "landing": "na",
+      "note": "需结果类；拍照前应申请 CAMERA",
+      "device_expect": [
+        "permissions.request",
+        "image.pick"
+      ]
+    },
+    {
+      "id": "DEV-SIDE-01",
+      "domain": "device",
+      "layer": "device",
+      "text": "记一笔 9.9 元的餐饮",
+      "expect": [
+        "transaction_add"
+      ],
+      "kind": "write",
+      "landing": "landed",
+      "also": [
+        "device_widget_refresh",
+        "device_haptic"
+      ],
+      "note": "★ 副作用断言：记账写库后应调用 device_widget_refresh 刷新小组件（device_haptic 是模型自发的确认反馈，属观察项）"
+    },
+    {
+      "id": "CMP-01",
+      "domain": "transaction",
+      "layer": "boundary",
+      "text": "记一笔 88 元的餐饮，账户用现金，日期写 2026-09-15",
+      "expect": [
+        "transaction_add"
+      ],
+      "kind": "write",
+      "landing": "landed",
+      "note": "★ 复合句（R-PROD-28 原始形态）：账户与日期两个附加字段必须都进 agent，不能被本地 NLU 丢弃"
+    },
+    {
+      "id": "CMP-02",
+      "domain": "transaction",
+      "layer": "boundary",
+      "text": "先查一下这个月餐饮花了多少，再把餐饮预算调到 2000",
+      "expect": [
+        "transaction_summary",
+        "stats_monthly",
+        "budget_set_category"
+      ],
+      "kind": "boundary",
+      "landing": "produced",
+      "note": "多步复合：读 + 写两步；路由应同时注入 transaction/analysis/budget"
+    },
+    {
+      "id": "NEG-01",
+      "domain": "none",
+      "layer": "boundary",
+      "text": "你好呀",
+      "expect": [],
+      "kind": "boundary",
+      "landing": "forbidden",
+      "note": "闲聊：不得调用任何工具（尤其不得写库）"
+    },
+    {
+      "id": "NEG-02",
+      "domain": "none",
+      "layer": "boundary",
+      "text": "帮我订一张明天去北京的机票",
+      "expect": [],
+      "kind": "boundary",
+      "landing": "forbidden",
+      "note": "能力外请求：应如实拒绝，不得幻觉出工具"
+    },
+    {
+      "id": "NEG-03",
+      "domain": "none",
+      "layer": "boundary",
+      "text": "那改成 6000 吧",
+      "expect": [],
+      "kind": "boundary",
+      "landing": "forbidden",
+      "note": "无上下文的指代：词表兜底全量注入；模型应澄清而不是猜一笔"
+    },
+    {
+      "id": "NEG-04",
+      "domain": "none",
+      "layer": "boundary",
+      "text": "今天天气怎么样",
+      "expect": [],
+      "kind": "boundary",
+      "landing": "forbidden",
+      "note": "完全无关输入"
+    },
+    {
+      "id": "GATE-01",
+      "domain": "budget",
+      "layer": "gate",
+      "text": "给餐饮设个月度预算 1500",
+      "expect": [
+        "budget_set_category"
+      ],
+      "kind": "write",
+      "landing": "produced",
+      "note": "本地 NLU 闸门对照样本（与 BUD-SETCAT-02 同句，用于成对核验）"
+    },
+    {
+      "id": "GATE-02",
+      "domain": "savings",
+      "layer": "gate",
+      "text": "存钱买相机，目标 8000",
+      "expect": [
+        "savings_create"
+      ],
+      "kind": "write",
+      "landing": "produced",
+      "note": "本地 NLU 闸门对照样本（无「我想」）+ 含金额"
+    },
+    {
+      "id": "GATE-03",
+      "domain": "scheduled",
+      "layer": "gate",
+      "text": "每月 5 号自动记一笔 1500 的购物",
+      "expect": [
+        "scheduled_create"
+      ],
+      "kind": "write",
+      "landing": "produced",
+      "note": "本地 NLU 闸门对照样本：无 OP_SENTENCE_RE 关键词 + 含金额与分类"
+    }
+  ]
+}
