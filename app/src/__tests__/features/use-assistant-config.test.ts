@@ -27,6 +27,8 @@ const mockBridge = vi.hoisted(() => ({
   listTransactionsByBook: vi.fn().mockResolvedValue([]),
   softDeleteTransaction: vi.fn().mockResolvedValue({ success: true }),
   triggerSync: vi.fn().mockResolvedValue(undefined),
+  // T18-2（REQ-67①）：写后走**阻塞式真同步**（auth.triggerSync），不再是入队式 triggerSync
+  triggerAuthSync: vi.fn().mockResolvedValue({ outcome: 'OK' }),
   executeProposal: vi.fn(),
   validateProposal: vi.fn().mockResolvedValue({ valid: true }),
   interpretAI: vi.fn(),
@@ -107,7 +109,7 @@ beforeEach(() => {
   vi.clearAllMocks()
   mockBridge.isAvailable.mockReturnValue(false)
   mockBridge.validateProposal.mockResolvedValue({ valid: true })
-  mockBridge.triggerSync.mockResolvedValue(undefined)
+  mockBridge.triggerAuthSync.mockResolvedValue({ outcome: 'OK' })
   mockBridge.insertBook.mockResolvedValue({ id: 'new-book' })
   mockBridge.insertAccount.mockResolvedValue({ id: 'new-account' })
   mockBridge.insertBudget.mockResolvedValue({ id: 'new-budget' })
@@ -202,7 +204,7 @@ describe('confirmConfig 逐 op 执行（T13-5 卡片3）', () => {
     return result
   }
 
-  it('book.create → insertBook（UUID id/mutationId、ownerId=local、icon 兜底 📒、version 1）+ 回执 + triggerSync', async () => {
+  it('book.create → insertBook（UUID id/mutationId、ownerId=local、icon 兜底 📒、version 1）+ 回执 + 写后真同步', async () => {
     const result = await openAndConfirm({ op: 'book.create', name: '旅行' })
     expect(mockBridge.insertBook).toHaveBeenCalledTimes(1)
     const [book, mutationId] = mockBridge.insertBook.mock.calls[0]
@@ -211,7 +213,7 @@ describe('confirmConfig 逐 op 执行（T13-5 卡片3）', () => {
     expect(mutationId).toMatch(UUID_RE)
     expect(lastMsg(result)).toBe('已创建账本「旅行」')
     expect(result.current.pendingConfig).toBeNull()
-    expect(mockBridge.triggerSync).toHaveBeenCalled()
+    expect(mockBridge.triggerAuthSync).toHaveBeenCalled()
   })
 
   it('book.create icon 透传', async () => {
@@ -288,7 +290,7 @@ describe('confirmConfig 逐 op 执行（T13-5 卡片3）', () => {
     await act(async () => { await result.current.confirmConfig() })
     expect(result.current.pendingConfig).toBeNull()
     expect(lastMsg(result)).toContain('❌ 设置执行失败')
-    expect(mockBridge.triggerSync).not.toHaveBeenCalled()
+    expect(mockBridge.triggerAuthSync).not.toHaveBeenCalled()
   })
 
   it('重入互斥：执行在途二次 confirm 不双写', async () => {
@@ -354,7 +356,7 @@ describe('cancelConfig（T13-5 防呆）', () => {
     expect(lastMsg(result)).toBe('已取消')
     expect(mockBridge.insertBook).not.toHaveBeenCalled()
     expect(mockBridge.setMeta).not.toHaveBeenCalled()
-    expect(mockBridge.triggerSync).not.toHaveBeenCalled()
+    expect(mockBridge.triggerAuthSync).not.toHaveBeenCalled()
   })
 })
 

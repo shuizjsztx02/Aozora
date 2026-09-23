@@ -735,6 +735,31 @@ export function useAssistant({
   }, [])
 
   /**
+   * T18-2（REQ-67①）：**写后一次真同步**——本轮写入收尾时的唯一同步入口。
+   *
+   * 原先各处用 `bridge.triggerSync()`（桥命令 `sync.trigger`），它只把一轮同步
+   * **入队**给 WorkManager（`SyncScheduler.enqueue`，带 `NetworkType.CONNECTED`
+   * 约束）就返回；何时真跑由系统调度决定，可能延后很久、也可能被约束卡住不跑。
+   * 而三个数据页（首页/明细/报表）都是**挂载期单次读**——用户从助手页切过去时，
+   * 服务端刚写下的权威行还没被拉回本地 Room，页面读到的就还是旧值。现象即
+   * 「AI 说改好了，聊天页与各处显示都没更新」（REQ-67 根因 H2）。
+   *
+   * 改用 `auth.triggerSync`：**同步阻塞**跑完一轮 push/pull（`SyncEngine.runOnce`），
+   * 返回时本地库已是最新，用户随即切页就是新值。失败只吞不抛——入队语义的兜底
+   * 仍在（下一轮同步自愈），页面侧另有「同步完成 / 重新可见」的重取订阅兜底。
+   *
+   * **不新增桥命令**：`auth.triggerSync` 是既有通道（`LoginPage` / `AiInsightCard`
+   * 在用），故不触本轮桥命令计数面（决策 #1）。
+   */
+  const syncAfterWrite = useCallback(async () => {
+    try {
+      await bridge.triggerAuthSync()
+    } catch {
+      /* 同步失败不阻断回执：下一轮同步自愈，页面侧订阅按期重取 */
+    }
+  }, [bridge])
+
+  /**
    * 尾卡（R-PROD-31）：**v2 提案的执行**——与 v1 完全不同的路径。
    *
    * v1 是「客户端本地写 + sync push」；v2 是**服务端执行**（`/ai/execute`，服务端
@@ -767,7 +792,7 @@ export function useAssistant({
       ))
       setCardStatus('committed')
       setPhase('idle')
-      try { await bridge.triggerSync() } catch { /* ignore */ }
+      await syncAfterWrite()
       return true
     } catch (err) {
       const errMsg = localizeBridgeError(err instanceof Error ? err.message : '未知错误')
@@ -779,7 +804,7 @@ export function useAssistant({
       setPhase('idle')
       return false
     }
-  }, [bridge, bookId, pushBookMissingError])
+  }, [bridge, bookId, pushBookMissingError, syncAfterWrite])
 
   /** 首次本地提交（解析成功后自动触发，无确认按钮）。
    *  T12-9：overrides.bookId 存在时视为卡内已选账本，hook 层 bookId 缺失也可写。
@@ -812,7 +837,7 @@ export function useAssistant({
       setCardStatus('committed')
       setPhase('idle')
 
-      try { await bridge.triggerSync() } catch { /* ignore */ }
+      await syncAfterWrite()
       return true
     } catch (err) {
       // 本地写入失败必须可见；卡片保持 error 态可编辑重试
@@ -827,7 +852,7 @@ export function useAssistant({
       setPhase('idle')
       return false
     }
-  }, [bridge, bookId, pushBookMissingError, writeTransactions])
+  }, [bridge, bookId, pushBookMissingError, writeTransactions, syncAfterWrite])
 
   /** T9-8：图片批量链路等页面级流程完成后落一条普通助手消息（不进状态机）。
    *  T12-11：chat/query 气泡、操作执行回执也走本通道（提定义到 submitInput 之前以供引用）。 */
@@ -1121,7 +1146,7 @@ export function useAssistant({
         proposalStatus: 'committed' as const,
         transactionIds: ids,
       }])
-      try { await bridge.triggerSync() } catch { /* ignore */ }
+      await syncAfterWrite()
       return
     }
 
@@ -1141,7 +1166,7 @@ export function useAssistant({
   }, [
     adoptConversation, appendAssistantMessage, bridge, dropApprovals, enqueueApproval,
     finishProcessing, forgetConversation, forgetCursor, setCursor, setMessages,
-    showPendingApproval,
+    showPendingApproval, syncAfterWrite,
   ])
 
   /**
@@ -1499,7 +1524,7 @@ export function useAssistant({
   ) => {
     if (!bookId && !overrides?.bookId) { pushBookMissingError(edited.proposalId); return }
     // T12-8（REQ-30 ①）：待选分类态——分类补齐前编辑只回写消息（不写库、态保持），
-    // 选定分类后接管首次写入（commitProposalInternal：文案「已记录 N 笔」+ triggerSync）
+    // 选定分类后接管首次写入（commitProposalInternal：文案「已记录 N 笔」+ syncAfterWrite）
     if (isPendingCategoryRef.current) {
       // 尾卡（R-PROD-31）：v2 没有「待选分类」这回事——它的 payload 形状由服务端
       // 工具注册表拥有，补分类是 v1 本地解析路径的产物。这条守卫同时给类型收窄。
@@ -1563,7 +1588,7 @@ export function useAssistant({
       ))
       setCardStatus('committed')
       setPhase('idle')
-      try { await bridge.triggerSync() } catch { /* ignore */ }
+      await syncAfterWrite()
     } catch (err) {
       const errMsg = localizeBridgeError(err instanceof Error ? err.message : '未知错误')
       setMessages(prev => prev.map(m =>
@@ -1574,7 +1599,7 @@ export function useAssistant({
       setPhase('idle')
     }
   }, [bridge, bookId, pushBookMissingError, writeTransactions, commitProposalInternal,
-      dropApprovals, showPendingApproval, streamActive, appendAssistantMessage])
+      dropApprovals, showPendingApproval, streamActive, appendAssistantMessage, syncAfterWrite])
 
   const undoExecution = useCallback(async () => {
     const ids = activeTxIdsRef.current
@@ -1590,7 +1615,7 @@ export function useAssistant({
       activeTxIdsRef.current = []
       setActiveProposal(null)
       setCardStatus(null)
-      try { await bridge.triggerSync() } catch { /* ignore */ }
+      await syncAfterWrite()
     } catch {
       // C-B1 fix: undo 失败时通知用户，不静默吞掉
       setMessages(prev => prev.map(m =>
@@ -1599,13 +1624,13 @@ export function useAssistant({
       ))
     }
     setPhase('idle')
-  }, [bridge])
+  }, [bridge, syncAfterWrite])
 
   /**
    * T12-11（REQ-37 ③ / 决策 #3 #5）：执行 pendingOp——逐笔 updateTransaction/
    * softDeleteTransaction（各自 mutationId UUID，上限 MAX_BATCH_OPS）。
    * 逐笔独立、部分失败可见不回滚（与手动记账「逐笔入队、失败可见」同口径）；
-   * 成功回执优先用云端 reply（仅全成功无截断时），否则模板语；有写入才 triggerSync。
+   * 成功回执优先用云端 reply（仅全成功无截断时），否则模板语；有写入才 syncAfterWrite。
    */
   const confirmOp = useCallback(async () => {
     const op = pendingOp
@@ -1649,9 +1674,9 @@ export function useAssistant({
     }
     appendAssistantMessage(text)
     if (done > 0) {
-      bridge.triggerSync().catch(() => { /* 同步入队失败不阻断（hook 层同口径） */ })
+      void syncAfterWrite()
     }
-  }, [pendingOp, bridge, categories, timezone, accounts, books, appendAssistantMessage])
+  }, [pendingOp, bridge, categories, timezone, accounts, books, appendAssistantMessage, syncAfterWrite])
 
   /** T12-11：取消 pendingOp——不执行任何写，落一条「已取消」回执。 */
   const cancelOp = useCallback(() => {
@@ -1666,7 +1691,7 @@ export function useAssistant({
    * meta.set 全部现成命令；入参组装口径照 BooksPage/AccountsPage/BudgetPage/
    * SavingsPage 现行 UI：id=newUuid()、ownerId='local'、version=1、mutationId UUID）。
    * 失败只报错不保留卡（重说一次即可重触发，与 pendingOp 收口口径一致）；
-   * 成功统一 triggerSync（savings/meta 仅本地，触发无副作用）。
+   * 成功统一 syncAfterWrite（savings/meta 仅本地，多跑一轮无副作用）。
    */
   const confirmConfig = useCallback(async () => {
     const pc = pendingConfig
@@ -1754,7 +1779,7 @@ export function useAssistant({
       // T13-5：写入成功 → 通知页面重拉对象名单（下一轮可点名本轮新建对象；
       // default.* 还会经重拉更新 bookId/bookName 落点）
       onConfigApplied?.()
-      bridge.triggerSync().catch(() => { /* 同步入队失败不阻断（confirmOp 同口径） */ })
+      void syncAfterWrite()
     } catch (err) {
       const errMsg = localizeBridgeError(err instanceof Error ? err.message : '未知错误')
       setPendingConfig(null)
@@ -1762,7 +1787,7 @@ export function useAssistant({
     } finally {
       opBusyRef.current = false
     }
-  }, [pendingConfig, bridge, bookId, timezone, appendAssistantMessage, onConfigApplied])
+  }, [pendingConfig, bridge, bookId, timezone, appendAssistantMessage, onConfigApplied, syncAfterWrite])
 
   /** T13-5：取消 pendingConfig——不落任何写，落一条「已取消」回执。 */
   const cancelConfig = useCallback(() => {

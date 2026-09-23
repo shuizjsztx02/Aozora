@@ -29,6 +29,8 @@ const mockBridge = vi.hoisted(() => ({
   listTransactionsByBook: vi.fn().mockResolvedValue([]),
   softDeleteTransaction: vi.fn().mockResolvedValue({ success: true }),
   triggerSync: vi.fn().mockResolvedValue(undefined),
+  // T18-2（REQ-67①）：写后走**阻塞式真同步**（auth.triggerSync），不再是入队式 triggerSync
+  triggerAuthSync: vi.fn().mockResolvedValue({ outcome: 'OK' }),
   validateProposal: vi.fn().mockResolvedValue({ valid: true }),
   interpretAI: vi.fn(),
   runAgent: vi.fn(),
@@ -265,7 +267,7 @@ describe('use-assistant — agent 流式消费（T-M7-02i）', () => {
 
   // ─── done 的三类落点 ───
 
-  it('done.executions 非空 → 回执消息 + 事务 id 记入撤销窗 + triggerSync', async () => {
+  it('done.executions 非空 → 回执消息 + 事务 id 记入撤销窗 + 写后真同步', async () => {
     const { result } = setup()
 
     await act(async () => {
@@ -286,7 +288,9 @@ describe('use-assistant — agent 流式消费（T-M7-02i）', () => {
     expect(last.role).toBe('assistant')
     expect(last.text).toBe('记好了\n\n已记录 1 笔交易')
     expect(last.transactionIds).toEqual(['tx-9'])
-    expect(mockBridge.triggerSync).toHaveBeenCalled()
+    // T18-2（REQ-67①）：服务端已写 → 客户端跑一轮**阻塞式真同步**把权威行拉回本地
+    expect(mockBridge.triggerAuthSync).toHaveBeenCalled()
+    expect(mockBridge.triggerSync).not.toHaveBeenCalled()
 
     // 撤销窗可用：undoExecution 能删掉那一笔
     await act(async () => { await result.current.undoExecution() })

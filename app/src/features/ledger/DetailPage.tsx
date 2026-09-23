@@ -18,6 +18,7 @@ import { useState, useEffect, useCallback } from 'react'
 import { useNavigate } from 'react-router'
 import { EmptyState } from '../../components/StateViews'
 import { useBridge } from '../../platform/hooks/use-bridge'
+import { useRefreshOnSync } from '../../platform/hooks/use-refresh-on-sync'
 import { newUuid } from '../../platform/uuid'
 import { pickEntryBook } from '../../domain/books'
 import { CategoryIcon } from '../../components/CategoryIcon'
@@ -91,8 +92,12 @@ export function DetailPage() {
     setAllTxs(lists.flat().filter(tx => tx.deletedAt === null))
   }, [bridge])
 
-  const loadData = useCallback(async () => {
-    setLoading(true)
+  /**
+   * @param silent T18-2（REQ-67①）：静默重取——同步完成 / 页面重新可见时刷新数据，
+   *   但不置 loading（否则正在阅读的页面会闪一下加载态；挂载首读仍走非静默）。
+   */
+  const loadData = useCallback(async (silent = false) => {
+    if (!silent) setLoading(true)
     try {
       const [bs, cats, meta] = await Promise.all([
         bridge.call('book.list', {}) as Promise<BookData[]>,
@@ -113,13 +118,17 @@ export function DetailPage() {
     } catch (err) {
       console.error('Failed to load detail:', err)
     } finally {
-      setLoading(false)
+      if (!silent) setLoading(false)
     }
   }, [bridge, loadTxs])
 
   useEffect(() => {
     loadData()
   }, [loadData])
+
+  // T18-2（REQ-67①）：同步完成 / 页面重新可见 → 静默重取
+  const refreshQuiet = useCallback(() => { void loadData(true) }, [loadData])
+  useRefreshOnSync(refreshQuiet)
 
   const handleSelectBook = async (id: string) => {
     setBookPickerOpen(false)

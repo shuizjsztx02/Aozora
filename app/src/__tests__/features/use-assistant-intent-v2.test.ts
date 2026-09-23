@@ -24,6 +24,8 @@ const mockBridge = vi.hoisted(() => ({
   listTransactionsByBook: vi.fn().mockResolvedValue([]),
   softDeleteTransaction: vi.fn().mockResolvedValue({ success: true }),
   triggerSync: vi.fn().mockResolvedValue(undefined),
+  // T18-2（REQ-67①）：写后走**阻塞式真同步**（auth.triggerSync），不再是入队式 triggerSync
+  triggerAuthSync: vi.fn().mockResolvedValue({ outcome: 'OK' }),
   executeProposal: vi.fn(),
   validateProposal: vi.fn().mockResolvedValue({ valid: true }),
   interpretAI: vi.fn(),
@@ -97,7 +99,7 @@ describe('use-assistant — AI 意图分发矩阵（T12-11）', () => {
     mockBridge.updateTransaction.mockResolvedValue({ id: 'tx-1', version: 8 })
     mockBridge.softDeleteTransaction.mockResolvedValue({ success: true })
     mockBridge.listTransactionsByBook.mockResolvedValue([])
-    mockBridge.triggerSync.mockResolvedValue(undefined)
+    mockBridge.triggerAuthSync.mockResolvedValue({ outcome: 'OK' })
     mockBridge.isAvailable.mockReturnValue(false)
     // T14-4：messages 外置到模块级 store——逐用例复位防串
     useAssistantChatStore.setState({ messages: [] })
@@ -236,9 +238,9 @@ describe('use-assistant — AI 意图分发矩阵（T12-11）', () => {
     })
     expect(mutationId).toMatch(UUID_RE)
     expect(result.current.pendingOp).toBeNull()
-    // 全成功无截断 → 回执优先云端 reply；有写入才 triggerSync
+    // 全成功无截断 → 回执优先云端 reply；有写入才跑写后真同步（T18-2）
     expect(lastMsg(result).text).toBe('好')
-    expect(mockBridge.triggerSync).toHaveBeenCalledTimes(1)
+    expect(mockBridge.triggerAuthSync).toHaveBeenCalledTimes(1)
   })
 
   it('delete 执行 → 逐笔 softDelete（各自 UUID），reply 空走模板回执', async () => {
@@ -304,7 +306,7 @@ describe('use-assistant — AI 意图分发矩阵（T12-11）', () => {
     expect(result.current.pendingOp).toBeNull()
   })
 
-  it('全部失败 → ❌ 回执且 triggerSync 不发', async () => {
+  it('全部失败 → ❌ 回执且不跑写后真同步', async () => {
     aiPath({ intent: 'delete', reply: '', filter: { keyword: '打车' } })
     mockBridge.listTransactionsByBook.mockResolvedValue([opTx({ id: 'a' })])
     const { result } = setupOp()
@@ -314,7 +316,7 @@ describe('use-assistant — AI 意图分发矩阵（T12-11）', () => {
     await act(async () => { await result.current.confirmOp() })
 
     expect(lastMsg(result).text).toContain('❌ 删除失败')
-    expect(mockBridge.triggerSync).not.toHaveBeenCalled()
+    expect(mockBridge.triggerAuthSync).not.toHaveBeenCalled()
   })
 
   it('批量上限 50 截断：命中 55 → 执行 50 笔，回执含未处理数', async () => {
@@ -420,7 +422,7 @@ describe('use-assistant — 操作句式守卫（T12-12）', () => {
     mockBridge.updateTransaction.mockResolvedValue({ id: 'tx-1', version: 8 })
     mockBridge.softDeleteTransaction.mockResolvedValue({ success: true })
     mockBridge.listTransactionsByBook.mockResolvedValue([])
-    mockBridge.triggerSync.mockResolvedValue(undefined)
+    mockBridge.triggerAuthSync.mockResolvedValue({ outcome: 'OK' })
     mockBridge.isAvailable.mockReturnValue(false)
     // T14-4：messages 外置到模块级 store——逐用例复位防串
     useAssistantChatStore.setState({ messages: [] })
@@ -492,7 +494,7 @@ describe('use-assistant — edit 契约 v4（T15-7 / REQ-56）', () => {
     mockBridge.updateTransaction.mockResolvedValue({ id: 'tx-1', version: 8 })
     mockBridge.softDeleteTransaction.mockResolvedValue({ success: true })
     mockBridge.listTransactionsByBook.mockResolvedValue([])
-    mockBridge.triggerSync.mockResolvedValue(undefined)
+    mockBridge.triggerAuthSync.mockResolvedValue({ outcome: 'OK' })
     mockBridge.isAvailable.mockReturnValue(false)
     useAssistantChatStore.setState({ messages: [] })
   })

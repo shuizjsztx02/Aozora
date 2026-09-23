@@ -24,6 +24,8 @@ const mockBridge = vi.hoisted(() => ({
   listTransactionsByBook: vi.fn().mockResolvedValue([]),
   softDeleteTransaction: vi.fn().mockResolvedValue({ success: true }),
   triggerSync: vi.fn().mockResolvedValue(undefined),
+  // T18-2（REQ-67①）：写后走**阻塞式真同步**（auth.triggerSync），不再是入队式 triggerSync
+  triggerAuthSync: vi.fn().mockResolvedValue({ outcome: 'OK' }),
   executeProposal: vi.fn(),
   validateProposal: vi.fn().mockResolvedValue({ valid: true }),
   interpretAI: vi.fn(),
@@ -103,7 +105,7 @@ describe('use-assistant — 免确认本地记账（T8-6）', () => {
     // 卡片常驻（卡内「撤销」钮常驻可用，T13-3：无底部撤销条）
     expect(result.current.activeProposal).not.toBeNull()
     expect(result.current.phase).toBe('idle')
-    expect(mockBridge.triggerSync).toHaveBeenCalled()
+    expect(mockBridge.triggerAuthSync).toHaveBeenCalled()
   })
 
   it('非今日 bizDate → occurredAt 取该日本地正午（决策 #5 对齐）', async () => {

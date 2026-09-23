@@ -18,6 +18,7 @@ import { useState, useEffect, useCallback, useMemo } from 'react'
 import { EmptyState } from '../../components/StateViews'
 import { PieChart, Pie, Cell, LineChart, Line, BarChart, Bar, XAxis, YAxis, Tooltip, ResponsiveContainer } from 'recharts'
 import { useBridge } from '../../platform/hooks/use-bridge'
+import { useRefreshOnSync } from '../../platform/hooks/use-refresh-on-sync'
 import { groupByCategory, sumTransactions } from '../../domain/aggregator'
 import * as Money from '../../domain/money'
 import type { TransactionData, CategoryData, BookData } from '../../platform/bridge/bridge-types'
@@ -172,8 +173,12 @@ export function ReportsPage() {
     setBudgets(budgets)
   }, [bridge])
 
-  const loadData = useCallback(async () => {
-    setLoading(true)
+  /**
+   * @param silent T18-2（REQ-67①）：静默重取——同步完成 / 页面重新可见时刷新数据，
+   *   但不置 loading（否则正在阅读的页面会闪一下加载态；挂载首读仍走非静默）。
+   */
+  const loadData = useCallback(async (silent = false) => {
+    if (!silent) setLoading(true)
     try {
       // 决策 #2 / T7-6：初始展示目标 = 非 master 账本（记账目标语义）；T9-5b（决策 #3）default_book_id 优先
       const [bs, cats, meta] = await Promise.all([
@@ -194,11 +199,15 @@ export function ReportsPage() {
     } catch (err) {
       console.error('Failed to load reports:', err)
     } finally {
-      setLoading(false)
+      if (!silent) setLoading(false)
     }
   }, [bridge, loadTxsForBook])
 
   useEffect(() => { loadData() }, [loadData])
+
+  // T18-2（REQ-67①）：同步完成 / 页面重新可见 → 静默重取
+  const refreshQuiet = useCallback(() => { void loadData(true) }, [loadData])
+  useRefreshOnSync(refreshQuiet)
 
   const handleSelectBook = async (id: string) => {
     setBookPickerOpen(false)

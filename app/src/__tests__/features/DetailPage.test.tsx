@@ -9,7 +9,7 @@
  * - 删除走 softDeleteTransaction 且 mutationId 为 UUID（Bug-5.2 契约）
  */
 import { describe, it, expect, vi, beforeEach } from 'vitest'
-import { render, screen, waitFor, within } from '@testing-library/react'
+import { render, screen, waitFor, within, act } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { MemoryRouter } from 'react-router'
 
@@ -21,6 +21,7 @@ vi.mock('react-router', async (importOriginal) => {
 
 import { DetailPage } from '../../features/ledger/DetailPage'
 import type { TransactionData, CategoryData } from '../../platform/bridge/bridge-types'
+import { useSyncStore } from '../../platform/store/sync-store'
 
 const mockBridge = vi.hoisted(() => ({
   // T9-5b（REQ-11）：meta.get/set mock（默认无默认选择）
@@ -241,5 +242,59 @@ describe('DetailPage 账本切换（REQ-4）', () => {
     // T12-5：圆钮携带切换后的账本 id
     await user.click(screen.getByTestId('open-search'))
     expect(mockNavigate).toHaveBeenCalledWith('/search', { state: { bookId: 'b' } })
+  })
+})
+
+// ─── T18-2 / REQ-67①：同步完成 → 静默重取（不闪加载态） ───
+
+describe('DetailPage 同步重取（T18-2 / REQ-67①）', () => {
+  const emitSynced = (at: number) => {
+    act(() => {
+      useSyncStore.setState(s => ({ status: { ...s.status, state: 'idle', lastSyncedAt: at } }))
+    })
+  }
+
+  beforeEach(() => {
+    vi.clearAllMocks()
+    useSyncStore.setState(s => ({
+      status: { ...s.status, state: 'idle', pendingCount: 0, lastSyncedAt: 0, failedMutations: [] },
+    }))
+  })
+
+  it('同步轮完成 → 重取；刷新在途不置 loading（不闪骨架）', async () => {
+    // 页面挂载前已同步过（非零基准），随后的同步轮前进即触发重取
+    useSyncStore.setState(s => ({ status: { ...s.status, lastSyncedAt: 1000 } }))
+    let rows = [mkTx({ id: 'tx-cur', bizDate: `${curPeriod}-03`, note: '午饭', amountCents: 5500 })]
+    let releaseSecond: ((v: TransactionData[]) => void) | null = null
+    let callCount = 0
+    mockBridge.call.mockImplementation((cmd: string) => {
+      if (cmd === 'book.list') return Promise.resolve([{ id: 'b1' }])
+      if (cmd === 'category.list') return Promise.resolve(CATS)
+      if (cmd === 'transaction.listByBook') {
+        callCount += 1
+        // 第二次（同步后的重取）挂起，便于观察刷新在途时的 UI
+        if (callCount === 2) {
+          return new Promise(resolve => { releaseSecond = resolve as (v: TransactionData[]) => void })
+        }
+        return Promise.resolve(rows)
+      }
+      return Promise.resolve([])
+    })
+
+    const { container } = renderPage()
+    await waitFor(() => expect(screen.getByText('午饭')).toBeInTheDocument())
+    expect(container.querySelector('.animate-spin')).toBeNull()
+
+    // 服务端权威行变了 → 一轮同步完成把新值拉回本地
+    rows = [mkTx({ id: 'tx-cur', bizDate: `${curPeriod}-03`, note: '午饭', amountCents: 6600 })]
+    emitSynced(2000) // 前进 → 重取
+
+    // 重取已发起（挂起中）：静默路径不得回到 loading
+    await waitFor(() => expect(releaseSecond).not.toBeNull())
+    expect(container.querySelector('.animate-spin')).toBeNull()
+    expect(screen.getByText('午饭')).toBeInTheDocument()
+
+    act(() => { releaseSecond!(rows) })
+    await waitFor(() => expect(screen.getByText('66')).toBeInTheDocument())
   })
 })

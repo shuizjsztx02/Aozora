@@ -8,11 +8,12 @@
  * 不渲染、空态引导句删除、预算匹配扩当年（annual）。
  */
 import { describe, it, expect, vi, beforeEach } from 'vitest'
-import { render, screen, waitFor, fireEvent, within } from '@testing-library/react'
+import { render, screen, waitFor, fireEvent, within, act } from '@testing-library/react'
 import { MemoryRouter } from 'react-router'
 import { HomePage } from '../../features/ledger/HomePage'
 import { todayBizDate } from '../../domain/date'
 import type { TransactionData, SavingsGoalData } from '../../platform/bridge/bridge-types'
+import { useSyncStore } from '../../platform/store/sync-store'
 
 const mockBridge = vi.hoisted(() => ({
   call: vi.fn(),
@@ -258,5 +259,94 @@ describe('HomePage 三合一（T15-1 / REQ-50）', () => {
     await waitFor(() => expect(screen.getByText(/已用 20%/)).toBeInTheDocument())
     expect(screen.getByText(/预算 ¥1000\.00/)).toBeInTheDocument()
     expect(screen.queryByText(/年度预算/)).toBeNull()
+  })
+})
+
+// ─── T18-2 / REQ-67①：写后刷新 —— 同步完成 / 页面重新可见时重取 ───
+
+describe('HomePage 同步重取（T18-2 / REQ-67①）', () => {
+  const today = todayBizDate('Asia/Shanghai')
+
+  /** 模拟一轮同步完成（原生推来的终态事件 → store） */
+  const emitSynced = (at: number) => {
+    act(() => {
+      useSyncStore.setState(s => ({ status: { ...s.status, state: 'idle', lastSyncedAt: at } }))
+    })
+  }
+
+  beforeEach(() => {
+    vi.clearAllMocks()
+    useSyncStore.setState(s => ({
+      status: { ...s.status, state: 'idle', pendingCount: 0, lastSyncedAt: 0, failedMutations: [] },
+    }))
+  })
+
+  it('同步轮完成（lastSyncedAt 前进）→ 重取，页面显示新值（修复前只有重挂/重启才更新）', async () => {
+    // 页面挂载前已经同步过（lastSyncedAt 非零）：基准 = 挂载那一刻的值，之后前进即重取
+    useSyncStore.setState(s => ({ status: { ...s.status, lastSyncedAt: 1000 } }))
+    // 本地库（Room）在第一次读时还是旧值；同步把服务端权威行拉回来后变成新值
+    let amountCents = 500
+    mockBridge.call.mockImplementation((cmd: string) => {
+      if (cmd === 'book.list') return Promise.resolve([{ id: 'b1', name: '默认账本', version: 1 }])
+      if (cmd === 'category.list') return Promise.resolve([{ id: 'c1', kind: 'expense', name: '餐饮', parentId: null, version: 1 }])
+      if (cmd === 'budget.list') return Promise.resolve([])
+      if (cmd === 'transaction.listByBook') return Promise.resolve([mkTx({ id: 'a', amountCents, bizDate: today })])
+      return Promise.resolve([])
+    })
+    render(
+      <MemoryRouter>
+        <HomePage />
+      </MemoryRouter>,
+    )
+    await waitFor(() => expect(screen.getByText('-5.00')).toBeInTheDocument())
+
+    amountCents = 600
+    emitSynced(2000) // 前进 → 重取
+    await waitFor(() => expect(screen.getByText('-6.00')).toBeInTheDocument())
+  })
+
+  it('页面重新可见（visibilitychange → visible）→ 重取', async () => {
+    let amountCents = 500
+    mockBridge.call.mockImplementation((cmd: string) => {
+      if (cmd === 'book.list') return Promise.resolve([{ id: 'b1', name: '默认账本', version: 1 }])
+      if (cmd === 'category.list') return Promise.resolve([{ id: 'c1', kind: 'expense', name: '餐饮', parentId: null, version: 1 }])
+      if (cmd === 'budget.list') return Promise.resolve([])
+      if (cmd === 'transaction.listByBook') return Promise.resolve([mkTx({ id: 'a', amountCents, bizDate: today })])
+      return Promise.resolve([])
+    })
+    render(
+      <MemoryRouter>
+        <HomePage />
+      </MemoryRouter>,
+    )
+    await waitFor(() => expect(screen.getByText('-5.00')).toBeInTheDocument())
+
+    amountCents = 700
+    act(() => { document.dispatchEvent(new Event('visibilitychange')) })
+    await waitFor(() => expect(screen.getByText('-7.00')).toBeInTheDocument())
+  })
+
+  it('挂载时还没有过同步（lastSyncedAt=0）→ 首轮同步完成也要重取（冷启动就不该停在旧值）', async () => {
+    // 冷启动：应用刚起来、首轮同步尚未完成，用户已经切到首页——此时 store 里
+    // lastSyncedAt 还是 0。若把「0 → 非零」当作基准而非变化，首轮同步把权威行
+    // 拉回来时页面不会重取，用户要再切一次页才看得见新数据。
+    let amountCents = 500
+    mockBridge.call.mockImplementation((cmd: string) => {
+      if (cmd === 'book.list') return Promise.resolve([{ id: 'b1', name: '默认账本', version: 1 }])
+      if (cmd === 'category.list') return Promise.resolve([{ id: 'c1', kind: 'expense', name: '餐饮', parentId: null, version: 1 }])
+      if (cmd === 'budget.list') return Promise.resolve([])
+      if (cmd === 'transaction.listByBook') return Promise.resolve([mkTx({ id: 'a', amountCents, bizDate: today })])
+      return Promise.resolve([])
+    })
+    render(
+      <MemoryRouter>
+        <HomePage />
+      </MemoryRouter>,
+    )
+    await waitFor(() => expect(screen.getByText('-5.00')).toBeInTheDocument())
+
+    amountCents = 900
+    emitSynced(1500) // 首轮同步完成：0 → 1500
+    await waitFor(() => expect(screen.getByText('-9.00')).toBeInTheDocument())
   })
 })

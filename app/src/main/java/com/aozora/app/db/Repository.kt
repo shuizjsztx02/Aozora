@@ -1781,7 +1781,12 @@ class Repository(private val db: AozoraDatabase) {
         val amountCents = map["amountCents"]?.toLongOrNull() ?: return null
         val type = map["type"] ?: return null
         val bizDate = map["bizDate"] ?: return null
-        val occurredAt = map["occurredAt"]?.toLongOrNull() ?: return null
+        // T18-2：同 SyncModels.toTransaction —— 服务端 `occurred_at` 是 ISO 8601，Room 存
+        // epoch 毫秒；只认 Long 会让 bootstrap 把快照里的交易**全部跳过**
+        // （真机实测：`transactions: expected=4 actual=0`）。epoch 与 ISO 双收。
+        val occurredAt = map["occurredAt"]?.toLongOrNull()
+            ?: SyncPayloadMapper.isoToEpochMillis(map["occurredAt"])
+            ?: return null
         val note = map["note"] ?: ""
         val source = map["source"] ?: "manual"
         val version = map["version"]?.toIntOrNull() ?: 1

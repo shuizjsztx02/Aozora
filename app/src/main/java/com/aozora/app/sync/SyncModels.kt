@@ -29,7 +29,12 @@ data class ServerChange(
         val amountCents = entityPayload["amountCents"]?.toLongOrNull() ?: return null
         val type = entityPayload["type"] ?: return null
         val bizDate = entityPayload["bizDate"] ?: return null
-        val occurredAt = entityPayload["occurredAt"]?.toLongOrNull() ?: return null
+        // T18-2：服务端 `occurred_at` 出网是 **ISO 8601**（`_serialize_entity`），Room 存
+        // epoch 毫秒——只认 Long 会把每一条服务端下行的交易**静默丢光**（调用方 `?: continue`）。
+        // 双收：epoch（旧 fixture / 旧服务端）与 ISO（当前服务端）都接。
+        val occurredAt = entityPayload["occurredAt"]?.toLongOrNull()
+            ?: SyncPayloadMapper.isoToEpochMillis(entityPayload["occurredAt"])
+            ?: return null
         val note = entityPayload["note"] ?: ""
         val source = entityPayload["source"] ?: "manual"
         // 服务端 transaction 无 includeInBudget 列（决策 #1）→ 缺省 true（计入）；

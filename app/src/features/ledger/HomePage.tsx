@@ -17,6 +17,7 @@ import { useNavigate, useSearchParams } from 'react-router'
 import { SyncBadge } from '../../components/SyncBadge'
 import { TxListRow } from '../../components/TxListRow'
 import { useBridge } from '../../platform/hooks/use-bridge'
+import { useRefreshOnSync } from '../../platform/hooks/use-refresh-on-sync'
 import { useTheme } from '../../design/theme'
 import { QuickEntrySheet } from './QuickEntrySheet'
 import { TxEditSheet } from './TxEditSheet'
@@ -189,6 +190,9 @@ export function HomePage() {
   useEffect(() => {
     loadData()
   }, [loadData])
+
+  // T18-2（REQ-67①）：同步完成 / 页面重新可见 → 重取（消除「只有切页重挂才看见新值」）
+  useRefreshOnSync(loadData)
 
   const todayExpense = sumTransactions(todayTxs.map(toDomainTransaction))
 

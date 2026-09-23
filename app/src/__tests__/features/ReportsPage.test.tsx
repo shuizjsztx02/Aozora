@@ -12,11 +12,12 @@
  * 就绪门用加载完成后唯一出现的 selectedBook 按钮文字「默认账本」。
  */
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
-import { render, screen, fireEvent, waitFor, within } from '@testing-library/react'
+import { render, screen, fireEvent, waitFor, within, act } from '@testing-library/react'
 import { MemoryRouter } from 'react-router'
 import { ReportsPage, buildDailySeries, trendTickFormatter, nearestTrendIndex } from '../../features/reports/ReportsPage'
 import { ErrorBoundary } from '../../app/ErrorBoundary'
 import type { TransactionData, BookData, CategoryData } from '../../platform/bridge/bridge-types'
+import { useSyncStore } from '../../platform/store/sync-store'
 
 const mockBridge = vi.hoisted(() => ({
   call: vi.fn(),
@@ -472,5 +473,38 @@ describe('ReportsPage 日历视图（T11-3）', () => {
     fireEvent.click(screen.getByTestId('toggle-calendar-view'))
     await waitFor(() => expect(screen.queryByTestId('calendar-view')).not.toBeInTheDocument())
     expect(screen.getByTestId('trend-legend-expense')).toBeInTheDocument()
+  })
+})
+
+// ─── T18-2 / REQ-67①：同步完成 → 重取（消除「只有切页重挂才看见新值」） ───
+
+describe('ReportsPage 同步重取（T18-2 / REQ-67①）', () => {
+  const emitSynced = (at: number) => {
+    act(() => {
+      useSyncStore.setState(s => ({ status: { ...s.status, state: 'idle', lastSyncedAt: at } }))
+    })
+  }
+
+  beforeEach(() => {
+    vi.clearAllMocks()
+    useSyncStore.setState(s => ({
+      status: { ...s.status, state: 'idle', pendingCount: 0, lastSyncedAt: 0, failedMutations: [] },
+    }))
+  })
+
+  it('同步轮完成（lastSyncedAt 前进）→ 重取，报表显示新值', async () => {
+    // 页面挂载前已同步过（非零基准）
+    useSyncStore.setState(s => ({ status: { ...s.status, lastSyncedAt: 1000 } }))
+    let txs = TXS_B1
+    mockCalls(() => txs)
+    renderPage()
+    // 就绪门：账本按钮渲染出所选账本名
+    await waitFor(() => expect(screen.getByText('默认账本')).toBeInTheDocument())
+    expect(screen.getAllByText(/123\.45/).length).toBeGreaterThan(0)
+
+    // 同步把服务端权威行拉回本地（当月支出 123.45 → 200.00）
+    txs = [mkTx({ id: 't1', bookId: 'b1', bizDate: `${curPeriod}-03`, amountCents: 20000 })]
+    emitSynced(2000) // 前进 → 重取
+    await waitFor(() => expect(screen.getAllByText(/200\.00/).length).toBeGreaterThan(0))
   })
 })
