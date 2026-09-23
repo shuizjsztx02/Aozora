@@ -516,7 +516,9 @@ describe('use-assistant — agent 流式消费（T-M7-02i）', () => {
     proposal: ActionProposalV2) {
     await act(async () => {
       const p = result.current.submitInput('把祖传牛肉面那笔的金额改成15块')
-      await Promise.resolve()
+      // T18-8 之后 submitInput 先 `await isCloudReachable(bridge)` 再开流——等一个宏任务
+      // （本文件的 `flush`），否则 `emit('done')` 会赶在订阅注册之前，帧直接丢掉
+      await flush()
       emit('done', donePayload({
         steps: 2, tool_calls: 2, writes: 1,
         proposals: [proposal as unknown as Record<string, unknown>],
