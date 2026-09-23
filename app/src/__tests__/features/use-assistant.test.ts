@@ -12,6 +12,8 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest'
 import { renderHook, act, waitFor } from '@testing-library/react'
 import { useAssistant, AI_OFFLINE_CANNED } from '../../features/assistant/use-assistant'
+import { INTERRUPTED_TURN_NOTE } from '../../features/assistant/history-projection'
+import { resetCloudReachabilityForTest } from '../../platform/cloud-reachability'
 import { useAssistantChatStore } from '../../platform/store/assistant-chat-store'
 import { parseInput } from '../../domain/nlu/parser'
 import type { ActionProposal } from '../../domain/action-proposal'
@@ -30,6 +32,9 @@ const mockBridge = vi.hoisted(() => ({
   validateProposal: vi.fn().mockResolvedValue({ valid: true }),
   interpretAI: vi.fn(),
   isAvailable: vi.fn().mockReturnValue(false),
+  // T18-8（REQ-71）：`auth.me` 是可达性探测的探针——resolve = 云端可达（见
+  // platform/cloud-reachability.ts）。想让某个用例走离线快路径，把 isAvailable 置 false。
+  getMe: vi.fn().mockResolvedValue({}),
 }))
 
 vi.mock('../../platform/hooks/use-bridge', () => ({
@@ -39,6 +44,10 @@ vi.mock('../../platform/hooks/use-bridge', () => ({
 vi.mock('../../domain/nlu/parser', () => ({
   parseInput: vi.fn(),
 }))
+
+// T18-8：可达性探测是模块级单例（带 30s 缓存）——逐用例复位，否则上一条用例的
+// 「在线」判定会漏进下一条（顶层的 beforeEach 覆盖本文件所有 describe）。
+beforeEach(() => { resetCloudReachabilityForTest() })
 
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i
 
@@ -371,14 +380,18 @@ describe('use-assistant — 免确认本地记账（T8-6）', () => {
     expect(mockBridge.interpretAI).toHaveBeenCalledWith('随便说点什么', baseCtx)
   })
 
-  it('本地 NLU 高置信路径不触 AI（context 管线与本地解析无关）', async () => {
-    vi.mocked(parseInput).mockReturnValue(txProposal()) // confidence 0.9 → needsAI=false
+  it('★ T18-8：本地 NLU 高置信也走云端（在线时判据只剩可达性，NLU 关闭）', async () => {
+    // 旧判据（needsAiRouting 四条）在这句上全假 → 会被本地快路径直接记账、AI 根本看不到。
+    // T18-8 起在线一律走云端：本地置信度多高都不再影响落点。
+    vi.mocked(parseInput).mockReturnValue(txProposal()) // confidence 0.9
     mockBridge.isAvailable.mockReturnValue(true)
+    mockBridge.interpretAI.mockResolvedValue(undefined)
     const { result } = setupWithProfile({ nickname: '老板' })
 
     await act(async () => { await result.current.submitInput('吃饭678') })
 
-    expect(mockBridge.interpretAI).not.toHaveBeenCalled()
+    expect(mockBridge.interpretAI).toHaveBeenCalled()
+    expect(mockBridge.insertTransaction).not.toHaveBeenCalled()
   })
 
   // ─── 第十一轮 T11-7（REQ-28 / 决策 #7/#8）：角色 persona 注入在线 AI 路径 ───
@@ -503,7 +516,9 @@ describe('use-assistant — 免确认本地记账（T8-6）', () => {
     expect(result.current.phase).toBe('idle')
   })
 
-  it('interpretAI 失败 → 会话级一次性轻提示，第二次失败不再弹（决策 #9）', async () => {
+  it('★ T18-8：interpretAI 失败 → 中断 + 重发入口，**不回落本地**（与 agent 流转同结局）', async () => {
+    // 旧语义是「会话级一次性轻提示 + 本次以本地解析继续」（回退本地写库）。T18-8 统一到
+    // agent 流转那一侧：什么都不写 + `interrupted` 重发入口 + 同一份中断文案。
     vi.mocked(parseInput).mockReturnValue(txProposal({ confidence: 0.3 }))
     mockBridge.isAvailable.mockReturnValue(true)
     mockBridge.interpretAI.mockRejectedValue(
@@ -512,13 +527,13 @@ describe('use-assistant — 免确认本地记账（T8-6）', () => {
     const { result } = setup()
 
     await act(async () => { await result.current.submitInput('午饭吃了十二块五') })
-    await act(async () => { await result.current.submitInput('晚饭二十') })
 
-    const notices = result.current.messages.filter(m => m.text.includes('云端 AI 暂时不可用'))
-    expect(notices).toHaveLength(1)
-    expect(notices[0].text).toContain('本次以本地解析继续')
-    // 两次提交都回退本地提案正常写入
-    expect(mockBridge.insertTransaction).toHaveBeenCalledTimes(2)
+    expect(mockBridge.insertTransaction).not.toHaveBeenCalled()
+    expect(result.current.interrupted).toEqual({ input: '午饭吃了十二块五' })
+    const texts = result.current.messages.map(m => m.text).join('\n')
+    expect(texts).toContain(INTERRUPTED_TURN_NOTE)
+    expect(texts).toContain('云端 AI 暂时不可用')
+    expect(result.current.phase).toBe('idle')
   })
 
   it('code=no_ai_provider → 决策 #9 配置指引专属文案', async () => {

@@ -89,6 +89,9 @@ import {
   type AiConfig, type AiOpSet, type AiInterpretV2, type ConfigTargets,
 } from '../../domain/ai-proposal-builder'
 import { useBridge } from '../../platform/hooks/use-bridge'
+// T18-8（REQ-71）：在线判定改由真实可达性探测给出（原先的 `navigator.onLine` + 桥接口
+// 存在性两条都不可信，见该模块文件头）
+import { isCloudReachable, invalidateCloudReachability } from '../../platform/cloud-reachability'
 import { useAssistantChatStore } from '../../platform/store/assistant-chat-store'
 import {
   useAssistantStream,
@@ -414,27 +417,36 @@ interface UseAssistantReturn {
   appendAssistantMessage: (text: string) => void
 }
 
-const CONFIDENCE_THRESHOLD = 0.8
-
-// T12-12：操作/查询句式守卫（决策 #2 例外——这些句子本地解析必然错）。
-// 覆盖 edit（改成/改为…）、delete（删/去掉/移除…）、query（查一下/多少…）。
+// T12-12：操作/查询句式守卫。覆盖 edit（改成/改为…）、delete（删/去掉/移除…）、
+// query（查一下/多少…）。
+//
+// **T18-8（REQ-71）之后它只服务一件事：离线时不让本地 NLU 硬记操作句。** 它原先还有
+// 第二个职责——在线时把这类句子从本地快路径「救」到云端（T12-12 的真机收口发现：
+// 本地把「把昨天的午饭改成15块」记成一笔新的 ¥15）。在线分流改由可达性判据接管
+// （在线一律走云端）之后，那个职责随 `needsAiRouting` 一起下线了；**离线这一侧必须留**
+// ——离线没有云端可去，少了这道守卫，操作句会被本地解析成新账直接落库。
 const OP_SENTENCE_RE = /(改成|改为|记成|调成|删掉|删了|删除|删去|去掉|移除|查一下|查查|查询|多少)/
 const SLOW_THRESHOLD_MS = 12_000
 
+/** 一轮输入的落点。 */
+export type InputRoute = 'cloud' | 'local' | 'offline-canned'
+
 /**
- * 这一轮输入**是否必须交给云端 AI**；返回 false 表示走本地快路径直接记账。
+ * 这一轮输入走哪条路——T18-8（REQ-71）起**只看云端可达性**。
  *
- * 抽成导出的纯函数是为了让它可被**离线核验**：这个判据决定了「一句用户输入会不会
- * 被本地 NLU 拦下来、AI 根本看不到」，是「AI 接管各类指令」这条路上最前置的一道
- * 闸门。测试集（``server/scripts/ai_tool_matrix``）需要对每条用例算出它走哪条路，
- * 而这个判据原先锁在 ``submitInput`` 内部、外部无从得知。抽出来**不改任何行为**——
- * 四条判据与原先逐字相同，只是从内联表达式变成一次函数调用。
+ * 用户的诉求逐字是：*「只有在监控到当前应用属于离线状态，NLU 才启用；处于在线状态时
+ * 关闭 NLU，所有输入全部走云端 AI 进行理解和执行」*。所以判据从原来那四条「本地解析
+ * 可不可信」的启发式（操作句式 / 置信度 / warnings / chat 兜底）换成了一条事实判据：
+ * **云端能不能到**。那四条启发式正是 REQ-71 里「本地 NLU 拦截大量该给云端的需求、
+ * 误判成单笔记账」的成因（R-PROD-28），随 `needsAiRouting` 一并下线。
+ *
+ * 抽成导出的纯函数是为了让它能被**离线核验**（`ai-tool-matrix-device-gate.test.ts` 对
+ * 语料逐条算落点）：判据本身不该锁在 `submitInput` 内部。
  */
-export function needsAiRouting(text: string, localProposal: ActionProposal): boolean {
-  return OP_SENTENCE_RE.test(text)
-    || localProposal.confidence < CONFIDENCE_THRESHOLD
-    || localProposal.warnings.length > 0
-    || localProposal.action === 'chat'
+export function routeInput(text: string, cloudReachable: boolean): InputRoute {
+  if (cloudReachable) return 'cloud'
+  // 离线：操作/查询句没有云端可去，也不能拿本地结果硬记 → 统一 canned
+  return OP_SENTENCE_RE.test(text) ? 'offline-canned' : 'local'
 }
 
 /**
@@ -562,8 +574,6 @@ export function useAssistant({
   const isPendingCategoryRef = useRef(false)
   // T-M7-02i：当前卡是否处于待确认态（agent 挂起提案，尚未写库；语义同上一行）
   const isPendingConfirmRef = useRef(false)
-  // T12-8（REQ-30 ② / 决策 #9）：云端失败轻提示会话级只弹一次，不轰炸
-  const aiNoticeShownRef = useRef(false)
 
   // C-C2 fix: 组件卸载时清理所有 timer
   // （流事件的退订由 useAssistantStream 自己在卸载时兜底，不在这里重复）
@@ -1313,6 +1323,77 @@ export function useAssistant({
    *  启用**——第一道在 UI（按钮禁用，卡上写明「本轮仍在执行」），第二道在这里。 */
   const streamActive = projection !== null
 
+  /**
+   * 一轮的**落库收尾**：两条路（云端 / 离线本地）共用这一段，差别只有两处，都由
+   * `fromCloud` 一个参数表达。
+   *
+   * - `fromCloud=true`：先过服务端 best-effort 校验（T-M4-02）。服务端的契约是
+   *   「verdict 非 accepted / rejected_low_confidence 的提案，客户端**不得执行**」
+   *   （`routes.py:157`），故校验判无效时**返回 false 交给调用方收尾**（`failCloudTurn`：
+   *   中断 + 重发），不再写库。T18-8 之前这里是把 `finalProposal` 换成**本地解析结果**
+   *   继续写——在线时本地根本不解析（NLU 关闭），而且「拿本地猜测顶替云端结论」正是
+   *   本轮要拆掉的老口径。
+   * - `fromCloud=false`：本地快路径没有 AI 参与，`opCanned` 才可能出现（本地只解析出
+   *   chat = 用户想聊/查/改/删，离线时统一 canned 文案）。
+   *
+   * @returns 是否已按这份提案收尾（false 只在上面那条被服务端判无效时出现）
+   */
+  const settleProposal = useCallback(async (
+    proposal: ActionProposal, fromCloud: boolean,
+  ): Promise<boolean> => {
+    if (fromCloud && (proposal.action === 'add_tx' || proposal.action === 'add_tx_batch') && bookId) {
+      try {
+        const validation = await bridge.validateProposal(
+          proposal as unknown as Record<string, unknown>, bookId
+        )
+        if (!validation.valid && validation.verdict !== 'rejected_low_confidence') return false
+      } catch {
+        // 校验请求本身失败 → 保留 AI 结果（best-effort，不阻断）
+      }
+    }
+
+    // 清理慢速提示
+    if (slowTimerRef.current) {
+      clearTimeout(slowTimerRef.current)
+      slowTimerRef.current = null
+    }
+    setIsSlow(false)
+
+    const isTxAction = proposal.action === 'add_tx' || proposal.action === 'add_tx_batch'
+    // T12-8（REQ-30 ① / 决策 #7）：缺分类的提案不自动硬写（Kotlin require 会抛英文错），
+    // 卡片转「待选分类」态——选后才落库；Kotlin require 保留作最后防线（错误已中文化）。
+    const missingCategory = isTxAction && (proposal.transactions ?? []).some(t => !t.categoryId)
+    // T12-11（REQ-37 ④）：离线且本地 NLU 只落到 chat → 用户想聊/查/改/删但没有云端可去。
+    const opCanned = !fromCloud && !isTxAction && proposal.action === 'chat'
+    const assistantMsg: AssistantMessage = {
+      id: 'msg_' + Date.now() + '_assistant',
+      role: 'assistant',
+      text: missingCategory
+        ? '未识别到分类，请在卡片中选择分类后保存（尚未记账）'
+        : opCanned ? AI_OFFLINE_CANNED : proposal.message,
+      proposal,
+      proposalStatus: missingCategory ? 'pending' : isTxAction ? 'executing' : 'committed',
+    }
+    setMessages(prev => [...prev, assistantMsg])
+
+    if (isTxAction) {
+      // 第八轮 Bug-6：免确认——解析成功直接写入，卡片常驻可编辑
+      setActiveProposal(proposal)
+      isSubmittingRef.current = false
+      isPendingCategoryRef.current = missingCategory
+      if (missingCategory) {
+        setCardStatus('pending-category')
+        setPhase('idle')
+        return true
+      }
+      await commitProposalInternal(proposal)
+      return true
+    }
+    setPhase('idle')
+    isSubmittingRef.current = false
+    return true
+  }, [bridge, bookId, commitProposalInternal])
+
   const submitInput = useCallback(async (text: string) => {
     if (!text.trim()) return
     // C-B3 fix: 并发提交互斥 — 非 idle 阶段拒绝新提交
@@ -1341,28 +1422,44 @@ export function useAssistant({
     if (slowTimerRef.current) clearTimeout(slowTimerRef.current)
     slowTimerRef.current = setTimeout(() => setIsSlow(true), SLOW_THRESHOLD_MS)
 
-    // 1. 本地 NLU
-    const parseCtx = buildParseContext()
-    const localProposal = parseInput(text.trim(), parseCtx)
+    // 1. 这一轮走哪条路 —— T18-8（REQ-71）：**只看云端可达性**（真探测，30s 缓存；
+    //    见 `platform/cloud-reachability.ts`）。在线 = 本地 NLU 关闭、一律走云端；
+    //    离线 = 本地快路径（操作/查询句 canned）。旧的四条启发式判据（`needsAiRouting`）
+    //    连同 `isOnline()` 一并下线——它们正是「本地拦掉该给云端的需求」的成因。
+    const cloudReachable = await isCloudReachable(bridge)
+    const route = routeInput(text.trim(), cloudReachable)
 
-    // T12-12（真机收口发现）：本地 NLU 会把操作/查询句里的金额当新账解析
-    // （「把昨天的午饭改成15块」被记成新的 ¥15）。命中操作句式必须送云端
-    // intent v2；云端不可达时按 REQ-37 ④ canned，绝不以本地结果硬记。
-    const looksLikeOp = OP_SENTENCE_RE.test(text)
-    const needsAI = needsAiRouting(text, localProposal)
-
-    let finalProposal: ActionProposal = localProposal
-
-    if (looksLikeOp && !(isOnline() && bridge.isAvailable())) {
-      appendAssistantMessage(AI_OFFLINE_CANNED)
-      finishProcessing()
+    // 2. 离线：**根本不做云端请求，也不解析**（「关闭 NLU」按字面落地）
+    if (route !== 'cloud') {
+      if (route === 'offline-canned') {
+        appendAssistantMessage(AI_OFFLINE_CANNED)
+        finishProcessing()
+        return
+      }
+      await settleProposal(parseInput(text.trim(), buildParseContext()), false)
       return
     }
 
-    // 2. 尝试 AI —— T12-11（REQ-37 / 决策 #2）：needsAI 判据不翻向；
-    //    v2 输出按 intent 分发（bookkeeping 现链路 / chat+query 文本气泡 /
-    //    edit+delete 预览确认卡）。aiConsumed=意图已被非提案链路消化，直接收尾。
-    if (needsAI && isOnline() && bridge.isAvailable()) {
+    // 云端一支的**唯一失败出口**（T18-8 / 决策 #7）：结局与 agent 流转（`settleStream`
+    // 的 `error` 分支）**逐条对齐** —— 什么都不写 + `interrupted` 重发入口 + 同一份
+    // 中断文案。**不回落本地 NLU**：诉求逐字要求「在线时关闭 NLU」，回落等于把它又
+    // 打开；而本地解析恰好在复合句 / 操作句上会记错（R-PROD-28），那正是本轮要拆的。
+    // 两条链路原先一个回退本地、一个中断重试，「同一句话有时有结果、有时没有」——统一到后者。
+    let cloudSettled = false
+    const failCloudTurn = (reason: string) => {
+      if (cloudSettled) return
+      cloudSettled = true
+      // 这次判「可达」已经不作数了：下一次输入重新探，别在 TTL 内反复撞同一堵墙
+      invalidateCloudReachability()
+      setInterrupted({ input: text.trim() })
+      appendAssistantMessage(`${INTERRUPTED_TURN_NOTE}（${reason}）`)
+      finishProcessing()
+    }
+
+    // 3. 在线 → 云端。T12-11（REQ-37 / 决策 #2）：v2 输出按 intent 分发
+    //    （bookkeeping 现链路 / chat+query 文本气泡 / edit+delete 预览确认卡）。
+    //    条件恒真（另外两条路上面已 return），留着是为了三条路在代码里对称。
+    if (route === 'cloud') {
       // T-M7-02i：agent 流式通道优先（架构 §11.3 的双层灰度：服务端开关 + 客户端开关）。
       // **两道闸都要过**：开关开 **且** 桥具备流式能力（02h 未落地、或旧 APK 的命令表里
       // 没有这两条时，能力探测为假）。任一不满足即整条走下面的既有单发链路，行为与
@@ -1417,106 +1514,30 @@ export function useAssistant({
             finishProcessing()
             return
           }
-          // bookkeeping（含 intent 缺失的老输出）→ 现链路
-          finalProposal = buildProposalFromAiOutput(v2.legacy, {
+          // bookkeeping（含 intent 缺失的老输出）→ 同一套落库收尾（fromCloud=true 走服务端校验）
+          const written = await settleProposal(buildProposalFromAiOutput(v2.legacy, {
             now: Date.now(),
             timezone,
             categories,
             bookId: bookId || '',
-          })
-        } else if (looksLikeOp) {
-          // 桥返回空 output：操作句同样不回落本地（T12-12）
-          appendAssistantMessage(AI_OFFLINE_CANNED)
-          finishProcessing()
+          }), true)
+          if (!written) failCloudTurn('这次的结果没通过服务端校验，没有写入')
           return
         }
+        // 桥返回空 output = 云端没给出可用结果 → 与下面的 catch 同一条失败出口
+        failCloudTurn(AI_INTERPRET_ERROR_ZH.unavailable)
       } catch (err) {
-        // T12-8（REQ-30 ② / 决策 #9）：云端失败不再静默——会话级一次性轻提示后回退本地
-        if (!aiNoticeShownRef.current) {
-          aiNoticeShownRef.current = true
-          const code = typeof err === 'object' && err !== null && 'code' in err
-            ? String((err as { code: unknown }).code) : ''
-            const desc = AI_INTERPRET_ERROR_ZH[code] ?? '云端 AI 暂时不可用'
-          // T12-12：操作句不回落本地（否则「改X」被记成「新账X」），提示语区分
-          const suffix = looksLikeOp ? '操作与查询需要云端可用，本次未改动账本' : '本次以本地解析继续'
-          setMessages(prev => [...prev, {
-            id: 'msg_' + Date.now() + '_ai_notice',
-            role: 'assistant' as const,
-            text: `⚠️ ${desc}，${suffix}`,
-            proposalStatus: 'committed' as const,
-          }])
-        }
-        if (looksLikeOp) {
-          appendAssistantMessage(AI_OFFLINE_CANNED)
-          finishProcessing()
-          return
-        }
-        finalProposal = localProposal
+        // T12-8（REQ-30 ② / 决策 #9）：云端失败不再静默——原因如实透出，但**不再回落本地**。
+        const code = typeof err === 'object' && err !== null && 'code' in err
+          ? String((err as { code: unknown }).code) : ''
+        failCloudTurn(AI_INTERPRET_ERROR_ZH[code] ?? AI_INTERPRET_ERROR_ZH.unavailable)
       }
     }
-
-    // 3. 服务端验证（仅对 AI 生成的交易提案；best-effort，失败不阻断本地写）
-    if (finalProposal !== localProposal &&
-        (finalProposal.action === 'add_tx' || finalProposal.action === 'add_tx_batch') && bookId) {
-      try {
-        const validation = await bridge.validateProposal(
-          finalProposal as unknown as Record<string, unknown>, bookId
-        )
-        if (!validation.valid && validation.verdict !== 'rejected_low_confidence') {
-          finalProposal = localProposal
-        }
-      } catch {
-        // 验证请求失败 → 保留 AI 结果
-      }
-    }
-
-    // 4. 清理慢速提示
-    if (slowTimerRef.current) {
-      clearTimeout(slowTimerRef.current)
-      slowTimerRef.current = null
-    }
-    setIsSlow(false)
-
-    const isTxAction = finalProposal.action === 'add_tx' || finalProposal.action === 'add_tx_batch'
-    // T12-8（REQ-30 ① / 决策 #7）：缺分类的提案不自动硬写（Kotlin require 会抛英文错），
-    // 卡片转「待选分类」态——选后才落库；Kotlin require 保留作最后防线（错误已中文化）。
-    const missingCategory = isTxAction &&
-      (finalProposal.transactions ?? []).some(t => !t.categoryId)
-    // T12-11（REQ-37 ④）：AI 未消化（离线/无 key/失败）且本地 NLU 也只落到 chat
-    // 兜底 → 用户想聊/查/改/删但云端不可达，统一 canned 文案（bookkeeping 保持本地 NLU）。
-    const opCanned = !isTxAction && finalProposal === localProposal &&
-      localProposal.action === 'chat'
-    const assistantMsg: AssistantMessage = {
-      id: 'msg_' + Date.now() + '_assistant',
-      role: 'assistant',
-      text: missingCategory
-        ? '未识别到分类，请在卡片中选择分类后保存（尚未记账）'
-        : opCanned ? AI_OFFLINE_CANNED : finalProposal.message,
-      proposal: finalProposal,
-      proposalStatus: missingCategory ? 'pending' : isTxAction ? 'executing' : 'committed',
-    }
-    setMessages(prev => [...prev, assistantMsg])
-
-    if (isTxAction) {
-      // 第八轮 Bug-6：免确认——解析成功直接本地写入，卡片常驻可编辑
-      setActiveProposal(finalProposal)
-      isSubmittingRef.current = false
-      isPendingCategoryRef.current = missingCategory
-      if (missingCategory) {
-        setCardStatus('pending-category')
-        setPhase('idle')
-        return
-      }
-      await commitProposalInternal(finalProposal)
-      return
-    }
-    setPhase('idle')
-    isSubmittingRef.current = false
   }, [
     bridge, categories, bookId, timezone, profile, persona, aiCategories,
     books, accounts, budgets, goals, agentStream,
     buildParseContext, commitProposalInternal, dropApprovals, finishProcessing, runAgentTurn,
-    appendAssistantMessage, answerTextIntent, openOpPreview, openConfigPreview,
+    appendAssistantMessage, answerTextIntent, openOpPreview, openConfigPreview, settleProposal,
   ])
 
   /** 卡片编辑保存：替换写（softDelete 旧 + insert 新），不新增 transaction.update。
@@ -1824,8 +1845,4 @@ export function useAssistant({
     appendAssistantMessage,
     deviceVoiceRequest, respondDeviceVoice, dismissDeviceVoice,
   }
-}
-
-function isOnline(): boolean {
-  return typeof navigator !== 'undefined' ? navigator.onLine : true
 }

@@ -1015,9 +1015,15 @@ export class NativeBridge {
     return this.call('auth.logout')
   }
 
-  /** GET /me 透传（id/nickname/phone/status/timezone…）。401 → auth_lost。 */
-  async getMe(): Promise<MeData> {
-    return this.call('auth.me')
+  /**
+   * GET /me 透传（id/nickname/phone/status/timezone…）。401 → auth_lost。
+   *
+   * T18-8（REQ-71）：`options.timeoutMs` 是给**可达性探测**用的短超时
+   * （`platform/cloud-reachability.ts` 传 4s）——默认 10s 会把冷启动第一次输入
+   * 拖到十秒。不给就是原行为。
+   */
+  async getMe(options?: CallOptions): Promise<MeData> {
+    return this.call('auth.me', undefined, options)
   }
 
   /** PATCH /me 更新昵称；native 成功后镜像写 sync_meta display_name（离线可读）。 */

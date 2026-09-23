@@ -19,6 +19,7 @@ import {
   useAssistantStream, type AgentStreamProjection,
 } from '../../features/assistant/use-assistant-stream'
 import { useAssistantChatStore } from '../../platform/store/assistant-chat-store'
+import { resetCloudReachabilityForTest } from '../../platform/cloud-reachability'
 import { parseInput } from '../../domain/nlu/parser'
 import type { ActionProposal } from '../../domain/action-proposal'
 import { todayBizDate } from '../../domain/date'
@@ -40,6 +41,9 @@ const mockBridge = vi.hoisted(() => ({
   fetchConversationEvents: undefined as undefined | ReturnType<typeof vi.fn>,
   insertBook: vi.fn().mockResolvedValue({ id: 'new-book' }),
   isAvailable: vi.fn().mockReturnValue(true),
+  // T18-8（REQ-71）：`auth.me` = 可达性探测的探针；resolve = 云端可达
+  // （把 isAvailable 置 false 即模拟离线，走本地快路径）
+  getMe: vi.fn().mockResolvedValue({}),
 }))
 
 vi.mock('../../platform/hooks/use-bridge', () => ({
@@ -49,6 +53,10 @@ vi.mock('../../platform/hooks/use-bridge', () => ({
 vi.mock('../../domain/nlu/parser', () => ({
   parseInput: vi.fn(),
 }))
+
+// T18-8：可达性探测是模块级单例（带 30s 缓存）——逐用例复位，否则上一条用例的
+// 「在线」判定会漏进下一条。
+beforeEach(() => { resetCloudReachabilityForTest() })
 
 const TZ = 'Asia/Shanghai'
 const STREAM_ID = 'stream-1'
@@ -74,7 +82,18 @@ function emitAll(events: Array<[string, Record<string, unknown>]>) {
   }
 }
 
-/** 一条必然走 AI 分支的本地提案（action=chat → needsAI 为真）。 */
+/**
+ * 「发出输入 → 等 stream 订阅好 → 再推帧」之间的等待。
+ *
+ * T18-8 起 `submitInput` 起手多了一次 `await`（可达性探测，见 `platform/cloud-reachability.ts`），
+ * 探测链要走几个微任务才轮到 `runAgent`/`onAiStream`。原先一句 `await Promise.resolve()`
+ * 就够（微任务一轮），现在不够——帧会推在订阅之前、**静默丢掉**（表现为「气泡不出现」
+ * 或「消息流里只剩 user 那条」）。一个宏任务会把待处理的微任务全部排干，比数轮数稳。
+ */
+const flush = () => new Promise<void>(resolve => { setTimeout(resolve, 0) })
+
+/** 一条本地解析产物（action=chat）——T18-8 之后走哪条路只看可达性，它只用来
+ *  证明「在线时本地解析结果不影响落点」。 */
 function chatProposal(): ActionProposal {
   return {
     proposalId: 'prop-local',
@@ -160,7 +179,7 @@ describe('use-assistant — agent 流式消费（T-M7-02i）', () => {
 
     await act(async () => {
       const p = result.current.submitInput('帮我记一笔午饭12块')
-      await Promise.resolve()
+      await flush()
       emit('done', {
         conversation_id: 'conv-1', stop_reason: 'completed', steps: 2,
         tool_calls: 1, writes: 0, usage: { prompt_tokens: 1, completion_tokens: 1 },
@@ -185,7 +204,7 @@ describe('use-assistant — agent 流式消费（T-M7-02i）', () => {
     let submitting!: Promise<void>
     await act(async () => {
       submitting = result.current.submitInput('你好')
-      await Promise.resolve()
+      await flush()
     })
 
     const seen: string[] = []
@@ -215,7 +234,7 @@ describe('use-assistant — agent 流式消费（T-M7-02i）', () => {
     let submitting!: Promise<void>
     await act(async () => {
       submitting = result.current.submitInput('你好')
-      await Promise.resolve()
+      await flush()
     })
 
     await act(async () => {
@@ -245,7 +264,7 @@ describe('use-assistant — agent 流式消费（T-M7-02i）', () => {
     let submitting!: Promise<void>
     await act(async () => {
       submitting = result.current.submitInput('你好')
-      await Promise.resolve()
+      await flush()
     })
 
     await act(async () => { emit('delta', { text: '你好', channel: 'content', step: 1 }) })
@@ -272,7 +291,7 @@ describe('use-assistant — agent 流式消费（T-M7-02i）', () => {
 
     await act(async () => {
       const p = result.current.submitInput('记一笔午饭12块')
-      await Promise.resolve()
+      await flush()
       emit('delta', { text: '记好了', channel: 'content', step: 2 })
       emit('done', {
         conversation_id: 'conv-1', stop_reason: 'completed', steps: 2,
@@ -303,7 +322,7 @@ describe('use-assistant — agent 流式消费（T-M7-02i）', () => {
 
     await act(async () => {
       const p = result.current.submitInput('先看看这个月花了多少，然后记一笔午饭12块')
-      await Promise.resolve()
+      await flush()
       emit('delta', { text: '先查了一下', channel: 'content', step: 3 })
       emit('done', {
         conversation_id: 'conv-1', stop_reason: 'completed', steps: 3,
@@ -333,7 +352,7 @@ describe('use-assistant — agent 流式消费（T-M7-02i）', () => {
 
     await act(async () => {
       const p = result.current.submitInput('你好呀')
-      await Promise.resolve()
+      await flush()
       emit('delta', { text: '你好', channel: 'content', step: 1 })
       emit('done', {
         conversation_id: 'conv-1', stop_reason: 'completed', steps: 1,
@@ -356,7 +375,7 @@ describe('use-assistant — agent 流式消费（T-M7-02i）', () => {
 
     await act(async () => {
       const p = result.current.submitInput('你好')
-      await Promise.resolve()
+      await flush()
       emit('delta', { text: '我正在', channel: 'content', step: 1 })
       emit('error', { code: 'agent_failed', message: '本轮失败' })
       await p
@@ -389,7 +408,7 @@ describe('use-assistant — agent 流式消费（T-M7-02i）', () => {
 
     await act(async () => {
       const p = result.current.submitInput('你好')
-      await Promise.resolve()
+      await flush()
       emitAll([
         ['done', {
           conversation_id: 'conv-1', stop_reason: 'completed', steps: 1,
@@ -414,7 +433,7 @@ describe('use-assistant — agent 流式消费（T-M7-02i）', () => {
 
     await act(async () => {
       const p = result.current.submitInput('先看看这个月花了多少')
-      await Promise.resolve()
+      await flush()
       emit('done', {
         conversation_id: 'conv-42', stop_reason: 'completed', steps: 1,
         tool_calls: 0, writes: 0, usage: { prompt_tokens: 1, completion_tokens: 1 },
@@ -427,7 +446,7 @@ describe('use-assistant — agent 流式消费（T-M7-02i）', () => {
 
     await act(async () => {
       const p = result.current.submitInput('那上个月呢')
-      await Promise.resolve()
+      await flush()
       emit('done', {
         conversation_id: 'conv-42', stop_reason: 'completed', steps: 1,
         tool_calls: 0, writes: 0, usage: { prompt_tokens: 1, completion_tokens: 1 },
@@ -447,7 +466,7 @@ describe('use-assistant — agent 流式消费（T-M7-02i）', () => {
 
     await act(async () => {
       const p = result.current.submitInput('先看看这个月花了多少，然后记一笔午饭12块')
-      await Promise.resolve()
+      await flush()
       emit('done', {
         conversation_id: 'conv-1', stop_reason: 'completed', steps: 2,
         tool_calls: 2, writes: 1, usage: { prompt_tokens: 1, completion_tokens: 1 },
@@ -500,7 +519,7 @@ describe('use-assistant — 流式消费重构（T-M7-03b）', () => {
     let submitting!: Promise<void>
     await act(async () => {
       submitting = result.current.submitInput('把上个月的餐饮都改成交通')
-      await Promise.resolve()
+      await flush()
     })
 
     await act(async () => {
@@ -536,7 +555,7 @@ describe('use-assistant — 流式消费重构（T-M7-03b）', () => {
 
     await act(async () => {
       const p = result.current.submitInput('记一笔午饭12块')
-      await Promise.resolve()
+      await flush()
       emit('phase', { phase: 'tool_calling', step: 1 })
       emit('tool_call', { tool: 'insert_transaction', step: 1, message: '正在记账…' })
       emit('tool_result', { tool: 'insert_transaction', step: 1, status: 'ok' })
@@ -560,7 +579,7 @@ describe('use-assistant — 流式消费重构（T-M7-03b）', () => {
 
     await act(async () => {
       const p = result.current.submitInput('你好')
-      await Promise.resolve()
+      await flush()
       emit('done', donePayload({ conversation_id: 'conv-77' }))
       await p
     })
@@ -578,7 +597,7 @@ describe('use-assistant — 流式消费重构（T-M7-03b）', () => {
     // 会话 A（首轮不带 id → 服务端交回 conv-A）
     await act(async () => {
       const p = result.current.submitInput('会话A的消息')
-      await Promise.resolve()
+      await flush()
       emit('done', donePayload({ conversation_id: 'conv-A', stop_reason: 'completed' }))
       await p
     })
@@ -591,7 +610,7 @@ describe('use-assistant — 流式消费重构（T-M7-03b）', () => {
 
     await act(async () => {
       const p = result.current.submitInput('会话B的消息')
-      await Promise.resolve()
+      await flush()
       emit('done', donePayload({ conversation_id: 'conv-B' }))
       await p
     })
@@ -618,7 +637,7 @@ describe('use-assistant — 流式消费重构（T-M7-03b）', () => {
     let submitting!: Promise<void>
     await act(async () => {
       submitting = result.current.submitInput('会话A的消息')
-      await Promise.resolve()
+      await flush()
     })
 
     // 流式还没结束就切到另一个会话
@@ -644,7 +663,7 @@ describe('use-assistant — 流式消费重构（T-M7-03b）', () => {
     // 第一轮留下一个待确认卡（三态之一）
     await act(async () => {
       const p = result.current.submitInput('先看看这个月花了多少，然后记一笔午饭12块')
-      await Promise.resolve()
+      await flush()
       emit('done', donePayload({
         steps: 2, tool_calls: 2, writes: 1,
         proposals: [proposal as unknown as Record<string, unknown>],
@@ -659,7 +678,7 @@ describe('use-assistant — 流式消费重构（T-M7-03b）', () => {
     let submitting!: Promise<void>
     await act(async () => {
       submitting = result.current.submitInput('那上个月呢')
-      await Promise.resolve()
+      await flush()
     })
     await act(async () => { emit('delta', { text: '正想说', channel: 'content', step: 1 }) })
     expect(result.current.streaming).toEqual({ text: '正想说', reasoning: '' })
@@ -759,7 +778,7 @@ describe('useAssistantStream — 轮次归属（T-M7-03b 收口）', () => {
     let first!: Promise<void>
     await act(async () => {
       first = result.current.start('第一轮', 'book-1', null)
-      await Promise.resolve()
+      await flush()
     })
     expect(result.current.projection).not.toBeNull()
 
@@ -837,7 +856,7 @@ describe('use-assistant — 陈旧 conversation_id 的 404 降级（T-M7-03d）'
 
     await act(async () => {
       const p = result.current.submitInput('帮我记一笔午饭12块')
-      await Promise.resolve()
+      await flush()
       emitAll([
         ['delta', { text: '我先看看', channel: 'content', step: 1 }],
         ['error', { code: 'not_found', message: 'Conversation not found' }],
@@ -865,7 +884,7 @@ describe('use-assistant — 陈旧 conversation_id 的 404 降级（T-M7-03d）'
 
     await act(async () => {
       const p = result.current.submitInput('帮我记一笔午饭12块')
-      await Promise.resolve()
+      await flush()
       emitAll([['error', { code: 'network', message: 'Network error' }]])
       await p
     })
@@ -1015,7 +1034,7 @@ describe('use-assistant — 确认门四值（T-M7-03e）', () => {
     const { result } = setup()
     await act(async () => {
       const p = result.current.submitInput('帮我记一笔午饭12块')
-      await Promise.resolve()
+      await flush()
       emitAll([['error', { code: 'agent_failed', message: 'x' }]])
       await p
     })
@@ -1023,7 +1042,7 @@ describe('use-assistant — 确认门四值（T-M7-03e）', () => {
 
     await act(async () => {
       result.current.retryInterrupted()
-      await Promise.resolve()
+      await flush()
     })
 
     expect(result.current.interrupted).toBeNull()
@@ -1038,7 +1057,7 @@ describe('use-assistant — 确认门四值（T-M7-03e）', () => {
 
     await act(async () => {
       const p = result.current.submitInput('两个改动')
-      await Promise.resolve()
+      await flush()
       emit('confirm', { step: 2, proposal: p1 as unknown as Record<string, unknown> })
       emit('confirm', { step: 3, proposal: p2 as unknown as Record<string, unknown> })
       emit('done', donePayload({
@@ -1067,7 +1086,7 @@ describe('use-assistant — 确认门四值（T-M7-03e）', () => {
 
     await act(async () => {
       const p = result.current.submitInput('先看预算，再记午饭，再记打车')
-      await Promise.resolve()
+      await flush()
       emit('confirm', { step: 2, proposal: p1 as unknown as Record<string, unknown> })
       emit('confirm', { step: 3, proposal: p2 as unknown as Record<string, unknown> })
       emit('done', donePayload({
@@ -1094,7 +1113,7 @@ describe('use-assistant — 确认门四值（T-M7-03e）', () => {
 
     await act(async () => {
       const p = result.current.submitInput('两个改动')
-      await Promise.resolve()
+      await flush()
       emit('confirm', { step: 2, proposal: p1 as unknown as Record<string, unknown> })
       emit('confirm', { step: 3, proposal: p2 as unknown as Record<string, unknown> })
       emit('done', donePayload({
@@ -1193,7 +1212,7 @@ describe('use-assistant — 断连续跑（T-M7-04b）', () => {
   async function completeTurn(result: { current: { submitInput: (t: string) => Promise<void> } }, input: string) {
     await act(async () => {
       const p = result.current.submitInput(input)
-      await Promise.resolve()
+      await flush()
       emit('done', donePayload({ conversation_id: 'conv-1', seq: 7 }))
       await p
     })
@@ -1207,7 +1226,7 @@ describe('use-assistant — 断连续跑（T-M7-04b）', () => {
   ) {
     await act(async () => {
       const p = result.current.submitInput(input)
-      await Promise.resolve()
+      await flush()
       emitAll([['error', { code: 'ai_unavailable', message: '断了', ...extra }]])
       await p
     })
@@ -1260,7 +1279,7 @@ describe('use-assistant — 断连续跑（T-M7-04b）', () => {
 
     await act(async () => {
       const p = result.current.submitInput('看看流水')
-      await Promise.resolve()
+      await flush()
       emit('delta', { text: '我先查一下。', channel: 'content', step: 1 })
       emitAll([['error', { code: 'ai_unavailable', message: '断了', conversation_id: 'conv-1' }]])
       await p
@@ -1300,7 +1319,7 @@ describe('use-assistant — 断连续跑（T-M7-04b）', () => {
     const { result } = setup()
     await act(async () => {
       void result.current.submitInput('你好')
-      await Promise.resolve()
+      await flush()
     })
     await act(async () => { await result.current.cancelStream() })
 
@@ -1345,7 +1364,7 @@ describe('use-assistant — 日志游标落盘（T-M7-04e）', () => {
     const { result } = setup()
     await act(async () => {
       const p = result.current.submitInput('你好')
-      await Promise.resolve()
+      await flush()
       emit('done', donePayload({ conversation_id: 'conv-1', seq: 7 }))
       await p
     })
@@ -1357,7 +1376,7 @@ describe('use-assistant — 日志游标落盘（T-M7-04e）', () => {
     const { result } = setup()
     await act(async () => {
       const p = result.current.submitInput('第一句')
-      await Promise.resolve()
+      await flush()
       emit('done', donePayload({ conversation_id: 'conv-1', seq: 7 }))
       await p
     })
@@ -1371,7 +1390,7 @@ describe('use-assistant — 日志游标落盘（T-M7-04e）', () => {
 
     await act(async () => {
       const p = result.current.submitInput('第二句')
-      await Promise.resolve()
+      await flush()
       emitAll([['error', { code: 'ai_unavailable', message: '断了' }]])
       await p
     })
@@ -1383,7 +1402,7 @@ describe('use-assistant — 日志游标落盘（T-M7-04e）', () => {
     const { result } = setup()
     await act(async () => {
       const p = result.current.submitInput('第一句')
-      await Promise.resolve()
+      await flush()
       emit('done', donePayload({ conversation_id: 'conv-1', seq: 7 }))
       await p
     })
@@ -1391,7 +1410,7 @@ describe('use-assistant — 日志游标落盘（T-M7-04e）', () => {
 
     await act(async () => {
       void result.current.submitInput('第二句')
-      await Promise.resolve()
+      await flush()
     })
     await act(async () => { await result.current.cancelStream() })
 

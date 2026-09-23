@@ -12,6 +12,8 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest'
 import { renderHook, act, waitFor } from '@testing-library/react'
 import { useAssistant, AI_OFFLINE_CANNED } from '../../features/assistant/use-assistant'
+import { INTERRUPTED_TURN_NOTE } from '../../features/assistant/history-projection'
+import { resetCloudReachabilityForTest } from '../../platform/cloud-reachability'
 import { useAssistantChatStore } from '../../platform/store/assistant-chat-store'
 import { parseInput } from '../../domain/nlu/parser'
 import type { ActionProposal } from '../../domain/action-proposal'
@@ -30,6 +32,8 @@ const mockBridge = vi.hoisted(() => ({
   validateProposal: vi.fn().mockResolvedValue({ valid: true }),
   interpretAI: vi.fn(),
   isAvailable: vi.fn().mockReturnValue(false),
+  // T18-8（REQ-71）：`auth.me` = 可达性探测的探针；resolve = 云端可达
+  getMe: vi.fn().mockResolvedValue({}),
 }))
 
 vi.mock('../../platform/hooks/use-bridge', () => ({
@@ -39,6 +43,10 @@ vi.mock('../../platform/hooks/use-bridge', () => ({
 vi.mock('../../domain/nlu/parser', () => ({
   parseInput: vi.fn(),
 }))
+
+// T18-8：可达性探测是模块级单例（带 30s 缓存）——逐用例复位，否则上一条用例的
+// 「在线」判定会漏进下一条。
+beforeEach(() => { resetCloudReachabilityForTest() })
 
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i
 const TZ = 'Asia/Shanghai'
@@ -396,7 +404,7 @@ describe('use-assistant — AI 意图分发矩阵（T12-11）', () => {
     expect(ctx.today).toBe(todayBizDate(TZ))
   })
 
-  it('降级：AI 失败 + 本地 chat 兜底 → 轻提示 + AI_OFFLINE_CANNED', async () => {
+  it('★ T18-8：AI 失败 → 中断 + 重发（不再按「本地只解析出 chat」降级成 canned）', async () => {
     vi.mocked(parseInput).mockReturnValue(txProposal({
       action: 'chat', transactions: undefined, message: '抱歉，我没理解。', confidence: 0.1,
     }))
@@ -406,16 +414,18 @@ describe('use-assistant — AI 意图分发矩阵（T12-11）', () => {
 
     await act(async () => { await result.current.submitInput('帮我删掉上周的') })
 
+    expect(result.current.interrupted).toEqual({ input: '帮我删掉上周的' })
+    expect(result.current.messages.some(m => m.text.includes(INTERRUPTED_TURN_NOTE))).toBe(true)
     expect(result.current.messages.some(m => m.text.includes('云端 AI 暂时不可用'))).toBe(true)
-    expect(lastMsg(result).text).toBe(AI_OFFLINE_CANNED)
     expect(mockBridge.insertTransaction).not.toHaveBeenCalled()
   })
 })
 
-// T12-12 真机收口发现：本地 NLU 把操作句里的金额当新账解析
-// （「把昨天的午饭改成15块」实测被记成新的 ¥15）——OP_SENTENCE_RE 守卫必须
-// 把这类句子路由到云端 intent v2，云端不可达时 canned，绝不以本地结果硬记。
-describe('use-assistant — 操作句式守卫（T12-12）', () => {
+// T12-12 真机收口发现：本地 NLU 把操作句里的金额当新账解析（「把昨天的午饭改成15块」
+// 实测被记成新的 ¥15）。
+// T18-8 之后这道守卫（OP_SENTENCE_RE）**只服务离线**——在线一律走云端，不再需要它把
+// 句子「救」到云端；离线时它保证操作句既不走本地写、也不误报。
+describe('use-assistant — 操作句式守卫（T12-12 / T18-8 收窄为离线守卫）', () => {
   beforeEach(() => {
     vi.clearAllMocks()
     mockBridge.insertTransaction.mockResolvedValue({ id: 'tx-1', version: 1 })
@@ -442,7 +452,7 @@ describe('use-assistant — 操作句式守卫（T12-12）', () => {
     expect(result.current.pendingOp!.candidates.map(t => t.id)).toEqual(['a'])
   })
 
-  it('云端失败 + 操作句 → 轻提示区分措辞 + canned，不回落本地写账', async () => {
+  it('★ T18-8：云端失败 + 操作句 → 中断 + 重发，不回落本地写账', async () => {
     vi.mocked(parseInput).mockReturnValue(txProposal({ confidence: 0.95 }))
     mockBridge.isAvailable.mockReturnValue(true)
     mockBridge.interpretAI.mockRejectedValue(Object.assign(new Error('down'), { code: '503' }))
@@ -451,8 +461,8 @@ describe('use-assistant — 操作句式守卫（T12-12）', () => {
     await act(async () => { await result.current.submitInput('把打车那笔改成5块') })
 
     expect(mockBridge.insertTransaction).not.toHaveBeenCalled()
-    expect(result.current.messages.some(m => m.text.includes('操作与查询需要云端可用'))).toBe(true)
-    expect(lastMsg(result).text).toBe(AI_OFFLINE_CANNED)
+    expect(result.current.interrupted).toEqual({ input: '把打车那笔改成5块' })
+    expect(result.current.messages.some(m => m.text.includes(INTERRUPTED_TURN_NOTE))).toBe(true)
   })
 
   it('桥不可用 + 操作句 → canned 早退，不打云端不写库', async () => {

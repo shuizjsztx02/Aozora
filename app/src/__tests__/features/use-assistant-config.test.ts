@@ -14,6 +14,7 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest'
 import { renderHook, act, waitFor } from '@testing-library/react'
 import { useAssistant } from '../../features/assistant/use-assistant'
+import { resetCloudReachabilityForTest } from '../../platform/cloud-reachability'
 import { parseInput } from '../../domain/nlu/parser'
 import type { ActionProposal } from '../../domain/action-proposal'
 import type {
@@ -39,6 +40,8 @@ const mockBridge = vi.hoisted(() => ({
   insertBudget: vi.fn().mockResolvedValue({ id: 'new-budget' }),
   insertSavingsGoal: vi.fn().mockResolvedValue({ id: 'new-goal' }),
   setMeta: vi.fn().mockResolvedValue({ success: true }),
+  // T18-8（REQ-71）：`auth.me` = 可达性探测的探针；resolve = 云端可达
+  getMe: vi.fn().mockResolvedValue({}),
 }))
 
 vi.mock('../../platform/hooks/use-bridge', () => ({
@@ -48,6 +51,10 @@ vi.mock('../../platform/hooks/use-bridge', () => ({
 vi.mock('../../domain/nlu/parser', () => ({
   parseInput: vi.fn(),
 }))
+
+// T18-8：可达性探测是模块级单例（带 30s 缓存）——逐用例复位，否则上一条用例的
+// 「在线」判定会漏进下一条。
+beforeEach(() => { resetCloudReachabilityForTest() })
 
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i
 const TZ = 'Asia/Shanghai'
