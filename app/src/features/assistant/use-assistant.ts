@@ -132,8 +132,41 @@ export interface AssistantMessage {
   proposal?: AnyProposal
   proposalStatus?: 'pending' | 'confirming' | 'executing' | 'committed' | 'undone' | 'error'
   transactionIds?: string[]
+  /** T18-3（REQ-67②）：这一轮**实际执行**的凭据（见 `ExecutionEvidence`）。 */
+  executions?: ExecutionEvidence[]
   verdict?: AiValidateVerdict
   validationErrors?: string[]
+}
+
+/**
+ * T18-3（REQ-67②）：一条**执行凭据**——「本轮实际执行了什么」的唯一依据。
+ *
+ * 用户看到的那句「改好了」是**模型生成的自然语言**（全仓没有这条产品文案，唯一的
+ * 权威回执是执行结果），所以卡上那句「已执行」不许由模型的话充当，也不许由会话内的
+ * 瞬时标记充当——`proposalStatus: 'committed'` 表示的是「不在途」而不是「写成功了」
+ * （纯文本消息也带它），它当不了回执。
+ *
+ * 两条来源，各自都是**事实**：
+ *
+ * - **服务端执行**（v2 的记账与非记账 op 走 `/ai/execute`）：凭据是回执
+ *   `AiExecuteResponse`——它与 `done.executions` 的每一条**同形**（`stream.py` 的
+ *   `_done_payload` 原样透传 `result.executions`）。注意回执里的 `transaction_ids`
+ *   在 v2 车道承载的是**被影响的实体 id**（改 / 归档是同一个 id 的新版本，新建是新 id），
+ *   字段名沿用 v1 是既有契约，语义见 `service.py` 的 `execute_proposal`。
+ * - **设备本地执行**（`DEVICE_OP_DISPATCH` 那四个 op）：服务端**只挂起不执行**
+ *   （`tools.DEVICE_EXECUTED_OPS`），没有服务端回执。凭据是本机那次桥调用**成功返回**
+ *   ——它写的是设备本地状态（角色指针 / 隐私同意 / 同步触发 / 提醒），`entityIds`
+ *   因此恒为空。
+ *
+ * **`done.executions` 与「卡」在同一轮里不会同时出现**（服务端口径：已执行的不进
+ * `proposals`）——自动执行那一轮客户端拿不到提案，也就没有卡；有卡的那一轮，执行发生
+ * 在用户点「确认」之后、走的是上面第一条。所以凭据虽有两个入口，形状与含义是同一个。
+ */
+export interface ExecutionEvidence {
+  /** 执行落点：`server` = 服务端权威库；`device` = 本机桥（设备本地状态）。 */
+  lane: 'server' | 'device'
+  /** 被影响的实体 id（服务端回执的 `transaction_ids`；设备执行恒为空）。 */
+  entityIds: string[]
 }
 
 /** 第八轮：'confirming' 态随免确认改造移除——解析成功后直接本地提交。 */
@@ -790,16 +823,27 @@ export function useAssistant({
     setCardStatus('executing')
     try {
       const dispatch = DEVICE_OP_DISPATCH[proposal.action]
+      // T18-3（REQ-67②）：**执行凭据**——收尾时随消息一起落盘，只读历史卡据此说
+      // 「已执行」。它必须在这里取，因为这是**唯一**知道「到底做没做」的地方：
+      // 桥调用返回 = 服务端/设备真的受理了；抛异常走下面的 error 分支，凭据不写。
+      let execution: ExecutionEvidence
       if (dispatch) {
         await dispatch(proposal.payload ?? {}, bridge)
+        execution = { lane: 'device', entityIds: [] }
       } else {
-        await bridge.executeProposal(
+        const receipt = await bridge.executeProposal(
           proposal as unknown as Record<string, unknown>, bookId, newUuid(),
         )
+        execution = { lane: 'server', entityIds: receipt?.transaction_ids ?? [] }
       }
       setMessages(prev => prev.map(m =>
         m.proposal?.proposalId === proposal.proposalId
-          ? { ...m, proposalStatus: 'committed' as const, text: `✅ ${proposal.message}` }
+          ? {
+              ...m,
+              proposalStatus: 'committed' as const,
+              executions: [execution],
+              text: `✅ ${proposal.message}`,
+            }
           : m
       ))
       setCardStatus('committed')

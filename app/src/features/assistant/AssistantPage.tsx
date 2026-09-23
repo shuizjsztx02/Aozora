@@ -111,6 +111,24 @@ function historyCardStatus(s: AssistantMessage['proposalStatus']): CardStatus | 
 }
 
 /**
+ * T18-3（REQ-67②③）：v2 历史卡的状态映射。
+ *
+ * 与上面那张（v1）的分工：v1 的 `pending-category` 是「缺分类、未写库」这一 v1 专有态，
+ * v2 没有对应物（它的 payload 由服务端工具注册表拥有，客户端不解释它）。
+ *
+ * 更要紧的一点：**v2 的「写没写」不看这个映射**。`committed` 只表示「不在途」，卡上说
+ * 「已执行」的依据是消息上的**执行凭据**（`executions`，见 `V2ConfirmationCard`）——
+ * 这正是 REQ-67② 要拆掉的那件事。这里只透出两个终态语义（撤销 / 失败）与「待确认」。
+ */
+function v2HistoryStatus(s: AssistantMessage['proposalStatus']): CardStatus | 'undone' {
+  if (s === 'undone') return 'undone'
+  if (s === 'error') return 'error'
+  // 未确认过的挂起提案：只读卡因此报「未执行 · 待确认」（只读态不出按钮，见那张卡）
+  if (s === 'pending') return 'pending-confirm'
+  return 'committed'
+}
+
+/**
  * T16-4（REQ-60）：消息头像——角色/用户统一走 CategoryIcon（emoji/data URI 双形态
  * 已内建），28px 圆形 + 玻璃外框；无头像时 👤 兜底（与 header 角色钮同口径）。
  * 数据源零新增：助手 = activePersona.avatar，用户 = meta['avatar_uri']。
@@ -559,6 +577,13 @@ export function AssistantPage() {
     dismissDeviceVoice('failed')
   }, [voiceError, deviceVoiceRequest, dismissDeviceVoice])
 
+  // T18-3（REQ-67②）：当轮那张卡也要拿得到**执行凭据**——用户点「确认」之后卡并不
+  // 卸载（`activeProposal` 常驻到下一轮），它得跟历史卡说同一句话。凭据挂在**消息**上
+  // （`commitV2Proposal` 收尾时写入），所以这里按 proposalId 把它取回来。
+  const activeExecutions = messages.find(
+    m => m.proposal?.proposalId === activeProposal?.proposalId,
+  )?.executions
+
   return (
     <div
       className="flex flex-col h-screen safe-top"
@@ -640,9 +665,17 @@ export function AssistantPage() {
           // 撤销依赖内存态 activeTxIdsRef，切页/重启后不可用）；当轮那张卡仍由下方
           // activeProposal 链路渲染，同一提案不重复出卡。
           const p = msg.proposal
-          // 尾卡（R-PROD-31）：只读历史卡是 v1 的形状（读 `transactions`）——
-          // v2 提案没有那个根字段，它的回执由消息文本承载，这里不参与。
+          // 尾卡（R-PROD-31）：v1 的只读历史卡读 `transactions` 这个根字段。
           const historyProposal = p && !isV2Proposal(p) && (p.transactions?.length ?? 0) > 0 &&
+            p.proposalId !== activeProposal?.proposalId ? p : null
+          // T18-3（REQ-67②③）：v2 提案**同样常驻只读卡**。此前它被排除在外
+          // （「v2 没有 `transactions`，回执由消息文本承载」），而 v2 恰恰是当前默认
+          // 车道——用户「让 AI 改一笔」之后，聊天记录里那张卡一重挂载就不见了
+          // （只剩一行模型生成的「改好了」，那**不是**回执）。
+          //
+          // 判据不用 `transactions`（v2 没有它）：有提案、且不是当轮那张活动卡即可。
+          // 「反映执行结果」由消息上的执行凭据承担，见 `V2ConfirmationCard` 的只读态。
+          const historyV2Proposal = p && isV2Proposal(p) &&
             p.proposalId !== activeProposal?.proposalId ? p : null
           // T16-4（REQ-60）：助手侧左上、用户侧右上（flex-row-reverse 将头像与气泡整体镜像）
           const isUser = msg.role === 'user'
@@ -691,6 +724,18 @@ export function AssistantPage() {
                       selectedAccountId={
                         historyProposal.transactions?.[0]?.accountId ?? defaultAccountId ?? null
                       }
+                    />
+                  </div>
+                )}
+                {/* T18-3（REQ-67②③）：v2 提案的只读历史卡——正文 = 主行 + 执行凭据 */}
+                {historyV2Proposal && (
+                  <div className="w-full">
+                    <V2ConfirmationCard
+                      readonly
+                      proposal={historyV2Proposal}
+                      status={v2HistoryStatus(msg.proposalStatus)}
+                      executions={msg.executions}
+                      busy={false}
                     />
                   </div>
                 )}
@@ -793,6 +838,7 @@ export function AssistantPage() {
               proposal={activeProposal}
               status={cardStatus}
               busy={streaming !== null}
+              executions={activeExecutions}
               onConfirm={() => { void editProposal(activeProposal) }}
               onReject={rejectApproval}
             />

@@ -21,7 +21,7 @@ import {
 import { useAssistantChatStore } from '../../platform/store/assistant-chat-store'
 import { resetCloudReachabilityForTest } from '../../platform/cloud-reachability'
 import { parseInput } from '../../domain/nlu/parser'
-import type { ActionProposal } from '../../domain/action-proposal'
+import type { ActionProposal, ActionProposalV2 } from '../../domain/action-proposal'
 import { todayBizDate } from '../../domain/date'
 
 const mockBridge = vi.hoisted(() => ({
@@ -33,6 +33,8 @@ const mockBridge = vi.hoisted(() => ({
   // T18-2（REQ-67①）：写后走**阻塞式真同步**（auth.triggerSync），不再是入队式 triggerSync
   triggerAuthSync: vi.fn().mockResolvedValue({ outcome: 'OK' }),
   validateProposal: vi.fn().mockResolvedValue({ valid: true }),
+  // T18-3（REQ-67②）：v2 提案确认后的执行入口（`/ai/execute`）——回执即执行凭据
+  executeProposal: vi.fn(),
   interpretAI: vi.fn(),
   runAgent: vi.fn(),
   cancelAgent: vi.fn().mockResolvedValue({ cancelled: true }),
@@ -122,6 +124,21 @@ function pendingProposal(): ActionProposal {
       bizDate: todayBizDate(TZ),
       note: '午饭',
     }],
+  }
+}
+
+/** T18-3（REQ-67②）：服务端挂起的 **v2** 提案（`contractVersion` 在场即 v2 车道）。
+ *  v2 的 payload 形状由服务端工具注册表拥有，客户端只原样携带。 */
+function pendingV2Proposal(action = 'transaction_update'): ActionProposalV2 {
+  return {
+    contractVersion: 2,
+    proposalId: 'agent-v2-abc123',
+    action,
+    confidence: 0.95,
+    requiresConfirmation: true,
+    message: '把「祖传牛肉面」的金额改成 ¥15.00',
+    warnings: [],
+    payload: { transactionId: 'tx-1', version: 3, changes: { amountCents: 1500 } },
   }
 }
 
@@ -490,6 +507,69 @@ describe('use-assistant — agent 流式消费（T-M7-02i）', () => {
     expect(tx.amountCents).toBe(1200)
     expect(tx.categoryId).toBe('cat-food')
     expect(result.current.messages[result.current.messages.length - 1].text).toBe('已记录 1 笔交易')
+  })
+
+  // ─── T18-3（REQ-67②）：执行凭据（卡上「已执行」的唯一依据）───
+
+  /** 提交一句走 agent、收尾时挂起一张 v2 提案——返回结果供后续点「确认」。 */
+  async function submitPendingV2(result: { current: { submitInput: (t: string) => Promise<void> } },
+    proposal: ActionProposalV2) {
+    await act(async () => {
+      const p = result.current.submitInput('把祖传牛肉面那笔的金额改成15块')
+      await Promise.resolve()
+      emit('done', donePayload({
+        steps: 2, tool_calls: 2, writes: 1,
+        proposals: [proposal as unknown as Record<string, unknown>],
+      }))
+      await p
+    })
+  }
+
+  it('v2 提案确认后：消息带上服务端**执行凭据**（回执里的实体 id）', async () => {
+    const { result } = setup()
+    const proposal = pendingV2Proposal()
+    mockBridge.executeProposal.mockResolvedValue({
+      transaction_ids: ['tx-9'], proposal_id: proposal.proposalId, undo_window_seconds: 5,
+    })
+
+    await submitPendingV2(result, proposal)
+    expect(result.current.cardStatus).toBe('pending-confirm')
+    // 还没确认 → 没有任何凭据（卡因此报「未执行 · 待确认」）
+    expect(result.current.messages.find(m => m.proposal?.proposalId === proposal.proposalId)
+      ?.executions).toBeUndefined()
+
+    await act(async () => { await result.current.editProposal(proposal) })
+
+    expect(mockBridge.executeProposal).toHaveBeenCalledTimes(1)
+    const msg = result.current.messages.find(m => m.proposal?.proposalId === proposal.proposalId)
+    expect(msg?.proposalStatus).toBe('committed')
+    expect(msg?.executions).toEqual([{ lane: 'server', entityIds: ['tx-9'] }])
+  })
+
+  it('设备执行 op：凭据记在**设备**这一笔上，且不调 /ai/execute（服务端没有它的落点）', async () => {
+    const { result } = setup()
+    const proposal = pendingV2Proposal('sync_trigger')
+
+    await submitPendingV2(result, proposal)
+    await act(async () => { await result.current.editProposal(proposal) })
+
+    expect(mockBridge.triggerSync).toHaveBeenCalledTimes(1)
+    expect(mockBridge.executeProposal).not.toHaveBeenCalled()
+    const msg = result.current.messages.find(m => m.proposal?.proposalId === proposal.proposalId)
+    expect(msg?.executions).toEqual([{ lane: 'device', entityIds: [] }])
+  })
+
+  it('执行失败：**一条凭据都不写**——卡因此不会说「已执行」', async () => {
+    const { result } = setup()
+    const proposal = pendingV2Proposal()
+    mockBridge.executeProposal.mockRejectedValue(new Error('HTTP 500 服务不可用'))
+
+    await submitPendingV2(result, proposal)
+    await act(async () => { await result.current.editProposal(proposal) })
+
+    const msg = result.current.messages.find(m => m.proposal?.proposalId === proposal.proposalId)
+    expect(msg?.proposalStatus).toBe('error')
+    expect(msg?.executions).toBeUndefined()
   })
 })
 
