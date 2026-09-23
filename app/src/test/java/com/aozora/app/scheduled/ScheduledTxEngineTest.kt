@@ -2,6 +2,7 @@ package com.aozora.app.scheduled
 
 import com.aozora.app.db.AozoraDatabase
 import com.aozora.app.db.Repository
+import com.aozora.app.db.entity.AccountEntity
 import com.aozora.app.db.entity.PendingMutationEntity
 import com.aozora.app.db.entity.ScheduledRuleEntity
 import kotlinx.coroutines.runBlocking
@@ -117,6 +118,26 @@ class ScheduledTxEngineTest {
         val r = repository.getScheduledRule("r1")!!
         assertEquals("2026-09-09", r.lastRunDate)
         assertEquals(2, r.version)
+    }
+
+    /**
+     * 第十八轮 REQ-70（T18-7）：定时引擎生成的交易**同样联动账户余额**。
+     * 引擎走的是 `Repository.insertTransaction`，所以这条用例钉住的是「引擎没有
+     * 绕开 Repository 自己写库」—— 一旦将来有人给引擎开一条直写捷径，它会红。
+     */
+    @Test
+    fun dueRuleWithAccount_linksAccountBalance() = runBlocking {
+        repository.insertAccount(
+            AccountEntity(
+                id = "a1", ownerId = "local", name = "工资卡", icon = "💰",
+                accountType = null, balanceCents = 100_000L, archivedAt = null, version = 1,
+            ),
+            "m-acc",
+        )
+        repository.insertScheduledRule(rule("r1").copy(accountId = "a1"), "m1")
+
+        assertEquals(1, dueOn(wed))
+        assertEquals(98_500L, repository.getAccount("a1")!!.balanceCents)
     }
 
     @Test

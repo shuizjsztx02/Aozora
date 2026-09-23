@@ -10,6 +10,7 @@ import com.aozora.app.sync.SyncPayloadMapper
 import org.json.JSONException
 import org.json.JSONObject
 import java.time.LocalDate
+import java.util.UUID
 
 /**
  * Repository — 统一数据访问层。
@@ -26,6 +27,49 @@ import java.time.LocalDate
 class Repository(private val db: AozoraDatabase) {
 
     // ─── Transaction ───
+
+    /**
+     * 第十八轮 REQ-70（T18-7）：一笔交易对账户余额的净影响 —— **收入为正、支出为负**。
+     *
+     * 这是**跨端契约**（服务端 `transactions/service.py` 的 `balance_delta` 同式）：
+     * 两端符号必须一致，否则「AI 记一笔」与「手动记一笔」会把同一个账户的余额推向
+     * 相反方向。两处各有用例钉住（`RepositoryTransactionBalanceLinkTest` /
+     * `test_transaction_balance_link.py`）。
+     */
+    private fun balanceDelta(type: String, amountCents: Long): Long =
+        if (type == "income") amountCents else -amountCents
+
+    /**
+     * REQ-70：在**当前事务内**把 [delta] 加到账户余额上，并同事务入队一条 account 的
+     * upsert mutation —— payload 带**新余额的绝对值**而非增量（决策 #4 的幂等铁律：
+     * 重放同一 mutation 不会重复累加）。
+     *
+     * 账户不存在时**静默跳过**：联动是记账的附属效果，不该让一笔合法流水因为找不到
+     * 账户而写不进去。归档账户照样联动 —— 余额是事实，归档只是不再可选。
+     */
+    private suspend fun applyBalanceDelta(accountId: String, delta: Long) {
+        if (delta == 0L) return
+        val current = db.accountDao().getById(accountId) ?: return
+        val updated = current.copy(
+            balanceCents = current.balanceCents + delta,
+            version = current.version + 1,
+        )
+        db.accountDao().update(updated)
+        db.pendingMutationDao().insert(
+            PendingMutationEntity(
+                mutationId = UUID.randomUUID().toString(),
+                entityType = "account",
+                entityId = accountId,
+                operation = PendingMutationEntity.OP_UPDATE,
+                payload = accountToJson(updated),
+                status = PendingMutationEntity.STATUS_PENDING,
+                retryCount = 0,
+                createdAt = System.currentTimeMillis(),
+                expectedVersion = current.version,
+                lastError = null
+            )
+        )
+    }
 
     /** 原子事务：插入流水 + 写入 pending mutation */
     suspend fun insertTransaction(tx: TransactionEntity, mutationId: String) {
@@ -46,6 +90,8 @@ class Repository(private val db: AozoraDatabase) {
                 require(db.accountDao().getById(tx.accountId) != null) { "account not found: ${tx.accountId}" }
             }
             db.transactionDao().insert(tx)
+            // REQ-70：记账联动账户余额（同事务，无账户则不动）
+            tx.accountId?.let { applyBalanceDelta(it, balanceDelta(tx.type, tx.amountCents)) }
             db.pendingMutationDao().insert(
                 PendingMutationEntity(
                     mutationId = mutationId,
@@ -70,6 +116,10 @@ class Repository(private val db: AozoraDatabase) {
             val current = db.transactionDao().getById(id)
             require(current != null && current.deletedAt == null) { "transaction not found or already deleted" }
             db.transactionDao().softDelete(id, System.currentTimeMillis())
+            // REQ-70：软删回补 —— 这笔钱不再占用该账户
+            current.accountId?.let {
+                applyBalanceDelta(it, -balanceDelta(current.type, current.amountCents))
+            }
             db.pendingMutationDao().insert(
                 PendingMutationEntity(
                     mutationId = mutationId,
@@ -131,6 +181,16 @@ class Repository(private val db: AozoraDatabase) {
                 expectedVersion = current.version,
             )
             require(rows == 1) { "transaction version conflict" }
+            // REQ-70：编辑必须**重算**而非叠加增量 —— 旧账户回补 + 新账户加计。
+            // 同一账户时只做净差额（金额 / 类型改动的两种情形一并覆盖）。
+            val oldSigned = balanceDelta(current.type, current.amountCents)
+            val newSigned = balanceDelta(tx.type, tx.amountCents)
+            if (current.accountId == tx.accountId) {
+                tx.accountId?.let { applyBalanceDelta(it, newSigned - oldSigned) }
+            } else {
+                current.accountId?.let { applyBalanceDelta(it, -oldSigned) }
+                tx.accountId?.let { applyBalanceDelta(it, newSigned) }
+            }
             db.pendingMutationDao().insert(
                 PendingMutationEntity(
                     mutationId = mutationId,

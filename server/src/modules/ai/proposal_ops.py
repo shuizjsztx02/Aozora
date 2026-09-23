@@ -44,6 +44,7 @@ from __future__ import annotations
 import hashlib
 import re
 import uuid
+from collections.abc import Iterable
 from dataclasses import dataclass
 from datetime import UTC, date, datetime
 from typing import Any, Awaitable, Callable
@@ -54,6 +55,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from src.common.errors import AppException
 from src.models.budget import Budget, BudgetType
+from src.models.ledger import Account
 from src.models.persona import ChatPersona
 from src.models.savings import SavingsGoal
 from src.models.scheduled import ScheduledRule
@@ -159,6 +161,32 @@ async def _register_change(
     )
 
 
+async def register_balance_account_changes(
+    db: AsyncSession, *, user_id: uuid.UUID, account_ids: Iterable[uuid.UUID | None],
+) -> None:
+    """REQ-70（T18-7）：为**余额被记账联动改过**的账户各登一条 sync change。
+
+    交易自身的 sync change 由各执行体自己登（既有分工）；账户是**被联动改的第二个
+    实体**，同样必须登记 —— 否则 AI 记一笔之后服务端余额变了而设备 pull 不到，
+    用户在账户页看到的仍是旧值（T14-8 的同一条教训）。
+
+    版本取**当前值**（``TransactionService`` 已在同一事务里把 version 加过一了）。
+    账户查不到（已硬删 / 不属于该用户）就跳过，与联动本身的静默跳过同口径。
+    """
+    for account_id in {a for a in account_ids if a is not None}:
+        account = await db.scalar(
+            select(Account).where(
+                Account.id == account_id, Account.owner_id == user_id,
+            )
+        )
+        if account is None:
+            continue
+        await _register_change(
+            db, user_id=user_id, entity_type="account", entity_id=account.id,
+            operation="update", version=account.version,
+        )
+
+
 # ---------------------------------------------------------------------------
 # payload 取字段（T-M7-05c）
 # ---------------------------------------------------------------------------
@@ -250,10 +278,15 @@ async def _execute_transaction_update(
     # 账本归属：目标必须就在提案的账本里（``get_transaction`` 只校验 owner）。
     if tx.book_id != book_id:
         raise AppException(404, "not_found", "Transaction not found")
+    # REQ-70：换账户时**旧账户也要登记**——它被回补了；故在 update 之前取旧值。
+    old_account_id = tx.account_id
     tx = await service.update_transaction(tx_id, user_id, data)
     await _register_change(
         db, user_id=user_id, entity_type="transaction", entity_id=tx.id,
         operation="update", version=tx.version,
+    )
+    await register_balance_account_changes(
+        db, user_id=user_id, account_ids=[old_account_id, tx.account_id],
     )
     return OpReceipt(entity_type="transaction", entity_ids=[tx.id])
 
@@ -266,11 +299,16 @@ async def _execute_transaction_delete(
     tx = await service.get_transaction(tx_id, user_id)
     if tx.book_id != book_id:
         raise AppException(404, "not_found", "Transaction not found")
+    account_id = tx.account_id
     await service.delete_transaction(tx_id, user_id)
     # 同一个 session 的同一个实例——``soft_delete`` 已经把 version 加过一了。
     await _register_change(
         db, user_id=user_id, entity_type="transaction", entity_id=tx.id,
         operation="delete", version=tx.version,
+    )
+    # REQ-70：软删回补了账户余额，它同样要对设备可见
+    await register_balance_account_changes(
+        db, user_id=user_id, account_ids=[account_id],
     )
     return OpReceipt(entity_type="transaction", entity_ids=[tx.id])
 

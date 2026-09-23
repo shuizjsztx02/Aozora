@@ -39,7 +39,7 @@ from .prompts import (
     render_messages,
     render_messages_with_context,
 )
-from .proposal_ops import execute_op
+from .proposal_ops import execute_op, register_balance_account_changes
 from .provider import LLMProvider, ProviderError, ProviderResult
 from .schemas import (
     AIInterpretRequest,
@@ -889,6 +889,13 @@ class AIService:
                     operation=SyncOperation.INSERT,
                     version=tx.version,
                 )
+            # REQ-70：`create_transaction_batch` 已联动账户余额，被改的账户同样
+            # 要对设备可见（与上面交易自身同一口径）。
+            await register_balance_account_changes(
+                self._db,
+                user_id=user.id,
+                account_ids=[tx.account_id for tx in created],
+            )
 
         # ── Record idempotency ───────────────────────────────────────────
         if proposal_id:
