@@ -597,4 +597,86 @@ class BootstrapChecksumTest {
             ),
         )
     }
+
+    // ─── T18-5: accounts 新增两列后的跨语言 checksum 一致性 ───
+
+    /**
+     * 账户同服务端 `_serialize_entity(Account)`（T18-5 起多两列）：`account_type`
+     * 是字符串或 `null`，`balance_cents` 是**真数字**（负值出裸字面量、不带引号）。
+     */
+    private val accountCard = mapOf<String, Any?>(
+        "id" to "55555555-5555-4555-8555-222222222222",
+        "name" to "交行信用卡",
+        "icon" to "💳",
+        "account_type" to "信用卡",
+        "balance_cents" to -32500,
+        "version" to 4,
+        "created_at" to "2026-09-23T09:00:00+00:00",
+        "updated_at" to "2026-09-23T09:10:00+00:00",
+        "archived_at" to null,
+    )
+
+    /** 存量账户形态：`account_type` 为 null、`balance_cents` 为 0（迁移后的老行）。 */
+    private val accountLegacy = mapOf<String, Any?>(
+        "id" to "66666666-6666-4666-8666-333333333333",
+        "name" to "现金",
+        "icon" to null,
+        "account_type" to null,
+        "balance_cents" to 0,
+        "version" to 1,
+        "created_at" to "2026-09-23T09:00:00+00:00",
+        "updated_at" to "2026-09-23T09:00:00+00:00",
+        "archived_at" to null,
+    )
+
+    /**
+     * 新增两列后 checksum 仍与服务端逐字节一致 —— 这是本项目**被咬过两次**的失败
+     * 模式（P0-1 的键名、T-M7-01 的类型口径：客户端重算一旦与服务端声明值不等，
+     * bootstrap 就判 RETRYABLE 死循环）。accounts 是 checksum 的输入之一，往它
+     * 里加键必须钉住这一条。参考值由 Python 侧 `compute_bootstrap_checksum_v3`
+     * 对同一输入真实生成。
+     */
+    @Test
+    fun computeV3_accountWithTypeAndBalance_matchesServerReference() {
+        val hash = BootstrapChecksum.computeV3(
+            books = emptyList(), categories = emptyList(),
+            accounts = listOf(accountCard), transactions = emptyList(), budgets = emptyList(),
+            savingsGoals = emptyList(), scheduledRules = emptyList(),
+            chatPersonas = emptyList(), userPreferences = emptyList(), cursor = 7,
+        )
+        assertEquals(
+            "85dbc4c7c8454d359004225ca9a214fd3d76895b1f5bc78e26a7cdf9d2d1bacb",
+            hash,
+        )
+    }
+
+    /** 存量形态（null 分类 + 0 余额）同样逐字节一致——两种取值都要被钉住。 */
+    @Test
+    fun computeV3_legacyAccountShape_matchesServerReference() {
+        val hash = BootstrapChecksum.computeV3(
+            books = emptyList(), categories = emptyList(),
+            accounts = listOf(accountLegacy), transactions = emptyList(), budgets = emptyList(),
+            savingsGoals = emptyList(), scheduledRules = emptyList(),
+            chatPersonas = emptyList(), userPreferences = emptyList(), cursor = 7,
+        )
+        assertEquals(
+            "934a232f9879f56d51a2c4373f852ccffa3b6f5308c93789867e88052de67462",
+            hash,
+        )
+    }
+
+    /** 两账户同批时按 id 升序拼接（与服务端一致），负余额确实进入了哈希。 */
+    @Test
+    fun computeV3_twoAccounts_matchesServerReferenceInIdOrder() {
+        val hash = BootstrapChecksum.computeV3(
+            books = emptyList(), categories = emptyList(),
+            accounts = listOf(accountLegacy, accountCard), transactions = emptyList(),
+            budgets = emptyList(), savingsGoals = emptyList(), scheduledRules = emptyList(),
+            chatPersonas = emptyList(), userPreferences = emptyList(), cursor = 7,
+        )
+        assertEquals(
+            "fe3106f8a3c534506ab67e405a92ec6b1e9d96a021e17bfab9e8d91c24ac2d88",
+            hash,
+        )
+    }
 }

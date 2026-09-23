@@ -5,6 +5,7 @@ import com.aozora.app.db.entity.AccountEntity
 import com.aozora.app.db.entity.PendingMutationEntity
 import com.aozora.app.sync.BootstrapResponse
 import com.aozora.app.sync.ServerChange
+import com.aozora.app.sync.SyncPayloadMapper
 import com.aozora.app.sync.SyncChangeOp
 import kotlinx.coroutines.runBlocking
 import org.json.JSONObject
@@ -102,6 +103,16 @@ class RepositoryAccountBalanceSyncTest {
         // 信用卡欠款：负余额必须能上行（服务端同样不加非负 CHECK）
         repository.insertAccount(account(type = "信用卡", balance = -32_500L), "m1")
         assertEquals(-32_500L, payloadOf("a1").getLong("balanceCents"))
+    }
+
+    @Test
+    fun accountPayload_convertsToWireSnakeCase() = runBlocking {
+        // 生产端发 camelCase、线缆要 snake_case：两键都必须落在 SNAKE_TO_CAMEL 的
+        // 逆表里（否则服务端 account 分支读不到，字段再次静默丢失）。
+        repository.insertAccount(account(type = "储蓄卡", balance = -32_500L), "m1")
+        val wire = SyncPayloadMapper.toWirePayload(payloadOf("a1").toString())
+        assertEquals("储蓄卡", wire.getString("account_type"))
+        assertEquals(-32_500L, wire.getLong("balance_cents"))
     }
 
     // ─── pull 侧：两字段落库 ───
