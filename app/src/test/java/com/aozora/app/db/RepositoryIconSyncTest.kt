@@ -2,6 +2,8 @@ package com.aozora.app.db
 
 import com.aozora.app.db.entity.AccountEntity
 import com.aozora.app.db.entity.BookEntity
+import com.aozora.app.db.entity.DefaultIcons
+import com.aozora.app.sync.BootstrapResponse
 import com.aozora.app.sync.ServerChange
 import com.aozora.app.sync.SyncChangeOp
 import kotlinx.coroutines.runBlocking
@@ -19,6 +21,10 @@ import org.robolectric.annotation.Config
  * 第九轮 T9-6 / REQ-13 决策 #7：照片版 book/account icon 的同步三件套——
  * push 侧超长（>64）icon 省略键（防服务端 _validate_name 422 毒丸），
  * pull 侧本地 data: icon 不被服务端回传的非 data: 值冲刷。
+ *
+ * 第十八轮 REQ-68（T18-4）：服务端 icon 列可空（AI 新建账户/账本常常不带 icon），
+ * 缺键时的兜底值必须是 emoji —— 旧兜底是裸词 `"default"`，CategoryIcon
+ * 「非空即原样文本」会把它画进圆形图标框。pull 与 bootstrap 是两条独立读口，同钉。
  */
 @RunWith(RobolectricTestRunner::class)
 @Config(sdk = [33])
@@ -103,7 +109,7 @@ class RepositoryIconSyncTest {
         repository.applyServerChanges(
             listOf(ServerChange(
                 entityType = "book", entityId = "b1", operation = SyncChangeOp.UPDATE, version = 2,
-                entityPayload = mapOf("id" to "b1", "name" to "改名了") // 无 icon → toBook 回 "default"
+                entityPayload = mapOf("id" to "b1", "name" to "改名了") // 无 icon → toBook 走默认图标
             )),
             newCursor = 0, ownerId = "u1"
         )
@@ -137,5 +143,51 @@ class RepositoryIconSyncTest {
             newCursor = 0, ownerId = "u1"
         )
         assertEquals(photoIcon, repository.listAccounts().first { it.id == "a1" }.icon)
+    }
+
+    // ─── REQ-68（T18-4）：缺 icon 的兜底值是 emoji，不是英文裸词 ───
+
+    @Test
+    fun bookPull_iconMissing_fallsBackToBookEmoji() = runBlocking {
+        repository.applyServerChanges(
+            listOf(ServerChange(
+                entityType = "book", entityId = "b1", operation = SyncChangeOp.INSERT, version = 1,
+                // 服务端 book.icon 可空且无默认值 → 出网即为缺键
+                entityPayload = mapOf("id" to "b1", "name" to "云端账本")
+            )),
+            newCursor = 0, ownerId = "u1"
+        )
+        assertEquals(DefaultIcons.BOOK, repository.listBooks().first { it.id == "b1" }.icon)
+    }
+
+    @Test
+    fun accountPull_iconMissing_fallsBackToAccountEmoji() = runBlocking {
+        repository.applyServerChanges(
+            listOf(ServerChange(
+                entityType = "account", entityId = "a1", operation = SyncChangeOp.INSERT, version = 1,
+                entityPayload = mapOf("id" to "a1", "name" to "云端账户")
+            )),
+            newCursor = 0, ownerId = "u1"
+        )
+        assertEquals(DefaultIcons.ACCOUNT, repository.listAccounts().first { it.id == "a1" }.icon)
+    }
+
+    /** bootstrap 是另一条读口（serverChangeMapToBook/Account），同一兜底必须一致。 */
+    @Test
+    fun bootstrap_iconMissing_fallsBackToEmoji() = runBlocking {
+        repository.applyBootstrap(
+            BootstrapResponse(
+                books = listOf(mapOf("id" to "b1", "name" to "云端账本", "version" to "1")),
+                categories = emptyList(),
+                accounts = listOf(mapOf("id" to "a1", "name" to "云端账户", "version" to "1")),
+                transactions = emptyList(),
+                budgets = emptyList(),
+                cursor = 1,
+                checksum = "ignored"
+            ),
+            ownerId = "u1"
+        )
+        assertEquals(DefaultIcons.BOOK, repository.listBooks().first { it.id == "b1" }.icon)
+        assertEquals(DefaultIcons.ACCOUNT, repository.listAccounts().first { it.id == "a1" }.icon)
     }
 }

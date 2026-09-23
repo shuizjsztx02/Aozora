@@ -68,3 +68,22 @@ describe('CategoryIcon 双分支等高容器（REQ-32）', () => {
     expectContainerGeometry(el)
   })
 })
+
+describe('CategoryIcon 存量兜底裸词容错（REQ-68 / T18-4）', () => {
+  // 旧兜底把 "default"/"book"/"account" 当图标写进库；它们不是 emoji，
+  // 「非空即原样文本」会把英文单词画进圆形框 → 视同未设置。
+  it.each(['default', 'book', 'account'])('icon="%s" 视同未设置，走 fallback', poison => {
+    const el = containerOf(<CategoryIcon icon={poison} name="交行卡" fallback="💰" />)
+    expect(el.textContent).toBe('💰')
+  })
+
+  it('裸词无 fallback 时继续走名映射回退', () => {
+    const el = containerOf(<CategoryIcon icon="default" name="餐饮" />)
+    expect(el.textContent).toBe(getCategoryEmoji('餐饮'))
+  })
+
+  it('非裸词的自定义文本照旧原样渲染（容错不得放宽到吞掉真自定义图标）', () => {
+    const el = containerOf(<CategoryIcon icon="旅行" name="交行卡" fallback="💰" />)
+    expect(el.textContent).toBe('旅行')
+  })
+})

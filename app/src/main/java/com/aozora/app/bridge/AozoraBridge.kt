@@ -412,7 +412,7 @@ class AozoraBridge(
             id = bObj.getString("id"),
             ownerId = bObj.getString("ownerId"),
             name = bObj.getString("name"),
-            icon = bObj.optString("icon", "book"),
+            icon = bObj.optString("icon", DefaultIcons.BOOK),
             version = BridgePayload.version(bObj),
             archivedAt = null
         )
@@ -527,7 +527,7 @@ class AozoraBridge(
             id = aObj.getString("id"),
             ownerId = aObj.getString("ownerId"),
             name = aObj.getString("name"),
-            icon = aObj.optString("icon", "account"),
+            icon = aObj.optString("icon", DefaultIcons.ACCOUNT),
             accountType = BridgePayload.optionalString(aObj, "accountType"),
             // REQ-69（T18-5）：当前余额（分）；键缺省 = 0（新建时未填）
             balanceCents = if (aObj.has("balanceCents"))

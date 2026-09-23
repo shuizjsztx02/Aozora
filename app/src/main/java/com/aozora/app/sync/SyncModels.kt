@@ -53,7 +53,7 @@ data class ServerChange(
         if (entityType != "book") return null
         val id = entityPayload["id"] ?: return null
         val name = entityPayload["name"] ?: return null
-        val icon = entityPayload["icon"] ?: "default"
+        val icon = entityPayload["icon"] ?: DefaultIcons.BOOK
         return BookEntity(
             id = id, ownerId = ownerId, name = name, icon = icon,
             version = version, archivedAt = null
@@ -77,7 +77,7 @@ data class ServerChange(
         if (entityType != "account") return null
         val id = entityPayload["id"] ?: return null
         val name = entityPayload["name"] ?: return null
-        val icon = entityPayload["icon"] ?: "default"
+        val icon = entityPayload["icon"] ?: DefaultIcons.ACCOUNT
         return AccountEntity(
             id = id, ownerId = ownerId, name = name, icon = icon,
             accountType = entityPayload["accountType"],

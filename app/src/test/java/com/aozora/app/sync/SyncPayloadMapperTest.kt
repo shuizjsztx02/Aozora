@@ -183,7 +183,7 @@ class SyncPayloadMapperTest {
             {
               "changes": [
                 {"entity_type": "widget", "entity_id": "w1", "operation": "insert", "version": 1, "entity": {"id":"w1"}},
-                {"entity_type": "book", "entity_id": "b1", "operation": "insert", "version": 1, "entity": {"id":"b1","name":"Main","icon":"default"}}
+                {"entity_type": "book", "entity_id": "b1", "operation": "insert", "version": 1, "entity": {"id":"b1","name":"Main","icon":"📗"}}
               ],
               "next_cursor": 1
             }
