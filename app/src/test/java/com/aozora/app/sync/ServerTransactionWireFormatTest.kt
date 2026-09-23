@@ -7,6 +7,7 @@ import org.json.JSONObject
 import org.junit.After
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNotNull
+import org.junit.Assert.assertNull
 import org.junit.Before
 import org.junit.Test
 import org.junit.runner.RunWith
@@ -120,5 +121,50 @@ class ServerTransactionWireFormatTest {
         assertEquals("bootstrap 的 transaction 被静默丢弃了", 1, rows.size)
         assertEquals(600L, rows[0].amountCents)
         assertEquals(1790156027687L, rows[0].occurredAt)
+    }
+
+    /**
+     * T18-10（REQ-72 追加）：**向后兼容**——纯数字毫秒（旧 fixture / 旧服务端）仍可解析。
+     *
+     * 解析修复是「epoch 与 ISO 双收」，本用例守护 epoch 这条支路不被砍掉。
+     */
+    @Test
+    fun `pull 路径：纯数字毫秒的 occurred_at 仍可解析（向后兼容）`() {
+        val epochWire = wireTx
+            .replace("\"2026-09-23T09:33:47.687000+00:00\"", "1790156027687")
+        val camel = SyncPayloadMapper.snakeToCamelMap(JSONObject(epochWire))
+        val change = ServerChange(
+            entityType = "transaction",
+            entityId = camel["id"]!!,
+            operation = SyncChangeOp.UPDATE,
+            version = 2,
+            entityPayload = camel,
+        )
+        val entity = change.toTransaction()
+        assertNotNull("纯数字毫秒被拒了——向后兼容被打破", entity)
+        assertEquals(1790156027687L, entity!!.occurredAt)
+    }
+
+    /**
+     * T18-10（REQ-72 追加）：**坏字符串返回 null**——调用方 `?: return null` 会让本条
+     * 被跳过（`?: continue`），但**不会崩**；本用例守护的是「坏数据 → null → 跳过」
+     * 这条防御路径仍在。
+     *
+     * 注：这是「坏数据不进库」的守护，不是「坏数据能修复」——真正的修复靠的是服务端
+     * 不出坏数据 + 解析层对合法 ISO 的双收。
+     */
+    @Test
+    fun `pull 路径：坏 occurred_at 字符串返回 null（防御路径守护）`() {
+        val garbageWire = wireTx
+            .replace("\"2026-09-23T09:33:47.687000+00:00\"", "\"not-a-date\"")
+        val camel = SyncPayloadMapper.snakeToCamelMap(JSONObject(garbageWire))
+        val change = ServerChange(
+            entityType = "transaction",
+            entityId = camel["id"]!!,
+            operation = SyncChangeOp.UPDATE,
+            version = 2,
+            entityPayload = camel,
+        )
+        assertNull("坏日期应该返回 null（调用方跳过），不应崩", change.toTransaction())
     }
 }

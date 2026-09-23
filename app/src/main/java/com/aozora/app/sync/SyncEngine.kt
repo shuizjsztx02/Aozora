@@ -88,6 +88,18 @@ class SyncEngine(
                 // bootstrap 成功后 cursor 已推进，继续正常 pull/push 流程
             }
 
+            // 4b. T18-10（REQ-72）：一次性游标重置——服务端 transaction 自 T-M3 起发
+            //     ISO 字符串，客户端此前只认 Long → 全部静默丢弃且游标照常推进。
+            //     解析修复（epoch/ISO 双收）已在编译内生效，但历史已丢的行不会自己
+            //     回来。把 cursor 置 0 触发一次全量重放，让修复后的路径把它们拉回来。
+            //     只在首次同步跑一次（meta 标记），二次启动直接跳过。
+            //     必须在 bootstrap 之后（bootstrap 已把 cursor 推到最新快照点，
+            //     而本方法要的是"从 0 开始重放"）——不对，本方法本意就是置 0，
+            //     跟 bootstrap 后 cursor 是几没关系；放 bootstrap 后面只是确保
+            //     "新设备不需要重放"（新设备 bootstrap 后 cursor 已是最新，
+            //     重置会让它重新拉全量——但 applyServerChanges 幂等，无害）。
+            repository.applyOneTimeCursorResetIfNeeded()
+
             // 5. Pull
             emit(SyncState.PULLING, pendingCountSnapshot())
             pullUntilCaughtUp(ownerId)

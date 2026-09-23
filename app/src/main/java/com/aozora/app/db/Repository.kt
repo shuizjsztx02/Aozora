@@ -1,5 +1,6 @@
 package com.aozora.app.db
 
+import android.util.Log
 import androidx.room.withTransaction
 import com.aozora.app.db.entity.*
 import com.aozora.app.sync.FailedMutation
@@ -1374,6 +1375,45 @@ class Repository(private val db: AozoraDatabase) {
     }
 
     /**
+     * T18-10（REQ-72）：一次性游标重置——让解析修复（ISO→epoch 双收）后，
+     * 历史已丢失的服务端 transaction 通过全量重放回到本地 Room。
+     *
+     * 背景：自 T-M3 起，服务端 `_serialize_entity` 把 `occurred_at` 出网成 ISO 字符串，
+     * 而客户端 `toTransaction()` 只认 `toLongOrNull()` → null → 调用方 `?: continue`
+     * 静默丢弃，**游标照常推进** → 数据永久丢失。解析修复（epoch/ISO 双收）让新数据
+     * 正常落地，但历史漏掉的行不会自己回来。本方法把 cursor 置 0，触发一次从起点
+     * 开始的全量 pull，让修复后的路径把漏掉的行全部拉回来。
+     *
+     * 契约（镜像 [migrateCloudEntitiesUp] / [migratePreferencesUp]）：
+     * - 标记与 cursor 重置在同一事务内，崩溃安全。
+     * - 只做一次：`pull_iso_fix_applied_v1 = '1'` 之后永不再重置。
+     * - 调用方必须保证解析修复已生效（否则等于再丢一次）。SyncEngine 在 pull 之前调用，
+     *   此时 pull 路径的 ISO 双收已编译进二进制，满足顺序要求。
+     * - 重放安全：applyServerChanges 的 upsert 天然幂等；DELETE 分支走归档/物删，
+     *   已删除的行再删一次仍是删除态。
+     */
+    suspend fun applyOneTimeCursorResetIfNeeded() {
+        if (getMeta(SyncMetaEntity.KEY_PULL_ISO_FIX_APPLIED) == "1") return
+        db.withTransaction {
+            // 事务内二次检查：并发触发时以先落盘者为准
+            if (db.syncMetaDao().getValue(SyncMetaEntity.KEY_PULL_ISO_FIX_APPLIED) == "1") {
+                return@withTransaction
+            }
+            db.syncMetaDao().upsert(
+                SyncMetaEntity(SyncMetaEntity.KEY_CURSOR, "0")
+            )
+            db.syncMetaDao().upsert(
+                SyncMetaEntity(SyncMetaEntity.KEY_PULL_ISO_FIX_APPLIED, "1")
+            )
+            Log.i(
+                "Repository",
+                "T18-10: sync_cursor reset to 0 for REQ-72 pull fix backfill; " +
+                    "next pull will replay all server changes from origin"
+            )
+        }
+    }
+
+    /**
      * T-M3-03: 从 bootstrap 响应重建所有实体。
      *
      * 在单个 Room 事务内 upsert 全部实体 + 写入 cursor。不入队 pending mutation。
@@ -1806,7 +1846,7 @@ class Repository(private val db: AozoraDatabase) {
     ): BookEntity? {
         val id = map["id"] ?: return null
         val name = map["name"] ?: return null
-        val icon = map["icon"] ?: "default"
+        val icon = map["icon"] ?: DefaultIcons.BOOK
         val version = map["version"]?.toIntOrNull() ?: 1
         return BookEntity(
             id = id, ownerId = ownerId, name = name, icon = icon,
@@ -1835,7 +1875,7 @@ class Repository(private val db: AozoraDatabase) {
     ): AccountEntity? {
         val id = map["id"] ?: return null
         val name = map["name"] ?: return null
-        val icon = map["icon"] ?: "default"
+        val icon = map["icon"] ?: DefaultIcons.ACCOUNT
         val version = map["version"]?.toIntOrNull() ?: 1
         return AccountEntity(
             id = id, ownerId = ownerId, name = name, icon = icon,

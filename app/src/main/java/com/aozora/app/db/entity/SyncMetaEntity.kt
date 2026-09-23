@@ -65,5 +65,12 @@ data class SyncMetaEntity(
         // 仅 Repository.migratePreferencesUp 自管写入，语义与
         // KEY_CLOUD_ENTITIES_UPLOADED 一致（同事务写标记 + mutation）。
         const val KEY_PREFERENCES_UPLOADED = "preferences_uploaded_v1"
+        // T18-10（REQ-72）：一次性游标重置的完成标记。'1' = 已执行。
+        // 服务端 _serialize_entity 发 ISO 字符串（自 T-M3 起），客户端 toTransaction
+        // 之前只认 Long → 所有服务端下行的 transaction 被静默丢弃且游标照常推进。
+        // 解析修复（epoch/ISO 双收）已让新数据正常落地，但历史已丢的数据不会自己
+        // 回来——把 cursor 置 0 触发一次全量重放，让解析修复后的路径把漏掉的行拉回来。
+        // 只做一次：标记与 cursor 重置在同一事务内，幂等且崩溃安全。
+        const val KEY_PULL_ISO_FIX_APPLIED = "pull_iso_fix_applied_v1"
     }
 }
