@@ -51,18 +51,40 @@ class AccountRepository:
         )
         return result.scalar_one_or_none()
 
-    async def create(self, owner_id: uuid.UUID, name: str, icon: str | None) -> Account:
-        account = Account(owner_id=owner_id, name=name, icon=icon)
+    async def create(
+        self,
+        owner_id: uuid.UUID,
+        name: str,
+        icon: str | None,
+        account_type: str | None = None,
+        balance_cents: int = 0,
+    ) -> Account:
+        account = Account(
+            owner_id=owner_id, name=name, icon=icon,
+            account_type=account_type, balance_cents=balance_cents,
+        )
         self.db.add(account)
         await self.db.flush()
         await self.db.refresh(account)
         return account
 
-    async def update(self, account: Account, name: str | None, icon: str | None) -> Account:
+    async def update(
+        self,
+        account: Account,
+        name: str | None,
+        icon: str | None,
+        account_type: str | None = None,
+        balance_cents: int | None = None,
+    ) -> Account:
         if name is not None:
             account.name = name
         if icon is not None:
             account.icon = icon
+        # None = 不修改（局部合并语义）。balance_cents 允许 0，故判 None 而非真值。
+        if account_type is not None:
+            account.account_type = account_type
+        if balance_cents is not None:
+            account.balance_cents = balance_cents
         account.version += 1
         await self.db.flush()
         await self.db.refresh(account)

@@ -34,7 +34,10 @@ class AccountService:
         return account
 
     async def create_account(self, user_id: uuid.UUID, data: AccountCreate) -> Account:
-        return await self.repo.create(user_id, data.name, data.icon)
+        return await self.repo.create(
+            user_id, data.name, data.icon,
+            account_type=data.account_type, balance_cents=data.balance_cents,
+        )
 
     async def update_account(self, account_id: uuid.UUID, user_id: uuid.UUID, data: AccountUpdate) -> Account:
         account = await self.get_account(account_id, user_id)
@@ -46,7 +49,10 @@ class AccountService:
                 f"Account version mismatch: expected {data.version}, current {account.version}",
             )
 
-        return await self.repo.update(account, data.name, data.icon)
+        return await self.repo.update(
+            account, data.name, data.icon,
+            account_type=data.account_type, balance_cents=data.balance_cents,
+        )
 
     async def archive_account(self, account_id: uuid.UUID, user_id: uuid.UUID) -> None:
         account = await self.get_account(account_id, user_id)

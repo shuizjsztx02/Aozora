@@ -1542,12 +1542,22 @@ class Repository(private val db: AozoraDatabase) {
                         } else {
                             val entity = change.toAccount(ownerId) ?: continue
                             // 同 book：本地照片 icon 不被 pull 冲刷（决策 #7②）
-                            val localIcon = db.accountDao().getById(entity.id)?.icon
+                            val local = db.accountDao().getById(entity.id)
                             val mergedIcon = if (
-                                localIcon != null && localIcon.startsWith("data:") &&
+                                local != null && local.icon.startsWith("data:") &&
                                 !entity.icon.startsWith("data:")
-                            ) localIcon else entity.icon
-                            db.accountDao().upsertFromSync(entity.copy(icon = mergedIcon))
+                            ) local.icon else entity.icon
+                            // REQ-69：accountType 两端化后服务端是权威，但**服务端空值
+                            // 不得冲掉本地值** —— 存量行 account_type 仍是 NULL，而本地
+                            // 早就存着用户选的分类（「储蓄卡」），照单全收就让它在一次
+                            // pull 后消失（这正是本卡之前它在同步中丢掉的形态）。
+                            // balanceCents 刻意**不做**这层保护：0 是合法的服务端值
+                            // （未校准），保护它会永远吃不下服务端的 0；本地乐观写入
+                            // 由上方「活跃 mutation 跳过」兜住（决策 #4：冲突以服务端为权威）。
+                            val mergedType = entity.accountType ?: local?.accountType
+                            db.accountDao().upsertFromSync(
+                                entity.copy(icon = mergedIcon, accountType = mergedType)
+                            )
                         }
                     }
                     "budget" -> {
@@ -1685,6 +1695,9 @@ class Repository(private val db: AozoraDatabase) {
             // 同 bookToJson：照片 icon 超长省略键，防 push 422（决策 #7①）
             if (account.icon.length <= ICON_WIRE_MAX_LEN) put("icon", account.icon)
             put("accountType", account.accountType ?: JSONObject.NULL)
+            // REQ-69（决策 #4）：余额恒以**绝对值**上行，绝不发增量 ——
+            // 重放同一 mutation（离线队列重试 / pull-push 重放）不会重复累加。
+            put("balanceCents", account.balanceCents)
             put("version", account.version)
         }.toString()
     }
@@ -1822,6 +1835,8 @@ class Repository(private val db: AozoraDatabase) {
         return AccountEntity(
             id = id, ownerId = ownerId, name = name, icon = icon,
             accountType = map["accountType"],
+            // REQ-69：服务端列缺省（旧服务端 / 未写入）时按 0 回落。
+            balanceCents = map["balanceCents"]?.toLongOrNull() ?: 0L,
             archivedAt = map["archivedAt"]?.toLongOrNull(), version = version
         )
     }

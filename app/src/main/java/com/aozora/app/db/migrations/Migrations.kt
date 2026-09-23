@@ -213,3 +213,20 @@ val MIGRATION_9_10: Migration = object : Migration(9, 10) {
         )
     }
 }
+
+/**
+ * 第十八轮 REQ-69（T18-5）Room schema 迁移。
+ *
+ * v10 → v11：
+ * - accounts 新增 balanceCents INTEGER NOT NULL DEFAULT 0（账户当前余额，分；
+ *   **允许负值**，故无 CHECK）。存量行取 0 = 「未设置/未校准」。
+ *   accountType 无需迁移：它早在 v4（MIGRATION_3_4）就已是本地列，本卡只是
+ *   把它与服务端 accounts.account_type 两端化（客户端结构不变）。
+ */
+val MIGRATION_10_11: Migration = object : Migration(10, 11) {
+    override fun migrate(db: SupportSQLiteDatabase) {
+        db.execSQL(
+            "ALTER TABLE `accounts` ADD COLUMN `balanceCents` INTEGER NOT NULL DEFAULT 0"
+        )
+    }
+}

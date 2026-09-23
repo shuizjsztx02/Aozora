@@ -305,11 +305,20 @@ class SyncService:
             _validate_name(payload["name"], 64, "name")
             if payload.get("icon") is not None:
                 _validate_name(payload["icon"], 64, "icon")
+            # REQ-69（T18-5）：分类与余额跟账户一起上行。三处口径与 update 分支一致
+            # （account_type 显式 null 可清、balance_cents 缺省 0）。
+            account_type = payload.get("account_type")
+            if account_type is not None:
+                _validate_name(account_type, 64, "account_type")
+            balance_cents = payload.get("balance_cents", 0)
+            _validate_balance_cents(balance_cents)
             acc = Account(
                 id=entity_id,
                 owner_id=user_id,
                 name=payload["name"],
                 icon=payload.get("icon"),
+                account_type=account_type,
+                balance_cents=balance_cents,
             )
             self.db.add(acc)
             await self.db.flush()
@@ -546,6 +555,15 @@ class SyncService:
                 if payload["icon"] is not None:
                     _validate_name(payload["icon"], 64, "icon")
                 entity.icon = payload["icon"]
+            # REQ-69（T18-5）：两列都按「键在场才改」处理 —— 尚未更新的旧客户端
+            # 不会发 balance_cents，若无条件写入会把服务端余额清零。
+            if "account_type" in payload:
+                if payload["account_type"] is not None:
+                    _validate_name(payload["account_type"], 64, "account_type")
+                entity.account_type = payload["account_type"]
+            if "balance_cents" in payload:
+                _validate_balance_cents(payload["balance_cents"])
+                entity.balance_cents = payload["balance_cents"]
 
         elif entity_type == "transaction":
             if "type" in payload:
@@ -983,6 +1001,23 @@ def _validate_current_cents(value: object) -> None:
         )
 
 
+def _validate_balance_cents(value: object) -> None:
+    """Reject non-integer / out-of-range ``balance_cents`` with 422.
+
+    与 [``_validate_current_cents``] 的关键差别：**允许负值**（信用卡欠款是常态，
+    accounts.balance_cents 也不带非负 CHECK，见 ADR-013）。
+    """
+    if (
+        isinstance(value, bool)
+        or not isinstance(value, int)
+        or abs(value) > _MAX_SAFE_INT
+    ):
+        raise AppException(
+            422, "validation_error",
+            f"balance_cents must be an integer in ±{_MAX_SAFE_INT}",
+        )
+
+
 def _require_bool(value: object, field: str) -> bool:
     """Reject non-boolean values for a boolean payload field with 422.
 
@@ -1119,6 +1154,11 @@ def _serialize_entity(entity: object) -> dict:
             "id": str(entity.id),
             "name": entity.name,
             "icon": entity.icon,
+            # REQ-69（T18-5，ADR-013）：两列两端化后随 change / bootstrap 下发。
+            # bootstrap checksum 由客户端按收到的原始 JSON 重算（rawEntityMap 保留
+            # JSON 原始类型），故新增键两侧一致，不会造成 RETRYABLE 失配。
+            "account_type": entity.account_type,
+            "balance_cents": entity.balance_cents,
             "version": entity.version,
             "created_at": entity.created_at.isoformat(),
             "updated_at": entity.updated_at.isoformat(),

@@ -271,7 +271,7 @@ aozora/
 | DeviceSession | id、userId、deviceId、refreshTokenHash、expiresAt | Refresh token 不明文入库，可单设备撤销 |
 | Book | id、ownerId、name、icon、version、archivedAt | 首版仅单人所有权，预留成员模型但不实现共享 |
 | Category | id、ownerId、bookId?、parentId、kind、name、archivedAt、version | 支持系统分类和二级自定义分类，删除为归档 |
-| Account | id、ownerId、name、icon、archivedAt、version | 仅支付渠道标记，不维护真实余额 |
+| Account | id、ownerId、name、icon、accountType?、balanceCents、archivedAt、version | 支付渠道标记 + **用户可手动设置的当前余额**（存量字段，允许负值 = 信用卡欠款）；余额与「按交易现算的净额」不保证相等，差额 = 手动校准量（第十八轮 REQ-69 / ADR-013） |
 | Transaction | id、bookId、type、amountCents、categoryId、accountId?、note、bizDate、occurredAt、source、version、deletedAt | 金额为正整数分；收支由 type 表达；软删除 |
 | Budget | id、bookId、budgetType (monthly|annual)、categoryId?、period、amountCents、version | `(bookId, budgetType, period, categoryId)` 唯一；categoryId 为 null 时代表该周期整体预算；整体预算与分类预算在同一周期内可共存 |
 | Attachment | id、transactionId?、objectKey、mimeType、status、expiresAt? | 私有访问，上传类型和大小受限 |
@@ -460,8 +460,8 @@ app/src/
 ### 8.2 账本、分类与账户
 
 **目标：** 为所有流水提供稳定组织结构。
-**范围：** 多账本、内置/自定义二级分类、支付渠道标记、归档。
-**验收：** 账本数据隔离；分类归档不破坏历史流水；账户不计算余额；名称冲突可解释。
+**范围：** 多账本、内置/自定义二级分类、支付渠道标记、账户分类与当前余额、归档。
+**验收：** 账本数据隔离；分类归档不破坏历史流水；账户余额为**用户可手动设置的存量值**（可为负），编辑后同步与重启均保持；名称冲突可解释。
 
 ### 8.3 交易记账
 

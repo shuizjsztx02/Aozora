@@ -340,14 +340,14 @@ class AozoraDatabaseTest {
     fun test_invalidAccount_doesNotWrite() = runBlocking {
         // 空 ID
         try {
-            repository.insertAccount(AccountEntity("", "o", "n", "i", null, null, 1), "m-bad")
+            repository.insertAccount(AccountEntity("", "o", "n", "i", null, 0L, null, 1), "m-bad")
             fail("empty id accepted")
         } catch (_: IllegalArgumentException) { }
 
         // 负数金额（如果未来有金额字段）
         // 版本为 0
         try {
-            repository.insertAccount(AccountEntity("bad", "o", "n", "i", null, null, 0), "m-bad")
+            repository.insertAccount(AccountEntity("bad", "o", "n", "i", null, 0L, null, 0), "m-bad")
             fail("version 0 accepted")
         } catch (_: IllegalArgumentException) { }
 

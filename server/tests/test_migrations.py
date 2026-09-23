@@ -266,3 +266,39 @@ class TestMigrationConsistency:
         index_name = "ix_ai_conversations_user_archived_active"
         assert index_name in {i.name for i in AIConversation.__table__.indexes}
         assert index_name in source
+
+    def test_account_balance_type_migration_chains_onto_0021(self):
+        """REQ-69（T18-5）: 0022 must extend the chain（账户分类与当前余额两端化）."""
+        m21 = importlib.import_module("src.migrations.versions.0021_user_preferences")
+        m22 = importlib.import_module("src.migrations.versions.0022_account_balance_type")
+        assert m22.down_revision == m21.revision
+        assert m22.revision == "0022_account_balance_type"
+
+    def test_account_balance_type_migration_adds_the_columns(self):
+        """0022 的两列必须在迁移里真的加上。
+
+        SQLite 测试面走 ``Base.metadata.create_all``、**不经本迁移**，所以
+        「ORM 改了、迁移忘了」在测试里完全看不出来 —— 这条把那段差距钉住。
+        """
+        import inspect
+
+        from sqlalchemy import BigInteger
+
+        from src.models.ledger import Account
+
+        m22 = importlib.import_module("src.migrations.versions.0022_account_balance_type")
+        source = inspect.getsource(m22.upgrade)
+
+        for column in ("account_type", "balance_cents"):
+            assert column in Account.__table__.columns, f"ORM 缺列 {column}"
+            assert f'"{column}"' in source, f"0022 没加列 {column}"
+
+        # 金额列一律 BigInteger（同 test_amount_columns_are_integer 的口径）。
+        assert isinstance(Account.__table__.columns["balance_cents"].type, BigInteger)
+
+        # 负余额（信用卡欠款）必须能存：不带非负 CHECK，与 savings_goals 刻意不同。
+        checks = [
+            str(c.sqltext) for c in Account.__table__.constraints
+            if hasattr(c, "sqltext")
+        ]
+        assert not any("balance_cents" in c for c in checks)

@@ -1081,3 +1081,154 @@ class TestRuleUpdateWithInactiveReferences:
             select(ScheduledRule).where(ScheduledRule.id == rule_id)
         )).scalar_one()
         assert row.category_id == ctx["cat_a"].id
+
+
+# ---------------------------------------------------------------------------
+# REQ-69（T18-5）：账户分类与当前余额两端化
+# ---------------------------------------------------------------------------
+
+class TestAccountTypeAndBalance:
+    """``accounts.account_type`` / ``balance_cents``（ADR-013）。
+
+    这两列此前只存在于客户端 Room：``account_type`` 上行被静默忽略、pull 又被
+    冲刷成 NULL；``balance_cents`` 服务端完全没有。本组钉住三条契约：
+
+    * 两字段随账户一起上行/下行（insert 与 update 两个入口）；
+    * ``balance_cents`` **允许负值**（信用卡欠款），且**只按绝对值写入**；
+    * update 在**键缺省时不改动**该列 —— 未升级的旧客户端发的 payload 里
+      没有 ``balance_cents``，无条件写入会把服务端余额清零。
+    """
+
+    def _account_id(self) -> uuid.UUID:
+        return uuid.uuid4()
+
+    @pytest.mark.asyncio
+    async def test_insert_persists_type_and_negative_balance(self, cloud_ctx):
+        ctx = cloud_ctx
+        acc_id = self._account_id()
+        resp = _push(ctx, ctx["user_a"], [
+            _mutation("account", acc_id, {
+                "name": "交行信用卡", "icon": "💳",
+                "account_type": "信用卡", "balance_cents": -32_500,
+            }),
+        ])
+        assert resp.status_code == 200
+        acc = (await ctx["db"].execute(
+            select(Account).where(Account.id == acc_id)
+        )).scalar_one()
+        assert acc.account_type == "信用卡"
+        # 负余额必须存得下：accounts 不带非负 CHECK（与 savings.current_cents 不同）
+        assert acc.balance_cents == -32_500
+
+    @pytest.mark.asyncio
+    async def test_insert_defaults_when_fields_absent(self, cloud_ctx):
+        """旧客户端 / 缺省 payload：分类 NULL、余额 0，不炸。"""
+        ctx = cloud_ctx
+        acc_id = self._account_id()
+        _push(ctx, ctx["user_a"], [_mutation("account", acc_id, {"name": "现金"})])
+        acc = (await ctx["db"].execute(
+            select(Account).where(Account.id == acc_id)
+        )).scalar_one()
+        assert acc.account_type is None
+        assert acc.balance_cents == 0
+
+    @pytest.mark.asyncio
+    async def test_update_changes_both_fields(self, cloud_ctx):
+        ctx = cloud_ctx
+        acc_id = self._account_id()
+        _push(ctx, ctx["user_a"], [
+            _mutation("account", acc_id, {"name": "交行卡", "account_type": "储蓄卡"}),
+        ])
+        resp = _push(ctx, ctx["user_a"], [
+            _mutation("account", acc_id, {
+                "name": "交行卡", "account_type": "信用卡", "balance_cents": 5_000_00,
+            }, operation="update", version=1),
+        ])
+        assert resp.status_code == 200
+        assert resp.json()["results"][0]["status"] == "applied"
+        acc = (await ctx["db"].execute(
+            select(Account).where(Account.id == acc_id)
+        )).scalar_one()
+        assert acc.account_type == "信用卡"
+        assert acc.balance_cents == 500_000
+
+    @pytest.mark.asyncio
+    async def test_update_without_keys_preserves_them(self, cloud_ctx):
+        """旧客户端只发 name/icon —— 两列必须原样留着（不被清零/清空）。"""
+        ctx = cloud_ctx
+        acc_id = self._account_id()
+        _push(ctx, ctx["user_a"], [
+            _mutation("account", acc_id, {
+                "name": "交行卡", "account_type": "储蓄卡", "balance_cents": 500_000,
+            }),
+        ])
+        resp = _push(ctx, ctx["user_a"], [
+            _mutation("account", acc_id, {"name": "交行卡改名"},
+                      operation="update", version=1),
+        ])
+        assert resp.status_code == 200
+        acc = (await ctx["db"].execute(
+            select(Account).where(Account.id == acc_id)
+        )).scalar_one()
+        assert acc.name == "交行卡改名"
+        assert acc.account_type == "储蓄卡"
+        assert acc.balance_cents == 500_000
+
+    @pytest.mark.asyncio
+    async def test_update_explicit_null_clears_type_and_zero_is_a_value(self, cloud_ctx):
+        """account_type 显式 null 可清空；balance_cents = 0 是**数值**，不是"未设置"。"""
+        ctx = cloud_ctx
+        acc_id = self._account_id()
+        _push(ctx, ctx["user_a"], [
+            _mutation("account", acc_id, {
+                "name": "交行卡", "account_type": "储蓄卡", "balance_cents": 500_000,
+            }),
+        ])
+        _push(ctx, ctx["user_a"], [
+            _mutation("account", acc_id, {
+                "name": "交行卡", "account_type": None, "balance_cents": 0,
+            }, operation="update", version=1),
+        ])
+        acc = (await ctx["db"].execute(
+            select(Account).where(Account.id == acc_id)
+        )).scalar_one()
+        assert acc.account_type is None
+        assert acc.balance_cents == 0
+
+    @pytest.mark.asyncio
+    async def test_non_integer_balance_rejected(self, cloud_ctx):
+        ctx = cloud_ctx
+        resp = _push(ctx, ctx["user_a"], [
+            _mutation("account", self._account_id(), {
+                "name": "交行卡", "balance_cents": "500000",
+            }),
+        ])
+        assert resp.status_code == 422
+
+    @pytest.mark.asyncio
+    async def test_pull_serializes_both_fields(self, cloud_ctx):
+        ctx = cloud_ctx
+        acc_id = self._account_id()
+        _push(ctx, ctx["user_a"], [
+            _mutation("account", acc_id, {
+                "name": "交行卡", "account_type": "储蓄卡", "balance_cents": 1_234_567,
+            }),
+        ])
+        data = _pull(ctx, ctx["user_a"]).json()
+        change = next(c for c in data["changes"] if c["entity_type"] == "account")
+        assert change["entity"]["account_type"] == "储蓄卡"
+        assert change["entity"]["balance_cents"] == 1_234_567
+
+    @pytest.mark.asyncio
+    async def test_bootstrap_serializes_both_fields(self, cloud_ctx):
+        ctx = cloud_ctx
+        acc_id = self._account_id()
+        _push(ctx, ctx["user_a"], [
+            _mutation("account", acc_id, {
+                "name": "交行卡", "account_type": "储蓄卡", "balance_cents": -1,
+            }),
+        ])
+        data = _bootstrap(ctx, ctx["user_a"]).json()
+        acc = next(a for a in data["accounts"] if a["id"] == str(acc_id))
+        assert acc["account_type"] == "储蓄卡"
+        assert acc["balance_cents"] == -1

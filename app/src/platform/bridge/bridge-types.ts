@@ -423,6 +423,8 @@ export interface AccountData {
   version: number
   /** T7-2（REQ-5）：账户分类（储蓄卡/微信/…或自定义），旧行为 null。 */
   accountType?: string | null
+  /** REQ-69（T18-5）：当前余额（分，**可为负** = 信用卡欠款）；未设置为 0。 */
+  balanceCents?: number
   /** T9-5a（REQ-11，决策 #2）：true = 系统默认账户。 */
   isDefault?: boolean
 }
@@ -435,6 +437,11 @@ export interface AccountInput {
   icon?: string
   /** 显式传 null 清空分类；键缺省保留当前值（update 局部合并语义）。 */
   accountType?: string | null
+  /**
+   * REQ-69（T18-5）：当前余额（分）。insert 缺省 = 0；update 键缺省保留当前值。
+   * 恒传**绝对值**——不要传增量（决策 #4 的幂等铁律）。
+   */
+  balanceCents?: number
   version: number
 }
 

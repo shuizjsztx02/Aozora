@@ -334,6 +334,44 @@ class TestAccountsAPI:
         assert resp.status_code == 200
         assert resp.json()["total"] == 2
 
+    def test_create_account_with_type_and_balance(self, auth_client, user):
+        """REQ-69（T18-5）: POST /accounts 接受分类与余额（余额可为负 = 信用卡欠款）。"""
+        resp = auth_client.post(
+            "/accounts",
+            json={"name": "交行信用卡", "account_type": "信用卡", "balance_cents": -32500},
+            headers=_auth_header(user),
+        )
+        assert resp.status_code == 201
+        data = resp.json()
+        assert data["account_type"] == "信用卡"
+        assert data["balance_cents"] == -32500
+
+    def test_create_account_defaults_type_and_balance(self, auth_client, user):
+        """缺省：分类 NULL、余额 0（旧客户端与旧调用方零感知）。"""
+        resp = auth_client.post("/accounts", json={"name": "现金"}, headers=_auth_header(user))
+        assert resp.status_code == 201
+        assert resp.json()["account_type"] is None
+        assert resp.json()["balance_cents"] == 0
+
+    def test_update_account_balance_and_type(self, auth_client, user):
+        """PATCH /accounts/:id 改余额与分类（None = 不修改，0 是数值）。"""
+        created = auth_client.post(
+            "/accounts",
+            json={"name": "交行卡", "account_type": "储蓄卡", "balance_cents": 500_000},
+            headers=_auth_header(user),
+        ).json()
+
+        resp = auth_client.patch(
+            f"/accounts/{created['id']}",
+            json={"account_type": "信用卡", "balance_cents": 0, "version": created["version"]},
+            headers=_auth_header(user),
+        )
+        assert resp.status_code == 200
+        assert resp.json()["account_type"] == "信用卡"
+        assert resp.json()["balance_cents"] == 0
+        # name 未传 → 局部合并不动它
+        assert resp.json()["name"] == "交行卡"
+
 
 # ── Transactions ────────────────────────────────────────────────────────
 

@@ -36,3 +36,20 @@
 - **wire 契约映射**：Room/Bridge 层 camelCase，服务端同步/业务 API 为 snake_case；`occurredAt`（UTC ms）↔ ISO-8601 UTC 字符串；客户端 `archive` ↔ wire `delete`。
 
 完整实体和同步规则以 `docs/APP-CONTEXT.md` 第 5 节为准。
+
+## accounts 表：账户分类与当前余额（T18-5 / REQ-69，ADR-013）
+
+第十八轮把两列**两端化**（此前只存在于客户端 Room：`accountType` 上行被 sync 静默丢弃、pull 又被冲刷成 NULL；余额则完全没有）：
+
+| 列 | 类型 | 说明 |
+|---|---|---|
+| `account_type` | VARCHAR(64) NULL | 账户分类（自由文本：「储蓄卡」「微信」…），与客户端 AccountsPage 同值域。NULL = 未分类 |
+| `balance_cents` | BIGINT NOT NULL DEFAULT 0 | 账户当前余额，单位分 |
+
+三条与其它实体刻意不同的口径：
+
+- **`balance_cents` 不带非负 CHECK**（对照 `savings_goals.current_cents` 的 `>= 0`）：信用卡欠款是常态，负余额必须能存。这是对上面「`MoneyCents` 存储层禁止负值」的**唯一例外**，范围仅限本列——客户端渲染负余额仍走既有 `Math.abs` + 手拼负号口径（`Money.cents` 的非负契约未放开）。
+- **余额 ≠ 该账户交易净额**：它是**存量字段**，允许被用户手动校准，差额即手动校准量。AI 只读工具 `account_balances` 现算的是净额，两者不保证相等属正常状态。
+- **上行恒传绝对值，不传增量**：账户 mutation 携带更新后的余额本身，故重放（离线队列重试 / pull-push 重放）不会重复累加。多设备各自离线记账后互相覆盖（后到者胜）是该取值的已知代价，登记为 R-PROD-43。
+
+**同步保护口径（客户端 pull）**：`account_type` 在**服务端为空值**时保留本地值（存量行服务端仍是 NULL，而本地早已存着用户选的分类，照单全收会让它在一次 pull 后消失）；非空时服务端权威。`balance_cents` **不做**本地保护——`0` 是合法的服务端值，保护它就永远吃不下云端清零；本地乐观写入由既有「活跃 mutation 跳过合并」兜住。

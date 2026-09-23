@@ -300,10 +300,12 @@ class RepositoryUserPreferenceSyncTest {
     /**
      * 迁移 9→10：建 user_preferences 表 + key 唯一索引，存量数据保留。
      *
-     * 手法：先用当前版本建库（v10 schema），再手工退回 v9 形态 —— 删掉
-     * user_preferences 表、把 room_master_table 的 identity_hash 改回 9.json 的值、
-     * user_version 置 9。这样重开时 Room 会真实走 MIGRATION_9_10，并按 v10 生成代码
-     * 校验 schema（DDL 与实体不一致这里就会失败）。
+     * 手法：先用当前版本建库（当前 schema），再手工退回 v9 形态 —— 删掉
+     * user_preferences 表、把 accounts 退回无 balanceCents 列的形态（v11 的新列，
+     * 见 RepositoryAccountBalanceSyncTest）、把 room_master_table 的 identity_hash
+     * 改回 9.json 的值、user_version 置 9。这样重开时 Room 会真实走
+     * MIGRATION_9_10（及后续 10_11），并按当前生成代码校验 schema
+     * （DDL 与实体不一致这里就会失败）。
      */
     @Test
     fun migration9To10_createsPreferenceTableAndKeepsData() = runBlocking {
@@ -319,6 +321,21 @@ class RepositoryUserPreferenceSyncTest {
         val path = ctx.getDatabasePath(name).path
         SQLiteDatabase.openDatabase(path, null, SQLiteDatabase.OPEN_READWRITE).use { raw ->
             raw.execSQL("DROP TABLE IF EXISTS `user_preferences`")
+            // accounts 退回 v9 形态（无 balanceCents，v11 才加）——否则重开时
+            // MIGRATION_10_11 的 ADD COLUMN 会撞 "duplicate column name"。
+            raw.execSQL(
+                "CREATE TABLE `accounts_v9` (" +
+                    "`id` TEXT NOT NULL, `ownerId` TEXT NOT NULL, `name` TEXT NOT NULL, " +
+                    "`icon` TEXT NOT NULL, `accountType` TEXT, `archivedAt` INTEGER, " +
+                    "`version` INTEGER NOT NULL, PRIMARY KEY(`id`))"
+            )
+            raw.execSQL(
+                "INSERT INTO `accounts_v9` " +
+                    "SELECT `id`, `ownerId`, `name`, `icon`, `accountType`, `archivedAt`, `version` " +
+                    "FROM `accounts`"
+            )
+            raw.execSQL("DROP TABLE `accounts`")
+            raw.execSQL("ALTER TABLE `accounts_v9` RENAME TO `accounts`")
             raw.execSQL(
                 "UPDATE room_master_table SET identity_hash = ?",
                 arrayOf(V9_IDENTITY_HASH)

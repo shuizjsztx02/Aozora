@@ -512,6 +512,8 @@ class AozoraBridge(
                 put("id", a.id); put("name", a.name); put("icon", a.icon); put("version", a.version)
                 // T7-1（REQ-6）：支付渠道子类型，可为 null
                 put("accountType", a.accountType ?: JSONObject.NULL)
+                // REQ-69（T18-5）：当前余额（分，可为负）
+                put("balanceCents", a.balanceCents)
                 put("isDefault", a.id == defaultId)
             })
         }
@@ -527,6 +529,9 @@ class AozoraBridge(
             name = aObj.getString("name"),
             icon = aObj.optString("icon", "account"),
             accountType = BridgePayload.optionalString(aObj, "accountType"),
+            // REQ-69（T18-5）：当前余额（分）；键缺省 = 0（新建时未填）
+            balanceCents = if (aObj.has("balanceCents"))
+                BridgePayload.safeLong(aObj, "balanceCents") else 0L,
             archivedAt = null,
             version = BridgePayload.version(aObj)
         )
@@ -548,6 +553,10 @@ class AozoraBridge(
             // 显式传 null 可清空 accountType；键缺省则保留当前值
             accountType = if (aObj.has("accountType"))
                 BridgePayload.optionalString(aObj, "accountType") else current.accountType,
+            // REQ-69（T18-5）：余额只有「数值」一种语义（0 = 零余额，不是"未设置"），
+            // 故没有 null 分支；键缺省保留当前值（局部合并语义，同 name/icon）。
+            balanceCents = if (aObj.has("balanceCents"))
+                BridgePayload.safeLong(aObj, "balanceCents") else current.balanceCents,
             archivedAt = current.archivedAt,
             version = BridgePayload.version(aObj)
         )

@@ -76,6 +76,9 @@ data class ServerChange(
         return AccountEntity(
             id = id, ownerId = ownerId, name = name, icon = icon,
             accountType = entityPayload["accountType"],
+            // REQ-69（T18-5）：服务端 account_type / balance_cents 两端化后的落库读口。
+            // balanceCents 缺键（旧服务端）按 0 回落；accountType 的防冲刷在 Repository。
+            balanceCents = entityPayload["balanceCents"]?.toLongOrNull() ?: 0L,
             archivedAt = null, version = version
         )
     }
