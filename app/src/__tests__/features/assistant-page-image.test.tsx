@@ -6,6 +6,8 @@
  * - 完整链路：pickImage → parseImage → 批量卡渲染 → batch-confirm →
  *   executeProposal（token=chat_img_*）→ 卡片收起 + 落「已记录 N 笔交易」+ triggerSync
  * - parse 失败 → 红条 + 重试（重试续 parse 不重新选图）
+ * - T18-1（REQ-66）：503 的三个码 → 同一句用户文案（不透服务端运维细节）；
+ *   失败红条给「手动记账」退路（点击回首页）
  * - pick 取消 → 静默回 idle 无红条
  * - 账本未就绪 → 红条「账本未就绪」
  * - 批量卡显示期间文本输入不禁用（决策 #11，与单卡链路互不干扰）
@@ -13,7 +15,7 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest'
 import { render, screen, waitFor } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
-import { MemoryRouter } from 'react-router'
+import { MemoryRouter, useLocation } from 'react-router'
 import { AssistantPage } from '../../features/assistant/AssistantPage'
 
 const mockVoice = vi.hoisted(() => ({
@@ -168,18 +170,54 @@ describe('AssistantPage — 图片上传链路 (T9-8)', () => {
     await waitFor(() => expect(screen.getByTestId('batch-confirmation-card')).toBeInTheDocument())
   })
 
-  it('parse 503 no_ai_provider → AI 未配置专属文案（T12-1 决策 #9）', async () => {
-    mockBridge.parseImage.mockRejectedValueOnce(
-      bridgeError('AI service is temporarily unavailable', 'no_ai_provider'),
+  // T18-1（REQ-66 ②）：归因分层落在**码**上，用户可见文案只有一句。
+  // 三种码都得说同一句话——`no_ai_provider` 是旧桥的兜底码（现不再产生），
+  // 另两个是服务端 503 的子码（provider 暂时故障 / 图片解析被运维关闭）。
+  it.each(['ai_unavailable', 'image_parsing_disabled', 'no_ai_provider'])(
+    'parse 503（code=%s）→ 统一「AI 服务暂时不可用」，不透服务端运维细节（T18-1 / REQ-66）',
+    async (code) => {
+      mockBridge.parseImage.mockRejectedValueOnce(
+        bridgeError('AI service is temporarily unavailable', code),
+      )
+      const user = userEvent.setup()
+      renderPage()
+      await waitFor(() => expect(mockBridge.listBooks).toHaveBeenCalled())
+
+      await user.click(screen.getByTestId('image-upload-button'))
+      const bar = await screen.findByTestId('image-error')
+      expect(bar.textContent).toContain('AI 服务暂时不可用，请稍后重试')
+      expect(bar.textContent).not.toContain('AI service is temporarily unavailable')
+      // T18-1 之前 no_ai_provider 分支显示「需在服务器 .env 填 AI_PROVIDER_API_KEY
+      // 并重启」——服务端运维细节（env 文件名 + 变量名）不得再出现在用户可见文案里
+      expect(bar.textContent).not.toContain('AI_PROVIDER_API_KEY')
+      expect(bar.textContent).not.toContain('.env')
+    },
+  )
+
+  // T18-1（REQ-66 ④ / APP-CONTEXT §6.4）：图片这条路走不通时给退路——
+  // 重试仍在（附件没丢），并且可以直接去首页手写记账。
+  it('图片失败 → 红条给「手动记账」退路，点击回首页', async () => {
+    mockBridge.parseImage.mockRejectedValue(
+      bridgeError('AI service is temporarily unavailable', 'ai_unavailable'),
     )
+    function LocationProbe() {
+      return <div data-testid="probe-path">{useLocation().pathname}</div>
+    }
     const user = userEvent.setup()
-    renderPage()
+    render(
+      <MemoryRouter>
+        <AssistantPage />
+        <LocationProbe />
+      </MemoryRouter>,
+    )
     await waitFor(() => expect(mockBridge.listBooks).toHaveBeenCalled())
 
     await user.click(screen.getByTestId('image-upload-button'))
-    const bar = await screen.findByTestId('image-error')
-    expect(bar.textContent).toContain('AI_PROVIDER_API_KEY')
-    expect(bar.textContent).not.toContain('AI service is temporarily unavailable')
+    await screen.findByTestId('image-error')
+    expect(screen.getByTestId('image-retry')).toBeInTheDocument()
+
+    await user.click(screen.getByTestId('image-manual-entry'))
+    expect(screen.getByTestId('probe-path')).toHaveTextContent('/home')
   })
 
   it('用户取消选图 → 静默回 idle，无红条', async () => {

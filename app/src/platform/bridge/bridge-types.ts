@@ -848,6 +848,11 @@ export type ParseImageErrorCode =
   | 'network_error'
   | 'server_error'
   | 'auth_lost'
+  /** T18-1（REQ-66）：服务端 503 主码（provider 暂时故障 / 未配 key），桥透传。 */
+  | 'ai_unavailable'
+  /** T18-1（REQ-66）：服务端 503 子码（运维关掉了图片解析），桥透传。 */
+  | 'image_parsing_disabled'
+  /** T18-1 之前桥把**任意** 503 压成的兜底码；现不再产生，保留以兼容旧语义。 */
   | 'no_ai_provider'
   | 'attachment_not_found'
   | 'attachment_not_pending'

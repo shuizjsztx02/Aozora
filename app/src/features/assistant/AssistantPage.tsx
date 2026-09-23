@@ -10,6 +10,8 @@
  * T16-2（REQ-58）：带 proposal 的历史消息在气泡下渲染只读账单卡（常驻，无编辑/撤销）
  * T16-4（REQ-60）：消息行改「头像 + 气泡」两列——助手头像 = 当前角色头像，
  * 用户头像 = meta['avatar_uri']（同批顺路读），均走 CategoryIcon、圆形带玻璃外框
+ * T18-1（REQ-66）：图片链路文案归口 ai-error-text.ts（不再透出服务端运维细节），
+ * 失败红条给「手动记账」退路
  */
 
 import { useState, useRef, useEffect, useLayoutEffect, useCallback, useMemo } from 'react'
@@ -20,6 +22,7 @@ import { useBridge } from '../../platform/hooks/use-bridge'
 import { usePermissions } from '../../platform/hooks/use-permissions'
 import { useVoice } from '../../platform/hooks/use-voice'
 import { useAssistant, type AssistantMessage, type CardStatus } from './use-assistant'
+import { IMAGE_ERROR_ZH } from './ai-error-text'
 // 车道判定来自契约层——放在这里（而不是从 use-assistant 取）也让本文件的测试
 // 不必在 `vi.mock` 里补这个导出。
 import { isV2Proposal } from '../../domain/action-proposal'
@@ -71,23 +74,9 @@ function normalizeVoiceCode(err: { code?: string; message?: string } | null): st
   return 'voice_generic'
 }
 
-// T12-1（REQ-29 / 决策 #9）：图片链路错误码 → 中文文案。503 被 Kotlin 统一映射为
-// no_ai_provider（AozoraBridge:1406-1412），按决策给配置指引专属文案；未知码回退原生 message。
-// T14-3（REQ-40）：补 execute 分支（handleAiExecute 的码集与 handleImageParse 不同：
-// 'network'/'429'/'503'）与服务端 400 ai_missing_category、500 database_error 防御键
-const IMAGE_ERROR_ZH: Record<string, string> = {
-  no_ai_provider: 'AI 服务未配置：需在服务器 .env 填 AI_PROVIDER_API_KEY 并重启',
-  timeout: '图片解析超时，请检查网络后重试',
-  network_error: '网络错误，请检查网络连接后重试',
-  network: '网络错误，请检查网络后重试',
-  rate_limited: 'AI 请求过于频繁，请稍后重试',
-  '429': 'AI 请求过于频繁，请稍后重试',
-  server_error: 'AI 服务暂时不可用，请稍后重试',
-  '503': 'AI 服务暂时不可用，请稍后重试',
-  auth_lost: '登录已失效，请重新登录',
-  ai_missing_category: '有记录未识别到分类，请在卡片中选择分类后重试',
-  database_error: '服务处理失败，请稍后重试',
-}
+// T18-1（REQ-66）：图片链路的错误码 → 中文文案已归口到 ai-error-text.ts（与
+// QuickEntrySheet 的小票识别**共用同一常量**）；原「503 → no_ai_provider →
+// 配置指引」的误译链随之拆掉（误译的根源在桥侧，见 AozoraBridge.handleImageParse）。
 
 // T14-3（REQ-40 / 决策 #5）：提案行缺分类的确认前拦截文案（与服务端 400 同语义）
 const IMG_NO_CATEGORY_MSG = '有记录未识别到分类，请在卡片中选择后再确认'
@@ -1016,14 +1005,27 @@ export function AssistantPage() {
             data-testid="image-error"
           >
             <span className="truncate">🖼️ {imageError}</span>
-            <button
-              type="button"
-              onClick={handleImageRetry}
-              className="shrink-0 underline font-medium"
-              data-testid="image-retry"
-            >
-              重试
-            </button>
+            <div className="shrink-0 flex items-center gap-3">
+              <button
+                type="button"
+                onClick={handleImageRetry}
+                className="underline font-medium"
+                data-testid="image-retry"
+              >
+                重试
+              </button>
+              {/* T18-1（REQ-66 / APP-CONTEXT §6.4「无法处理图片时保留草稿并提示」）：
+                  图片这条路走不通时的退路——已选的附件仍留着（imageAttachmentRef 未清），
+                  用户也可以直接去首页手写记账，不必在这里反复重试 */}
+              <button
+                type="button"
+                onClick={() => navigate('/home')}
+                className="underline font-medium"
+                data-testid="image-manual-entry"
+              >
+                手动记账
+              </button>
+            </div>
           </div>
         )}
         {/* T12-1（REQ-29 ②）：输入行重排 [🎤语音][🖼️图片][输入框][发送]——图片钮从输入框右移到左、紧挨语音；样式不动 */}

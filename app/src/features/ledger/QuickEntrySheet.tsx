@@ -21,6 +21,9 @@ import { todayBizDate } from '../../domain/date'
 import DateField from '../../components/DateField'
 import { pickEntryBook, pickDefaultAccount } from '../../domain/books'
 import { CategoryPager, EntryChipRow } from './entry-controls'
+// T18-1（REQ-66）：AI 不行的两类说法归一到同一常量——此前这里写「识别失败（AI 服务
+// 不可用）」、聊天页写「需在服务器 .env 填 AI_PROVIDER_API_KEY 并重启」，同码两套。
+import { AI_UNAVAILABLE_ZH, isAiUnavailable } from '../assistant/ai-error-text'
 
 interface QuickEntrySheetProps {
   categories: CategoryData[]
@@ -681,7 +684,7 @@ export function QuickEntrySheet({ categories, onClose, onSuccess }: QuickEntrySh
                       ❌ {parseError === 'no_transactions'
                         ? '未识别到消费记录'
                         : parseError === 'no_categories' ? '未找到匹配的分类'
-                        : parseError === 'no_ai_provider' ? '识别失败（AI 服务不可用）' : '识别失败'}
+                        : isAiUnavailable(parseError) ? `识别失败（${AI_UNAVAILABLE_ZH}）` : '识别失败'}
                     </span>
                   </div>
                   <div className="flex gap-2">

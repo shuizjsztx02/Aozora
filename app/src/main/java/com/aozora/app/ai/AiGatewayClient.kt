@@ -76,7 +76,16 @@ class AiGatewayClient(
             AiError(message, cause)
         class RateLimited :
             AiError("AI rate limit exceeded")
-        class Unavailable(val httpCode: Int) :
+        /**
+         * HTTP 503。
+         *
+         * T18-1（REQ-66）：带上服务端 body 里的 `code`——503 **不是一个语义**：
+         * `ai_unavailable`（provider 暂时故障，或服务端未配 key）与
+         * `image_parsing_disabled`（运维把图片解析关了）都走这个状态码。桥以前
+         * 只按状态码映射，于是把整类译成了 `no_ai_provider`（「没配 key」）。
+         * 与 [NotFound] 同理：状态码相同、语义不同的，要在这一层就分开。
+         */
+        class Unavailable(val httpCode: Int, val serverCode: String? = null) :
             AiError("AI service unavailable: HTTP $httpCode")
         class AuthLost(cause: Throwable? = null) :
             AiError("Authentication lost", cause)
@@ -347,7 +356,7 @@ class AiGatewayClient(
                                 // 403 is NOT auth — /ai/execute uses it for proposal
                                 // rejection, so it falls through to the 4xx branch below.
                                 resp.code == 401 -> throw AiError.AuthLost()
-                                resp.code == 503 -> throw AiError.Unavailable(resp.code)
+                                resp.code == 503 -> throw AiError.Unavailable(resp.code, serverErrorCode(body))
                                 // T-M7-03d: 404 有自己的语义（会话端点：别人的 / 已删的 /
                                 // 不存在的 id 全是它），不能被折叠成一次网络故障——客户端
                                 // 要据此幂等收敛（删除重试、丢弃陈旧的 conversation_id）。
@@ -448,6 +457,21 @@ class AiGatewayClient(
             ""
         }
         return if (msg.isNotBlank()) "Server error: HTTP $code: $msg" else "Server error: HTTP $code"
+    }
+
+    /**
+     * T18-1（REQ-66）：服务端 `ErrorResponse` 的 `code` —— 解析不出 / 为空则 null。
+     *
+     * 与 [serverMessage] 同源（只读**我们自己的** gateway 错误体，不碰 provider
+     * 原文），差别是取的字段：那边是要给人看的 message，这边是要拿来做归因的码。
+     */
+    private fun serverErrorCode(body: String): String? {
+        val code = try {
+            JSONObject(body).optString("code", "")
+        } catch (_: Exception) {
+            ""
+        }
+        return code.takeIf { it.isNotBlank() }
     }
 
     companion object {

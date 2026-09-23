@@ -1811,12 +1811,21 @@ class AozoraBridge(
         } catch (e: AiGatewayClient.AiError.RateLimited) {
             BridgeResponse.error(requestId, "rate_limited", "AI rate limit exceeded")
         } catch (e: AiGatewayClient.AiError.Unavailable) {
-            // 503 可能是 no_ai_provider，也可能是暂时不可用
-            if (e.httpCode == 503) {
-                BridgeResponse.error(requestId, "no_ai_provider", "AI service is temporarily unavailable")
-            } else {
-                BridgeResponse.error(requestId, "server_error", "AI service unavailable: HTTP ${e.httpCode}")
+            // T18-1（REQ-66）：503 的**归因分层**——不再一律压成 no_ai_provider。
+            // 服务端 body 带 code（ai_unavailable = provider 暂时故障或未配 key；
+            // image_parsing_disabled = 运维把图片解析关了），AiGatewayClient 已把它
+            // 带上来。旧口径把整类 503 译成「没配 key」，于是一次临时抽风就把用户
+            // 引去改服务器 .env（真因与文案完全无关）。
+            //
+            // 只放行**已知**子码：未知 code 会让前端落到「回退原生英文 message」，
+            // 那比笼统的 ai_unavailable 更糟。用户可见文案由前端再归一到同一句
+            // （features/assistant/ai-error-text.ts），差异留给归因与监控。
+            val code = when {
+                e.httpCode != 503 -> "server_error"
+                e.serverCode == "image_parsing_disabled" -> "image_parsing_disabled"
+                else -> "ai_unavailable"
             }
+            BridgeResponse.error(requestId, code, "AI service is temporarily unavailable")
         } catch (e: AiGatewayClient.AiError.AuthLost) {
             BridgeResponse.error(requestId, "auth_lost", "Authentication required")
         }
