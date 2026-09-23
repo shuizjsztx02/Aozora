@@ -59,15 +59,29 @@ describe('parseAiConfig（6 op 白名单，决策 #6）', () => {
     expect(parseAiConfig({ op: 'book.create', name: '旅行', icon: '  ' })).toEqual({ op: 'book.create', name: '旅行' })
   })
 
-  it('account.create：accountType 必为 income|expense；initBalance ≥0（含 0）', () => {
-    expect(parseAiConfig({ op: 'account.create', name: '工资卡', accountType: 'income', initBalance: 5000 }))
-      .toEqual({ op: 'account.create', name: '工资卡', accountType: 'income', initBalance: 5000 })
-    expect(parseAiConfig({ op: 'account.create', name: 'A', accountType: 'expense', initBalance: 0 }))
-      .toEqual({ op: 'account.create', name: 'A', accountType: 'expense', initBalance: 0 })
-    expect(parseAiConfig({ op: 'account.create', name: 'A' })).toBeNull()
-    expect(parseAiConfig({ op: 'account.create', name: 'A', accountType: '储蓄卡' })).toBeNull()
-    expect(parseAiConfig({ op: 'account.create', name: 'A', accountType: 'income', initBalance: -1 }))
-      .toEqual({ op: 'account.create', name: 'A', accountType: 'income' })
+  it('account.create：accountType 自由分类名（可省略）；initBalance 可正可负', () => {
+    // REQ-69（T18-6）：分类不再是 income|expense 二值——用户说的「储蓄卡」原样保留
+    expect(parseAiConfig({ op: 'account.create', name: '工资卡', accountType: '储蓄卡', initBalance: 5000 }))
+      .toEqual({ op: 'account.create', name: '工资卡', accountType: '储蓄卡', initBalance: 5000 })
+    expect(parseAiConfig({ op: 'account.create', name: 'A', accountType: ' 数字人民币 ' }))
+      .toEqual({ op: 'account.create', name: 'A', accountType: '数字人民币' })
+    // 分类可省略（= 不填分类，与设置页「取消选择即不填」同口径）
+    expect(parseAiConfig({ op: 'account.create', name: 'A' }))
+      .toEqual({ op: 'account.create', name: 'A' })
+    expect(parseAiConfig({ op: 'account.create', name: 'A', accountType: '  ' }))
+      .toEqual({ op: 'account.create', name: 'A' })
+    // 余额允许 0 与负值（信用卡欠款）
+    expect(parseAiConfig({ op: 'account.create', name: 'A', initBalance: 0 }))
+      .toEqual({ op: 'account.create', name: 'A', initBalance: 0 })
+    expect(parseAiConfig({ op: 'account.create', name: 'A', accountType: '信用卡', initBalance: -2000 }))
+      .toEqual({ op: 'account.create', name: 'A', accountType: '信用卡', initBalance: -2000 })
+    // 超长分类（> 服务端列宽 64）与坏余额：只丢该字段，不整体拒
+    expect(parseAiConfig({ op: 'account.create', name: 'A', accountType: 'x'.repeat(65) }))
+      .toEqual({ op: 'account.create', name: 'A' })
+    expect(parseAiConfig({ op: 'account.create', name: 'A', accountType: '储蓄卡', initBalance: 'abc' }))
+      .toEqual({ op: 'account.create', name: 'A', accountType: '储蓄卡' })
+    // name 仍必填
+    expect(parseAiConfig({ op: 'account.create' })).toBeNull()
   })
 
   it('budget.create：category/amount 必填（amount>0，接受数字字符串）；period 坏值仅丢键', () => {
@@ -234,14 +248,21 @@ describe('buildConfigPreview（预览 rows，决策 #8）', () => {
     expect(buildConfigPreview({ op: 'book.create', name: '旅行' }, '2026-09-10').rows).toHaveLength(2)
   })
 
-  it('account.create：类型折中文标签；initBalance 明示「补记一笔」', () => {
-    const p = buildConfigPreview({ op: 'account.create', name: '工资卡', accountType: 'income', initBalance: 5000 }, '2026-09-10')
+  it('account.create：分类名原样展示；余额为真实落库值（负值带负号）', () => {
+    // REQ-69（T18-6）：不再折成「收入账户/支出账户」，也不再出现「补记一笔」引导
+    const p = buildConfigPreview({ op: 'account.create', name: '工资卡', accountType: '储蓄卡', initBalance: 5000 }, '2026-09-10')
     expect(p.rows).toEqual([
       { label: '操作', value: '新建账户' },
       { label: '名称', value: '工资卡' },
-      { label: '类型', value: '收入账户' },
-      { label: '期初余额', value: '¥5000.00（创建后请补记一笔收入）' },
+      { label: '类型', value: '储蓄卡' },
+      { label: '当前余额', value: '¥5000.00' },
     ])
+    // 分类/余额省略时行也省略；余额 0 与负值都要显示（0 是「已校准为零」）
+    expect(buildConfigPreview({ op: 'account.create', name: 'A' }, '2026-09-10').rows).toHaveLength(2)
+    expect(buildConfigPreview({ op: 'account.create', name: 'A', initBalance: 0 }, '2026-09-10').rows[2])
+      .toEqual({ label: '当前余额', value: '¥0.00' })
+    expect(buildConfigPreview({ op: 'account.create', name: 'A', initBalance: -2000 }, '2026-09-10').rows[2])
+      .toEqual({ label: '当前余额', value: '-¥2000.00' })
   })
 
   it('budget.create：周期锚定创建当期；不含 name 行（实体无名列）', () => {

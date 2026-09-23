@@ -86,8 +86,10 @@ LEDGER_PARSE = PromptTemplate(
         '- "config": 对象，仅 intent=config。"op" 指定操作，参数按 op 附带，'
         "用户没有明确提到的可选参数一律省略。op 只允许以下 6 个值：\n"
         '  "book.create": {name: 账本名, icon?: 单个表情符号}；\n'
-        '  "account.create": {name: 账户名, accountType: "income"或"expense", '
-        'initBalance?: 数字（单位：元）}；\n'
+        '  "account.create": {name: 账户名, accountType?: 账户分类名（用户怎么说就'
+        '怎么写，如 储蓄卡/信用卡/微信/现金；**不是**餐饮/交通那些记账分类，'
+        '用户没提就省略）, initBalance?: 数字（单位：元；欠款为负数，如信用卡'
+        '欠 2000 填 -2000）}；\n'
         '  "budget.create": {name: 预算名, category: 分类名, amount: 数字（单位：元）, '
         'period?: "month"或"year"（未说时省略，按 month 处理）}；\n'
         '  "savings.create": {name: 目标名, targetAmount: 数字（单位：元）, '

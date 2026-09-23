@@ -221,13 +221,29 @@ describe('confirmConfig 逐 op 执行（T13-5 卡片3）', () => {
     expect(mockBridge.insertBook.mock.calls[0][0].icon).toBe('✈️')
   })
 
-  it('account.create → accountType 折中文标签；initBalance 回执引导补记', async () => {
-    const result = await openAndConfirm({ op: 'account.create', name: '工资卡', accountType: 'income', initBalance: 5000 })
+  it('account.create → 分类原样写入 + 余额真落库（REQ-69：不再折标签/引导补记）', async () => {
+    const result = await openAndConfirm({ op: 'account.create', name: '工资卡', accountType: '储蓄卡', initBalance: 5000 })
     const [acc] = mockBridge.insertAccount.mock.calls[0]
-    expect(acc).toEqual({ id: expect.any(String), ownerId: 'local', name: '工资卡', icon: '💰', accountType: '收入账户', version: 1 })
+    expect(acc).toEqual({
+      id: expect.any(String), ownerId: 'local', name: '工资卡', icon: '💰',
+      accountType: '储蓄卡', balanceCents: 500000, version: 1,
+    })
     expect(acc.id).toMatch(UUID_RE)
-    expect(lastMsg(result)).toContain('已创建账户「工资卡」（收入账户）')
-    expect(lastMsg(result)).toContain('¥5000.00 请再记一笔写入')
+    expect(lastMsg(result)).toBe('已创建账户「工资卡」（储蓄卡）；当前余额 ¥5000.00')
+  })
+
+  it('account.create 省略分类与余额：accountType=null、余额 0（不再要求 income|expense）', async () => {
+    const result = await openAndConfirm({ op: 'account.create', name: '零钱包' })
+    const [acc] = mockBridge.insertAccount.mock.calls[0]
+    expect(acc).toMatchObject({ accountType: null, balanceCents: 0 })
+    expect(lastMsg(result)).toBe('已创建账户「零钱包」')
+  })
+
+  it('account.create 信用卡欠款：负余额按「更新后的绝对值」落库', async () => {
+    const result = await openAndConfirm({ op: 'account.create', name: '中信信用卡', accountType: '信用卡', initBalance: -2000 })
+    const [acc] = mockBridge.insertAccount.mock.calls[0]
+    expect(acc).toMatchObject({ accountType: '信用卡', balanceCents: -200000 })
+    expect(lastMsg(result)).toBe('已创建账户「中信信用卡」（信用卡）；当前余额 -¥2000.00')
   })
 
   it('budget.create → insertBudget（categoryId 解析、period=当期、元→分）', async () => {

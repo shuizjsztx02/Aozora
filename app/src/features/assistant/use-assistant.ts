@@ -98,6 +98,8 @@ import {
 import { INTERRUPTED_TURN_NOTE } from './history-projection'
 import { newUuid } from '../../platform/uuid'
 import { todayBizDate } from '../../domain/date'
+// REQ-69（T18-6）：余额（可负）的显示口径，与账户页同一 helper
+import { formatSigned } from '../../domain/money'
 import { META_KEY_DEFAULT_ACCOUNT_ID, META_KEY_DEFAULT_BOOK_ID } from '../../domain/meta'
 import type {
   AccountData, BookData, BudgetData, CategoryData, SavingsGoalData, TransactionData,
@@ -1714,19 +1716,22 @@ export function useAssistant({
           break
         }
         case 'account.create': {
-          // config 契约 accountType 是 income|expense 二值（T13-4 prompt）；native
-          // accountType 是自由文案分类（储蓄卡/微信/…），折成中文标签再写。
-          const typeLabel = cfg.accountType === 'income' ? '收入账户' : '支出账户'
+          // REQ-69（T18-6）：分类是自由文案（与设置页同值域），**原样写入**——
+          // 旧口径把它折成「收入账户/支出账户」，用户说的「储蓄卡」会丢失。
+          // 余额同时真落库（T18-5 的 AccountEntity.balanceCents）；元→分，允许负值。
+          const balanceCents = Math.round((cfg.initBalance ?? 0) * 100)
           await bridge.insertAccount(
             {
               id: newUuid(), ownerId: 'local', name: cfg.name,
-              icon: '💰', accountType: typeLabel, version: 1,
+              icon: '💰', accountType: cfg.accountType ?? null,
+              balanceCents, version: 1,
             },
             newUuid(),
           )
-          text = `已创建账户「${cfg.name}」（${typeLabel}）`
-          if (cfg.initBalance) {
-            text += `；期初余额 ${yuan(cfg.initBalance)} 请再记一笔写入（账户暂无期初字段）`
+          text = `已创建账户「${cfg.name}」`
+          if (cfg.accountType) text += `（${cfg.accountType}）`
+          if (cfg.initBalance !== undefined) {
+            text += `；当前余额 ${formatSigned(balanceCents)}`
           }
           break
         }

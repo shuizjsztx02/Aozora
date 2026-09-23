@@ -348,6 +348,9 @@ async def _execute_account_create(
     data = _model_or_400(AccountCreate, {
         "name": payload.get("name"),
         "icon": payload.get("icon"),
+        # REQ-69（T18-6）：分类与余额在创建时即可写入；余额缺省 = 0（未校准）
+        "account_type": payload.get("accountType"),
+        "balance_cents": payload.get("balanceCents", 0),
     })
     account = await AccountService(db).create_account(user_id, data)
     await _register_change(
@@ -364,6 +367,10 @@ async def _execute_account_update(
     data = _model_or_400(AccountUpdate, {
         "name": payload.get("name"),
         "icon": payload.get("icon"),
+        # REQ-69（T18-6）：None = 不修改（与 name/icon 同一局部合并语义）。
+        # 余额拿的是**绝对值**（决策 #4），不是增量——重放不会重复累加。
+        "account_type": payload.get("accountType"),
+        "balance_cents": payload.get("balanceCents"),
         "version": payload.get("version"),
     })
     account = await AccountService(db).update_account(account_id, user_id, data)

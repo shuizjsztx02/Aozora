@@ -304,6 +304,42 @@ class TestV2LedgerOps:
         assert archive.status_code == 200
         assert _rows(factory, Account, id=acc_id)[0].archived_at is not None
 
+    def test_account_create_and_update_carry_type_and_balance(self, v2_env):
+        """REQ-69（T18-6）：AI 建账户时可带分类/余额，改账户时可改分类/余额。
+
+        两侧语义的钉子：**余额传绝对值**（决策 #4 的幂等铁律），且**键缺省 =
+        不改**（AccountUpdate 的局部合并）——把这两条弄反，要么重放会重复累加，
+        要么一次改名把余额清零。
+        """
+        from src.models.ledger import Account
+
+        c, factory = v2_env
+        user = _guest(v2_env)
+        book_id = _mk_book(c, user)
+
+        create = _execute(v2_env, user, book_id, _v2("account_create", {
+            "name": "中信信用卡", "accountType": "信用卡", "balanceCents": -200000,
+        }))
+        assert create.status_code == 200
+        acc_id = uuid.UUID(create.json()["transaction_ids"][0])
+        account = _rows(factory, Account, id=acc_id)[0]
+        assert (account.account_type, account.balance_cents) == ("信用卡", -200000)
+
+        update = _execute(v2_env, user, book_id, _v2("account_update", {
+            "accountId": str(acc_id), "version": account.version,
+            "accountType": "储蓄卡", "balanceCents": 500000,
+        }))
+        assert update.status_code == 200
+        row = _rows(factory, Account, id=acc_id)[0]
+        assert (row.account_type, row.balance_cents) == ("储蓄卡", 500000)
+
+        # 只改名：分类与余额都保持原值（键缺省 = 不改；0 才是「清零」）
+        rename = _execute(v2_env, user, book_id, _v2("account_update", {
+            "accountId": str(acc_id), "version": row.version, "name": "零钱",
+        }))
+        assert rename.status_code == 200
+        assert _rows(factory, Account, id=acc_id)[0].balance_cents == 500000
+
     def test_book_create_update_delete(self, v2_env):
         from src.models.ledger import Book
 

@@ -128,6 +128,99 @@ describe('AccountsPage', () => {
   })
 })
 
+// ─── REQ-69（T18-6）：手动设置「当前余额」 ───
+
+describe('AccountsPage · 当前余额（REQ-69）', () => {
+  beforeEach(() => {
+    vi.clearAllMocks()
+    mockBridge.call.mockResolvedValue([])
+    mockBridge.insertAccount.mockResolvedValue({ id: 'acc-new' })
+    mockBridge.updateAccount.mockResolvedValue({ id: 'a1' })
+  })
+
+  it('新建：余额（元）转分进 insertAccount 载荷；恒为绝对值', async () => {
+    const user = userEvent.setup()
+    renderPage()
+    await user.click(await screen.findByText('＋ 添加账户'))
+    await user.type(screen.getByPlaceholderText('账户名称'), '工资卡')
+    await user.clear(screen.getByTestId('account-balance-input'))
+    await user.type(screen.getByTestId('account-balance-input'), '1500.50')
+    await user.click(screen.getByRole('button', { name: '添加' }))
+
+    await waitFor(() => expect(mockBridge.insertAccount).toHaveBeenCalledTimes(1))
+    expect(mockBridge.insertAccount.mock.calls[0][0]).toMatchObject({ balanceCents: 150050 })
+  })
+
+  it('新建：欠款填负数 → 负分落库（信用卡欠款是正常状态）', async () => {
+    const user = userEvent.setup()
+    renderPage()
+    await user.click(await screen.findByText('＋ 添加账户'))
+    await user.type(screen.getByPlaceholderText('账户名称'), '信用卡')
+    await user.clear(screen.getByTestId('account-balance-input'))
+    await user.type(screen.getByTestId('account-balance-input'), '-2000')
+    await user.click(screen.getByRole('button', { name: '添加' }))
+
+    await waitFor(() => expect(mockBridge.insertAccount).toHaveBeenCalledTimes(1))
+    expect(mockBridge.insertAccount.mock.calls[0][0]).toMatchObject({ balanceCents: -200000 })
+  })
+
+  it('新建：留空按 0（未校准），不报错', async () => {
+    const user = userEvent.setup()
+    renderPage()
+    await user.click(await screen.findByText('＋ 添加账户'))
+    await user.type(screen.getByPlaceholderText('账户名称'), '零钱包')
+    await user.clear(screen.getByTestId('account-balance-input'))
+    await user.click(screen.getByRole('button', { name: '添加' }))
+
+    await waitFor(() => expect(mockBridge.insertAccount).toHaveBeenCalledTimes(1))
+    expect(mockBridge.insertAccount.mock.calls[0][0]).toMatchObject({ balanceCents: 0 })
+  })
+
+  it('新建：非法余额 → 可见报错且零写入（不静默改值）', async () => {
+    const user = userEvent.setup()
+    renderPage()
+    await user.click(await screen.findByText('＋ 添加账户'))
+    await user.type(screen.getByPlaceholderText('账户名称'), '工资卡')
+    await user.clear(screen.getByTestId('account-balance-input'))
+    await user.type(screen.getByTestId('account-balance-input'), '12.345')
+    await user.click(screen.getByRole('button', { name: '添加' }))
+
+    expect(await screen.findByText(/当前余额请填数字/)).toBeInTheDocument()
+    expect(mockBridge.insertAccount).not.toHaveBeenCalled()
+    // 表单保留，供用户改后重试
+    expect(screen.getByTestId('account-form')).toBeInTheDocument()
+  })
+
+  it('编辑：表单预填现有余额，保存带上更新后的绝对值', async () => {
+    mockBridge.call.mockResolvedValue([
+      { id: 'a1', name: '信用卡', icon: '💳', version: 2, accountType: '信用卡', balanceCents: -200000 },
+    ])
+    const user = userEvent.setup()
+    renderPage()
+    await user.click(await screen.findByText('信用卡'))
+    // 预填：-2000（元）
+    expect(screen.getByTestId('account-balance-input')).toHaveValue('-2000')
+    await user.clear(screen.getByTestId('account-balance-input'))
+    await user.type(screen.getByTestId('account-balance-input'), '3500')
+    await user.click(screen.getByRole('button', { name: '保存' }))
+
+    await waitFor(() => expect(mockBridge.updateAccount).toHaveBeenCalledTimes(1))
+    expect(mockBridge.updateAccount.mock.calls[0][0]).toMatchObject({
+      id: 'a1', balanceCents: 350000, version: 3,
+    })
+  })
+
+  it('列表行显示当前余额（负值带负号）', async () => {
+    mockBridge.call.mockResolvedValue([
+      { id: 'a1', name: '招行卡', icon: '🏦', version: 1, accountType: '储蓄卡', balanceCents: 500000 },
+      { id: 'a2', name: '信用卡', icon: '💳', version: 1, accountType: '信用卡', balanceCents: -200000 },
+    ])
+    renderPage()
+    expect(await screen.findByTestId('account-balance-a1')).toHaveTextContent('¥5000.00')
+    expect(screen.getByTestId('account-balance-a2')).toHaveTextContent('-¥2000.00')
+  })
+})
+
 // ─── T9-5b（REQ-11）：默认勾选 + 长按排序 ───
 
 describe('AccountsPage · 排序与默认（REQ-11）', () => {

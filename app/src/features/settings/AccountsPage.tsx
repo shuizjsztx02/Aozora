@@ -15,9 +15,36 @@ import { CategoryIcon } from '../../components/CategoryIcon'
 import { IconPicker } from '../../components/IconPicker'
 import type { AccountData } from '../../platform/bridge/bridge-types'
 import { META_KEY_ACCOUNT_ORDER, META_KEY_DEFAULT_ACCOUNT_ID, serializeIdOrder } from '../../domain/meta'
+import { formatSigned, fromYuan } from '../../domain/money'
 
 /** REQ-5：预置账户分类；用户可经"+ 自定义"追加，取消选择即不填（accountType null）。 */
 const DEFAULT_ACCOUNT_TYPES = ['储蓄卡', '信用卡', '花呗', '微信', '支付宝', '现金', '余额宝', '零钱通']
+
+/**
+ * REQ-69（T18-6）：「当前余额」输入（元）→ 分。余额**允许负值**（信用卡欠款），
+ * 而 `money.ts` 的 fromYuan 只收非负值——故取符号后仍复用它（沿用其四舍五入与
+ * 安全整数校验）。空串 = 0（未校准）；返回 null = 格式非法，提交时报错、不静默改值。
+ */
+function parseBalanceYuan(raw: string): number | null {
+  const s = raw.trim()
+  if (!s) return 0
+  if (!/^-?\d+(\.\d{1,2})?$/.test(s)) return null
+  try {
+    const cents = fromYuan(Math.abs(Number(s)))
+    return s.startsWith('-') ? -cents : cents
+  } catch {
+    return null
+  }
+}
+
+/** 分 → 元输入串（无 ¥ 前缀；整数余额不带小数尾巴，便于编辑）。 */
+function balanceYuanInput(cents: number): string {
+  const abs = Math.abs(cents)
+  const body = abs % 100 === 0
+    ? String(abs / 100)
+    : `${Math.trunc(abs / 100)}.${String(abs % 100).padStart(2, '0')}`
+  return cents < 0 ? `-${body}` : body
+}
 
 export function AccountsPage() {
   const bridge = useBridge()
@@ -32,6 +59,8 @@ export function AccountsPage() {
   // T9-6（REQ-13）：图标值并入共享 IconPicker — emoji/自定义文本/照片 data URI 单一受控值
   const [icon, setIcon] = useState<string | null>('💰')
   const [accountType, setAccountType] = useState('')
+  // REQ-69（T18-6）：当前余额（元，**可负** = 信用卡欠款）；'' 视同 0
+  const [balanceYuan, setBalanceYuan] = useState('0')
   const [addedTypes, setAddedTypes] = useState<string[]>([])
   const [showTypeInput, setShowTypeInput] = useState(false)
   const [typeInput, setTypeInput] = useState('')
@@ -68,6 +97,7 @@ export function AccountsPage() {
     // 非预置值（旧自定义文本 / 照片 data URI）由 IconPicker 自动回填对应控件
     setIcon(acc?.icon ?? '💰')
     setAccountType(acc?.accountType ?? '')
+    setBalanceYuan(balanceYuanInput(acc?.balanceCents ?? 0))
     setAddedTypes([])
     setShowTypeInput(false)
     setTypeInput('')
@@ -101,18 +131,24 @@ export function AccountsPage() {
       return
     }
     const finalIcon = icon || '💰'
+    // REQ-69（T18-6）：余额恒传**绝对值**（决策 #4 的幂等铁律），不是增量
+    const balanceCents = parseBalanceYuan(balanceYuan)
+    if (balanceCents === null) {
+      setError('当前余额请填数字（最多两位小数，欠款填负数）')
+      return
+    }
     try {
       // 必须走 NativeBridge 封装：native 侧期望 {account, mutationId} 包裹结构，且 ownerId 必填
       if (editing) {
         // 决策 #4：account.update 局部合并，version 必须递增
         await bridge.updateAccount(
-          { id: editing.id, ownerId: 'local', name: trimmed, icon: finalIcon, accountType: accountType || null, version: editing.version + 1 },
+          { id: editing.id, ownerId: 'local', name: trimmed, icon: finalIcon, accountType: accountType || null, balanceCents, version: editing.version + 1 },
           newUuid()
         )
       } else {
         // 服务端 sync/ai 契约要求 UUID（第六轮 Bug-5.2）
         await bridge.insertAccount(
-          { id: newUuid(), ownerId: 'local', name: trimmed, icon: finalIcon, accountType: accountType || null, version: 1 },
+          { id: newUuid(), ownerId: 'local', name: trimmed, icon: finalIcon, accountType: accountType || null, balanceCents, version: 1 },
           newUuid()
         )
       }
@@ -246,6 +282,14 @@ export function AccountsPage() {
                     </span>
                   )}
                 </span>
+                {/* REQ-69（T18-6）：当前余额（可负）。0 也照显，用户能核对写入结果 */}
+                <span
+                  className="text-sm shrink-0 tabular-nums"
+                  style={{ color: 'var(--ink2)' }}
+                  data-testid={`account-balance-${acc.id}`}
+                >
+                  {formatSigned(acc.balanceCents ?? 0)}
+                </span>
                 {/* 排序模式：↑↓；普通模式：默认勾选（radio 语义） */}
                 {reorderMode ? (
                   <div className="flex gap-1 shrink-0">
@@ -357,6 +401,17 @@ export function AccountsPage() {
                 style={{ background: 'var(--glass)', color: 'var(--ink)', border: '1px solid var(--glass-border)' }}
               />
             )}
+            {/* REQ-69（T18-6）：当前余额（元）。手动设置后随账户上行同步（T18-5 两端化） */}
+            <input
+              type="text"
+              inputMode="decimal"
+              value={balanceYuan}
+              onChange={e => setBalanceYuan(e.target.value)}
+              placeholder="当前余额（元）；欠款填负数，留空为 0"
+              className="w-full px-3 py-2 rounded-lg text-sm outline-none"
+              style={{ background: 'var(--glass)', color: 'var(--ink)', border: '1px solid var(--glass-border)' }}
+              data-testid="account-balance-input"
+            />
             {/* T9-6（REQ-13）：图标区换共享 IconPicker（emoji 宫格 + 照片 + ≤4 字符自定义文本） */}
             <IconPicker icon={icon} onChange={setIcon} customText name={name} fallback="💰" />
             {error && (

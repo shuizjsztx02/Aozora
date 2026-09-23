@@ -85,7 +85,7 @@ from datetime import date
 from typing import Any, Literal
 
 from jsonschema import Draft7Validator
-from sqlalchemy import String, case, cast, false, func, select
+from sqlalchemy import String, and_, case, cast, false, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from src.models.budget import Budget, BudgetType
@@ -700,6 +700,34 @@ _TX_ITEM_PROPERTIES: dict[str, Any] = {
 
 _TX_ITEM_REQUIRED: list[str] = ["type", "amountCents", "categoryName", "bizDate"]
 
+#: 账户分类（REQ-69 / T18-6）：**自由文案**，与客户端 AccountsPage 同值域
+#: （储蓄卡/信用卡/微信…或用户自定义）。上限 64 = ``accounts.account_type`` 列宽。
+#: T18-6 之前 AI 只改名字与图标，这条字段是本卡放开的。
+_ACCOUNT_TYPE_SCHEMA: dict[str, Any] = {
+    "type": "string",
+    "minLength": 1,
+    "maxLength": 64,
+    "description": (
+        "账户的分类名，用用户自己的说法（如「储蓄卡」「信用卡」「微信」）。"
+        "**不是**记账分类（餐饮/交通那些），也不是「收入账户」「支出账户」"
+        "这类笼统标签。用户没提分类就省略。"
+    ),
+}
+
+#: 账户余额（REQ-69 / T18-6）：单位**分**，恒为**绝对值**（决策 #4 的幂等铁律），
+#: **允许负值** = 信用卡欠款。
+_ACCOUNT_BALANCE_SCHEMA: dict[str, Any] = {
+    "type": "integer",
+    "minimum": -9007199254740991,
+    "maximum": 9007199254740991,
+    "description": (
+        "账户当前余额，单位是分（1 元 = 100 分），可正可负（信用卡欠款为负）。"
+        "你必须自己完成元到分的换算：「五千」= 500000、「欠两千」= -200000。"
+        "必须填**更新后的绝对值**，不要填增减量：用户说「再充 500，现在 3500」"
+        "就填 350000。用户没提金额就省略。"
+    ),
+}
+
 
 def _tx_item_schema() -> dict[str, Any]:
     return {
@@ -809,6 +837,12 @@ def _format_yuan(cents: int) -> str:
     sign = "-" if cents < 0 else ""
     cents = abs(cents)
     return f"{sign}{cents // 100}.{cents % 100:02d}"
+
+
+def _format_signed_yuan(cents: int) -> str:
+    """分 → 「¥12.50」/「-¥12.50」——余额等**可为负**的金额（`_format_yuan` 的
+    负号在数字前，直接加 ¥ 会得到「¥-12.50」）。"""
+    return f"{'-' if cents < 0 else ''}¥{_format_yuan(abs(cents))}"
 
 
 def _period_range(period: str) -> tuple[date, date]:
@@ -1661,24 +1695,28 @@ async def _handle_account_balances(ctx: ToolContext, params: dict[str, Any]) -> 
     date_from = _parse_biz_date(params["dateFrom"]) if params.get("dateFrom") else None
     date_to = _parse_biz_date(params["dateTo"]) if params.get("dateTo") else None
 
-    conditions = [
+    # 期间/账本限定只约束**流水聚合**，故全部落在 JOIN 的 ON 上（外连接）：
+    # 没有任何流水的账户也要出现——它可能有用户手动校准过的余额，用户问
+    # 「我这张卡有多少钱」时若它不在结果里，模型只能回「没有流水」，与账户页
+    # 显示的余额自相矛盾（REQ-69 / 决策 #3 要消掉的就是这一类两个答案）。
+    tx_conditions = [
+        # 关联条件本身也在 ON 上：外连接后它不再由 ``join(Account, ...)`` 提供，
+        # 漏掉它就退化成「每个账户都汇总全部流水」的笛卡尔积。
+        Transaction.account_id == Account.id,
         Transaction.book_id == ctx.book_id,
         Transaction.deleted_at.is_(None),
         Transaction.account_id.is_not(None),
-        # 归档账户与 ``account_list`` / 名字映射同口径剔除：它不在清单里、也
-        # 解析不到，若这里仍列出来，模型会看到一个用户根本记不进去的账户名
-        # （「看得见却记不了」），与分类/预算侧已修过的同一类死路。
-        Account.archived_at.is_(None),
     ]
     if date_from is not None:
-        conditions.append(Transaction.biz_date >= date_from)
+        tx_conditions.append(Transaction.biz_date >= date_from)
     if date_to is not None:
-        conditions.append(Transaction.biz_date <= date_to)
+        tx_conditions.append(Transaction.biz_date <= date_to)
 
     rows = await ctx.db.execute(
         select(
             Account.id,
             Account.name,
+            Account.balance_cents,
             func.coalesce(
                 func.sum(case((Transaction.type == TxType.INCOME, Transaction.amount_cents), else_=0)), 0,
             ),
@@ -1686,25 +1724,42 @@ async def _handle_account_balances(ctx: ToolContext, params: dict[str, Any]) -> 
                 func.sum(case((Transaction.type == TxType.EXPENSE, Transaction.amount_cents), else_=0)), 0,
             ),
         )
-        .join(Account, Transaction.account_id == Account.id)
-        .where(*conditions)
+        .select_from(Account)
+        .join(Transaction, and_(*tx_conditions), isouter=True)
+        # 账户是用户级实体（流水才是账本级），列出账户时这一条过滤必须自己带——
+        # 原查询靠 JOIN 流水间接限定归属，改成外连接后 JOIN 不再起这个作用。
+        .where(
+            Account.owner_id == ctx.user_id,
+            # 归档账户与 ``account_list`` / 名字映射同口径剔除：它不在清单里、也
+            # 解析不到，若这里仍列出来，模型会看到一个用户根本记不进去的账户名
+            # （「看得见却记不了」），与分类/预算侧已修过的同一类死路。
+            Account.archived_at.is_(None),
+        )
         # 按 id 而非 name 分组：账户没有唯一性约束，两个同名账户按名字分组会把
         # 它们的金额合成一个数——那是错的，不是「简洁」。
-        .group_by(Account.id, Account.name)
+        .group_by(Account.id, Account.name, Account.balance_cents)
         .order_by(Account.name, Account.id),
     )
     balances = []
-    for _account_id, name, income, expense in rows.all():
+    for _account_id, name, stored_cents, income, expense in rows.all():
         income_int, expense_int = int(income), int(expense)
         balances.append({
             "name": name,
             "incomeCents": income_int,
             "expenseCents": expense_int,
             "netCents": income_int - expense_int,
+            # REQ-69（决策 #3）：存量余额——与 netCents 口径不同，二者不等是正常的
+            "balanceCents": int(stored_cents or 0),
         })
     return ToolOutcome.result({
         "accounts": balances,
-        "note": "只包含有记录关联的账户；未出现在结果里的账户期间内没有流水。同名账户会分列成多条。",
+        "note": (
+            "列出的账户是所有未归档账户。incomeCents/expenseCents/netCents 是"
+            "所选期间的流水（没有流水的账户为 0）；balanceCents 是账户**当前余额**，"
+            "由用户手动设置或记账联动维护，**不随期间变化**。"
+            "两者不相等是正常的：差额来自手动校准与期间之外的流水。"
+            "回答「账户有多少钱」用 balanceCents；回答「这段时间花了多少」用 netCents。"
+        ),
     })
 
 
@@ -1893,10 +1948,19 @@ async def _handle_account_create(ctx: ToolContext, params: dict[str, Any]) -> To
     payload: dict[str, Any] = {"name": name}
     if params.get("icon"):
         payload["icon"] = str(params["icon"])
+    # REQ-69（T18-6）：分类与余额在**创建时**就能给（用户常说「建一个储蓄卡账户，
+    # 里面有五千」；只给 update 会逼模型分两步走）。
+    detail: list[str] = []
+    if params.get("accountType"):
+        payload["accountType"] = str(params["accountType"])
+        detail.append(str(params["accountType"]))
+    if params.get("balanceCents") is not None:
+        payload["balanceCents"] = int(params["balanceCents"])
+        detail.append(f"余额 {_format_signed_yuan(int(params['balanceCents']))}")
     return ToolOutcome.proposal({
         "action": "account_create",
         "payload": payload,
-        "message": f"新建账户「{name}」",
+        "message": f"新建账户「{name}」" + (f"（{'，'.join(detail)}）" if detail else ""),
         "warnings": [],
     })
 
@@ -1917,6 +1981,14 @@ async def _handle_account_update(ctx: ToolContext, params: dict[str, Any]) -> To
     if params.get("icon"):
         payload["icon"] = str(params["icon"])
         notes.append("更换图标")
+    # REQ-69（T18-6）：放开旧口径写死的「改不动账目余额、只改名字与图标」。
+    # 余额传的是**绝对值**（执行体按 None=不修改 的局部合并语义写入）。
+    if params.get("accountType"):
+        payload["accountType"] = str(params["accountType"])
+        notes.append(f"分类改为「{params['accountType']}」")
+    if params.get("balanceCents") is not None:
+        payload["balanceCents"] = int(params["balanceCents"])
+        notes.append(f"余额改为 {_format_signed_yuan(int(params['balanceCents']))}")
     if len(payload) == 2:
         return ToolOutcome.failure(ERR_INVALID_ARGUMENTS, argument="changes")
 
@@ -3370,9 +3442,12 @@ TOOLS: tuple[Tool, ...] = (
         domain=DOMAIN_ACCOUNT,
         kind="read",
         description=(
-            "按账户汇总金额流向：每个账户在某段时间内的收入、支出与净额。"
-            "用户问「招行卡花了多少」「各账户的收支」时用它。"
-            "不传日期则统计全部历史。只能统计有关联记录到账户的交易。"
+            "按账户汇总：每个账户在某段时间内的收入、支出、净额，以及账户的"
+            "**当前余额**。用户问「招行卡花了多少」「各账户的收支」「我这张卡还有"
+            "多少钱」时用它。不传日期则统计全部历史。"
+            "「当前余额」是用户手动设置 / 记账联动维护的存量数，**不随期间变化**；"
+            "它与期间净额不相等是正常的（差额来自手动校准与期间之外的流水）。"
+            "回答「账户有多少钱」用当前余额，回答「这段时间花了多少」用净额。"
         ),
         parameters=_object_schema({
             "dateFrom": {
@@ -3398,7 +3473,8 @@ TOOLS: tuple[Tool, ...] = (
         description=(
             "新建一个账户（如「招行卡」「现金」「支付宝」）。用户说「帮我建一个"
             "账户」时用它。账户名不要和已有账户重名——先用 account_list 核对。"
-            "只建账户本身，不涉及任何金额。"
+            "用户同时说了分类（「建一个储蓄卡账户」）或余额（「里面有五千」）时"
+            "一并填上；没说就省略。"
         ),
         parameters=_object_schema(
             {
@@ -3413,6 +3489,8 @@ TOOLS: tuple[Tool, ...] = (
                     "maxLength": 64,
                     "description": "图标标识；用户没提就不要填（会走默认图标）。",
                 },
+                "accountType": _ACCOUNT_TYPE_SCHEMA,
+                "balanceCents": _ACCOUNT_BALANCE_SCHEMA,
             },
             required=["name"],
         ),
@@ -3424,10 +3502,11 @@ TOOLS: tuple[Tool, ...] = (
         kind="write",
         proposal_action="account_update",
         description=(
-            "修改一个已有账户的名称或图标。用户说「把招行卡改名成工资卡」时用它。"
+            "修改一个已有账户的名称、图标、分类或当前余额。用户说「把招行卡改名成"
+            "工资卡」「把交行卡分类到储蓄卡」「给这张卡设余额五千」时用它。"
             "accountName 必须与现有账户完全一致（先用 account_list 核对）；重名"
-            "账户会被拒绝，那时请向用户指明是哪一个。改不动账目余额——本工具只"
-            "改账户自身的名字与图标。"
+            "账户会被拒绝，那时请向用户指明是哪一个。改余额前先用 account_balances"
+            "看当前值；余额一律给更新后的**绝对值**，不是增减量。"
         ),
         parameters=_object_schema(
             {
@@ -3446,6 +3525,8 @@ TOOLS: tuple[Tool, ...] = (
                     "maxLength": 64,
                     "description": "新的图标标识；不换图标就不要填。",
                 },
+                "accountType": _ACCOUNT_TYPE_SCHEMA,
+                "balanceCents": _ACCOUNT_BALANCE_SCHEMA,
             },
             required=["accountName"],
         ),

@@ -267,6 +267,47 @@ class TestAccountWriteTools:
         _assert_registry_consistency("account_create", draft)
         assert draft["payload"] == {"name": "微信零钱"}
 
+    async def test_create_carries_type_and_balance_when_the_user_says_so(self, seeded):
+        """REQ-69（T18-6）：建账户时可同时给分类与余额。
+
+        「建一个储蓄卡账户，里面有五千」是一句话一个意图，只给 update 会逼模型
+        分两步走（其间还会出现一个既无分类也无余额的中间态）。
+        """
+        draft = await _draft("account_create", seeded["ctx"], {
+            "name": "中信信用卡", "accountType": "信用卡", "balanceCents": -200000,
+        })
+        _assert_registry_consistency("account_create", draft)
+        assert draft["payload"] == {
+            "name": "中信信用卡", "accountType": "信用卡", "balanceCents": -200000,
+        }
+        assert "信用卡" in draft["message"]
+        assert "-¥2000.00" in draft["message"], "负余额的元呈现不能写成 ¥-2000.00"
+
+    async def test_update_carries_the_absolute_balance_and_the_type(self, seeded):
+        """REQ-69（T18-6）：放开旧口径写死的「改不动账目余额、只改名字与图标」。
+
+        余额是**绝对值**（用户说「设成 5000」而不是「加 5000」），因为只有绝对值
+        才幂等——mutation 重放不会重复累加。
+        """
+        draft = await _draft("account_update", seeded["ctx"], {
+            "accountName": "招行卡", "accountType": "储蓄卡", "balanceCents": 500000,
+        })
+        payload = draft["payload"]
+        assert payload["accountId"] == str(seeded["card"].id)
+        assert payload["version"] == seeded["card"].version
+        assert payload["accountType"] == "储蓄卡"
+        assert payload["balanceCents"] == 500000
+        assert "储蓄卡" in draft["message"] and "¥5000.00" in draft["message"]
+
+    async def test_update_without_any_change_is_refused(self, seeded):
+        """只报账户名（无 name/icon/分类/余额）→ ``invalid_arguments``。
+
+        加字段不能把这道「空改动」护栏撑坏：payload 里除 accountId/version 之外
+        一个改动都没有时仍须拒绝，否则会产出一张什么都不做的确认卡。
+        """
+        outcome = await T.invoke_tool("account_update", seeded["ctx"], {"accountName": "招行卡"})
+        assert outcome.data["code"] == T.ERR_INVALID_ARGUMENTS
+
     async def test_update_resolves_the_account_and_its_version(self, seeded):
         draft = await _draft("account_update", seeded["ctx"], {
             "accountName": "招行卡", "newName": "工资卡",

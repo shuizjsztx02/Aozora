@@ -1115,6 +1115,67 @@ class TestLedgerReadTools:
         balances = {a["name"]: a for a in outcome.data["accounts"]}
         assert balances["招行卡"]["expenseCents"] == 1250
 
+    async def test_account_balances_reports_the_stored_balance_alongside_the_net(self, seeded):
+        """REQ-69（决策 #3）：存量余额与期间净额**同出**——否则模型对「我这张卡
+        有多少钱」只能回净额，与账户页显示的余额是两个答案。"""
+        seeded["card"].balance_cents = 480000
+        await seeded["ctx"].db.commit()
+
+        outcome = await T.invoke_tool("account_balances", seeded["ctx"], {})
+        balances = {a["name"]: a for a in outcome.data["accounts"]}
+        assert balances["招行卡"]["balanceCents"] == 480000
+        # 净额仍是流水口径（1250 + 2000 两笔支出），不被余额污染
+        assert balances["招行卡"]["netCents"] == -3250
+        assert "手动校准" in outcome.data["note"]
+
+    async def test_stored_balance_is_not_period_scoped(self, seeded):
+        """余额是**点值**：换期间它不变，变的只是流水净额。"""
+        seeded["card"].balance_cents = 480000
+        await seeded["ctx"].db.commit()
+
+        sept = await T.invoke_tool(
+            "account_balances", seeded["ctx"],
+            {"dateFrom": "2026-09-01", "dateTo": "2026-09-30"},
+        )
+        row = {a["name"]: a for a in sept.data["accounts"]}["招行卡"]
+        assert row["balanceCents"] == 480000
+        assert row["netCents"] == -1250, "期间净额只算九月那笔"
+
+    async def test_an_account_without_any_transaction_still_lists_its_balance(self, seeded):
+        """REQ-69（T18-6）：没有流水的账户也要出现——它可能有手动校准过的余额。
+
+        漏掉它，用户问「新建的那张卡里有多少钱」时模型只能回「没有流水」，
+        与账户页显示的数字自相矛盾。
+        """
+        from src.models.ledger import Account
+
+        seeded["ctx"].db.add(Account(
+            id=uuid.uuid4(), owner_id=seeded["user"].id,
+            name="新卡", balance_cents=500000,
+        ))
+        await seeded["ctx"].db.commit()
+
+        outcome = await T.invoke_tool("account_balances", seeded["ctx"], {})
+        row = {a["name"]: a for a in outcome.data["accounts"]}["新卡"]
+        assert row["balanceCents"] == 500000
+        assert (row["incomeCents"], row["expenseCents"], row["netCents"]) == (0, 0, 0)
+
+    async def test_another_users_account_is_absent(self, seeded):
+        """账户是**用户级**实体（流水才是账本级）：改成外连接后，归属过滤不再由
+        JOIN 流水间接提供，必须显式带上 ``Account.owner_id``。"""
+        from src.models.ledger import Account
+        from src.models.user import User
+
+        stranger = User(id=uuid.uuid4(), nickname="someone-else")
+        seeded["ctx"].db.add_all([
+            stranger,
+            Account(id=uuid.uuid4(), owner_id=stranger.id, name="别人的卡", balance_cents=999),
+        ])
+        await seeded["ctx"].db.commit()
+
+        outcome = await T.invoke_tool("account_balances", seeded["ctx"], {})
+        assert "别人的卡" not in {a["name"] for a in outcome.data["accounts"]}
+
     async def test_archived_account_is_absent_from_balances(self, seeded):
         """归档账户必须与 ``account_list`` / 名字映射**同口径**剔除。
 

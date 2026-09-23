@@ -20,7 +20,7 @@ import type {
   TransactionData, TransactionInput,
 } from '../platform/bridge/bridge-types'
 import { localBizDate, parseBizDate } from './date'
-import { fromYuan } from './money'
+import { formatSigned, fromYuan } from './money'
 
 /** AI interpret 输出结构（ledger_parse 任务） */
 export interface AiParseOutput {
@@ -540,9 +540,18 @@ export interface AiConfig {
   name: string
   /** book.create：单个表情（可选） */
   icon?: string
-  /** account.create：契约必填（income|expense） */
-  accountType?: 'income' | 'expense'
-  /** account.create：期初余额（元，可选；AccountEntity 无余额列，执行不落库，回执引导补记一笔） */
+  /**
+   * account.create：账户分类（REQ-69 / T18-6 起为**自由分类名**，与设置页同值域：
+   * 储蓄卡/信用卡/微信…或用户自定义；省略 = 不填分类）。
+   *
+   * T18-6 之前是 `income|expense` 二值，执行时折成「收入账户/支出账户」写入——
+   * 用户说「把交行卡分类到储蓄卡」会被写成「支出账户」，分类信息丢失。
+   */
+  accountType?: string
+  /**
+   * account.create：当前余额（元，可选；**允许负值** = 信用卡欠款）。
+   * T18-6 起**真落库**（`AccountEntity.balanceCents` 已于 T18-5 两端化）。
+   */
   initBalance?: number
   /** budget.create：分类名（契约必填，解析 expense 口径分类 id） */
   category?: string
@@ -564,6 +573,8 @@ const AI_CONFIG_OPS: ReadonlySet<string> = new Set<AiConfigOp>([
 /** context.books/accounts/budgets/goals 名单上限（决策 #7：≤30 条 × ≤16 字）。 */
 export const AI_OBJECT_MAX_COUNT = 30
 export const AI_OBJECT_NAME_MAX_CHARS = 16
+/** account.create 分类名上限（= 服务端 `accounts.account_type` 列宽）。 */
+export const AI_ACCOUNT_TYPE_MAX_CHARS = 64
 
 /** 金额容错（元）：number 或数字字符串，>0 且有限才收。 */
 function toPositiveNum(v: unknown): number | undefined {
@@ -580,13 +591,13 @@ function toPositiveNum(v: unknown): number | undefined {
   return n
 }
 
-/** initBalance 容错：≥0（期初 0 元合法）。 */
-function toNonNegativeNum(v: unknown): number | undefined {
+/** 余额容错（元）：number 或数字字符串，有限即收——**允许负值**（信用卡欠款）。 */
+function toSignedNum(v: unknown): number | undefined {
   const n =
     typeof v === 'number' ? v
       : typeof v === 'string' && v.trim() !== '' ? Number(v)
         : NaN
-  if (!Number.isFinite(n) || n < 0) return undefined
+  if (!Number.isFinite(n)) return undefined
   return n
 }
 
@@ -612,9 +623,12 @@ export function parseAiConfig(raw: unknown): AiConfig | null {
       return cfg
     }
     case 'account.create': {
-      if (raw.accountType !== 'income' && raw.accountType !== 'expense') return null
-      cfg.accountType = raw.accountType
-      const bal = toNonNegativeNum(raw.initBalance)
+      // REQ-69（T18-6）：分类是自由文案（与设置页同值域），**省略即不填**——
+      // 不再要求 income|expense 二值（旧契约会把「储蓄卡」折成「支出账户」）。
+      // 超长（> 服务端列宽）按「可选字段坏 → 丢该字段」处理，不截断用户的原话。
+      const type = trimmedNonEmpty(raw.accountType)
+      if (type && type.length <= AI_ACCOUNT_TYPE_MAX_CHARS) cfg.accountType = type
+      const bal = toSignedNum(raw.initBalance)
       if (bal !== undefined) cfg.initBalance = bal
       return cfg
     }
@@ -800,13 +814,13 @@ export function buildConfigPreview(cfg: AiConfig, today: string): ConfigPreview 
       return { title: '⚙️ 新建账本', rows }
     }
     case 'account.create': {
-      const rows = [
-        { label: '操作', value: '新建账户' },
-        { label: '名称', value: cfg.name },
-        { label: '类型', value: cfg.accountType === 'income' ? '收入账户' : '支出账户' },
-      ]
-      if (cfg.initBalance) {
-        rows.push({ label: '期初余额', value: `${YUAN(cfg.initBalance)}（创建后请补记一笔收入）` })
+      const rows = [{ label: '操作', value: '新建账户' }, { label: '名称', value: cfg.name }]
+      // REQ-69（T18-6）：分类为自由文案，省略 = 不填分类（与设置页同口径）
+      if (cfg.accountType) rows.push({ label: '类型', value: cfg.accountType })
+      // T18-6：余额真落库，故不再出现「创建后请补记一笔收入」的引导；
+      // formatSigned 是余额（可负）的既有口径——负数显示为 -¥2000.00。
+      if (cfg.initBalance !== undefined) {
+        rows.push({ label: '当前余额', value: formatSigned(Math.round(cfg.initBalance * 100)) })
       }
       return { title: '⚙️ 新建账户', rows }
     }
