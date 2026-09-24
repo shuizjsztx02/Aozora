@@ -61,6 +61,7 @@ from src.models.savings import SavingsGoal
 from src.models.scheduled import ScheduledRule
 from src.models.sync import SyncOperation
 from src.models.user import User
+
 # T-M7-05j: 偏好项上云——``meta_set`` 的执行体写这张表。
 from src.models.user_preference import UserPreference
 from src.modules.accounts.schemas import AccountCreate, AccountUpdate

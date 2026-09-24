@@ -21,6 +21,7 @@ from src.models.savings import SavingsGoal
 from src.models.scheduled import ScheduledRule
 from src.models.sync import SyncChange
 from src.models.user import DeviceSession, User
+
 # T-M7-05j: 偏好项上云。
 from src.models.user_preference import SYNCABLE_KEYS, UserPreference
 

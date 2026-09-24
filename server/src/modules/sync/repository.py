@@ -13,8 +13,8 @@ from src.models.mutation import MutationIdempotency
 from src.models.persona import ChatPersona
 from src.models.savings import SavingsGoal
 from src.models.scheduled import ScheduledRule
-from src.models.user_preference import UserPreference
 from src.models.sync import SyncChange, SyncOperation
+from src.models.user_preference import UserPreference
 
 # T-M7-01: 实体类型 → 软删语义。归档型（archived_at）与删除型（deleted_at）在
 # pull/bootstrap 的"是否已删"判定、以及 sync delete 的写入列上分道。

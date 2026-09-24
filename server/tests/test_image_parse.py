@@ -451,6 +451,48 @@ class TestImageParseSuccess:
         assert len(resp2.json()["proposal"]["transactions"]) == 1
 
 
+    def test_proposal_id_is_server_generated_not_model_supplied(self, img_env):
+        """T18-9：proposalId 是执行幂等键，必须服务端生成、不采信模型输出。
+
+        LLM 无法真正生成随机 UUID——实测它会照抄训练数据里的示例值
+        ``123e4567-e89b-12d3-a456-426614174000``（也曾产出含 g/h/i/j 这类非
+        十六进制字符的伪 UUID）。若照单全收，用户第二次识别同一张图并「确认」
+        时会命中第一次的幂等键，``execute_proposal`` 直接返回缓存条目、**静默
+        丢弃**这一笔（T18-9 真机复现：服务端零写入、界面无任何提示）。
+
+        守护：模型反复给出同一个值，两次解析仍须得到**不同**的幂等键。
+        """
+        sample_uuid = "123e4567-e89b-12d3-a456-426614174000"
+        model_output = {
+            "action": "add_tx_batch",
+            "proposalId": sample_uuid,
+            "confidence": 0.9,
+            "transactions": [
+                {"type": "expense", "amountCents": 3500, "category": "餐饮",
+                 "note": "午餐", "bizDate": "2026-09-06"},
+            ],
+        }
+        payload = json.dumps(model_output, ensure_ascii=False)
+        img_env.provider.results = [
+            ProviderResult(payload, 200, 100),
+            ProviderResult(payload, 200, 100),
+        ]
+
+        user = _guest(img_env)
+        book_id = _seed_book_and_categories(img_env, user["id"])
+        att_id = _seed_attachment(img_env, user["id"])
+
+        seen = []
+        for _ in range(2):
+            resp = _parse_image(img_env, user, att_id, book_id)
+            assert resp.status_code == 200, resp.text
+            seen.append(resp.json()["proposal"]["proposalId"])
+
+        assert all(pid.startswith("img-") for pid in seen), seen
+        assert sample_uuid not in seen, "模型给出的 proposalId 不得被采用"
+        assert seen[0] != seen[1], "同一张图两次解析必须得到不同的幂等键"
+
+
 class TestImageParseOwnership:
     """Attachment access control."""
 

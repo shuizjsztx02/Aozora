@@ -1432,7 +1432,14 @@ class AIService:
             # -- Extract transactions from LLM output --
             raw_transactions = output.get("transactions") or []
             confidence = output.get("confidence", 0)
-            proposal_id = output.get("proposalId", "") or f"img-{uuid.uuid4()}"
+            # T18-9：幂等键**必须由服务端生成**，不采信模型输出。
+            # LLM 无法真正生成随机 UUID——实测它会照抄训练数据里的示例值
+            # （``123e4567-e89b-12d3-a456-426614174000``）、也曾产出含 g/h/i/j
+            # 这类非十六进制字符的伪 UUID。撞上历史幂等键时，「确认」会变成
+            # 静默丢弃（``execute_proposal`` 命中缓存直接返回，用户看不到任何
+            # 反馈，T18-9 真机复现）。与 agent 路径同款原则：幂等键不接受
+            # 外部输入（见 ``tests/test_ai_agent_approval.py``）。
+            proposal_id = f"img-{uuid.uuid4()}"
 
             if not isinstance(confidence, (int, float)):
                 confidence = 0

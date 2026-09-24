@@ -189,7 +189,9 @@ IMAGE_RECEIPT_PARSE = PromptTemplate(
         "输出格式（ActionProposal）：\n"
         "{\n"
         '  "action": "add_tx_batch",\n'
-        '  "proposalId": "img-<uuid4>",\n'
+        # T18-9：proposalId 由服务端生成（幂等键不采信模型输出），示例给空串
+        # 以免模型去「生成一个 uuid4」——它做不到，只会照抄示例值或编造伪 UUID。
+        '  "proposalId": "",\n'
         '  "confidence": 0.0到1.0的小数,\n'
         '  "transactions": [\n'
         "    {\n"
