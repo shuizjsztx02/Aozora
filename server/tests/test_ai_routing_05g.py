@@ -290,6 +290,57 @@ class TestLexicon:
         assert named == set(T.DOMAINS), "每个域都该有信号（与上一条同源）"
 
 
+class TestProfileSignals:
+    """T19-3（REQ-74 决策 #7）：画像类措辞必须把 ``meta`` 域带进注入面。
+
+    这一组存在的理由是一条**实测出来的能力消失**：``DOMAIN_META`` 原先只有
+    「默认」一个信号，于是「以后叫我爹」只命中 security + reminder —— meta 域被
+    排除在注入面外，模型手里根本没有 ``meta_set``，只能回一句「你自己去设置页
+    填」（附件 #147 的原文）。漏注入的代价是功能凭空消失，故按模块头「宁可多
+    注入」补词。
+    """
+
+    def test_addressing_words_inject_meta_alongside_their_own_domains(self):
+        """「叫我」是**并列**补 meta，不是从 reminder / security 挪走（决策 #7）：
+        并集语义下三个域都注入，由模型按语义选。挪走的代价是「提醒我交房租」
+        丢掉 reminder 域——一次真的漏注入。"""
+        decision = routing.route_domains("以后叫我爹")
+
+        assert T.DOMAIN_META in decision.domains
+        assert T.DOMAIN_REMINDER in decision.domains
+        assert T.DOMAIN_SECURITY in decision.domains
+
+    @pytest.mark.parametrize(
+        "text",
+        [
+            "我的说话偏好是温柔一点",
+            "把我的用户画像清空",
+            "帮我整理一下用户设定",
+            "记住我的记账习惯是月底结算",
+            "语气温柔一点",
+            "以后称呼我为老板",
+            "帮我改一下我的消费偏好",
+        ],
+    )
+    def test_profile_phrasings_route_to_meta(self, text):
+        """画像表单的 7 个字段各有自然说法，逐条钉住（补词时漏一条就是一次
+        「模型没有 meta_set」的静默退化）。"""
+        assert T.DOMAIN_META in routing.route_domains(text).domains
+
+    @pytest.mark.parametrize("text", ["我更偏好用现金", "我习惯月底结账"])
+    def test_a_bare_preference_word_does_not_narrow_to_meta(self, text):
+        """泛词（「偏好」「习惯」本身）**不进词表**——这是这一组最容易踩的坑。
+
+        它们出现时输入未必与设定有关（「我更偏好用现金」是在说记账方式），而
+        **收窄**成 meta 单域会把记账工具一起收走，正是模块头明令避免的漏注入
+        方向。所以词表只收复合词（「消费偏好」「记账习惯」），这类输入仍走
+        兜底全量。"""
+        decision = routing.route_domains(text)
+
+        assert decision.matched is False
+        assert decision.domains == T.DOMAINS
+
+
 # ── 2. 兜底 ────────────────────────────────────────────────────────────────
 
 

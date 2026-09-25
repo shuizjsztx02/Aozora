@@ -395,3 +395,26 @@ class TestMetaSetTool:
         """T-M7-05j：``meta_set`` 的执行位置已迁回服务端（偏好项上云，服务端有
         ``user_preferences`` 表作为存储位置）。它不再在 ``DEVICE_EXECUTED_OPS`` 里。"""
         assert "meta_set" not in T.DEVICE_EXECUTED_OPS
+
+    async def test_user_profile_is_passed_through_as_the_value_field(self, seeded):
+        """T19-3（REQ-74）：``profile`` → ``payload["value"]`` 这条缝。
+
+        工具层的形状与执行体（``proposal_ops._execute_meta_set`` 按
+        ``_META_VALUE_FIELD["user_profile"] == "value"`` 取值）**必须逐字对上**：
+        对不上就是「模型调了、卡也出了、执行体说没有值」——而两边的用例各自都绿。
+        这里只钉**透传**（不改一个字节，浅合并是执行体的事，见
+        ``test_ai_proposal_v2_execution.TestV2MetaSet``）。
+        """
+        draft = await _draft("meta_set", seeded["ctx"], {
+            "key": "user_profile", "profile": '{"nickname": "爹"}',
+        })
+        _assert_registry_consistency("meta_set", draft)
+
+        assert draft["payload"] == {
+            "key": "user_profile", "value": '{"nickname": "爹"}',
+        }
+
+        missing = await T.invoke_tool(
+            "meta_set", seeded["ctx"], {"key": "user_profile"},
+        )
+        assert missing.data["code"] == T.ERR_INVALID_ARGUMENTS

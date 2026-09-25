@@ -98,6 +98,13 @@ from src.models.user import User
 
 from .help import search as search_help
 from .help import topic_titles as help_topic_titles
+
+# 画像的键集**只有一份**，在 prompts 的标签表里（那张表同时用于渲染系统提示的
+# 【用户画像】段）。这里 import 私有名是有意的：抄成第二份必然漂移，而漂移的
+# 形态正是 T19-3 要修的那个 bug——模型按自然语言写键名（「说话偏好」），表单页
+# 按 ``FIELD_ORDER`` 取值，于是**写进去了却显示为空**。同 ``proposal_ops`` 从
+# ``sync.service`` import 私有校验器的先例。
+from .prompts import _PROFILE_LABELS  # noqa: PLC2701 - 见上
 from .validator import _FORMAT_CHECKER
 
 # ---------------------------------------------------------------------------
@@ -3063,6 +3070,16 @@ async def _handle_help_search(ctx: ToolContext, params: dict[str, Any]) -> ToolO
 # 注册表
 # ---------------------------------------------------------------------------
 
+#: 画像的 7 个键与中文含义——**写给模型看的那一份**（T19-3 / REQ-74 决策 #4）。
+#: 直接由 ``prompts._PROFILE_LABELS`` 生成，因此两边不可能漂移；它与客户端表单页
+#: （``UserSettingsPage.FIELD_ORDER``）的一致由 ``tests/test_ai_profile_vocabulary.py``
+#: 钉住。写成一句话而不是让模型自由发挥，是这张卡的核心修复：实测模型对
+#: 「我的说话偏好是温柔一点」会写成 ``{"说话偏好": "温柔一点"}``——键名对不上，
+#: 表单页按 ``FIELD_ORDER`` 取值 → 显示为空，而数据其实已经存进去了。
+_PROFILE_KEYS_HINT: str = " / ".join(
+    f"{key}（{label}）" for key, label in _PROFILE_LABELS.items()
+)
+
 TOOLS: tuple[Tool, ...] = (
     # ── 记账域 ──────────────────────────────────────────────────────────
     Tool(
@@ -4239,11 +4256,12 @@ TOOLS: tuple[Tool, ...] = (
         description=(
             "设置用户级偏好：默认账本（记账时默认用哪个账本）/ 默认账户（新记录默认"
             "挂在哪个账户上）/ 小组件配置（桌面小组件的显示选项 JSON）/ 用户画像"
-            "（AI 注入上下文的个人信息 JSON）。用户说「默认用旅行账本」「以后都记"
-            "在招行卡上」「把我的风格设成保守型」时用它。**这只改默认值 / 配置，"
-            "不动任何已有记录。** 要新增 / 修改账本或账户本身，请用 book_* / "
-            "account_* 那几个工具。**当前角色**请用 persona_switch（单独 op，不"
-            "与本工具混用，理由见 §7.2 经验上限）。"
+            "（**设置页「用户设定」表单里的那份个人信息**，也是 AI 注入上下文的那"
+            "一份）。用户说「默认用旅行账本」「以后都记在招行卡上」「把我的风格设成"
+            "保守型」「**以后叫我老王**」「我的消费偏好是保守一点」时用它。"
+            "**这只改默认值 / 配置，不动任何已有记录。** 要新增 / 修改账本或账户"
+            "本身，请用 book_* / account_* 那几个工具。**当前角色**请用 "
+            "persona_switch（单独 op，不与本工具混用，理由见 §7.2 经验上限）。"
         ),
         parameters=_object_schema(
             {
@@ -4256,7 +4274,8 @@ TOOLS: tuple[Tool, ...] = (
                     "description": (
                         "default_book=默认账本；default_account=默认账户；"
                         "widget_config=小组件配置（同时传 config 字段，JSON 字符串）；"
-                        "user_profile=用户画像（同时传 profile 字段，JSON 字符串）。"
+                        "user_profile=用户画像（同时传 profile 字段，JSON 字符串，"
+                        "**只含这次要改的键**）。"
                     ),
                 },
                 "bookName": {
@@ -4273,7 +4292,18 @@ TOOLS: tuple[Tool, ...] = (
                 },
                 "profile": {
                     "type": "string",
-                    "description": "key=user_profile 时填：用户画像 JSON 字符串。",
+                    "description": (
+                        "key=user_profile 时填：用户画像 JSON **对象**字符串。"
+                        "**只写用户这次要改的键**——没提到的键一律不要出现，它们在"
+                        "服务端按浅合并保留原值（写全量会覆盖掉用户原本填好的其它"
+                        "字段，那是静默数据丢失）。"
+                        f"可用键固定为这 7 个：{_PROFILE_KEYS_HINT}。"
+                        "用户说「以后叫我老王」「以后称呼我为老板」「我的说话偏好"
+                        "是温柔一点」「语气温柔一点」时用它——这些内容在设置页的"
+                        "「用户设定」表单里，用户能直接看到和修改。"
+                        "**注意**：改的是 AI 对你的称呼，不是账号昵称——用户明确说"
+                        "「账号昵称」时才用 auth_update_profile。"
+                    ),
                 },
             },
             required=["key"],
@@ -4423,7 +4453,11 @@ TOOLS: tuple[Tool, ...] = (
         kind="write",
         proposal_action="auth_update_profile",
         description=(
-            "修改用户自己的昵称。用户说「以后叫我小王」「把昵称改成…」时用它。"
+            "修改用户**账号资料里的昵称**——「账号安全」页面顶部显示的那个名字。"
+            "只有当用户明确说「账号昵称」「把昵称改成…」时用它。"
+            "**用户说「以后叫我小王」「以后称呼我为老板」时不要用它**：那是希望 AI "
+            "换个叫法（AI 对他的称呼来自用户画像的 nickname，见 meta_set），不是改"
+            "账号资料——用错工具用户会发现「叫他新名字 AI 还是不理」。"
             "只能改昵称——手机号不能通过对话修改，用户要换手机号请让他到设置页去。"
         ),
         parameters=_object_schema(

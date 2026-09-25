@@ -42,6 +42,8 @@ v2 的 op 注册表（``contracts/action-proposal/schema-v2.json``）有 34 个�
 from __future__ import annotations
 
 import hashlib
+import json
+import logging
 import re
 import uuid
 from collections.abc import Iterable
@@ -94,7 +96,12 @@ from src.modules.telemetry.service import TelemetryService
 from src.modules.transactions.schemas import TransactionUpdate
 from src.modules.transactions.service import TransactionService
 
+# 画像的键集**只有一份**（同 ``tools`` 的用法，见那里的注释）：AI 写进来的键名
+# 必须与表单页 ``FIELD_ORDER`` 逐字相同，否则写进去了表单页也显示为空。
+from .prompts import _PROFILE_LABELS  # noqa: PLC2701 - 见上
 from .tools import DEVICE_EXECUTED_OPS
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True, slots=True)
@@ -994,6 +1001,79 @@ _META_STORAGE_KEY: dict[str, str] = {
     "user_profile": "user_profile",
 }
 
+#: 唯一走**浅合并**写入语义的偏好键（T19-3 / REQ-74 决策 #4）。其余三个键是
+#: 单值指针 / 整份配置，「合并」对它们没有意义。
+_PROFILE_STORAGE_KEY = "user_profile"
+
+
+def _merge_profile(existing: str | None, incoming: str) -> str:
+    """``user_profile`` 的**浅合并**：键在场才改，未出现的键保持原值。
+
+    T19-3（REQ-74 决策 #4）的由来：``_execute_meta_set`` 一直是**整值 upsert**，
+    而 AI 只想改一项（「以后叫我爹」）会把用户已经填好的其余 6 个字段**整体抹掉**
+    ——静默数据丢失。表单页的写入语义不变（它序列化的就是全部字段，用户看到的
+    就是全部），这条只作用于 AI 走的那条路。
+
+    三种输入各有明确处置：
+
+    - **未知键**（不在 ``_PROFILE_LABELS`` 里）→ **丢弃 + 记日志**。决策 #4 在
+      「丢弃」与「400」之间二选一，取宽容档：与 ``MetaWhitelist`` 的「读取端
+      容错」同取向，且模型写了怪键不该让整张卡失败。
+    - **非字符串值** → 同样丢弃 + 记日志。表单页 ``parseStoredForm`` 只认
+      ``typeof === 'string'``，存进去也是**看不见的垃圾**（写了等于没写，却占着
+      一个「已更新」的回执）。
+    - **入参不是 JSON 对象** → **400**。这是刻意的**不宽容**：宽容在这里只能落成
+      「照收但什么都改不了」——卡片回执说「已更新用户画像」而实际零写入，正是
+      T18-3 记的「回执说谎」。且这条路径在执行期、模型已不在回路里，报错比吞掉
+      更诚实（客户端会把它显示成执行失败）。
+
+    存量值解析不出来（历史 AI 写过自然语言键、或更早版本存过非对象）时**不阻断
+    本次写入**，按空对象合并并记一条 warning——那份内容按定义已经读不出来了
+    （表单页对它同样回退空表单）。
+    """
+    try:
+        parsed: Any = json.loads(incoming)
+    except ValueError:
+        parsed = None
+    if not isinstance(parsed, dict):
+        raise AppException(
+            400, "ai_invalid_payload",
+            "user_profile value must be a JSON object",
+        )
+
+    base: dict[str, Any] = {}
+    if existing:
+        try:
+            stored: Any = json.loads(existing)
+        except ValueError:
+            stored = None
+        if isinstance(stored, dict):
+            base = stored
+        else:
+            logger.warning(
+                "meta_set: stored user_profile is not a JSON object, merging into {}",
+                extra={"stored_type": type(stored).__name__},
+            )
+
+    unknown = sorted(k for k in parsed if k not in _PROFILE_LABELS)
+    non_string = sorted(
+        k for k in parsed if k in _PROFILE_LABELS and not isinstance(parsed[k], str)
+    )
+    if unknown or non_string:
+        logger.info(
+            "meta_set: dropped unusable profile keys",
+            extra={"unknown": unknown, "non_string": non_string},
+        )
+
+    merged = {
+        **base,
+        **{
+            k: v for k, v in parsed.items()
+            if k in _PROFILE_LABELS and isinstance(v, str)
+        },
+    }
+    return json.dumps(merged, ensure_ascii=False)
+
 
 async def _execute_meta_set(
     db: AsyncSession, *, user_id: uuid.UUID, book_id: uuid.UUID, payload: dict[str, Any],
@@ -1009,6 +1089,10 @@ async def _execute_meta_set(
     **幂等**：命中 ``(user_id, key)`` 已存在时不覆盖 ``id``（行的 UUID 身份不
     变），只更新 ``value`` 与 ``version``——与 05c 的 ``budget_set`` 同模式（UPSERT
     语义）。
+
+    **写入语义按键分两种**（T19-3 / REQ-74 决策 #4）：``user_profile`` 走
+    **浅合并**（键在场才改，见 :func:`_merge_profile`），其余三个键仍是整值替换
+    ——它们是单值指针 / 整份配置，「合并」对它们没有意义。
     """
     key = payload.get("key")
     if not isinstance(key, str) or key not in _META_VALUE_FIELD:
@@ -1039,6 +1123,17 @@ async def _execute_meta_set(
         )
     )
     existing = existing_result.scalar_one_or_none()
+
+    # 画像走**浅合并**（T19-3 / 决策 #4）：只改用户这次提到的键，未出现的保持原值。
+    # 必须拿到存量行之后再做——所以它在 upsert 查询与写回之间，不是前置校验。
+    if storage_key == _PROFILE_STORAGE_KEY:
+        new_value = _merge_profile(
+            existing.value if existing is not None else None, new_value,
+        )
+        # 合并结果可能比入参更长（存量本来就接近上限），因此合并后**再量一次**。
+        if len(new_value) > 16_000:
+            raise AppException(400, "ai_invalid_payload", "value too long")
+
     if existing is not None:
         existing.value = new_value
         existing.version += 1

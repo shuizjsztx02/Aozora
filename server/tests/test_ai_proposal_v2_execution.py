@@ -18,6 +18,7 @@ sync 登记（T14-8 口径：服务端权威直写必须自己登 sync change）
 from __future__ import annotations
 
 import asyncio
+import json
 import shutil
 import tempfile
 import uuid
@@ -704,6 +705,143 @@ class TestV2MetaSet:
         ))
         assert resp.status_code == 400
         assert resp.json()["code"] == "ai_invalid_payload"
+
+    # ── T19-3（REQ-74 决策 #4）：画像的**浅合并**写入语义 ────────────────
+    #
+    # 旧行为是整值 upsert：AI 只想改一项（「以后叫我爹」）会把用户已经填好的
+    # 其余字段**整体抹掉**——静默数据丢失。下面四条钉住新语义的四条边界。
+
+    def test_meta_set_merges_profile_instead_of_replacing_it(self, v2_env):
+        """只改这次提到的键，没提到的**原样保留**。"""
+        from src.models.user_preference import UserPreference
+
+        c, factory = v2_env
+        user = _guest(v2_env)
+        book_id = _mk_book(c, user)
+
+        first = _execute(v2_env, user, book_id, _v2(
+            "meta_set", {"key": "user_profile", "value":
+                         '{"nickname": "老王", "occupation": "会计"}'},
+        ))
+        assert first.status_code == 200, first.text
+
+        # 第二次只带 nickname——occupation 必须活着（整值替换在这里会露馅）。
+        second = _execute(v2_env, user, book_id, _v2(
+            "meta_set", {"key": "user_profile", "value": '{"nickname": "爹"}'},
+        ))
+        assert second.status_code == 200, second.text
+
+        prefs = _rows(
+            factory, UserPreference,
+            user_id=uuid.UUID(user["id"]), key="user_profile",
+        )
+        assert len(prefs) == 1
+        assert json.loads(prefs[0].value) == {"nickname": "爹", "occupation": "会计"}
+        # 合并也是一次真写入：行身份不变、版本前进（与既有 upsert 口径一致）。
+        assert prefs[0].version == 2
+
+    def test_meta_set_drops_unknown_and_non_string_profile_keys(self, v2_env):
+        """未知键与非字符串值一律**丢弃 + 记日志**（决策 #4 取宽容档）。
+
+        它们即使写进去表单页也看不见——``parseStoredForm`` 只认
+        ``typeof === 'string'`` 的已知键，等于「写了个寂寞」；留在库里则是垃圾。
+        """
+        from src.models.user_preference import UserPreference
+
+        c, factory = v2_env
+        user = _guest(v2_env)
+        book_id = _mk_book(c, user)
+
+        resp = _execute(v2_env, user, book_id, _v2(
+            "meta_set", {"key": "user_profile", "value": json.dumps(
+                {"nickname": "爹", "说话偏好": "温柔一点", "extra": 42},
+                ensure_ascii=False,
+            )},
+        ))
+        assert resp.status_code == 200, resp.text
+
+        prefs = _rows(
+            factory, UserPreference,
+            user_id=uuid.UUID(user["id"]), key="user_profile",
+        )
+        assert len(prefs) == 1
+        assert json.loads(prefs[0].value) == {"nickname": "爹"}
+
+    @pytest.mark.parametrize("bad", ["温柔一点", "[1, 2]", "{不是 JSON}", ""])
+    def test_meta_set_rejects_a_profile_that_is_not_a_json_object(self, v2_env, bad):
+        """**入参不是 JSON 对象 → 400**：这是决策 #4 里刻意**不宽容**的那一档。
+
+        宽容在这里只能落成「照收但什么都改不了」——卡片回执说「已更新用户画像」
+        而库里一个字没变，正是 T18-3 记的「回执说谎」。而且这段路是执行期、模型
+        已不在回路里，报错（客户端显示成执行失败）比吞掉诚实。
+        """
+        c, _ = v2_env
+        user = _guest(v2_env)
+        book_id = _mk_book(c, user)
+
+        resp = _execute(v2_env, user, book_id, _v2(
+            "meta_set", {"key": "user_profile", "value": bad},
+        ))
+
+        assert resp.status_code == 400, (bad, resp.text)
+        assert resp.json()["code"] == "ai_invalid_payload"
+
+    def test_meta_set_merges_onto_an_unusable_stored_profile(self, v2_env):
+        """存量脏值（历史上 AI 写过自然语言、或更早版本存过非对象）**不阻断**写入。
+
+        那份内容按定义已经读不出来了（表单页对它同样回退空表单），卡在这里只会
+        让用户永远改不动自己的画像——比覆盖它更糟。
+        """
+        from src.models.user_preference import UserPreference
+
+        c, factory = v2_env
+        user = _guest(v2_env)
+        book_id = _mk_book(c, user)
+
+        async def _seed_garbage() -> None:
+            async with factory() as session:
+                session.add(UserPreference(
+                    user_id=uuid.UUID(user["id"]), key="user_profile",
+                    value="温柔一点",
+                ))
+                await session.commit()
+
+        asyncio.run(_seed_garbage())
+
+        resp = _execute(v2_env, user, book_id, _v2(
+            "meta_set", {"key": "user_profile", "value": '{"nickname": "爹"}'},
+        ))
+        assert resp.status_code == 200, resp.text
+
+        prefs = _rows(
+            factory, UserPreference,
+            user_id=uuid.UUID(user["id"]), key="user_profile",
+        )
+        assert len(prefs) == 1
+        assert json.loads(prefs[0].value) == {"nickname": "爹"}
+
+    def test_meta_set_still_replaces_widget_config_wholesale(self, v2_env):
+        """浅合并**只给 user_profile**（决策 #4 的边界）：小组件配置是**整份**
+        配置，「合并」对它没有意义。这条钉住口径没有扩散到别的键。"""
+        from src.models.user_preference import UserPreference
+
+        c, factory = v2_env
+        user = _guest(v2_env)
+        book_id = _mk_book(c, user)
+
+        _execute(v2_env, user, book_id, _v2(
+            "meta_set", {"key": "widget_config", "value": '{"showBalance": true}'},
+        ))
+        _execute(v2_env, user, book_id, _v2(
+            "meta_set", {"key": "widget_config", "value": '{"theme": "dark"}'},
+        ))
+
+        prefs = _rows(
+            factory, UserPreference,
+            user_id=uuid.UUID(user["id"]), key="widget_config",
+        )
+        assert len(prefs) == 1
+        assert prefs[0].value == '{"theme": "dark"}'
 
     def test_meta_set_authorizes_foreign_book_id(self, v2_env):
         """别人账本的 id 打到本端点 → 403（payload 授权把 bookId 过归属校验）。"""
