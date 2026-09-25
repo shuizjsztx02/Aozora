@@ -2,16 +2,23 @@
  * UserSettingsPage — 用户设定（第十一轮 T11-6 / REQ-27 / 决策 #7）。
  *
  * 用户画像编辑页：称呼/职业/生活节奏/固定支出提示/消费偏好/沟通风格/其他，
- * 统一存 meta `user_profile`（JSON 对象 ≤8KB，仅本地不上行）。
+ * 统一存 meta `user_profile`（JSON 对象 ≤8KB）。该键**会上云**（服务端
+ * `SYNCABLE_KEYS` / 客户端 `SYNCABLE_PREFERENCE_KEYS` 均含它，T-M7-05j 起），
+ * 本机在 `sync_meta`、云端在 `user_preferences` 一行，经 sync 双向一致——本页与
+ * AI 的 `meta_set` 改的是**同一个键**，不存在「第二份」。
  * 保存 = 单按钮 → meta.set + dirty 提示 + 成功轻提示（区别于组件页的即改即存——
  * 文本画像字段多，逐字段写盘会打字一个字符写一次，统一提交更合理）。
  * 恢复 = meta.get 解析回填；坏 JSON/非对象回退空表单。
+ * T19-4（REQ-74②）：读不再只在挂载期一次——复用 `useRefreshOnSync` 补「同步完成 /
+ * 重新可见」静默重取（AI 写入后不切页也能看见）；用户正在编辑（dirty）时**不覆盖
+ * 输入**，改提示「载入最新」由用户决定（决策 #6）。
  * 消费端：AssistantPage 读同键解析后注入 ai.interpret context.profile（在线 AI 路径）。
  */
 
-import { useCallback, useEffect, useState } from 'react'
+import { useCallback, useEffect, useRef, useState } from 'react'
 import { PageHeader } from '../../components/Layout'
 import { useBridge } from '../../platform/hooks/use-bridge'
+import { useRefreshOnSync } from '../../platform/hooks/use-refresh-on-sync'
 
 const META_KEY_USER_PROFILE = 'user_profile'
 /** 与 native MetaWhitelist.MAX_VALUE_LEN 同限（超限时桥会拒，前端先行给可读错误）。 */
@@ -72,6 +79,15 @@ function parseStoredForm(raw: string | null | undefined): ProfileForm {
   }
 }
 
+/**
+ * 归一化：raw（或 null）→ 本页口径的 JSON 字符串。
+ * 用于「云端现值」与「本地存盘快照」的比较——两边都先过这一道，未知键与键序
+ * 差异就不会被误判成「云端变了」（否则会反复弹「载入最新」提示）。
+ */
+function normalizeProfile(raw: string | null | undefined): string {
+  return serializeForm(parseStoredForm(raw))
+}
+
 export function UserSettingsPage() {
   const bridge = useBridge()
   const [form, setForm] = useState<ProfileForm>({ ...EMPTY_FORM })
@@ -80,6 +96,17 @@ export function UserSettingsPage() {
   const [error, setError] = useState<string | null>(null)
   const [saving, setSaving] = useState(false)
   const [savedTip, setSavedTip] = useState(false)
+  /** T19-4：dirty 期间云端来了新值 → 暂存于此并提示，等用户决定是否丢弃自己的编辑 */
+  const [pendingRemote, setPendingRemote] = useState<string | null>(null)
+
+  /** 以某个云端值为准重置表单（首读 / 静默重取 / 用户点「载入最新」共用一处落点） */
+  const applyRemote = useCallback((json: string) => {
+    const parsed = parseStoredForm(json)
+    setForm(parsed)
+    setSavedJson(serializeForm(parsed))
+    setPendingRemote(null)
+    setError(null)
+  }, [])
 
   // 恢复：meta.get 解析回填（读失败静默保持空表单，与组件页同语义）
   useEffect(() => {
@@ -88,13 +115,11 @@ export function UserSettingsPage() {
       .getMeta([META_KEY_USER_PROFILE])
       .then((m) => {
         if (cancelled) return
-        const parsed = parseStoredForm(m[META_KEY_USER_PROFILE])
-        setForm(parsed)
-        setSavedJson(serializeForm(parsed))
+        applyRemote(normalizeProfile(m[META_KEY_USER_PROFILE]))
       })
       .catch(() => { /* 桥不可用 → 空表单 */ })
     return () => { cancelled = true }
-  }, [bridge])
+  }, [bridge, applyRemote])
 
   // 成功轻提示 2s 自动消失
   useEffect(() => {
@@ -105,6 +130,32 @@ export function UserSettingsPage() {
 
   const currentJson = serializeForm(form)
   const dirty = currentJson !== savedJson
+
+  // refresh 要读「此刻」的 dirty 与存盘快照，但自身必须保持稳定（它被 useRefreshOnSync
+  // 的 effect 依赖）；用 ref 取最新值，不在依赖数组里追 state。
+  const stateRef = useRef({ dirty, savedJson })
+  useEffect(() => { stateRef.current = { dirty, savedJson } }, [dirty, savedJson])
+
+  // T19-4（REQ-74②）：同步完成 / 页面重新可见 → 静默重取（复用 T18-2 的现成机制）。
+  // 决策 #6：非 dirty 静默重取；dirty 时**不覆盖用户输入**，只暂存云端值并给提示。
+  const refresh = useCallback(() => {
+    void bridge
+      .getMeta([META_KEY_USER_PROFILE])
+      .then((m) => {
+        const nextJson = normalizeProfile(m[META_KEY_USER_PROFILE])
+        const cur = stateRef.current
+        // 云端值与本地存盘快照一致 → 云端没变（含「同步轮跑完但没动这个键」），不打扰
+        if (nextJson === cur.savedJson) return
+        if (cur.dirty) {
+          setPendingRemote(nextJson)
+          return
+        }
+        applyRemote(nextJson)
+      })
+      .catch(() => { /* 读失败静默：保持当前视图 */ })
+  }, [bridge, applyRemote])
+
+  useRefreshOnSync(refresh)
 
   const change = (patch: Partial<ProfileForm>) => setForm(prev => ({ ...prev, ...patch }))
 
@@ -118,6 +169,8 @@ export function UserSettingsPage() {
     try {
       await bridge.setMeta(META_KEY_USER_PROFILE, currentJson)
       setSavedJson(currentJson)
+      // 本次保存已把这份内容写成云端权威值 → 暂存的「云端旧值」失效，清掉提示
+      setPendingRemote(null)
       setError(null)
       setSavedTip(true)
     } catch {
@@ -133,7 +186,7 @@ export function UserSettingsPage() {
 
       <div className="px-4 py-4 space-y-4 pb-28">
         <div className="glass-card p-4 text-xs text-ink2 leading-relaxed">
-          这些信息仅保存在本机，用于让 AI 助手的回答更贴近你的习惯与语气。
+          用于让 AI 助手的回答更贴近你的习惯与语气；内容随账号同步，云端与对话 AI 改的是同一份。
         </div>
 
         <div className="glass-card p-4 space-y-4">
@@ -219,6 +272,24 @@ export function UserSettingsPage() {
           />
         </div>
 
+        {pendingRemote !== null && (
+          <div
+            data-testid="user-pref-remote-pending"
+            className="text-xs px-3 py-2 rounded-lg flex items-center gap-3"
+            style={{ background: 'var(--glass)', border: '1px solid var(--glass-border)', color: 'var(--ink2)' }}
+          >
+            <span className="flex-1">云端已更新（对话 AI 或其它设备改动）。载入最新会丢弃你未保存的编辑。</span>
+            <button
+              type="button"
+              data-testid="user-pref-load-remote"
+              onClick={() => { if (pendingRemote !== null) applyRemote(pendingRemote) }}
+              className="shrink-0 px-3 py-1 rounded-full text-xs font-medium text-white"
+              style={{ background: 'var(--accent)' }}
+            >
+              载入最新
+            </button>
+          </div>
+        )}
         {error && (
           <div
             data-testid="user-pref-error"
