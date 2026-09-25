@@ -150,9 +150,6 @@ dependencies {
     testImplementation("org.robolectric:robolectric:4.12.2")
     testImplementation("androidx.test:core:1.5.0")
 
-    // T-M4-04b: Vosk offline speech recognition
-    implementation("com.alphacephei:vosk-android:0.3.47")
-
     // Instrumented tests
     androidTestImplementation("androidx.test.ext:junit:1.2.1")
     androidTestImplementation("androidx.test:runner:1.6.1")

@@ -51,10 +51,13 @@ class SecurityConfigTest {
         // T-M7-05f（决策 #1）: +DEVICE_EXECUTE/DEVICE_RESULT（device.execute / device.result）→ 85。
         //   设备能力通道的客户端执行器：前者是「能力名 → 桥命令」的分派 + status
         //   归一化，后者是需结果类的上行回传（Token 不出 Kotlin 层）。
+        // T19-7（REQ-75 / 决策 #1）: -VOICE_START_RECORDING/VOICE_STOP_RECORDING → 83。
+        //   离线语音（Vosk）整体移除：连同 RECORD_AUDIO 权限族与设备能力
+        //   voice.transcribe 一并下架（服务端侧见 T19-8）。
         val kotlinCommands = BridgeCommands.ALL
         assertEquals(
-            "Bridge command count must be 85 (sync with bridge-types.ts)",
-            85,
+            "Bridge command count must be 83 (sync with bridge-types.ts)",
+            83,
             kotlinCommands.size
         )
         assertEquals(

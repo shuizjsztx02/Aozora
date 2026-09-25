@@ -101,10 +101,6 @@ export const BridgeCommands = {
   PERMISSIONS_REQUEST: 'permissions.request',
   PERMISSIONS_OPEN_SETTINGS: 'permissions.openSettings',
 
-  // T-M4-04b 占位：语音
-  VOICE_START_RECORDING: 'voice.startRecording',
-  VOICE_STOP_RECORDING: 'voice.stopRecording',
-
   // T-M4-04d: 图片链路
   IMAGE_PICK: 'image.pick',
   IMAGE_DELETE: 'image.delete',
@@ -787,13 +783,12 @@ export interface AiReportResponse {
 
 // ─── T-M4-04a: 权限管理类型 ───
 
-export type PermissionType = 'RECORD_AUDIO' | 'CAMERA' | 'READ_MEDIA_IMAGES' | 'POST_NOTIFICATIONS'
+export type PermissionType = 'CAMERA' | 'READ_MEDIA_IMAGES' | 'POST_NOTIFICATIONS'
 
 export type PermissionStatus = 'not_requested' | 'granted' | 'denied' | 'permanently_denied'
 
 export interface PermissionStatusData {
   permissions: Record<PermissionType, PermissionStatus>
-  canRecordAudio: boolean
   canUseCamera: boolean
   canAccessImages: boolean
 }

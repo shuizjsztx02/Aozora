@@ -562,10 +562,6 @@ export class NativeBridge {
    * **不设调用超时**（`timeoutMs: 0`）：需结果类的等待时长由用户在设备上决定
    * （权限对话框 / 相册 / 相机），服务端自己有 `timeout_seconds` 的挂起上限；桥这
    * 一层再加一个更短的超时只会把「用户还在选」误判成失败（同 `pickImage` 的先例）。
-   *
-   * 语音转写（`voice.transcribe`）不走这里：它的起止由录音界面掌握，执行器在
-   * `device-executor.ts` 里用既有的 `voice.startRecording` / `voice.stopRecording`
-   * 编排。
    */
   async executeDevice(
     capability: string, payload: Record<string, unknown>,
@@ -750,104 +746,6 @@ export class NativeBridge {
       if ((window as any).__aozoraImageProgress__ === wrapped) {
         // eslint-disable-next-line @typescript-eslint/no-explicit-any
         ;(window as any).__aozoraImageProgress__ = prev
-      }
-    }
-  }
-
-  // ─── T-M4-04b: 语音识别 ───
-
-  /**
-   * 开始语音录音和实时转写。
-   *
-   * 录音过程中通过 onVoicePartial 推送实时部分转写结果；
-   * 停止录音后通过 onVoiceFinal 推送最终转写文本。
-   *
-   * @returns { started: true } 表示录音已启动
-   */
-  async startVoiceRecording(): Promise<{ started: boolean }> {
-    return this.call('voice.startRecording')
-  }
-
-  /**
-   * 停止语音录音并返回最终转写结果。
-   *
-   * @returns { stopped: true, text: string } 最终转写文本
-   */
-  async stopVoiceRecording(): Promise<{ stopped: boolean; text: string }> {
-    return this.call('voice.stopRecording')
-  }
-
-  /**
-   * 注册部分转写结果监听（Android 录音过程中通过 __aozoraVoicePartial__ 推送）。
-   * 返回取消订阅函数。
-   */
-  onVoicePartial(listener: (text: string) => void): () => void {
-    if (typeof window === 'undefined') return () => {}
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    const prev = (window as any).__aozoraVoicePartial__
-    const wrapped = (text: string) => {
-      listener(text)
-      if (typeof prev === 'function') prev(text)
-    }
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    ;(window as any).__aozoraVoicePartial__ = wrapped
-    return () => {
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      if ((window as any).__aozoraVoicePartial__ === wrapped) {
-        // eslint-disable-next-line @typescript-eslint/no-explicit-any
-        ;(window as any).__aozoraVoicePartial__ = prev
-      }
-    }
-  }
-
-  /**
-   * 注册最终转写结果监听（Android 停止录音后通过 __aozoraVoiceFinal__ 推送）。
-   * 返回取消订阅函数。
-   */
-  onVoiceFinal(listener: (text: string) => void): () => void {
-    if (typeof window === 'undefined') return () => {}
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    const prev = (window as any).__aozoraVoiceFinal__
-    const wrapped = (text: string) => {
-      listener(text)
-      if (typeof prev === 'function') prev(text)
-    }
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    ;(window as any).__aozoraVoiceFinal__ = wrapped
-    return () => {
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      if ((window as any).__aozoraVoiceFinal__ === wrapped) {
-        // eslint-disable-next-line @typescript-eslint/no-explicit-any
-        ;(window as any).__aozoraVoiceFinal__ = prev
-      }
-    }
-  }
-
-  /**
-   * 注册语音识别错误监听（Android 通过 __aozoraVoiceError__ 推送）。
-   * 返回取消订阅函数。
-   *
-   * Bug-B4 fix：Android 现在传裸对象字面量 {code, message}，与 __aozoraImageProgress__ 一致，
-   * 不再需要 JSON.parse 字符串。保留 typeof === 'string' 分支以兼容旧版 Android。
-   */
-  onVoiceError(listener: (error: { code: string; message: string }) => void): () => void {
-    if (typeof window === 'undefined') return () => {}
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    const prev = (window as any).__aozoraVoiceError__
-    const wrapped = (errorOrJson: { code: string; message: string } | string) => {
-      try {
-        const error = typeof errorOrJson === 'string' ? JSON.parse(errorOrJson) : errorOrJson
-        listener(error as { code: string; message: string })
-      } catch { /* ignore parse errors */ }
-      if (typeof prev === 'function') prev(errorOrJson)
-    }
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    ;(window as any).__aozoraVoiceError__ = wrapped
-    return () => {
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      if ((window as any).__aozoraVoiceError__ === wrapped) {
-        // eslint-disable-next-line @typescript-eslint/no-explicit-any
-        ;(window as any).__aozoraVoiceError__ = prev
       }
     }
   }

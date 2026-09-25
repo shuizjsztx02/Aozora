@@ -18,9 +18,7 @@ import com.aozora.app.scheduled.ScheduledTxReceiver
 import com.aozora.app.sync.SyncEngine
 import com.aozora.app.sync.SyncScheduler
 import com.aozora.app.sync.SyncState
-import com.aozora.app.voice.VoiceRecognitionService
 import com.aozora.app.widget.AozoraWidgetProvider
-import androidx.core.content.ContextCompat
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
@@ -61,7 +59,6 @@ class AozoraBridge(
     private val permissionManager: PermissionManager? = null,
     private val imagePicker: ImagePicker? = null,
     private val imageClient: ImageClient? = null,
-    private val voiceRecognitionService: VoiceRecognitionService? = null,
     private val consentStore: ConsentStore? = null,
     // T-M5-05c fix (S1): 上传同意记录到服务端。
     private val consentClient: ConsentClient? = null,
@@ -205,10 +202,6 @@ class AozoraBridge(
             BridgeCommands.PERMISSIONS_GET_STATUS -> handlePermissionsGetStatus(requestId)
             BridgeCommands.PERMISSIONS_REQUEST -> handlePermissionsRequest(requestId, payload)
             BridgeCommands.PERMISSIONS_OPEN_SETTINGS -> handlePermissionsOpenSettings(requestId)
-
-            // T-M4-04b: 语音识别
-            BridgeCommands.VOICE_START_RECORDING -> handleVoiceStartRecording(requestId)
-            BridgeCommands.VOICE_STOP_RECORDING -> handleVoiceStopRecording(requestId)
 
             // T-M4-04d: 图片链路
             BridgeCommands.IMAGE_PICK -> handleImagePick(requestId, payload)
@@ -1488,7 +1481,6 @@ class AozoraBridge(
                 }
             }
             put("permissions", permsObj)
-            put("canRecordAudio", statuses[android.Manifest.permission.RECORD_AUDIO] == PermissionStatus.GRANTED)
             put("canUseCamera", statuses[android.Manifest.permission.CAMERA] == PermissionStatus.GRANTED)
             val imageGranted = statuses.entries.any { (k, v) ->
                 (k.endsWith("READ_MEDIA_IMAGES") || k.endsWith("READ_EXTERNAL_STORAGE")) && v == PermissionStatus.GRANTED
@@ -1548,7 +1540,6 @@ class AozoraBridge(
     }
 
     private fun permissionToKey(androidPerm: String): String? = when (androidPerm) {
-        android.Manifest.permission.RECORD_AUDIO -> "RECORD_AUDIO"
         android.Manifest.permission.CAMERA -> "CAMERA"
         android.Manifest.permission.READ_MEDIA_IMAGES -> "READ_MEDIA_IMAGES"
         android.Manifest.permission.READ_EXTERNAL_STORAGE -> "READ_MEDIA_IMAGES" // 低版本映射到同一 key
@@ -1558,7 +1549,6 @@ class AozoraBridge(
     }
 
     private fun keyToPermission(key: String): String? = when (key) {
-        "RECORD_AUDIO" -> android.Manifest.permission.RECORD_AUDIO
         "CAMERA" -> android.Manifest.permission.CAMERA
         "READ_MEDIA_IMAGES" -> if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.TIRAMISU) {
             android.Manifest.permission.READ_MEDIA_IMAGES
@@ -1581,128 +1571,6 @@ class AozoraBridge(
     }
 
     // ─── T-M4-04d: 图片链路 handlers ───
-
-    // ─── T-M4-04b: 语音识别 handlers ───
-
-    private fun handleVoiceStartRecording(requestId: String): BridgeResponse {
-        val service = voiceRecognitionService
-            ?: return BridgeResponse.error(requestId, "unavailable", "Voice recognition service not injected")
-
-        if (!service.isModelLoaded()) {
-            return BridgeResponse.error(requestId, "model_not_loaded", "Vosk model not loaded")
-        }
-
-        if (service.isRecording()) {
-            return BridgeResponse.error(requestId, "already_recording", "Already recording")
-        }
-
-        // R-M4-43 fix: Bridge 层防御检查 RECORD_AUDIO 权限，避免 service 层在 AudioRecord 创建时才触发 SecurityException
-        val ctx = syncContext
-        if (ctx != null) {
-            val granted = ContextCompat.checkSelfPermission(
-                ctx, android.Manifest.permission.RECORD_AUDIO
-            ) == android.content.pm.PackageManager.PERMISSION_GRANTED
-            if (!granted) {
-                return BridgeResponse.error(requestId, "permission_denied", "RECORD_AUDIO permission not granted")
-            }
-        }
-
-        // T14-6（REQ-41 / 决策 #6）：service.startRecording 的失败路径都先同步回调
-        // onError 再返回 false（VoiceRecognitionService 各早退分支），这里捕获该码，
-        // 让 promise 拒绝与事件推送同码——旧实现固定回 start_failed，会把具体的
-        // permission_denied 语义覆盖掉，前端恢复流（授权内联钮）随之失效。
-        var startFailure: Pair<String, String>? = null
-        val started = service.startRecording(object : VoiceRecognitionService.VoiceRecognitionListener {
-            override fun onPartialResult(text: String) {
-                dispatchVoicePartial(text)
-            }
-
-            override fun onFinalResult(text: String) {
-                // Final result is returned via the stopRecording response
-            }
-
-            override fun onError(code: String, message: String) {
-                startFailure = code to message
-                dispatchVoiceError(code, message)
-            }
-        })
-
-        return if (started) {
-            BridgeResponse.success(requestId, JSONObject().put("started", true).toString())
-        } else {
-            val (code, message) = startFailure ?: ("start_failed" to "Failed to start recording")
-            BridgeResponse.error(requestId, code, message)
-        }
-    }
-
-    private suspend fun handleVoiceStopRecording(requestId: String): BridgeResponse {
-        val service = voiceRecognitionService
-            ?: return BridgeResponse.error(requestId, "unavailable", "Voice recognition service not injected")
-
-        if (!service.isRecording()) {
-            return BridgeResponse.error(requestId, "not_recording", "Not recording")
-        }
-
-        // Bug-B2 fix：stopRecording 现在是 suspend 函数，在此直接 await
-        val finalText = service.stopRecording()
-
-        // Dispatch final result to frontend
-        dispatchVoiceFinal(finalText)
-
-        return BridgeResponse.success(requestId, JSONObject().apply {
-            put("stopped", true)
-            put("text", finalText)
-        }.toString())
-    }
-
-    /** Push partial transcription to frontend via `window.__aozoraVoicePartial__`. */
-    private fun dispatchVoicePartial(text: String) {
-        val js = """
-            (function(){
-              try {
-                if (typeof window.__aozoraVoicePartial__ === 'function') {
-                  window.__aozoraVoicePartial__(${JSONObject.quote(text)});
-                }
-              } catch (e) {}
-            })();
-        """.trimIndent()
-        webView.post { webView.evaluateJavascript(js, null) }
-    }
-
-    /** Push final transcription to frontend via `window.__aozoraVoiceFinal__`. */
-    private fun dispatchVoiceFinal(text: String) {
-        val js = """
-            (function(){
-              try {
-                if (typeof window.__aozoraVoiceFinal__ === 'function') {
-                  window.__aozoraVoiceFinal__(${JSONObject.quote(text)});
-                }
-              } catch (e) {}
-            })();
-        """.trimIndent()
-        webView.post { webView.evaluateJavascript(js, null) }
-    }
-
-    /**
-     * Push voice error to frontend via `window.__aozoraVoiceError__`.
-     *
-     * Bug-B4 fix：传裸对象字面量，与 dispatchImageProgress 保持一致。
-     * 旧代码用 JSONObject.quote(data.toString()) 导致双重 JSON 编码（JS 收到的是字符串而非对象）。
-     */
-    private fun dispatchVoiceError(code: String, message: String) {
-        val safeCode = JSONObject.quote(code)
-        val safeMessage = JSONObject.quote(message)
-        val js = """
-            (function(){
-              try {
-                if (typeof window.__aozoraVoiceError__ === 'function') {
-                  window.__aozoraVoiceError__({code: $safeCode, message: $safeMessage});
-                }
-              } catch (e) {}
-            })();
-        """.trimIndent()
-        webView.post { webView.evaluateJavascript(js, null) }
-    }
 
     private suspend fun handleImagePick(requestId: String, p: JSONObject): BridgeResponse {
         val picker = imagePicker
@@ -2423,14 +2291,9 @@ class AozoraBridge(
      * 本函数做两件事，**两件都不新增设备语义**：
      *
      * ① **分派**——能力名（点号，协议层）→ 既有的设备类桥命令 handler；
-     * ② **归一化**——6 个能力各自的错误码族（`cancelled` / `permission_denied` /
-     *    `model_not_loaded` / `compress_failed` …）收成四值。WebView 因此不必认识
-     *    任何一条桥错误码，模型那一侧的降级文案由服务端按四值给出。
-     *
-     * **语音转写（`voice.transcribe`）不在这里**：它的起止由用户在录音界面上掌握
-     * （`use-voice` 的状态机），执行器在 WebView 侧用既有的
-     * `voice.startRecording` / `voice.stopRecording` 编排——本层没有能让用户"停下"
-     * 的界面，硬塞进来只会让那条既有路径出现第二个 writer。
+     * ② **归一化**——各能力自己的错误码族（`cancelled` / `permission_denied` /
+     *    `compress_failed` …）收成四值。WebView 因此不必认识任何一条桥错误码，
+     *    模型那一侧的降级文案由服务端按四值给出。
      */
     private suspend fun handleDeviceExecute(
         requestId: String, p: JSONObject,

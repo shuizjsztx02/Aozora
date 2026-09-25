@@ -21,16 +21,6 @@ import { useAssistantChatStore } from '../../platform/store/assistant-chat-store
 import type { AssistantMessage, CardStatus } from '../../features/assistant/use-assistant'
 import type { ActionProposal, ActionProposalV2 } from '../../domain/action-proposal'
 
-const mockVoice = vi.hoisted(() => ({
-  isRecording: false,
-  partialText: '',
-  finalText: '',
-  error: null,
-  startRecording: vi.fn(),
-  stopRecording: vi.fn(),
-  reset: vi.fn(),
-}))
-
 const mockBridge = vi.hoisted(() => ({
   listCategories: vi.fn().mockResolvedValue([
     { id: 'cat-lunch', kind: 'expense', name: '午饭', parentId: null, icon: '🥟', version: 1 },
@@ -51,7 +41,6 @@ const mockAssistantState = vi.hoisted(() => ({
   cardStatus: null as CardStatus | null,
 }))
 
-vi.mock('../../platform/hooks/use-voice', () => ({ useVoice: () => mockVoice }))
 vi.mock('../../platform/hooks/use-bridge', () => ({ useBridge: () => mockBridge }))
 vi.mock('../../platform/hooks/use-permissions', () => ({
   usePermissions: () => ({

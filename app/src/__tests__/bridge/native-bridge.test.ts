@@ -32,9 +32,6 @@ afterEach(() => {
   delete win.AozoraBridge
   delete win.__aozoraBridgeRespond
   delete win.__aozoraPermissionResult__
-  delete win.__aozoraVoicePartial__
-  delete win.__aozoraVoiceFinal__
-  delete win.__aozoraVoiceError__
   delete win.__aozoraImageProgress__
   delete win.__aozoraAiStream__
 })
@@ -102,9 +99,6 @@ describe('Bridge types — 命令完整性', () => {
     'permissions.getStatus',
     'permissions.request',
     'permissions.openSettings',
-    // T-M4-04b 占位：语音
-    'voice.startRecording',
-    'voice.stopRecording',
     // T-M4-04d: 图片链路
     'image.pick',
     'image.delete',
@@ -154,7 +148,7 @@ describe('Bridge types — 命令完整性', () => {
     'device.result',
   ]
 
-  it('BridgeCommands 包含所有 85 个命令（含 AI 6 个 + 权限 3 个 + 语音 2 个 + 图片 4 个 + 同意 2 个 + 导出 4 个 + 账号删除 2 个 + 反馈 1 个 + FIX 4 个 + T7-2 账户更新 1 个 + 第八轮分类/图标/存钱 7 个 + T9-5a meta 2 个 + T10-3 auth 4 个 + T11-2 widget 1 个 + T11-4 scheduled 4 个 + T11-7 persona 4 个 + T12-7 交易更新 1 个 + T14-2 账本更新 1 个 + T16-5 主题背景 1 个 + T-M7-02h agent 2 个 + T-M7-03d 会话索引 3 个 + T-M7-04b 会话事件 1 个 + T-M7-05f 设备通道 2 个）', () => {
+  it('BridgeCommands 包含所有 83 个命令（含 AI 6 个 + 权限 3 个 + 图片 4 个 + 同意 2 个 + 导出 4 个 + 账号删除 2 个 + 反馈 1 个 + FIX 4 个 + T7-2 账户更新 1 个 + 第八轮分类/图标/存钱 7 个 + T9-5a meta 2 个 + T10-3 auth 4 个 + T11-2 widget 1 个 + T11-4 scheduled 4 个 + T11-7 persona 4 个 + T12-7 交易更新 1 个 + T14-2 账本更新 1 个 + T16-5 主题背景 1 个 + T-M7-02h agent 2 个 + T-M7-03d 会话索引 3 个 + T-M7-04b 会话事件 1 个 + T-M7-05f 设备通道 2 个）', () => {
     const actualCommands = Object.values(BridgeCommands)
     expect(actualCommands).toHaveLength(expectedCommands.length)
     for (const cmd of expectedCommands) {
@@ -506,9 +500,8 @@ describe('NativeBridge — T-M4-04a 权限管理', () => {
       capturedCommand = cmd
       capturedPayload = payload
       setTimeout(() => simulateResponse(requestId, {
-        permissions: { RECORD_AUDIO: 'granted', CAMERA: 'not_requested', READ_MEDIA_IMAGES: 'denied' },
-        canRecordAudio: true,
-        canUseCamera: false,
+        permissions: { CAMERA: 'granted', READ_MEDIA_IMAGES: 'denied' },
+        canUseCamera: true,
         canAccessImages: false,
       }), 0)
     })
@@ -517,10 +510,9 @@ describe('NativeBridge — T-M4-04a 权限管理', () => {
   it('getPermissionStatus → permissions.getStatus', async () => {
     const result = await bridge.getPermissionStatus()
     expect(capturedCommand).toBe('permissions.getStatus')
-    expect(result.canRecordAudio).toBe(true)
-    expect(result.canUseCamera).toBe(false)
-    expect(result.permissions.RECORD_AUDIO).toBe('granted')
-    expect(result.permissions.CAMERA).toBe('not_requested')
+    expect(result.canUseCamera).toBe(true)
+    expect(result.permissions.CAMERA).toBe('granted')
+    expect(result.permissions.READ_MEDIA_IMAGES).toBe('denied')
   })
 
   it('requestPermission → permissions.request，payload 含 permission', async () => {
@@ -641,84 +633,6 @@ describe('NativeBridge — T-M4-02c AI 助手对话', () => {
     expect(payload.confirmation_token).toBe('token-123')
     expect(result.transaction_ids).toEqual(['tx-1', 'tx-2'])
     expect(result.undo_window_seconds).toBe(5)
-  })
-})
-
-// ─── T-M4-04b: 语音识别桥命令 ───
-
-describe('NativeBridge — T-M4-04b 语音识别', () => {
-  let bridge: NativeBridge
-  let mockNative: ReturnType<typeof installMockBridge>
-  let capturedCommand = ''
-
-  beforeEach(() => {
-    bridge = new NativeBridge()
-    mockNative = installMockBridge()
-    mockNative.call.mockImplementation((_v: number, requestId: string, cmd: string) => {
-      capturedCommand = cmd
-      setTimeout(() => simulateResponse(requestId, { started: true }), 0)
-    })
-  })
-
-  it('startVoiceRecording → voice.startRecording 命令', async () => {
-    const result = await bridge.startVoiceRecording()
-    expect(capturedCommand).toBe('voice.startRecording')
-    expect(result.started).toBe(true)
-  })
-
-  it('stopVoiceRecording → voice.stopRecording 命令，返回转写文本', async () => {
-    mockNative.call.mockImplementation((_v: number, requestId: string, cmd: string) => {
-      capturedCommand = cmd
-      setTimeout(() => simulateResponse(requestId, { stopped: true, text: '你好世界' }), 0)
-    })
-    const result = await bridge.stopVoiceRecording()
-    expect(capturedCommand).toBe('voice.stopRecording')
-    expect(result.stopped).toBe(true)
-    expect(result.text).toBe('你好世界')
-  })
-
-  it('startVoiceRecording 失败时抛出 BridgeError', async () => {
-    mockNative.call.mockImplementation((_v: number, requestId: string) => {
-      setTimeout(() => simulateResponse(requestId, null, false, 'permission_denied', 'RECORD_AUDIO not granted'), 0)
-    })
-    await expect(bridge.startVoiceRecording()).rejects.toMatchObject({
-      code: 'permission_denied',
-    })
-  })
-
-  it('onVoicePartial 监听实时部分转写', () => {
-    const texts: string[] = []
-    const unsubscribe = bridge.onVoicePartial(t => texts.push(t))
-    win.__aozoraVoicePartial__('你')
-    win.__aozoraVoicePartial__('你好')
-    expect(texts).toEqual(['你', '你好'])
-    unsubscribe()
-  })
-
-  it('onVoiceFinal 监听最终转写结果', () => {
-    let finalText = ''
-    const unsubscribe = bridge.onVoiceFinal(t => { finalText = t })
-    win.__aozoraVoiceFinal__('你好世界')
-    expect(finalText).toBe('你好世界')
-    unsubscribe()
-  })
-
-  it('onVoiceError 监听语音错误（对象格式）', () => {
-    const errors: Array<{ code: string; message: string }> = []
-    const unsubscribe = bridge.onVoiceError(e => errors.push(e))
-    win.__aozoraVoiceError__({ code: 'model_not_loaded', message: 'Vosk model not loaded' })
-    expect(errors).toHaveLength(1)
-    expect(errors[0].code).toBe('model_not_loaded')
-    unsubscribe()
-  })
-
-  it('onVoiceError 兼容旧版字符串格式（R-M4-04b Bug-B4）', () => {
-    const errors: Array<{ code: string; message: string }> = []
-    const unsubscribe = bridge.onVoiceError(e => errors.push(e))
-    win.__aozoraVoiceError__(JSON.stringify({ code: 'start_error', message: 'audio init failed' }))
-    expect(errors).toHaveLength(1)
-    expect(errors[0].code).toBe('start_error')
-    unsubscribe()
   })
 })
 

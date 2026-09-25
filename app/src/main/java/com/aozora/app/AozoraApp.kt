@@ -20,7 +20,6 @@ import com.aozora.app.scheduled.ScheduledTxEngine
 import com.aozora.app.scheduled.ScheduledTxReceiver
 import com.aozora.app.sync.HttpSyncApi
 import com.aozora.app.sync.SyncEngine
-import com.aozora.app.voice.VoiceRecognitionService
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
@@ -140,12 +139,6 @@ class AozoraApp : Application(), Configuration.Provider {
             httpClient = httpClient,
             tokenStore = tokenStore
         )
-    }
-
-    /** T-M4-04b: Vosk 离线语音识别服务。
-     *  首次使用时需调用 initialize() 加载模型（约 1-2 秒）。 */
-    val voiceRecognitionService: VoiceRecognitionService by lazy {
-        VoiceRecognitionService(this)
     }
 
     /** T-M5-04a: 隐私同意快速检查。 */

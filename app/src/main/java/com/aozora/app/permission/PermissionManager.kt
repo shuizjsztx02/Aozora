@@ -13,7 +13,7 @@ import androidx.core.content.ContextCompat
 /**
  * T-M4-04a: 权限状态机。
  *
- * 管理 RECORD_AUDIO / CAMERA / READ_MEDIA_IMAGES 三种权限的四态生命周期：
+ * 管理 CAMERA / READ_MEDIA_IMAGES / POST_NOTIFICATIONS 三种权限的四态生命周期：
  * - NOT_REQUESTED：从未请求过
  * - GRANTED：已授予
  * - DENIED：已请求但被拒绝（仍可再次请求）
@@ -92,7 +92,6 @@ class PermissionManager(private val activity: ComponentActivity) {
      */
     fun getAllStatuses(): Map<String, PermissionStatus> {
         val result = mutableMapOf(
-            android.Manifest.permission.RECORD_AUDIO to getStatus(android.Manifest.permission.RECORD_AUDIO),
             android.Manifest.permission.CAMERA to getStatus(android.Manifest.permission.CAMERA),
             imagePermission() to getStatus(imagePermission())
         )

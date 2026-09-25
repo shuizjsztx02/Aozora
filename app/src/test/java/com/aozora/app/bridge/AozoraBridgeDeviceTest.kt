@@ -29,9 +29,6 @@ import org.robolectric.annotation.Config
  *   那个收口点；
  * - `device.result` 的**入参校验**与桥缺席时的降级（真回传走 HTTP，由
  *   `AiGatewayClient` 的用例与端到端走查覆盖：这里没有可用的 AI 客户端）。
- *
- * 语音转写（`voice.transcribe`）**不在本层**：它由 WebView 侧的 `device-executor`
- * 编排（`deferred`），用例见 `app/src/__tests__/features/device-executor.test.ts`。
  */
 @RunWith(RobolectricTestRunner::class)
 @Config(sdk = [33])

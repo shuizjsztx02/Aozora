@@ -18,8 +18,7 @@
         android:protectionLevel="signature" />
     <uses-permission android:name="com.aozora.app.permission.BRIDGE_COMMAND" />
 
-    <!-- T-M4-04a: 语音/图片权限 -->
-    <uses-permission android:name="android.permission.RECORD_AUDIO" />
+    <!-- T-M4-04a: 图片/相机权限（离线语音已随 REQ-75 移除，App 不再申请麦克风） -->
     <uses-permission android:name="android.permission.CAMERA" />
     <uses-feature android:name="android.hardware.camera" android:required="false" />
     <uses-permission android:name="android.permission.READ_MEDIA_IMAGES" />

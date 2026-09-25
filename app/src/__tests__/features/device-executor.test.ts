@@ -2,7 +2,7 @@
  * T-M7-05f：设备能力通道**客户端执行器**的测试。
  *
  * 执行器是纯编排（无 React、无业务状态），所以可以对每条分派规则给出确定断言：
- * 单向不回传、需结果回传（含 data 的有无）、语音交给上层、桥缺席时安静退出、
+ * 单向不回传、需结果回传（含 data 的有无）、桥缺席时安静退出、
  * 执行抛异常时按 failed 结算（**不能悬挂**——服务端在等这一次回传）。
  *
  * 桥本身的行为（能力名 → 具体命令、status 归一化）在原生侧，由 Kotlin 的
@@ -10,7 +10,6 @@
  */
 import { describe, it, expect, vi } from 'vitest'
 import {
-  VOICE_CAPABILITY,
   deliverDeviceResult,
   runDeviceRequest,
   type DeviceExecutorBridge,
@@ -83,17 +82,6 @@ describe('T-M7-05f 设备执行器 — 分派', () => {
 
     expect(outcome).toBe('failed')
     expect(bridge.resultDevice).toHaveBeenCalledWith('dev-1', 'failed', undefined)
-  })
-
-  it('语音转写交给上层（`deferred`）：**不自动执行**，也不回传', async () => {
-    const bridge = fakeBridge()
-    const outcome = await runDeviceRequest(bridge, frame({
-      kind: 'result', capability: VOICE_CAPABILITY, payload: {},
-    }))
-
-    expect(outcome).toBe('deferred')
-    expect(bridge.executeDevice).not.toHaveBeenCalled()
-    expect(bridge.resultDevice).not.toHaveBeenCalled()
   })
 
   it('桥没有设备通道能力（旧 APK）→ null，什么都不做', async () => {

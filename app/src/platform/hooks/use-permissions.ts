@@ -5,7 +5,7 @@
  *
  * - 挂载时自动查询权限状态
  * - 监听异步权限结果推送（Android 权限对话框关闭后）
- * - 提供便捷判断：canRecord / canCamera / canGallery / shouldGuideSettings
+ * - 提供便捷判断：canCamera / canGallery / shouldGuideSettings
  */
 
 import { useState, useEffect, useCallback } from 'react'
@@ -14,12 +14,10 @@ import type { PermissionType, PermissionStatusData } from '../bridge/bridge-type
 
 const DEFAULT_STATUSES: PermissionStatusData = {
   permissions: {
-    RECORD_AUDIO: 'not_requested',
     CAMERA: 'not_requested',
     READ_MEDIA_IMAGES: 'not_requested',
     POST_NOTIFICATIONS: 'not_requested',
   },
-  canRecordAudio: false,
   canUseCamera: false,
   canAccessImages: false,
 }
@@ -29,8 +27,6 @@ export interface UsePermissionsReturn {
   status: PermissionStatusData
   /** 是否正在加载 */
   loading: boolean
-  /** 是否可以录音 */
-  canRecord: boolean
   /** 是否可以使用相机 */
   canCamera: boolean
   /** 是否可以访问图片 */
@@ -109,7 +105,6 @@ export function usePermissions(): UsePermissionsReturn {
   return {
     status,
     loading,
-    canRecord: status.canRecordAudio,
     canCamera: status.canUseCamera,
     canGallery: status.canAccessImages,
     shouldGuideSettings,

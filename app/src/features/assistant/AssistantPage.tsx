@@ -3,8 +3,6 @@
  *
  * 输入 → AI/本地 NLU → 记账卡（T9-7 v2 两态）→ 本地写入 → 撤销
  * T9-8（REQ-16）：键盘 IME inset 顶起输入区；🖼️ 走既有图片链路（image.pick → image.parse → 批量卡 → ai.execute，服务端权威）
- * T12-1（REQ-29 / 决策 #8 #9）：语音按需授权（点 mic 才请求 RECORD_AUDIO，结果经 usePermissions 状态推送续链）；
- * 语音/图片桥错误中文本地化；输入行重排 [🎤][🖼️][输入][发送]
  * T12-11（REQ-37）：分类名白名单组装（≤120 截断，喂 interpret context.categories）；
  * edit/delete 意图 → OpPreviewCard 预览确认；chat/query → 文本气泡（hook 层分发）
  * T16-2（REQ-58）：带 proposal 的历史消息在气泡下渲染只读账单卡（常驻，无编辑/撤销）
@@ -19,8 +17,6 @@ import { useNavigate } from 'react-router'
 import { PageHeader } from '../../components/Layout'
 import { CategoryIcon } from '../../components/CategoryIcon'
 import { useBridge } from '../../platform/hooks/use-bridge'
-import { usePermissions } from '../../platform/hooks/use-permissions'
-import { useVoice } from '../../platform/hooks/use-voice'
 import { useAssistant, type AssistantMessage, type CardStatus } from './use-assistant'
 import { IMAGE_ERROR_ZH } from './ai-error-text'
 // 车道判定来自契约层——放在这里（而不是从 use-assistant 取）也让本文件的测试
@@ -40,39 +36,6 @@ import type {
 } from '../../platform/bridge/bridge-types'
 import { pickDefaultAccount, pickEntryBook } from '../../domain/books'
 import { resolveActivePersona } from '../../domain/personas'
-
-// T12-1（REQ-29 / 决策 #8）：语音桥错误码 → 中文文案（原生 message 为英文，不透出）；
-// 未知码回退原生 message。码源：AozoraBridge.handleVoiceStartRecording / VoiceRecognitionService.onError
-const VOICE_ERROR_ZH: Record<string, string> = {
-  permission_denied: '麦克风权限未授予，请授权后重试',
-  model_not_loaded: '语音模型尚未就绪，请稍后重试',
-  start_failed: '录音启动失败，请重试',
-  audio_init_failed: '录音启动失败，请重试',
-  start_error: '录音启动失败，请重试',
-  already_recording: '已在录音中',
-  not_recording: '当前没有进行中的录音',
-  unavailable: '语音服务不可用',
-  timeout: '语音操作超时，请重试',
-  // T14-6（REQ-41 / 决策 #6）：code 缺失/未知且 message 无法反推时的中文兜底，
-  // 原生英文 message 一律不透出
-  voice_generic: '录音操作未成功，请重试',
-}
-
-/**
- * T14-6（REQ-41 / 决策 #6）：语音错误码归一。
- * WebView 边界 code 丢失/未知时按原生 message 子串反推（如
- * "RECORD_AUDIO permission not granted" → permission_denied），
- * 使恢复流（refresh + 「授权」内联钮）与中文文案不依赖 code 完好。
- */
-function normalizeVoiceCode(err: { code?: string; message?: string } | null): string {
-  if (!err) return ''
-  if (err.code && VOICE_ERROR_ZH[err.code]) return err.code
-  const m = (err.message ?? '').toLowerCase()
-  if (m.includes('permission') || m.includes('not granted') || m.includes('securityexception')) return 'permission_denied'
-  if (m.includes('model')) return 'model_not_loaded'
-  if (m.includes('already recording')) return 'already_recording'
-  return 'voice_generic'
-}
 
 // T18-1（REQ-66）：图片链路的错误码 → 中文文案已归口到 ai-error-text.ts（与
 // QuickEntrySheet 的小票识别**共用同一常量**）；原「503 → no_ai_provider →
@@ -177,25 +140,6 @@ function emptyMessagesHint(
 export function AssistantPage() {
   const bridge = useBridge()
   const navigate = useNavigate()
-  const {
-    isRecording: voiceIsRecording,
-    partialText: voicePartialText,
-    finalText: voiceFinalText,
-    error: voiceError,
-    startRecording: voiceStartRecording,
-    stopRecording: voiceStopRecording,
-    reset: voiceReset,
-  } = useVoice()
-  // T12-1（REQ-29 / 决策 #8）：语音按需授权——不在启动时轰炸权限，点 mic 才请求
-  const {
-    canRecord,
-    status: permStatus,
-    requestPermission: requestPerm,
-    openSettings,
-    refresh: refreshPermissions,
-  } = usePermissions()
-  const [micPermissionHint, setMicPermissionHint] = useState<'denied' | 'permanently_denied' | null>(null)
-  const [pendingPermission, setPendingPermission] = useState(false)
   const [categories, setCategories] = useState<CategoryData[]>([])
   const [bookId, setBookId] = useState<string | null>(null)
   // T9-7（REQ-15）：卡片账户 chip 数据源 + 提案未带账户时的默认兜底 + 行4 账本名
@@ -217,7 +161,6 @@ export function AssistantPage() {
   const [avatarUri, setAvatarUri] = useState<string | null>(null)
   const [inputText, setInputText] = useState('')
   const scrollRef = useRef<HTMLDivElement>(null)
-  const prevFinalTextRef = useRef('')
 
   // T12-11（REQ-37 / 决策 #3）：分类名白名单——prompt v2 约束 category/filter/set 从
   // 列表选择（根治「喝酒→未分类」类云端瞎猜）；≤120 个、各 ≤16 字（buildAiCategoryNames）
@@ -301,11 +244,6 @@ export function AssistantPage() {
     interrupted,
     retryInterrupted,
     appendAssistantMessage,
-    // T-M7-05f：设备通道要的一段语音（模型请求 voice.transcribe）——见下方提示条与
-    // `voiceFinalText` 那个 effect 的分支
-    deviceVoiceRequest,
-    respondDeviceVoice,
-    dismissDeviceVoice,
   } = useAssistant({
     categories,
     bookId,
@@ -458,23 +396,6 @@ export function AssistantPage() {
     return () => window.removeEventListener('resize', onResize)
   }, [])
 
-  // T-M4-04b: 转写文本 → 填入输入框
-  // T-M7-05f：**这一轮录音是替设备通道说的**（模型请求 `voice.transcribe`，服务端
-  // loop 正挂在这句话上等回传）→ 文本回传服务端，而不是填进输入框：用户要的是
-  // 「助手听见了」，不是留一条待发的草稿。两条出口互斥，判据是本次录音有没有
-  // 那条挂起的设备请求。
-  useEffect(() => {
-    if (voiceFinalText && voiceFinalText !== prevFinalTextRef.current) {
-      prevFinalTextRef.current = voiceFinalText
-      if (deviceVoiceRequest) {
-        respondDeviceVoice(voiceFinalText)
-      } else {
-        setInputText(voiceFinalText)
-      }
-      voiceReset()
-    }
-  }, [voiceFinalText, voiceReset, deviceVoiceRequest, respondDeviceVoice])
-
   const handleSubmit = useCallback(async () => {
     if (!inputText.trim() || phase === 'processing' || phase === 'executing') return
     const text = inputText.trim()
@@ -488,94 +409,6 @@ export function AssistantPage() {
       handleSubmit()
     }
   }, [handleSubmit])
-
-  // T12-1（REQ-29 / 决策 #8）：语音按需授权——
-  // 已授予 → 直接录音；permanently_denied → 引导系统设置；其余 → 弹系统框，
-  // 结果经 onPermissionResult 推送 → usePermissions 刷新 status → 下方 effect 续链
-  const requestMicPermission = useCallback(() => {
-    setMicPermissionHint(null)
-    setPendingPermission(true)
-    void requestPerm('RECORD_AUDIO')
-  }, [requestPerm])
-
-  const handleMicClick = useCallback(async () => {
-    if (voiceIsRecording) {
-      const text = await voiceStopRecording()
-      // T-M7-05f：设备通道要的那段语音，用户停下来却没说出可转写的内容——
-      // 也要结算（下面那个 effect 只在有文本时触发），否则服务端会一直挂到超时。
-      if (deviceVoiceRequest && !text.trim()) dismissDeviceVoice('denied')
-      return
-    }
-    // T-M7-03e：语音打断的语义同「取消」（架构 §9.2 交互对照）——开口即打断本轮生成，
-    // 再进入录音。与输入区的「停止生成」收敛到同一个状态（§4.4 不变式 3）。
-    // T-M7-05f：**设备通道要的那一段除外**——模型请求 voice.transcribe 时服务端正挂在
-    // 那句话上等回传，用户开口是在**回答它**、不是打断这一轮；这里若照旧取消，SSE 一断
-    // 服务端就把整轮当取消了（ADR-010），设备请求连同用户刚说的话一起作废。
-    if (streaming && !deviceVoiceRequest) await cancelStream()
-    if (canRecord) {
-      setMicPermissionHint(null)
-      await voiceStartRecording()
-      return
-    }
-    if (pendingPermission) return // 系统弹框在途，防重入
-    if (permStatus.permissions.RECORD_AUDIO === 'permanently_denied') {
-      setMicPermissionHint('permanently_denied')
-      return
-    }
-    requestMicPermission()
-  }, [
-    voiceIsRecording,
-    voiceStopRecording,
-    canRecord,
-    pendingPermission,
-    permStatus,
-    voiceStartRecording,
-    requestMicPermission,
-    streaming,
-    cancelStream,
-    deviceVoiceRequest,
-    dismissDeviceVoice,
-  ])
-
-  // 权限异步结果续链（primitive dep：usePermissions 推送刷新后本 effect 感知变化）
-  const recordAudioStatus = permStatus.permissions.RECORD_AUDIO
-  useEffect(() => {
-    if (!pendingPermission) return
-    if (recordAudioStatus === 'granted') {
-      setPendingPermission(false)
-      setMicPermissionHint(null)
-      void voiceStartRecording()
-    } else if (recordAudioStatus === 'permanently_denied') {
-      setPendingPermission(false)
-      setMicPermissionHint('permanently_denied')
-    } else if (recordAudioStatus === 'denied') {
-      setPendingPermission(false)
-      setMicPermissionHint('denied')
-    }
-  }, [pendingPermission, recordAudioStatus, voiceStartRecording])
-
-  // T14-6（REQ-41 / 决策 #6）：桥返回 permission_denied = 前端 canRecord 滞后真实权限
-  //（系统设置撤销授权后不会推送结果）→ refresh 拉真实态并接入 T12-1 恢复条
-  //（「授权」内联钮重发请求 / permanently_denied「去设置」），不再只是红条死路。
-  useEffect(() => {
-    if (!voiceError || normalizeVoiceCode(voiceError) !== 'permission_denied') return
-    let cancelled = false
-    void refreshPermissions().then(s => {
-      if (cancelled) return
-      setMicPermissionHint(
-        s.permissions.RECORD_AUDIO === 'permanently_denied' ? 'permanently_denied' : 'denied',
-      )
-    })
-    return () => { cancelled = true }
-  }, [voiceError, refreshPermissions])
-
-  // T-M7-05f：设备通道要的那段语音出错了（录音启动失败 / 权限不足 / 服务层报错）→
-  // 按结局回传。**不能只把错误条留在屏幕上**：服务端那一轮正挂着等这一句，不回传
-  // 它会白等满 `ai_device_timeout_seconds`。重复调用是安全的（已结算就是空操作）。
-  useEffect(() => {
-    if (!voiceError || !deviceVoiceRequest) return
-    dismissDeviceVoice('failed')
-  }, [voiceError, deviceVoiceRequest, dismissDeviceVoice])
 
   // T18-3（REQ-67②）：当轮那张卡也要拿得到**执行凭据**——用户点「确认」之后卡并不
   // 卸载（`activeProposal` 常驻到下一轮），它得跟历史卡说同一句话。凭据挂在**消息**上
@@ -909,98 +742,6 @@ export function AssistantPage() {
           borderTop: '1px solid var(--glass-border)',
         }}
       >
-        {/* T-M4-04b: 实时部分转写提示 */}
-        {voiceIsRecording && voicePartialText && (
-          <div
-            className="mb-2 px-3 py-1.5 rounded-lg text-xs truncate"
-            style={{
-              background: 'var(--glass)',
-              color: 'var(--ink2)',
-              border: '1px solid var(--glass-border)',
-            }}
-            data-testid="voice-partial"
-          >
-            🎤 {voicePartialText}
-          </div>
-        )}
-        {/* T-M4-04b: 语音错误提示（T12-1：错误码映射中文；T14-6 / 决策 #6：code 缺失
-            按 message 反推，英文一律不透出；permission_denied 由下方恢复条承载，
-            此处不重复渲染） */}
-        {voiceError && !voiceIsRecording && normalizeVoiceCode(voiceError) !== 'permission_denied' && (
-          <div
-            className="mb-2 px-3 py-1.5 rounded-lg text-xs"
-            style={{
-              background: '#fef2f2',
-              color: '#b91c1c',
-              border: '1px solid #fecaca',
-            }}
-            data-testid="voice-error"
-          >
-            {VOICE_ERROR_ZH[normalizeVoiceCode(voiceError)]}
-          </div>
-        )}
-        {/* T12-1（REQ-29 / 决策 #8）：未授权红条——denied 内联「授权」重发请求，
-            permanently_denied 内联「去设置」跳系统设置页 */}
-        {/* T-M7-05f：设备通道要的一段语音（模型请求 voice.transcribe，服务端 loop 正挂在
-            那句话上等回传）。**不自动开麦**——只提示，用户点那颗既有的 mic 按钮走完
-            录音（T12-1 的语音按需授权口径）。录音中不显示这条（mic 已经在响了）。 */}
-        {deviceVoiceRequest && !voiceIsRecording && (
-          <div
-            className="mb-2 px-3 py-1.5 rounded-lg text-xs flex items-center justify-between gap-2"
-            style={{
-              background: '#eff6ff',
-              color: '#1d4ed8',
-              border: '1px solid #bfdbfe',
-            }}
-            data-testid="device-voice-bar"
-          >
-            <span>🎤 助手想听你说一句——点麦克风开始</span>
-            <button
-              type="button"
-              onClick={() => dismissDeviceVoice('denied')}
-              className="shrink-0 underline font-medium"
-              data-testid="device-voice-dismiss"
-            >
-              不用了
-            </button>
-          </div>
-        )}
-        {micPermissionHint && !voiceIsRecording && (
-          <div
-            className="mb-2 px-3 py-1.5 rounded-lg text-xs flex items-center justify-between gap-2"
-            style={{
-              background: '#fef2f2',
-              color: '#b91c1c',
-              border: '1px solid #fecaca',
-            }}
-            data-testid="voice-permission-bar"
-          >
-            <span>
-              {micPermissionHint === 'permanently_denied'
-                ? '麦克风权限已被拒绝，需到系统设置中开启后重试'
-                : '未获得麦克风权限，无法语音输入'}
-            </span>
-            {micPermissionHint === 'permanently_denied' ? (
-              <button
-                type="button"
-                onClick={() => void openSettings()}
-                className="shrink-0 underline font-medium"
-                data-testid="voice-permission-settings"
-              >
-                去设置
-              </button>
-            ) : (
-              <button
-                type="button"
-                onClick={requestMicPermission}
-                className="shrink-0 underline font-medium"
-                data-testid="voice-permission-grant"
-              >
-                授权
-              </button>
-            )}
-          </div>
-        )}
         {/* T-M7-03e（R-PROD-19）：agent 轮以失败 / 断连收尾 → 明确提示中断状态 + 重连入口。
             与「已取消」是两种说法（那里是用户主动按的停止，这里是被动断的），故不合并。
             P2 的恢复手段是原样重发；按 conversation_id 续跑归 P3 的 04b。 */}
@@ -1074,29 +815,8 @@ export function AssistantPage() {
             </div>
           </div>
         )}
-        {/* T12-1（REQ-29 ②）：输入行重排 [🎤语音][🖼️图片][输入框][发送]——图片钮从输入框右移到左、紧挨语音；样式不动 */}
+        {/* 输入行 [🖼️图片][输入框][发送]——原 🎤 语音入口已随 REQ-75 移除 */}
         <div className="flex gap-2 items-end">
-          {/* T-M4-04b: 语音输入按钮 */}
-          <button
-            onClick={handleMicClick}
-            /* T-M7-03e：流式期间**可用**——按住它即打断（语义同取消，架构 §9.2）；
-             * 执行写库中（executing）与快路径处理中仍禁用（后者没有可打断的流） */
-            disabled={phase === 'executing' || (phase === 'processing' && !streaming)}
-            className="px-3 py-2 rounded-xl text-sm transition-all disabled:opacity-40"
-            style={{
-              background: voiceIsRecording ? '#ef4444' : 'var(--glass)',
-              color: voiceIsRecording ? 'white' : 'var(--ink2)',
-              border: voiceIsRecording
-                ? '1px solid #dc2626'
-                : '1px solid var(--glass-border)',
-              minWidth: '40px',
-            }}
-            title={voiceIsRecording ? '停止录音' : '语音输入'}
-            data-testid="voice-mic-button"
-            aria-label={voiceIsRecording ? '停止录音' : '语音输入'}
-          >
-            {voiceIsRecording ? '⏹' : '🎤'}
-          </button>
           {/* T9-8: 图片上传按钮（相册选图 → 批量记账卡） */}
           <button
             onClick={handleImageUpload}
@@ -1122,7 +842,7 @@ export function AssistantPage() {
             value={inputText}
             onChange={e => setInputText(e.target.value)}
             onKeyDown={handleKeyDown}
-            placeholder={voiceIsRecording ? '正在聆听…' : '输入记账短句…'}
+            placeholder="输入记账短句…"
             disabled={phase === 'processing' || phase === 'executing'}
             className="flex-1 min-w-0 px-3 py-2 rounded-xl text-sm outline-none"
             style={{

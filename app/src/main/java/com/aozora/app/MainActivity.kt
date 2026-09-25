@@ -117,7 +117,6 @@ class MainActivity : AppCompatActivity() {
             permissionManager = permissionManager,
             imagePicker = imagePicker,
             imageClient = app.imageClient,
-            voiceRecognitionService = app.voiceRecognitionService,
             consentStore = app.consentStore,
             consentClient = app.consentClient,
             exportClient = app.exportClient,
@@ -157,16 +156,6 @@ class MainActivity : AppCompatActivity() {
         // 第八轮 #1：主动请求一次 insets 派发，避免冷启动首帧只有 CSS 兜底值。
         ViewCompat.requestApplyInsets(webView)
 
-        // T-M4-04b: 异步预加载 Vosk 语音识别模型（约 1-2 秒）
-        // Bug-B3 fix：传入 scope，Activity 销毁时 scope.cancel() 会取消加载协程，防止回调泄漏
-        app.voiceRecognitionService.initialize(scope) { success, error ->
-            if (success) {
-                android.util.Log.i("MainActivity", "Vosk model loaded successfully")
-            } else {
-                android.util.Log.w("MainActivity", "Vosk model load failed: $error")
-            }
-        }
-
         // T-M3-02: 启动时收集同步状态事件 → 桥接到前端；同时触发一轮同步。
         observeSyncStatus()
         // T-M5-04a: 未同意隐私政策前不上行业务数据
@@ -201,8 +190,6 @@ class MainActivity : AppCompatActivity() {
         scope.cancel()
         webView.removeJavascriptInterface("AozoraBridge")
         webView.destroy()
-        // T-M4-04b: 释放语音识别资源
-        app.voiceRecognitionService.shutdown()
     }
 
     /**

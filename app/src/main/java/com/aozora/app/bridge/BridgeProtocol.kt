@@ -128,10 +128,6 @@ object BridgeCommands {
     const val PERMISSIONS_REQUEST = "permissions.request"
     const val PERMISSIONS_OPEN_SETTINGS = "permissions.openSettings"
 
-    // T-M4-04b 占位：语音（04a 仅声明命令，handler 返回 unavailable）
-    const val VOICE_START_RECORDING = "voice.startRecording"
-    const val VOICE_STOP_RECORDING = "voice.stopRecording"
-
     // T-M4-04d: 图片链路
     const val IMAGE_PICK = "image.pick"
     const val IMAGE_DELETE = "image.delete"
@@ -221,7 +217,6 @@ object BridgeCommands {
         AI_AGENT, AI_CANCEL,
         CONVERSATION_LIST, CONVERSATION_RENAME, CONVERSATION_DELETE, CONVERSATION_EVENTS,
         PERMISSIONS_GET_STATUS, PERMISSIONS_REQUEST, PERMISSIONS_OPEN_SETTINGS,
-        VOICE_START_RECORDING, VOICE_STOP_RECORDING,
         IMAGE_PICK, IMAGE_DELETE,
         IMAGE_PARSE, IMAGE_PARSE_CANCEL,
         CONSENT_RECORD, CONSENT_STATUS,

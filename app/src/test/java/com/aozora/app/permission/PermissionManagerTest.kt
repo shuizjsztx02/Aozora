@@ -42,18 +42,17 @@ class PermissionManagerTest {
 
     @Test
     fun defaultStatus_isNotRequested() {
-        val status = manager.getStatus(android.Manifest.permission.RECORD_AUDIO)
+        val status = manager.getStatus(android.Manifest.permission.CAMERA)
         assertEquals(PermissionStatus.NOT_REQUESTED, status)
     }
 
     @Test
-    fun getAllStatuses_returnsFourPermissions_onApi33() {
+    fun getAllStatuses_returnsThreePermissions_onApi33() {
         val statuses = manager.getAllStatuses()
-        assertTrue(statuses.containsKey(android.Manifest.permission.RECORD_AUDIO))
         assertTrue(statuses.containsKey(android.Manifest.permission.CAMERA))
         // NEW-A1 fix: POST_NOTIFICATIONS included on API 33+
         assertTrue(statuses.containsKey(android.Manifest.permission.POST_NOTIFICATIONS))
-        assertEquals(4, statuses.size)
+        assertEquals(3, statuses.size)
     }
 
     @Test
@@ -76,8 +75,8 @@ class PermissionManagerTest {
 
     @Test
     fun getStatus_afterGranted_returnsGranted() {
-        grantPermission(android.Manifest.permission.RECORD_AUDIO)
-        val status = manager.getStatus(android.Manifest.permission.RECORD_AUDIO)
+        grantPermission(android.Manifest.permission.CAMERA)
+        val status = manager.getStatus(android.Manifest.permission.CAMERA)
         assertEquals(PermissionStatus.GRANTED, status)
     }
 
@@ -111,12 +110,11 @@ class PermissionManagerTest {
     fun getAllStatuses_onApi30_returnsLegacyKeys() {
         // P2-3 fix: 覆盖 API < 33 的 legacy 分支（NOTIFICATIONS_LEGACY + READ_EXTERNAL_STORAGE）
         val statuses = manager.getAllStatuses()
-        assertTrue(statuses.containsKey(android.Manifest.permission.RECORD_AUDIO))
         assertTrue(statuses.containsKey(android.Manifest.permission.CAMERA))
         assertTrue(statuses.containsKey(android.Manifest.permission.READ_EXTERNAL_STORAGE))
         assertTrue(statuses.containsKey("NOTIFICATIONS_LEGACY"))
         assertEquals(PermissionStatus.GRANTED, statuses["NOTIFICATIONS_LEGACY"])
-        assertEquals(4, statuses.size)
+        assertEquals(3, statuses.size)
         // API 30 不应包含 TIRAMISU 才有的 key
         assertFalse(statuses.containsKey(android.Manifest.permission.POST_NOTIFICATIONS))
         assertFalse(statuses.containsKey(android.Manifest.permission.READ_MEDIA_IMAGES))
@@ -125,7 +123,7 @@ class PermissionManagerTest {
     @Test
     fun requestPermission_concurrentRequest_returnsDenied() {
         var firstResult: PermissionStatus? = null
-        manager.requestPermission(android.Manifest.permission.RECORD_AUDIO) { firstResult = it }
+        manager.requestPermission(android.Manifest.permission.READ_MEDIA_IMAGES) { firstResult = it }
 
         var secondResult: PermissionStatus? = null
         manager.requestPermission(android.Manifest.permission.CAMERA) { secondResult = it }

@@ -104,9 +104,6 @@ class BridgeProtocolTest {
             BridgeCommands.PERMISSIONS_GET_STATUS,
             BridgeCommands.PERMISSIONS_REQUEST,
             BridgeCommands.PERMISSIONS_OPEN_SETTINGS,
-            // T-M4-04b: 语音识别
-            BridgeCommands.VOICE_START_RECORDING,
-            BridgeCommands.VOICE_STOP_RECORDING,
             // T-M4-04d: 图片链路
             BridgeCommands.IMAGE_PICK,
             BridgeCommands.IMAGE_DELETE,
@@ -127,7 +124,7 @@ class BridgeProtocolTest {
             // T-M5-05c: 应用内反馈
             BridgeCommands.FEEDBACK_SUBMIT,
         )
-        assertEquals(47, commands.size)
+        assertEquals(45, commands.size)
         // 无重复
         assertEquals(commands.size, commands.toSet().size)
     }

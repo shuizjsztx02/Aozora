@@ -18,16 +18,6 @@ import userEvent from '@testing-library/user-event'
 import { MemoryRouter, useLocation } from 'react-router'
 import { AssistantPage } from '../../features/assistant/AssistantPage'
 
-const mockVoice = vi.hoisted(() => ({
-  isRecording: false,
-  partialText: '',
-  finalText: '',
-  error: null,
-  startRecording: vi.fn(),
-  stopRecording: vi.fn(),
-  reset: vi.fn(),
-}))
-
 const mockBridge = vi.hoisted(() => ({
   listCategories: vi.fn().mockResolvedValue([]),
   listBooks: vi.fn().mockResolvedValue([{ id: 'book-1', name: '默认账本', isMaster: false }]),
@@ -56,7 +46,6 @@ const mockAssistant = vi.hoisted(() => ({
   appendAssistantMessage: vi.fn(),
 }))
 
-vi.mock('../../platform/hooks/use-voice', () => ({ useVoice: () => mockVoice }))
 vi.mock('../../platform/hooks/use-bridge', () => ({ useBridge: () => mockBridge }))
 vi.mock('../../features/assistant/use-assistant', () => ({ useAssistant: () => mockAssistant }))
 // T12-1：页面新增 usePermissions（mic 按需授权）——本文件不点 mic，默认已授予即可
@@ -114,15 +103,14 @@ describe('AssistantPage — 图片上传链路 (T9-8)', () => {
     mockBridge.executeProposal.mockResolvedValue({ transaction_ids: ['t1', 't2'], undo_window_seconds: 0 })
   })
 
-  it('输入行为 [语音][图片][输入框][发送] 顺序（T12-1 REQ-29 ②：图片钮移到语音旁）', () => {
+  it('输入行为 [图片][输入框][发送]，且语音入口已移除（REQ-75）', () => {
     renderPage()
-    const mic = screen.getByTestId('voice-mic-button')
     const img = screen.getByTestId('image-upload-button')
     const input = screen.getByPlaceholderText('输入记账短句…')
-    // T12-1 重排：mic 在最左，img 紧挨其右，input 在 img 之后
-    expect(mic.compareDocumentPosition(img) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy()
+    // 图片钮在输入框之前
     expect(img.compareDocumentPosition(input) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy()
-    expect(mic.compareDocumentPosition(input) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy()
+    // 离线语音整体下架：mic 按钮不再存在
+    expect(screen.queryByTestId('voice-mic-button')).toBeNull()
   })
 
   it('完整链路：选图 → 解析 → 批量卡 → 确认 → executeProposal → 消息落定 + triggerSync', async () => {

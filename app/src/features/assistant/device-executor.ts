@@ -10,16 +10,12 @@
  * 客户端模块同一条分工：投影与投影的消费在 `use-assistant-stream` / `use-assistant`，
  * 「一次设备动作怎么做」在这里。
  *
- * 三件事各自的位置（刻意的，不是遗漏）
+ * 两件事各自的位置（刻意的，不是遗漏）
  * ------------------------------------
  * ① **能力名 → 具体桥命令的分派与 status 归一化在原生侧**
  *    （`AozoraBridge.handleDeviceExecute`）。这一层只面对 `ok / denied /
  *    unavailable / failed` 四值——与服务端协议同构，不认识任何具体能力的错误码族。
- * ② **语音转写（`voice.transcribe`）不在这里自动执行**。它的起止由用户在录音界面上
- *    掌握（`use-voice` 的 `isRecording` 驱动那颗 mic 按钮），模型下发指令时替用户
- *    把麦克风打开是**不该有的默认**：那段界面属于既有路径，本模块只把它标记出来
- *    （`deferred`），由上层用既有路径承接。
- * ③ **回传失败不重试**。服务端的挂起有 `ai_device_timeout_seconds` 自己的收敛路径
+ * ② **回传失败不重试**。服务端的挂起有 `ai_device_timeout_seconds` 自己的收敛路径
  *    （ADR-010 决策 4：超时是「没等到结果」的一条工具结果，不是故障），客户端在这
  *    里重试只会拖长用户已经看不到的等待。
  *
@@ -49,24 +45,20 @@ export interface DeviceExecutorBridge {
   ): Promise<DeviceResultAck>
 }
 
-/** 需要用户掌握起止的能力（见文件头 ②）。 */
-export const VOICE_CAPABILITY = 'voice.transcribe'
-
 /**
  * 一次设备指令的处理结局。
  *
- * - `deferred`：交给上层（目前只有语音）——**帧没有被丢弃**，它转成了「请用户说话」
- *   的那条路径；
+ * - 四值之一（`ok` / `denied` / `unavailable` / `failed`）：本次执行的结果；
  * - `null`：桥没有设备通道能力（旧 APK），本次什么都没做。
  */
-export type DeviceRunOutcome = DeviceOutcomeStatus | 'deferred' | null
+export type DeviceRunOutcome = DeviceOutcomeStatus | null
 
 /**
  * 执行一条设备指令。需结果类在函数内**一并回传**——回传是这次执行的收尾，不是
  * 调用方还要记得去做的第二件事（漏掉它 = 服务端白等一个超时窗）。
  *
- * 帧的形态判据全在这里：`capability` 是不是语音（上层的活）、`kind` 是不是需结果
- * （决定要不要回传）。畸形帧（缺 `request_id` / `capability`）直接当没收到。
+ * 帧的形态判据全在这里：`kind` 是不是需结果（决定要不要回传）。畸形帧（缺
+ * `request_id` / `capability`）直接当没收到。
  */
 export async function runDeviceRequest(
   bridge: DeviceExecutorBridge,
@@ -74,7 +66,6 @@ export async function runDeviceRequest(
 ): Promise<DeviceRunOutcome> {
   if (!bridge.executeDevice) return null
   if (!frame.request_id || !frame.capability) return null
-  if (frame.capability === VOICE_CAPABILITY) return 'deferred'
 
   let result: DeviceExecuteResult
   try {

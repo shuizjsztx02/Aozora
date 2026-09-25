@@ -29,11 +29,6 @@ const hookState = vi.hoisted(() => ({
   streaming: null as { text: string; reasoning: string } | null,
 }))
 
-const mockVoice = vi.hoisted(() => ({
-  isRecording: false, partialText: '', finalText: '', error: null,
-  startRecording: vi.fn(), stopRecording: vi.fn(), reset: vi.fn(),
-}))
-
 const mockBridge = vi.hoisted(() => ({
   listCategories: vi.fn().mockResolvedValue([]),
   listBooks: vi.fn().mockResolvedValue([{ id: 'book-1', name: '默认账本', isMaster: false }]),
@@ -51,7 +46,6 @@ const mockBridge = vi.hoisted(() => ({
   fetchConversationEvents: vi.fn(),
 }))
 
-vi.mock('../../platform/hooks/use-voice', () => ({ useVoice: () => mockVoice }))
 vi.mock('../../platform/hooks/use-bridge', () => ({ useBridge: () => mockBridge }))
 vi.mock('../../platform/hooks/use-permissions', () => ({
   usePermissions: () => ({
