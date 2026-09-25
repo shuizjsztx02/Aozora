@@ -11,8 +11,8 @@
     需结果（result）  loop **暂停** → SSE 下发 → 客户端执行 → HTTP 上行回传 → 恢复
 
 判据是「结果有没有下游消费者」：分享文本 / 刷新小组件 / 触感反馈不影响后续推理，
-为它们引入一次往返与一份挂起态纯属浪费；而权限申请 / 语音转写 / 图片选择的结果
-是任务继续的必要输入。
+为它们引入一次往返与一份挂起态纯属浪费；而权限申请 / 图片选择的结果是任务继续的
+必要输入。
 
 本模块承载通道的**协议面**，不含任何执行语义：
 
@@ -26,7 +26,7 @@
 结局」，因此不依赖 ``ToolOutcome`` 与 loop。
 
 能力名（``capability``）是**协议层**的名字，用点号；**到桥命令的映射归客户端**
-（05f 的分派表），可能是一对多（``voice.transcribe`` 在桥上是一对 start / stop）。
+（05f 的分派表），协议不对映射的基数作要求（当前目录里每个能力恰好落一条桥命令）。
 工具名（``name``）走 provider，沿用下划线（点号会让 provider 直接 400，02c 实测）。
 """
 from __future__ import annotations
@@ -113,7 +113,7 @@ def _no_params() -> dict[str, Any]:
 
 
 #: 服务端的设备能力目录。**只放已在客户端就位的桥命令族**（架构 §3.2 的
-#: 「设备」行）：权限 / 语音 / 图片 / 分享 / 触感 / 小组件。提醒（``reminder.*``）
+#: 「设备」行）：权限 / 图片 / 分享 / 触感 / 小组件。提醒（``reminder.*``）
 #: 与图标 / 主题背景不在其中——前者是写工具（写的是用户的提醒配置，要过审批门，
 #: 进 ``tools.py`` 的注册表），后两者是记账域与用户设定的附属能力，各有各的归属。
 DEVICE_TOOLS: tuple[DeviceTool, ...] = (
@@ -183,19 +183,16 @@ DEVICE_TOOLS: tuple[DeviceTool, ...] = (
         kind=NEEDS_RESULT,
         description=(
             "向用户申请一项系统权限（弹出系统权限对话框），返回 granted / denied / "
-            "permanently_denied。只在确有必要时调用：录音前申请 RECORD_AUDIO，拍照前"
-            "申请 CAMERA，读取相册前申请 READ_MEDIA_IMAGES，设置提醒前申请 "
-            "POST_NOTIFICATIONS。被拒绝时不要反复申请，先向用户说明。"
+            "permanently_denied。只在确有必要时调用：拍照前申请 CAMERA，读取相册前"
+            "申请 READ_MEDIA_IMAGES，设置提醒前申请 POST_NOTIFICATIONS。被拒绝时"
+            "不要反复申请，先向用户说明。"
         ),
         parameters={
             "type": "object",
             "properties": {
                 "permission": {
                     "type": "string",
-                    "enum": [
-                        "RECORD_AUDIO", "CAMERA",
-                        "READ_MEDIA_IMAGES", "POST_NOTIFICATIONS",
-                    ],
+                    "enum": ["CAMERA", "READ_MEDIA_IMAGES", "POST_NOTIFICATIONS"],
                     "description": "要申请的权限。",
                 },
             },
@@ -226,18 +223,6 @@ DEVICE_TOOLS: tuple[DeviceTool, ...] = (
             "additionalProperties": False,
         },
         message="正在等待选择图片…",
-    ),
-    DeviceTool(
-        name="device_transcribe_voice",
-        capability="voice.transcribe",
-        kind=NEEDS_RESULT,
-        description=(
-            "请用户对着麦克风说一段话，并把内容转写成文本（录音由用户在设备上"
-            "结束）。返回转写文本。用户取消或转写失败时返回 denied。录音前需要"
-            "RECORD_AUDIO 权限。"
-        ),
-        parameters=_no_params(),
-        message="正在等待语音输入…",
     ),
 )
 

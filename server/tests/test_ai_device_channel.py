@@ -225,11 +225,29 @@ class TestProtocol:
         assert {tool.kind for tool in D.DEVICE_TOOLS} == {ONE_WAY, NEEDS_RESULT}
 
     def test_catalog_covers_the_architecture_list(self):
-        """架构 §4.3 两类各举的例子都要在目录里（这是目录的下界）。"""
+        """架构 §4.3 两类各举的例子都要在目录里（这是目录的下界）。
+
+        ``voice.transcribe`` 已随 REQ-75 下架，不再要求它存在——见
+        :meth:`test_voice_capability_is_gone`（那条是**反向**断言）。
+        """
         assert {t.capability for t in D.DEVICE_TOOLS} >= {
             "widget.refresh", "haptic.feedback", "share.text",          # 单向
-            "permissions.request", "voice.transcribe", "image.pick",    # 需结果
+            "permissions.request", "image.pick",                        # 需结果
         }
+
+    def test_voice_capability_is_gone(self):
+        """REQ-75：离线语音整体移除，服务端这边不留任何一条可达入口。
+
+        目录里、名字表里、以及**只为录音而存在的那个权限值**，三者都要干净——
+        留着任一条，模型都会调到一个客户端已经不存在的东西上（白等一个超时窗，
+        或收到一个 ``invalid_input``）。
+        """
+        assert "voice.transcribe" not in {t.capability for t in D.DEVICE_TOOLS}
+        assert "device_transcribe_voice" not in D.DEVICE_TOOLS_BY_NAME
+        permission = D.DEVICE_TOOLS_BY_NAME["device_request_permission"]
+        assert "RECORD_AUDIO" not in (
+            permission.parameters["properties"]["permission"]["enum"]
+        )
 
     def test_tool_names_are_provider_safe(self):
         """工具名走 provider：点号会让 provider 直接 400（02c 收口实测）。"""
@@ -409,11 +427,11 @@ class TestNeedsResult:
         channel = DeviceChannel(timeout_seconds=5.0)
         user_id = uuid.uuid4()
         provider = ScriptedProvider([
-            _tool_turn(_call("device_transcribe_voice")),
-            _text("没听清。"),
+            _tool_turn(_call("device_pick_image", {"source": "camera"})),
+            _text("没拍成。"),
         ])
         loop, observer = _loop(provider, ctx=_ctx(user_id), device=channel)
-        task = asyncio.create_task(loop.run("我说一句"))
+        task = asyncio.create_task(loop.run("拍一张"))
         await _wait_for(lambda: channel.pending_count == 1)
         channel.deliver(
             observer.device_requests[0]["request_id"],
@@ -425,23 +443,26 @@ class TestNeedsResult:
         assert _content_of(result)["message"]
         # 设备失败**不终结回合**：模型照常拿到结果并给出回答（ADR-010 决策 4）
         assert result.stop_reason == "completed"
-        assert result.content == "没听清。"
+        assert result.content == "没拍成。"
 
     async def test_permission_denied_is_a_tool_result_not_a_stop(self):
         channel = DeviceChannel(timeout_seconds=5.0)
         user_id = uuid.uuid4()
         provider = ScriptedProvider([
             _tool_turn(
-                _call("device_request_permission", {"permission": "RECORD_AUDIO"}),
+                _call(
+                    "device_request_permission",
+                    {"permission": "READ_MEDIA_IMAGES"},
+                ),
             ),
-            _text("没有麦克风权限，我没法录音。"),
+            _text("没有相册权限，我没法看图片。"),
         ])
         loop, observer = _loop(provider, ctx=_ctx(user_id), device=channel)
-        task = asyncio.create_task(loop.run("帮我语音记一笔"))
+        task = asyncio.create_task(loop.run("帮我从相册选张小票"))
         await _wait_for(lambda: channel.pending_count == 1)
         frame = observer.device_requests[0]
         assert frame["capability"] == "permissions.request"
-        assert frame["payload"] == {"permission": "RECORD_AUDIO"}
+        assert frame["payload"] == {"permission": "READ_MEDIA_IMAGES"}
         channel.deliver(
             frame["request_id"], user_id=user_id,
             outcome=DeviceOutcome(status=STATUS_DENIED),
@@ -449,7 +470,7 @@ class TestNeedsResult:
         result = await asyncio.wait_for(task, timeout=5.0)
 
         assert _content_of(result)["code"] == "device_denied"
-        assert result.content == "没有麦克风权限，我没法录音。"
+        assert result.content == "没有相册权限，我没法看图片。"
 
     async def test_two_requests_in_one_step_stay_paired(self):
         """同一步里两次设备调用：各自独立挂起、各自配对（不变式 1）。

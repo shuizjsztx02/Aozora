@@ -362,7 +362,7 @@ class Settings(BaseSettings):
         ),
     )
     # 一次**需结果**设备请求的挂起上限（秒）。客户端执行的是人的动作（系统权限
-    # 对话框、选图、录音），所以它比 ``ai_agent_step_timeout_seconds`` 宽松得多：
+    # 对话框、选图），所以它比 ``ai_agent_step_timeout_seconds`` 宽松得多：
     # 挂起期间流上有心跳（``ai_agent_heartbeat_seconds``），连接不会因为这个时长
     # 被掐断。到期仍未回传即收敛成一条「没等到结果」的失败结果回喂模型
     # （ADR-010 决策 4），回合照常往下走。

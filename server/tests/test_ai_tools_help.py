@@ -216,7 +216,6 @@ _SAMPLING: tuple[tuple[str, str], ...] = (
     ("怎么用聊天记账", "chat"),
     ("为什么要确认", "confirm-card"),
     ("怎么看历史聊天记录", "conversations"),
-    ("麦克风怎么用", "voice"),
     ("报表在哪看", "reports"),
     ("怎么把数据导出来", "export"),
     ("数据会不会丢", "sync"),
@@ -241,3 +240,18 @@ class TestSampling:
     def test_sampling_covers_the_feature_surface(self):
         """抽样表本身要够宽：每条语料都该至少被一次真实问法覆盖到。"""
         assert {expected for _, expected in _SAMPLING} == {t.id for t in H.TOPICS}
+
+    @pytest.mark.parametrize(
+        "query",
+        ["支持语音记账吗", "麦克风怎么用", "语音输入在哪", "怎么语音记账"],
+    )
+    def test_voice_queries_hit_nothing(self, query):
+        """REQ-75：语音条目下架后，问它**什么都答不出来**（空结果是预期）。
+
+        空结果不是缺陷：``help.py`` 的语料口径是「不写未实现的功能」，而
+        ``help_search`` 的**未命中**路径会把条目清单一并回给模型、并叮嘱
+        「条目里没有的就如实说不知道」——模型因此不会照着一条已经不存在的
+        功能向用户承诺。留下一条语音语料，才是这里真正要防的（它会让模型
+        答出一个用户走不到的入口）。
+        """
+        assert H.search(query) == []
