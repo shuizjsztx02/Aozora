@@ -69,7 +69,12 @@ data class ServerChange(
         val parentId = entityPayload["parentId"]
         return CategoryEntity(
             id = id, ownerId = ownerId, bookId = bookId, parentId = parentId,
-            kind = kind, name = name, archivedAt = null, version = version
+            kind = kind, name = name,
+            // REQ-73（T19-1）：icon 两端化后的下行读口。此前这里不读 icon（服务端
+            // 无此列），merge 侧那层本地保护因此是「无条件保留本地」；现在必须读，
+            // 否则 AI / 跨设备改的图标永远下不来。空值语义见 Repository 的 merge。
+            icon = entityPayload["icon"],
+            archivedAt = null, version = version
         )
     }
 

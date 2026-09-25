@@ -1232,3 +1232,159 @@ class TestAccountTypeAndBalance:
         acc = next(a for a in data["accounts"] if a["id"] == str(acc_id))
         assert acc["account_type"] == "储蓄卡"
         assert acc["balance_cents"] == -1
+
+
+class TestCategoryIcon:
+    """``categories.icon``（REQ-73 / T19-1，ADR-014）。
+
+    图标此前只存在于客户端 Room：无列、insert/update 都不读、序列化也不出，
+    pull 靠一层本地保护才没被冲刷。本组钉住四条契约：
+
+    * icon 随分类上行 / 下行（insert、update、pull、bootstrap 四个入口）；
+    * update 在**键缺省时不改动**该列 —— 未升级的旧客户端不发 icon，无条件写入
+      会把用户已有的图标清掉；
+    * 显式 ``null`` 可清空（与 book/account 同口径）；
+    * 跨端只承载 **≤64 字符**：超长（照片 data: URI）422 拒绝，客户端据此在
+      超长时省略键（护栏在 Repository.categoryToJson）。
+    """
+
+    def _cat_id(self) -> uuid.UUID:
+        return uuid.uuid4()
+
+    @pytest.mark.asyncio
+    async def test_insert_persists_icon(self, cloud_ctx):
+        ctx = cloud_ctx
+        cat_id = self._cat_id()
+        resp = _push(ctx, ctx["user_a"], [
+            _mutation("category", cat_id, {
+                "name": "交通", "kind": "expense", "icon": "🚇",
+            }),
+        ])
+        assert resp.status_code == 200
+        cat = (await ctx["db"].execute(
+            select(Category).where(Category.id == cat_id)
+        )).scalar_one()
+        assert cat.icon == "🚇"
+
+    @pytest.mark.asyncio
+    async def test_insert_defaults_to_null_when_icon_absent(self, cloud_ctx):
+        ctx = cloud_ctx
+        cat_id = self._cat_id()
+        resp = _push(ctx, ctx["user_a"], [
+            _mutation("category", cat_id, {"name": "交通", "kind": "expense"}),
+        ])
+        assert resp.status_code == 200
+        cat = (await ctx["db"].execute(
+            select(Category).where(Category.id == cat_id)
+        )).scalar_one()
+        assert cat.icon is None
+
+    @pytest.mark.asyncio
+    async def test_update_changes_icon(self, cloud_ctx):
+        ctx = cloud_ctx
+        cat_id = self._cat_id()
+        _push(ctx, ctx["user_a"], [
+            _mutation("category", cat_id, {
+                "name": "交通", "kind": "expense", "icon": "🚇",
+            }),
+        ])
+        resp = _push(ctx, ctx["user_a"], [
+            _mutation("category", cat_id,
+                      {"name": "交通", "icon": "🚗"}, operation="update", version=1),
+        ])
+        assert resp.status_code == 200
+        cat = (await ctx["db"].execute(
+            select(Category).where(Category.id == cat_id)
+        )).scalar_one()
+        assert cat.icon == "🚗"
+
+    @pytest.mark.asyncio
+    async def test_update_without_icon_key_preserves_it(self, cloud_ctx):
+        """旧客户端只发 name —— 图标必须原样留着（不被清空）。"""
+        ctx = cloud_ctx
+        cat_id = self._cat_id()
+        _push(ctx, ctx["user_a"], [
+            _mutation("category", cat_id, {
+                "name": "交通", "kind": "expense", "icon": "🚇",
+            }),
+        ])
+        resp = _push(ctx, ctx["user_a"], [
+            _mutation("category", cat_id,
+                      {"name": "出行"}, operation="update", version=1),
+        ])
+        assert resp.status_code == 200
+        cat = (await ctx["db"].execute(
+            select(Category).where(Category.id == cat_id)
+        )).scalar_one()
+        assert cat.name == "出行"
+        assert cat.icon == "🚇"
+
+    @pytest.mark.asyncio
+    async def test_update_explicit_null_clears_icon(self, cloud_ctx):
+        ctx = cloud_ctx
+        cat_id = self._cat_id()
+        _push(ctx, ctx["user_a"], [
+            _mutation("category", cat_id, {
+                "name": "交通", "kind": "expense", "icon": "🚇",
+            }),
+        ])
+        resp = _push(ctx, ctx["user_a"], [
+            _mutation("category", cat_id,
+                      {"name": "交通", "icon": None}, operation="update", version=1),
+        ])
+        assert resp.status_code == 200
+        cat = (await ctx["db"].execute(
+            select(Category).where(Category.id == cat_id)
+        )).scalar_one()
+        assert cat.icon is None
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("bad", ["x" * 65, 123])
+    async def test_icon_validation_rejects(self, cloud_ctx, bad):
+        """超长（照片 data: URI 就长这样）与非字符串都是 422 —— 客户端护栏的另一半。"""
+        ctx = cloud_ctx
+        resp = _push(ctx, ctx["user_a"], [
+            _mutation("category", self._cat_id(), {
+                "name": "交通", "kind": "expense", "icon": bad,
+            }),
+        ])
+        assert resp.status_code == 422
+
+    @pytest.mark.asyncio
+    async def test_update_icon_validation_rejects(self, cloud_ctx):
+        ctx = cloud_ctx
+        cat_id = self._cat_id()
+        _push(ctx, ctx["user_a"], [
+            _mutation("category", cat_id, {"name": "交通", "kind": "expense"}),
+        ])
+        resp = _push(ctx, ctx["user_a"], [
+            _mutation("category", cat_id,
+                      {"name": "交通", "icon": "x" * 65}, operation="update", version=1),
+        ])
+        assert resp.status_code == 422
+
+    @pytest.mark.asyncio
+    async def test_pull_serializes_icon(self, cloud_ctx):
+        ctx = cloud_ctx
+        cat_id = self._cat_id()
+        _push(ctx, ctx["user_a"], [
+            _mutation("category", cat_id, {
+                "name": "交通", "kind": "expense", "icon": "🚇",
+            }),
+        ])
+        data = _pull(ctx, ctx["user_a"]).json()
+        change = next(c for c in data["changes"] if c["entity_type"] == "category")
+        assert change["entity"]["icon"] == "🚇"
+
+    @pytest.mark.asyncio
+    async def test_bootstrap_serializes_icon(self, cloud_ctx):
+        ctx = cloud_ctx
+        cat_id = self._cat_id()
+        _push(ctx, ctx["user_a"], [
+            _mutation("category", cat_id, {
+                "name": "交通", "kind": "expense", "icon": "🚇",
+            }),
+        ])
+        data = _bootstrap(ctx, ctx["user_a"]).json()
+        cat = next(c for c in data["categories"] if c["id"] == str(cat_id))
+        assert cat["icon"] == "🚇"

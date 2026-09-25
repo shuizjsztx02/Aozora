@@ -1629,9 +1629,19 @@ class Repository(private val db: AozoraDatabase) {
                             )
                         } else {
                             val entity = change.toCategory(ownerId) ?: continue
-                            // 服务端 Category 无 icon 列：保留本地自定义图标，避免被 pull 冲刷
+                            // REQ-73（T19-1，ADR-014）：icon 两端化后的合并口径，三态 ——
+                            //   ① 本地是照片（data:）→ 保留本地：照片图标仅本机可见（决策 #3）；
+                            //   ② 服务端有值 → 服务端权威：AI 改图标 / 跨设备改图标只走这条；
+                            //   ③ 服务端为 null → 保留本地。category.icon 的 null 有语义
+                            //      （按名映射 emoji），且存量行服务端全是 NULL；把「无信息」
+                            //      当「清空」会在一次 pull 后抹掉本地已有的 emoji 图标。
+                            //      与 accounts.account_type 同口径（T18-5）。
                             val localIcon = db.categoryDao().getById(entity.id)?.icon
-                            db.categoryDao().upsertFromSync(entity.copy(icon = localIcon ?: entity.icon))
+                            val mergedIcon = if (
+                                localIcon != null && localIcon.startsWith("data:") &&
+                                entity.icon?.startsWith("data:") != true
+                            ) localIcon else entity.icon ?: localIcon
+                            db.categoryDao().upsertFromSync(entity.copy(icon = mergedIcon))
                         }
                     }
                     "account" -> {
@@ -1781,8 +1791,18 @@ class Repository(private val db: AozoraDatabase) {
             put("parentId", cat.parentId ?: JSONObject.NULL)
             put("kind", cat.kind)
             put("name", cat.name)
-            // icon：服务端 Category 无此列，push 时未知键被忽略（安全）；仅本地持久化。
-            put("icon", cat.icon ?: JSONObject.NULL)
+            // REQ-73（T19-1，ADR-014）：icon 两端化。三种情形分开表态 ——
+            //   * 照片版（data: URI 可达 48KB）超服务端 64 上限 → 省略键，防整批 push
+            //     422 毒丸（决策 #3），照片图标保持「仅本机可见」；
+            //   * null → 显式上行（服务端「键在场才改」）：「清除自定义图标」是 IconPicker
+            //     里的真实操作，省略键会让它静默失效（旧值下次 pull 又回来）；
+            //   * ≤64 字符 → 原样上行。
+            val icon = cat.icon
+            if (icon == null) {
+                put("icon", JSONObject.NULL)
+            } else if (icon.length <= ICON_WIRE_MAX_LEN) {
+                put("icon", icon)
+            }
             put("version", cat.version)
         }.toString()
     }

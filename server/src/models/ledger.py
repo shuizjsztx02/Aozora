@@ -99,6 +99,11 @@ class Category(Base, AuditMixin, VersionedMixin):
         String(10), nullable=False,
     )
     name: Mapped[str] = mapped_column(String(64), nullable=False)
+    # 第十九轮 REQ-73（T19-1，ADR-014）：分类图标两端化。此前只存在于客户端 Room
+    # （上行被 sync 静默丢弃、pull 靠本地保护、bootstrap 无保护）。跨端只承载
+    # ≤64 字符的 emoji：照片版 icon（data: URI 可达 48KB）由客户端在超长时省略键，
+    # 保持「仅本机可见」的现状（放宽松会把整批 push 变成 422 毒丸）。
+    icon: Mapped[str | None] = mapped_column(String(64), nullable=True)
     archived_at: Mapped[datetime | None] = mapped_column(
         DateTime(timezone=True), nullable=True,
     )

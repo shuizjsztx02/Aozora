@@ -289,6 +289,9 @@ class SyncService:
             # via the global catch in push().
             CategoryKind(payload["kind"])
             _validate_name(payload["name"], 64, "name")
+            # REQ-73（T19-1，ADR-014）：icon 两端化，照 book/account 的写法。
+            if payload.get("icon") is not None:
+                _validate_name(payload["icon"], 64, "icon")
             cat = Category(
                 id=entity_id,
                 owner_id=user_id,
@@ -296,6 +299,7 @@ class SyncService:
                 parent_id=parent_id,
                 kind=payload["kind"],
                 name=payload["name"],
+                icon=payload.get("icon"),
             )
             self.db.add(cat)
             await self.db.flush()
@@ -541,6 +545,11 @@ class SyncService:
             if "name" in payload:
                 _validate_name(payload["name"], 64, "name")
                 entity.name = payload["name"]
+            # REQ-73（T19-1，ADR-014）：键在场才改 —— 与 book/account 同口径。
+            if "icon" in payload:
+                if payload["icon"] is not None:
+                    _validate_name(payload["icon"], 64, "icon")
+                entity.icon = payload["icon"]
             if "parent_id" in payload:
                 parent_id = _to_uuid(payload["parent_id"]) if payload["parent_id"] else None
                 if parent_id is not None:
@@ -1141,6 +1150,10 @@ def _serialize_entity(entity: object) -> dict:
         return {
             "id": str(entity.id),
             "name": entity.name,
+            # REQ-73（T19-1，ADR-014）：icon 随 change / bootstrap 下发。bootstrap
+            # checksum 由客户端按收到的原始 JSON 重算（rawEntityMap 保留 JSON 原始
+            # 类型），故新增键两侧一致，不会造成 RETRYABLE 失配（同 T18-5 的 account）。
+            "icon": entity.icon,
             "kind": str(entity.kind),
             "book_id": str(entity.book_id) if entity.book_id else None,
             "parent_id": str(entity.parent_id) if entity.parent_id else None,

@@ -2,6 +2,7 @@ package com.aozora.app.db
 
 import com.aozora.app.db.entity.AccountEntity
 import com.aozora.app.db.entity.BookEntity
+import com.aozora.app.db.entity.CategoryEntity
 import com.aozora.app.db.entity.DefaultIcons
 import com.aozora.app.sync.BootstrapResponse
 import com.aozora.app.sync.ServerChange
@@ -52,6 +53,11 @@ class RepositoryIconSyncTest {
     private fun account(id: String, icon: String, version: Int = 1) =
         AccountEntity(id = id, ownerId = "u1", name = "账户-$id", icon = icon,
             accountType = null, archivedAt = null, version = version)
+
+    private fun category(id: String, icon: String?, version: Int = 1) =
+        CategoryEntity(id = id, ownerId = "u1", bookId = null, parentId = null,
+            kind = "expense", name = "分类-$id", icon = icon,
+            archivedAt = null, version = version)
 
     // ─── push 侧：payload 键省略 ───
 
@@ -189,5 +195,107 @@ class RepositoryIconSyncTest {
         )
         assertEquals(DefaultIcons.BOOK, repository.listBooks().first { it.id == "b1" }.icon)
         assertEquals(DefaultIcons.ACCOUNT, repository.listAccounts().first { it.id == "a1" }.icon)
+    }
+
+    // ─── REQ-73（T19-1，ADR-014）：分类 icon 两端化 ───
+
+    @Test
+    fun categoryInsert_photoIcon_payloadOmitsIconKey() = runBlocking {
+        repository.insertCategory(category("c1", photoIcon), "m1")
+        val payload = JSONObject(
+            repository.listPendingMutations().first { it.entityId == "c1" }.payload
+        )
+        assertFalse("超长照片 icon 不应进 push payload（防 422 毒丸）", payload.has("icon"))
+        assertTrue(payload.has("name")) // 其余字段不受影响
+    }
+
+    @Test
+    fun categoryInsert_nullIcon_payloadSendsExplicitNull() = runBlocking {
+        // 「清除自定义图标」是 IconPicker 的真实操作：省略键会让服务端保留旧值，
+        // 下次 pull 又把图标带回来 —— 必须显式发 null（服务端按键在场才改）。
+        repository.insertCategory(category("c1", null), "m1")
+        val payload = JSONObject(
+            repository.listPendingMutations().first { it.entityId == "c1" }.payload
+        )
+        assertTrue("null 必须显式上行", payload.has("icon"))
+        assertTrue(payload.isNull("icon"))
+    }
+
+    @Test
+    fun categoryPull_serverEmoji_overridesLocalEmoji() = runBlocking {
+        // AI / 跨设备改图标的主路径。修复前这里是无条件保留本地 → 服务端改了也下不来。
+        repository.insertCategory(category("c1", "🚇"), "m1")
+        repository.removeMutation("m1") // 模拟 push 成功，解除活跃 mutation 跳过条件
+        repository.applyServerChanges(
+            listOf(ServerChange(
+                entityType = "category", entityId = "c1", operation = SyncChangeOp.UPDATE, version = 2,
+                entityPayload = mapOf(
+                    "id" to "c1", "name" to "交通", "kind" to "expense", "icon" to "🚗"
+                )
+            )),
+            newCursor = 0, ownerId = "u1"
+        )
+        assertEquals("🚗", repository.listCategories().first { it.id == "c1" }.icon)
+    }
+
+    @Test
+    fun categoryPull_serverNull_preservesLocalEmoji() = runBlocking {
+        // 存量行服务端 icon 仍是 NULL；照单全收会在一次 pull 后抹掉本地 emoji
+        // （与 accounts.account_type 同口径：服务端空值 = 无信息）。
+        repository.insertCategory(category("c1", "🚇"), "m1")
+        repository.removeMutation("m1")
+        repository.applyServerChanges(
+            listOf(ServerChange(
+                entityType = "category", entityId = "c1", operation = SyncChangeOp.UPDATE, version = 2,
+                entityPayload = mapOf(
+                    "id" to "c1", "name" to "改名了", "kind" to "expense", "icon" to null
+                )
+            )),
+            newCursor = 0, ownerId = "u1"
+        )
+        val c = repository.listCategories().first { it.id == "c1" }
+        assertEquals("服务端空值不得冲刷本地 emoji", "🚇", c.icon)
+        assertEquals("其余字段正常合并", "改名了", c.name)
+    }
+
+    @Test
+    fun categoryPull_nonDataIcon_preservesLocalPhoto() = runBlocking {
+        repository.insertCategory(category("c1", photoIcon), "m1")
+        repository.removeMutation("m1")
+        repository.applyServerChanges(
+            listOf(ServerChange(
+                entityType = "category", entityId = "c1", operation = SyncChangeOp.UPDATE, version = 2,
+                entityPayload = mapOf(
+                    "id" to "c1", "name" to "分类-c1", "kind" to "expense", "icon" to "🚗"
+                )
+            )),
+            newCursor = 0, ownerId = "u1"
+        )
+        assertEquals("照片图标仅本机可见：服务端非 data: 值不得冲刷", photoIcon,
+            repository.listCategories().first { it.id == "c1" }.icon)
+    }
+
+    @Test
+    fun bootstrap_categoryIcon_readFromServer() = runBlocking {
+        // bootstrap 是另一条读口（serverChangeMapToCategory）：修复前服务端不出 icon，
+        // 走一次快照重建，分类图标全丢。
+        repository.applyBootstrap(
+            BootstrapResponse(
+                books = emptyList(),
+                categories = listOf(
+                    mapOf(
+                        "id" to "c1", "name" to "交通", "kind" to "expense",
+                        "icon" to "🚇", "version" to "1"
+                    ),
+                ),
+                accounts = emptyList(),
+                transactions = emptyList(),
+                budgets = emptyList(),
+                cursor = 1,
+                checksum = "ignored"
+            ),
+            ownerId = "u1"
+        )
+        assertEquals("🚇", repository.listCategories().first { it.id == "c1" }.icon)
     }
 }
