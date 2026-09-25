@@ -11,7 +11,7 @@ import { describe, it, expect, vi } from 'vitest'
 import { render, screen, fireEvent, within } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { CategoryPager, EntryChipRow } from '../../features/ledger/entry-controls'
-import type { EntryChipRowProps } from '../../features/ledger/entry-controls'
+import type { CategoryPagerProps, EntryChipRowProps } from '../../features/ledger/entry-controls'
 import type { AccountData, BookData, CategoryData } from '../../platform/bridge/bridge-types'
 
 const cat = (id: string, name: string): CategoryData => ({
@@ -157,6 +157,131 @@ describe('CategoryPager', () => {
     expect(onSelect).toHaveBeenCalledWith('cat-1')
     expect(cells[0].closest('.cat-cell')).toHaveClass('active')
     expect(cells[1].closest('.cat-cell')).not.toHaveClass('active')
+  })
+})
+
+// ─── CategoryPager：层级化（T19-5 / REQ-76①） ───
+//
+// 宿主仍传扁平全量（三处过滤口径不动），组件自己按 parentId 分组：一级进宫格、
+// 二级进「选中/展开的一级」下方的内嵌面板。★ 不变量：一级仍是合法终值——
+// 点一级格 onSelect 收到的就是一级 id（不下钻），展开与否只是可见性。
+
+const subCat = (id: string, name: string, parentId: string): CategoryData => ({
+  id, name, kind: 'expense', parentId, version: 1,
+})
+
+/** 餐饮 ← 午饭/晚饭；交通（无子类）；购物 ← 网购 */
+const HIER: CategoryData[] = [
+  cat('c-food', '餐饮'),
+  subCat('c-lunch', '午饭', 'c-food'),
+  subCat('c-dinner', '晚饭', 'c-food'),
+  cat('c-traffic', '交通'),
+  cat('c-shop', '购物'),
+  subCat('c-online', '网购', 'c-shop'),
+]
+
+function renderPager(props: Partial<CategoryPagerProps> = {}) {
+  const full: CategoryPagerProps = {
+    categories: HIER,
+    selectedId: '',
+    onSelect: vi.fn(),
+    page: 0,
+    onPageChange: vi.fn(),
+    ...props,
+  }
+  render(<CategoryPager {...full} />)
+  return full
+}
+
+describe('CategoryPager — 层级化（T19-5）', () => {
+  it('宫格只排一级；二级不进格；仅带子类的一级有可展开标记；占位仍按一级数补', () => {
+    renderPager()
+    const pager = screen.getByTestId('category-pager')
+    for (const name of ['餐饮', '交通', '购物']) {
+      expect(within(pager).getByText(name)).toBeTruthy()
+    }
+    for (const name of ['午饭', '晚饭', '网购']) {
+      expect(within(pager).queryByText(name)).toBeNull()
+    }
+    // 3 个一级 → 7 个占位格（分页口径只看一级，二级不入页）
+    expect(screen.getAllByTestId('cat-cell-placeholder')).toHaveLength(7)
+    expect(screen.getAllByTestId('cat-expand-marker')).toHaveLength(2)
+    const food = within(pager).getByText('餐饮').closest('button') as HTMLElement
+    const traffic = within(pager).getByText('交通').closest('button') as HTMLElement
+    expect(within(food).queryByTestId('cat-expand-marker')).toBeTruthy()
+    expect(within(traffic).queryByTestId('cat-expand-marker')).toBeNull()
+    // 默认不展开（选中的是空）
+    expect(screen.queryByTestId('category-subpanel')).toBeNull()
+  })
+
+  it('点带子类的一级 = 选中该一级（★不下钻）+ 其二级面板展开', async () => {
+    const user = userEvent.setup()
+    const onSelect = vi.fn()
+    renderPager({ onSelect })
+    await user.click(within(screen.getByTestId('category-pager')).getByText('餐饮'))
+    expect(onSelect).toHaveBeenLastCalledWith('c-food') // 一级仍是合法终值
+    const panel = screen.getByTestId('category-subpanel')
+    expect(within(panel).getByText('午饭')).toBeTruthy()
+    expect(within(panel).getByText('晚饭')).toBeTruthy()
+    expect(within(panel).queryByText('网购')).toBeNull() // 只属于「餐饮」
+  })
+
+  it('已展开时再点该一级 → 收起面板（选中值不变，仍是一级）', async () => {
+    const user = userEvent.setup()
+    const onSelect = vi.fn()
+    renderPager({ onSelect })
+    const food = () => within(screen.getByTestId('category-pager')).getByText('餐饮')
+    await user.click(food())
+    expect(screen.getByTestId('category-subpanel')).toBeTruthy()
+    await user.click(food())
+    expect(screen.queryByTestId('category-subpanel')).toBeNull()
+    expect(onSelect).toHaveBeenLastCalledWith('c-food')
+  })
+
+  it('点二级格 → onSelect 收到二级 id，面板保持展开', async () => {
+    const user = userEvent.setup()
+    const onSelect = vi.fn()
+    renderPager({ onSelect })
+    await user.click(within(screen.getByTestId('category-pager')).getByText('餐饮'))
+    await user.click(within(screen.getByTestId('category-subpanel')).getByText('晚饭'))
+    expect(onSelect).toHaveBeenLastCalledWith('c-dinner')
+    expect(screen.getByTestId('category-subpanel')).toBeTruthy()
+  })
+
+  it('无子类的一级：点击只选中，不展开面板（零回归）', async () => {
+    const user = userEvent.setup()
+    const onSelect = vi.fn()
+    renderPager({ onSelect })
+    await user.click(within(screen.getByTestId('category-pager')).getByText('交通'))
+    expect(onSelect).toHaveBeenLastCalledWith('c-traffic')
+    expect(screen.queryByTestId('category-subpanel')).toBeNull()
+  })
+
+  it('受控 selectedId 落在二级 → 其一级格 active 且面板默认展开（选的是谁的孩子可见）', () => {
+    renderPager({ selectedId: 'c-lunch' })
+    const pager = screen.getByTestId('category-pager')
+    expect(within(pager).getByText('餐饮').closest('button')).toHaveClass('active')
+    expect(within(pager).getByText('交通').closest('button')).not.toHaveClass('active')
+    const panel = screen.getByTestId('category-subpanel')
+    expect(within(panel).getByText('午饭').closest('button')).toHaveClass('active')
+    expect(within(panel).getByText('晚饭').closest('button')).not.toHaveClass('active')
+  })
+
+  it('二级不参与分页：10 个一级 + 2 个二级仍是单页、无指示点', () => {
+    const many = [...makeCats(10), subCat('s-1', '子一', 'cat-0'), subCat('s-2', '子二', 'cat-1')]
+    renderPager({ categories: many })
+    expect(screen.queryByTestId('category-page-dots')).toBeNull()
+    expect(screen.queryAllByTestId('cat-cell-placeholder')).toHaveLength(0)
+    expect(within(screen.getByTestId('category-pager')).queryByText('子一')).toBeNull()
+  })
+
+  it('父类不在列表内的孤儿按一级渲染——不凭空消失、仍可选中（改动前它们本就在格子里）', async () => {
+    const user = userEvent.setup()
+    const onSelect = vi.fn()
+    renderPager({ categories: [cat('c-a', '甲'), subCat('c-x', '孤儿', 'c-missing')], onSelect })
+    await user.click(within(screen.getByTestId('category-pager')).getByText('孤儿'))
+    expect(onSelect).toHaveBeenLastCalledWith('c-x')
+    expect(screen.queryByTestId('category-subpanel')).toBeNull()
   })
 })
 

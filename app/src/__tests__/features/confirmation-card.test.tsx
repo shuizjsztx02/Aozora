@@ -238,16 +238,24 @@ describe('ConfirmationCard — 编辑态草稿化（T16-3 / REQ-59）', () => {
     expect(screen.getByTestId('card-status').textContent).toContain('已记录')
   })
 
-  it('card-cat-toggle 展开/收起宫格；展开后平铺含二级分类（QuickEntry 同款）', async () => {
+  it('card-cat-toggle 展开/收起宫格；一级进宫格、二级进展开面板（T19-5 层级化）', async () => {
     renderCard()
     await toEdit()
     await openPager()
     const pager = screen.getByTestId('category-pager')
     expect(pager.textContent).toContain('餐饮')
-    expect(pager.textContent).toContain('午饭') // 平铺：二级进宫格
-    expect(pager.textContent).toContain('晚饭')
     expect(pager.textContent).toContain('交通')
     expect(pager.textContent).not.toContain('工资') // 只含当前 kind
+    // T19-5：二级不再与一级同格（这正是 REQ-76 要改的「完全是同级」）
+    expect(pager.textContent).not.toContain('午饭')
+    expect(pager.textContent).not.toContain('晚饭')
+    // 卡默认选中的是二级「午饭」→ 其一级（餐饮）的二级面板自动展开，「选的是谁的孩子」看得见
+    const panel = screen.getByTestId('category-subpanel')
+    expect(panel.textContent).toContain('午饭')
+    expect(panel.textContent).toContain('晚饭')
+    expect(within(panel).getByText('午饭').closest('button')).toHaveClass('active')
+    // 一级格也点亮（REQ-76 修复设计 ③）
+    expect(within(pager).getByText('餐饮').closest('button')).toHaveClass('active')
     fireEvent.click(screen.getByTestId('card-cat-toggle'))
     expect(screen.queryByTestId('category-pager')).toBeNull()
   })
@@ -269,14 +277,29 @@ describe('ConfirmationCard — 编辑态草稿化（T16-3 / REQ-59）', () => {
     expect(overrides).toBeUndefined()
   })
 
-  it('宫格点二级分类 → 确认后落子分类 id', async () => {
+  it('宫格展开二级面板后点二级分类 → 确认后落子分类 id', async () => {
     const { onEditCommit } = renderCard({ categoryId: 'cat-food' })
     await toEdit()
     await openPager()
-    fireEvent.click(within(screen.getByTestId('category-pager')).getByText('晚饭'))
+    // 挂载时选中的是「餐饮」（带子类，但不自动展开）：点它展开其二级面板
+    fireEvent.click(within(screen.getByTestId('category-pager')).getByText('餐饮'))
+    fireEvent.click(within(screen.getByTestId('category-subpanel')).getByText('晚饭'))
     fireEvent.click(screen.getByTestId('card-done'))
     fireEvent.click(screen.getByTestId('card-compare-confirm'))
     expect(onEditCommit.mock.calls[0][0].transactions[0].categoryId).toBe('cat-dinner')
+  })
+
+  it('★一级仍是合法终值：选带子类的一级不下钻 → 确认后落子就是该一级（T19-5 决策 #11）', async () => {
+    const { onEditCommit } = renderCard({ categoryId: 'cat-traffic' })
+    await toEdit()
+    await openPager()
+    // 点开「餐饮」只是展开可见性，选中值仍是这一级；面板里不再点任何二级
+    fireEvent.click(within(screen.getByTestId('category-pager')).getByText('餐饮'))
+    expect(screen.getByTestId('category-subpanel')).toBeTruthy()
+    fireEvent.click(screen.getByTestId('card-done'))
+    fireEvent.click(screen.getByTestId('card-compare-confirm'))
+    expect(onEditCommit).toHaveBeenCalledTimes(1)
+    expect(onEditCommit.mock.calls[0][0].transactions[0].categoryId).toBe('cat-food')
   })
 
   it('同值守卫：再点当前选中分类 → 确认时不写库', async () => {
