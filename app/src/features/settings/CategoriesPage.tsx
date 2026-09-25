@@ -37,8 +37,9 @@ export function CategoriesPage() {
     categories.filter(c => c.kind === kind && !c.parentId)
   const childrenOf = (id: string) => categories.filter(c => c.parentId === id)
 
-  const openNew = (kind: 'expense' | 'income') =>
-    setEditing({ mode: 'new', base: { id: '', kind, name: '', parentId: null, icon: null, version: 1 } })
+  // T19-6（REQ-76②）：parentId 预置——「新建二级分类」复用同一入口
+  const openNew = (kind: 'expense' | 'income', parentId: string | null = null) =>
+    setEditing({ mode: 'new', base: { id: '', kind, name: '', parentId, icon: null, version: 1 } })
   const openEdit = (c: CategoryData) =>
     setEditing({ mode: 'edit', base: c })
 
@@ -70,9 +71,19 @@ export function CategoriesPage() {
       </div>
 
       {editing && (
+        // key：一级 ↔ 其二级之间切换编辑目标时强制重挂载，否则 useState 初值不会重置
+        // （T19-6 弹层内可直接点进子类，列表页原地不再重挂）
         <CategoryEditor
+          key={editing.base.id || 'new'}
           editing={editing}
           siblings={topLevel(editing.base.kind)}
+          childList={
+            editing.mode === 'edit' && !editing.base.parentId
+              ? childrenOf(editing.base.id)
+              : null
+          }
+          onEditChild={openEdit}
+          onNewChild={() => openNew(editing.base.kind, editing.base.id)}
           bridge={bridge}
           onSaved={() => { setEditing(null); load() }}
           onClose={() => setEditing(null)}
@@ -110,7 +121,14 @@ function CategorySection({
               <CategoryIcon icon={cat.icon} name={cat.name} className="text-xl" />
               <span className="text-xs text-ink2 truncate w-full text-center">{cat.name}</span>
               {subs.length > 0 && (
-                <span className="text-[10px]" style={{ color: 'var(--ink3)' }}>{subs.length} 个子类</span>
+                // T19-6（REQ-76②③）：计数含义不变，改为可点提示（点格即打开含子类列表的弹层）
+                <span
+                  className="text-[10px] underline"
+                  style={{ color: 'var(--accent)' }}
+                  data-testid={`category-children-hint-${cat.id}`}
+                >
+                  {subs.length} 个子类 ›
+                </span>
               )}
             </button>
           )
@@ -129,10 +147,14 @@ function CategorySection({
 }
 
 function CategoryEditor({
-  editing, siblings, bridge, onSaved, onClose,
+  editing, siblings, childList, onEditChild, onNewChild, bridge, onSaved, onClose,
 }: {
   editing: { mode: 'new' | 'edit'; base: CategoryData }
   siblings: CategoryData[]
+  /** 非 null 时（=正在编辑一个一级分类）在下方渲染其二级分类段；null 则不渲染该段。 */
+  childList: CategoryData[] | null
+  onEditChild: (c: CategoryData) => void
+  onNewChild: () => void
   bridge: ReturnType<typeof useBridge>
   onSaved: () => void
   onClose: () => void
@@ -182,12 +204,16 @@ function CategoryEditor({
       data-testid="category-editor-mask"
     >
       <div
-        className="sheet-glass relative z-10 p-4 pb-6 space-y-4"
+        className="sheet-glass relative z-10 p-4 pb-6 space-y-4 max-h-[85vh] overflow-y-auto"
         onClick={e => e.stopPropagation()}
         data-testid="category-editor"
       >
         <div className="text-sm font-medium" style={{ color: 'var(--ink)' }}>
-          {isEdit ? '编辑分类' : `新建${editing.base.kind === 'expense' ? '支出' : '收入'}分类`}
+          {isEdit
+            ? '编辑分类'
+            : editing.base.parentId
+              ? '新建二级分类'
+              : `新建${editing.base.kind === 'expense' ? '支出' : '收入'}分类`}
         </div>
 
         {/* 名称（T9-3/REQ-12：名称、上级分类在上，图标选择在下） */}
@@ -241,6 +267,48 @@ function CategoryEditor({
 
         {/* 图标选择（T9-6：抽入共享 IconPicker，行为不变） */}
         <IconPicker icon={icon} onChange={setIcon} name={name || '?'} />
+
+        {/* T19-6（REQ-76②）：下段 = 该一级分类的二级分类列表（可点进编辑 / 新建） */}
+        {childList !== null && (
+          <div data-testid="category-children-section">
+            <div className="text-xs mb-1" style={{ color: 'var(--ink3)' }}>二级分类</div>
+            {childList.length === 0 ? (
+              <div
+                className="text-xs px-3 py-2 rounded-lg"
+                style={{ background: 'var(--glass)', color: 'var(--ink3)' }}
+                data-testid="category-children-empty"
+              >
+                暂无二级分类
+              </div>
+            ) : (
+              <div className="space-y-1.5 max-h-48 overflow-y-auto">
+                {childList.map(child => (
+                  <button
+                    key={child.id}
+                    type="button"
+                    onClick={() => onEditChild(child)}
+                    className="w-full flex items-center gap-2 px-3 py-2 rounded-lg"
+                    style={{ background: 'var(--glass)', border: '1px solid var(--glass-border)' }}
+                    data-testid={`category-child-${child.id}`}
+                  >
+                    <CategoryIcon icon={child.icon} name={child.name} className="text-base" />
+                    <span className="text-sm text-ink2 truncate flex-1 text-left">{child.name}</span>
+                    <span className="text-xs" style={{ color: 'var(--ink3)' }}>编辑 ›</span>
+                  </button>
+                ))}
+              </div>
+            )}
+            <button
+              type="button"
+              onClick={onNewChild}
+              className="w-full mt-2 py-2 rounded-lg text-xs"
+              style={{ background: 'var(--glass)', color: 'var(--accent)', border: '1px solid var(--glass-border)' }}
+              data-testid="category-add-child"
+            >
+              ＋ 新建二级分类
+            </button>
+          </div>
+        )}
 
         {error && (
           <div className="text-xs px-3 py-2 rounded-lg" style={{ background: 'rgba(220,38,38,0.1)', color: '#dc2626' }}>
