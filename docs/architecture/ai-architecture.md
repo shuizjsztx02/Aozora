@@ -226,7 +226,7 @@ sync change，设备上线后 pull 到）写在 `proposal_ops.py` 的文件头�
 
 ### 设备能力通道不是 ActionProposal
 
-架构 §4.3 的设备能力通道（刷新小组件、触感、分享、权限申请、语音转写、图片选择、图标选择）走的是 `device_request` 事件与上行回传，**不产生提案**：它们是「任务里的设备动作」，不是「待审批的写库」。
+架构 §4.3 的设备能力通道（刷新小组件、触感、分享、权限申请、图片选择、图标选择）走的是 `device_request` 事件与上行回传，**不产生提案**：它们是「任务里的设备动作」，不是「待审批的写库」。
 
 只有 **`reminder_set`** 两头都沾——它写的是用户的提醒配置（因此要过审批门，进注册表），执行体在设备上（因此 05f 接客户端执行器）。op 的执行位置由**客户端按 op 分派**（05f 的分派表），不写进信封。
 
@@ -249,7 +249,7 @@ sync change，设备上线后 pull 到）写在 `proposal_ops.py` 的文件头�
 | 类 | `kind` | 例子 | 流程 |
 |---|---|---|---|
 | 单向指令 | `one_way` | 触感反馈、刷新小组件、分享文本 | loop 下发即继续，**不回传** |
-| 需结果 | `result` | 权限申请、语音转写、图片选择 | loop **挂起** → 客户端执行 → **HTTP 上行回传** → loop 继续 |
+| 需结果 | `result` | 权限申请、图片选择 | loop **挂起** → 客户端执行 → **HTTP 上行回传** → loop 继续 |
 
 **下行：`device_request` 帧**（八类事件之一，其余七类的载荷见 `server/src/modules/ai/stream.py`）：
 
@@ -280,9 +280,9 @@ sync change，设备上线后 pull 到）写在 `proposal_ops.py` 的文件头�
 | **超时与失败** | 都是**工具级结果**（安全枚举码回喂模型），**不新增 `StopReason`**：模型据此向用户解释，回合照常往下走 |
 | **取消 / 断连** | 沿用连接级取消；`DeviceChannel.wait` 的 `finally` 注销条目——**不留悬挂请求** |
 
-**能力名（`capability`）与工具名（`name`）是两套**：工具名走 provider，必须下划线（点号会让 provider 直接 400，02c 实测）；`capability` 只出现在帧与回传里，用点号。**能力名 → 桥命令的映射在客户端**（05f 的分派表），可能是一对多——`voice.transcribe` 在桥上是一对（`voice.startRecording` → 用户停止 → `voice.stopRecording` 回文本）。服务端因此不需要知道客户端命令表的形状。
+**能力名（`capability`）与工具名（`name`）是两套**：工具名走 provider，必须下划线（点号会让 provider 直接 400，02c 实测）；`capability` 只出现在帧与回传里，用点号。**能力名 → 桥命令的映射在客户端**（05f 的分派表）——协议**不限制**映射的基数（当年 `voice.transcribe` 就是一对 start / stop，见 ADR-010 的注记），服务端因此不需要知道客户端命令表的形状。当前目录里每个能力恰好落一条桥命令。
 
-**服务端能力目录**（`server/src/modules/ai/devices.py`，6 个能力，与架构 §4.3 的例子一一对应）：
+**服务端能力目录**（`server/src/modules/ai/devices.py`，5 个能力，与架构 §4.3 的例子一一对应；`voice.transcribe` 已随 REQ-75 下架）：
 
 | 工具名 | `capability` | 类 |
 |---|---|---|
@@ -291,7 +291,6 @@ sync change，设备上线后 pull 到）写在 `proposal_ops.py` 的文件头�
 | `device_share_text` | `share.text` | 单向 |
 | `device_request_permission` | `permissions.request` | 需结果 |
 | `device_pick_image` | `image.pick` | 需结果 |
-| `device_transcribe_voice` | `voice.transcribe` | 需结果 |
 
 **闸门：** `AI_DEVICE_CHANNEL_ENABLED`（默认 **false**）。关闭时 loop **不注入**设备工具（模型看不到它们，行为与 P1 逐字相同）——设备能力要有人执行，客户端执行器（05f）就位前打开它只会让回合白等一个超时窗。提醒（`reminder.*`）不在本目录：它是写工具（进注册表、过审批门），执行体在设备上属于**执行位置**的分派问题（05f）。
 
@@ -379,7 +378,7 @@ sync change，设备上线后 pull 到）写在 `proposal_ops.py` 的文件头�
 |---|---|---|
 | `allowed-once` | 卡上点「确认」 | 执行写入（唯一放行值）；**执行后即失效**，下一次挂起重新问 |
 | `rejected` | 卡上点「拒绝」 | **零写**；本项不改，**任务不因此中止** |
-| `cancelled` | 输入区「停止生成」/ 语音打断 | **零写**；整个任务中止（架构 §4.4 不变式 3：不留悬挂的确认卡） |
+| `cancelled` | 输入区「停止生成」 | **零写**；整个任务中止（架构 §4.4 不变式 3：不留悬挂的确认卡） |
 | `unavailable` | 本轮以失败 / 断连收尾时仍挂着未回答的提案；或中途来的提案不在 `done.proposals` 里 | **视为拒绝、零写**（架构 §7.4：不确定时倾向拒绝） |
 
 **事件驱动 + 权威核对（两条一起才成立）。**
@@ -396,9 +395,9 @@ sync change，设备上线后 pull 到）写在 `proposal_ops.py` 的文件头�
 
 | | 触发 | 表现 | 恢复 |
 |---|---|---|---|
-| 取消 `cancelled` | 「停止生成」/ 语音打断 | 气泡与半截文本 + 「已取消」 | 用户自己重说 |
+| 取消 `cancelled` | 「停止生成」 | 气泡与半截文本 + 「已取消」 | 用户自己重说 |
 | 中断 `unavailable` | `error` 帧 / 桥层失败 | 「⚠️ 连接中断，本轮未完成」（挂起提案未记录时另加一句）+ **提示条与「重发」** | 点「重发」原样再发一次（服务端本轮不落库，重发安全） |
 
-中断态（`interrupted`）是**瞬时态**、不落盘；P2 的恢复手段是**原样重发**，按 `conversation_id` + `seq` 的续跑归 P3 的 04b（届时入口换成「继续」）。**语音打断语义同取消**（架构 §9.2）：录音键在流式期间可用，按下先取消当前流再进入录音。
+中断态（`interrupted`）是**瞬时态**、不落盘；P2 的恢复手段是**原样重发**，按 `conversation_id` + `seq` 的续跑归 P3 的 04b（届时入口换成「继续」）。
 
 **零写保证：** 四值里只有 `allowed-once` 会写库；拒绝、取消、未授权三条路径都有用例断言 `insertTransaction` / `updateTransaction` / `softDeleteTransaction` 零调用。

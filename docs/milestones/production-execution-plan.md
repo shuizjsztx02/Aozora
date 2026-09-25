@@ -617,6 +617,8 @@
 
 ### T-M4-04 语音、图片与桥接
 
+> **历史记录（2026-09-25 加注）：** 本节的 **T-M4-04b（离线语音）已整体移除**——依赖、模型资产、桥命令、麦克风权限与设备能力 `voice.transcribe` 随第十九轮 REQ-75 下架，产品改由系统输入法承担语音转写。**下文各行的完成记录保持当时原样、不改写**（它们是过程证据）。同一张卡里的 T-M4-04a / 04c / 04d / 04e（权限状态机、图片链路）**不受影响**；04a 的权限状态机保留，只是其中 `RECORD_AUDIO` 一项已随语音一并下架。决策与代价见 `docs/adr/ADR-015-remove-offline-voice-input.md`。
+
 | 子任务 | 硬依赖 | 交接产物 | 最低验证 | 状态 |
 |---|---|---|---|---|
 | T-M4-04a 权限状态机与桥扩展 | T-M4-02c | Android 运行时权限状态机（RECORD_AUDIO / CAMERA / READ_MEDIA_IMAGES：未请求/授予/拒绝/永久拒绝 → 引导设置）；bridge 扩展 permissions.* / voice.* / image.* 命令 + TS platform adapter | 权限分支（授予/拒绝/永久拒绝）真机通过；权限拒绝不阻塞手动记账 | ✅ 已完成（2026-09-06，PermissionManager 四态 + 7 桥命令 + usePermissions hook；voice.*/image.* 占位 unavailable；8 项 Robolectric + 389 TS 测试全绿） |
@@ -939,14 +941,14 @@
 **实现要点：**
 - 版本号采用 `versionCode` 递增 + `versionName` 语义化（如 `1.0.0`）
 - staging/prod 通过 `buildConfigField` 和 `resValue` 隔离，R8 混淆规则保障 mapping 可符号化
-- 包体预算包含 Vosk 模型资产，对比上一版本增量不超过 10%
+- 包体预算对比上一版本增量不超过 10%（**REQ-75 已移除离线语音及其模型资产，基线随之下移**）
 - 隐私清单与数据安全表单与 T-M5-04a 隐私政策保持一致
 - 真机矩阵覆盖 Android 8/12/15 + 深色模式 + 小屏 + 字体 1.3×
 
 | 子任务 | 硬依赖 | 交接产物 | 最低验证 | 状态 |
 |---|---|---|---|---|
 | T-M6-02a Release 构建与签名 | T-M6-01a、T-M5-02a | **版本策略（`app/build.gradle.kts`）：** `versionCode` = 构建时间戳（如 `2026090601`），`versionName` = `1.0.0`；**环境开关：** `buildConfigField("String", "AOZORA_API_BASE", ...)` 分 `debug`（`http://10.0.2.2:8000`）、`staging`（`https://staging.aozora.app`）、`release`（`https://api.aozora.app`）；**R8 混淆：** `proguard-rules.pro` 保留 `com.aozora.app.bridge.**`、`com.aozora.app.db.entity.**`、`com.aozora.app.sync.**` 的序列化路径；**mapping 归档：** 构建后自动运行 `tools/archive-mapping.sh` 将 `build/outputs/mapping/release/` 压缩为 `mapping-${versionName}-${versionCode}.zip` 存入 `build/mapping-archive/`；**签名：** keystore 由外部提供（不进仓库），`signingConfigs` 引用环境变量 `KEYSTORE_PATH`/`KEYSTORE_PASSWORD`/`KEY_ALIAS`/`KEY_PASSWORD` | 签名 AAB 可安装到真机（`adb install app.aab` 或通过 bundletool）；`BuildConfig.AOZORA_API_BASE` 在 staging 构建中指向 staging 域名、release 构建指向生产域名；`mapping-archive/` 中存在可符号化崩溃的 mapping 文件 | ⏳ 未开始 |
-| T-M6-02b 包体与隐私清单 | 02a、T-M5-04a、T-M4-04b | **包体预算检查脚本（`tools/check-apk-size.sh`）：** 对比当前 APK 与上一版本归档 APK 的未压缩大小，Vosk 模型资产单独统计并标记；**隐私清单（`app/src/main/AndroidManifest.xml` 权限声明 + `Play Console` 数据安全表单草稿）：** 相机（`CAMERA`）、麦克风（`RECORD_AUDIO`）、存储（`READ_MEDIA_IMAGES`、`POST_NOTIFICATIONS`）、网络（`INTERNET`、`ACCESS_NETWORK_STATE`）—— 每项权限用途在 T-M5-04a 隐私政策中对应说明；**AI 内容标识复核：** 所有 AI 生成内容旁 `ai-badge` 可见，无遗漏 | 包体对比：新 APK 未压缩大小 = 上一版本 × 1.1 上限内（含 Vosk 模型）；隐私清单声明权限与实际代码中 `requestPermissions` 调用一致（抓包验证无未声明权限使用）；AI 标识在助手对话、报表洞察卡中均可见 | ⏳ 未开始 |
+| T-M6-02b 包体与隐私清单 | 02a、T-M5-04a、T-M4-04b | **包体预算检查脚本（`tools/check-apk-size.sh`）：** 对比当前 APK 与上一版本归档 APK 的未压缩大小；**隐私清单（`app/src/main/AndroidManifest.xml` 权限声明 + `Play Console` 数据安全表单草稿）：** 相机（`CAMERA`）、存储（`READ_MEDIA_IMAGES`、`POST_NOTIFICATIONS`）、网络（`INTERNET`、`ACCESS_NETWORK_STATE`）—— 每项权限用途在 T-M5-04a 隐私政策中对应说明（**REQ-75 已移除麦克风 `RECORD_AUDIO` 与离线语音模型资产，本行的包体基线与权限清单随之收窄**）；**AI 内容标识复核：** 所有 AI 生成内容旁 `ai-badge` 可见，无遗漏 | 包体对比：新 APK 未压缩大小 = 上一版本 × 1.1 上限内；隐私清单声明权限与实际代码中 `requestPermissions` 调用一致（抓包验证无未声明权限使用）；AI 标识在助手对话、报表洞察卡中均可见 | ⏳ 未开始 |
 | T-M6-02c 真机矩阵与渠道提交 | 02b、T-M4-06；D-EXEC-06（分发账号） | **真机矩阵走查清单（`docs/testing/device-matrix.md`）：** Android 8（API 26，最低支持）、Android 12（API 31，主力）、Android 15（API 35，最新）三台真机，每台走查——深色模式/四时主题切换、小屏适配（320dp 宽度）、字体 1.3× 无遮挡、首页/明细/记账 Sheet/报表/我的/首启登录 6 页面全览；**走查记录：** 每台设备截屏存档（`docs/testing/screenshots/`），注明通过/失败/备注；**商店材料：** 截图（6 张，四时主题各 1 + 记账 Sheet 1 + 助手 1）、应用说明（`docs/store/description-zh-CN.md`）、分类（财务）、年龄分级、隐私政策 URL；**渠道提交：** 至少一个应用商店提交成功（过审或收到具体可整改反馈） | 三台真机走查清单全部通过，截图存档；商店材料完整且无违规内容；提交成功——过审或收到整改反馈（非静默拒审） | ⏳ 未开始 |
 
 ### T-M6-03 上线观察与回滚门槛

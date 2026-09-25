@@ -1,5 +1,7 @@
 # Aozora App 端到端测试报告
 
+> **历史记录（2026-09-25 加注）：** 本文描述的**离线语音输入已整体移除**——端上识别服务、模型资产、2 条桥命令、麦克风权限族与设备能力 `voice.transcribe` 均随第十九轮 REQ-75 下架，产品改由系统输入法承担语音转写。**正文保持当时原样、不改写**（它是过程证据，不是现行口径）。决策与代价见 `docs/adr/ADR-015-remove-offline-voice-input.md`。
+
 **测试日期：** 2026-09-07
 **测试设备：** OnePlus 2410DPN6CC | Android 16 | API 36
 **APK版本：** app-debug.apk (127MB, versionName=0.1.0, versionCode=1)

@@ -2,7 +2,7 @@
  
  **产品摘要：** Aozora 是面向 20-30 岁一二线城市职场新人的 AI-native 记账 App。"不用认真记账，也知道钱花哪了。" 核心差异：AI 对话即操作（AI 率 > 40%）、情感陪伴人格（小贝）、离线可用的云端生产架构、四时天空视觉体系。
  
- **技术栈：** Kotlin WebView 壳 + React 19 (Vite 8 + Tailwind 4 + Zustand + Framer Motion + Recharts) + Python 3.12 / FastAPI / PostgreSQL 18 / SQLAlchemy + Alembic（`server/`，T-M2-02 Schema 已就绪）+ 服务端 AI Gateway + Vosk 离线语音
+ **技术栈：** Kotlin WebView 壳 + React 19 (Vite 8 + Tailwind 4 + Zustand + Framer Motion + Recharts) + Python 3.12 / FastAPI / PostgreSQL 18 / SQLAlchemy + Alembic（`server/`，T-M2-02 Schema 已就绪）+ 服务端 AI Gateway
  
  **关键架构原则：**
  - 一切操作由 AI 驱动，手动表单仅为兜底（PR-1）
