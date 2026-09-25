@@ -171,6 +171,7 @@ class CategoryRepository:
         kind: str,
         book_id: uuid.UUID | None,
         parent_id: uuid.UUID | None,
+        icon: str | None = None,
     ) -> Category:
         # N-08: check name conflict before insert so the client gets 409
         # instead of 500 from the unique constraint violation.
@@ -182,13 +183,20 @@ class CategoryRepository:
             kind=kind,
             book_id=book_id,
             parent_id=parent_id,
+            icon=icon,
         )
         self.db.add(category)
         await self._flush_or_duplicate_conflict(owner_id, name, kind, book_id, parent_id)
         await self.db.refresh(category)
         return category
 
-    async def update(self, category: Category, name: str | None, parent_id: uuid.UUID | None) -> Category:
+    async def update(
+        self,
+        category: Category,
+        name: str | None,
+        parent_id: uuid.UUID | None,
+        icon: str | None = None,
+    ) -> Category:
         # N-08: any change to name or parent moves the row within the
         # unique (owner, book, parent, kind, name) space — check the
         # destination before writing so the client gets 409 instead of
@@ -204,6 +212,9 @@ class CategoryRepository:
             category.name = name
         if parent_id is not None:
             category.parent_id = parent_id
+        # REQ-73（T19-2）：None = 不修改（``icon`` 不参与唯一约束，无需预检）。
+        if icon is not None:
+            category.icon = icon
         category.version += 1
         await self._flush_or_duplicate_conflict(
             category.owner_id, new_name, category.kind,

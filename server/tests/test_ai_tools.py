@@ -572,7 +572,7 @@ async def seeded():
     food = Category(id=uuid.uuid4(), owner_id=user.id, book_id=book.id,
                     kind=CategoryKind.EXPENSE, name="餐饮")
     traffic = Category(id=uuid.uuid4(), owner_id=user.id, book_id=book.id,
-                       kind=CategoryKind.EXPENSE, name="交通")
+                       kind=CategoryKind.EXPENSE, name="交通", icon="🚗")
     salary = Category(id=uuid.uuid4(), owner_id=user.id, book_id=book.id,
                       kind=CategoryKind.INCOME, name="工资")
     card = Account(id=uuid.uuid4(), owner_id=user.id, name="招行卡")
@@ -1249,6 +1249,12 @@ class TestLedgerReadTools:
         }
         kinds = {c["name"]: c["kind"] for c in outcome.data["categories"]}
         assert kinds["工资"] == "income"
+        # REQ-73（T19-2）：图标随读结果出（模型照现有风格挑一个）；
+        # 没设过图标的分类是 ``None``——那是「按名字映射默认 emoji」，
+        # 不是「没有图标」，故不能当成空字符串。
+        icons = {c["name"]: c["icon"] for c in outcome.data["categories"]}
+        assert icons["交通"] == "🚗"
+        assert icons["餐饮"] is None
 
     async def test_other_book_has_no_categories_of_its_own(self, seeded):
         outcome = await T.invoke_tool(

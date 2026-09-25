@@ -228,6 +228,55 @@ class TestCategoryWriteTools:
         assert draft["payload"]["version"] == seeded["traffic"].version
         assert draft["payload"]["name"] == "通勤"
 
+    async def test_create_carries_the_icon_when_the_user_says_so(self, seeded):
+        """REQ-73（T19-2）：建分类时可同时给 emoji 图标。
+
+        与 ``account_create`` / ``book_create`` 同口径——**没提就不发这个键**
+        （上一条用例的 ``payload ==`` 逐字相等正是这条的钉子：多一个 ``icon: None``
+        会让它对不上）。
+        """
+        draft = await _draft("category_create", seeded["ctx"], {
+            "name": "夜宵", "kind": "expense", "icon": "🍜",
+        })
+        assert draft["payload"]["icon"] == "🍜"
+        no_icon = await _draft("category_create", seeded["ctx"], {
+            "name": "打车", "kind": "expense",
+        })
+        assert "icon" not in no_icon["payload"]
+
+    async def test_update_carries_the_icon(self, seeded):
+        draft = await _draft("category_update", seeded["ctx"], {
+            "categoryName": "交通", "kind": "expense", "icon": "🚗",
+        })
+        _assert_registry_consistency("category_update", draft)
+        assert draft["payload"]["icon"] == "🚗"
+        # 只换图标也是一种改动，不能被「没有任何改动」那条守卫拦下
+        assert len(draft["payload"]) == 3  # categoryId + version + icon
+        assert "图标" in draft["message"]
+
+    async def test_update_without_an_icon_leaves_the_key_out(self, seeded):
+        """**局部合并语义**（与 ``account_update`` 同口径）：键缺省 = 不改图标。
+
+        提案里带上 ``icon: None`` 就等于让执行体去清图标——模型没提图标时
+        绝不能把用户已有的图标抹掉。
+        """
+        draft = await _draft("category_update", seeded["ctx"], {
+            "categoryName": "交通", "kind": "expense", "newName": "通勤",
+        })
+        assert "icon" not in draft["payload"]
+
+    async def test_an_overlong_icon_is_refused_before_it_becomes_a_proposal(self, seeded):
+        """工具参数形状：描述里对模型写死的「≤64 字符」由 schema 自己兜住。
+
+        超长值（照片那种 data URI）连提案都产不出来——降级成可行动的
+        ``invalid_arguments``，而不是让一个装不进 payload 的图标走到组装器。
+        """
+        outcome = await T.invoke_tool("category_update", seeded["ctx"], {
+            "categoryName": "交通", "kind": "expense", "icon": "🚗" * 65,
+        })
+        assert outcome.kind == "error"
+        assert outcome.data["code"] == T.ERR_INVALID_ARGUMENTS
+
     async def test_update_without_any_change_is_refused(self, seeded):
         outcome = await T.invoke_tool("category_update", seeded["ctx"], {
             "categoryName": "交通", "kind": "expense",

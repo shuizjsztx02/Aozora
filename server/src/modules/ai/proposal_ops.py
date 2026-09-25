@@ -332,6 +332,9 @@ async def _execute_category_create(
     data = _model_or_400(CategoryCreate, {
         "name": payload.get("name"),
         "kind": payload.get("kind"),
+        # REQ-73（T19-2，ADR-014）：icon 落库（≤64 字符，超出即 400——schema
+        # 的 max_length 是服务端兜底，客户端的「超长省略键」护栏才是主要防线）。
+        "icon": payload.get("icon"),
         "book_id": payload.get("bookId"),
         "parent_id": payload.get("parentId"),
     })
@@ -353,6 +356,9 @@ async def _execute_category_update(
     data = _model_or_400(CategoryUpdate, {
         "name": payload.get("name"),
         "parent_id": payload.get("parentId"),
+        # REQ-73（T19-2）：键缺省即 None = 不修改（与 account_update 同口径）——
+        # 「模型没给图标」绝不能把用户已有的图标清零。
+        "icon": payload.get("icon"),
         "version": payload.get("version"),
     })
     service = CategoryService(db)

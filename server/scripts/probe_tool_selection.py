@@ -96,6 +96,10 @@ CASES: list[tuple[str, str]] = [
     ("加一个支出分类叫宠物", "category_create"),
     ("收入里再建一个分类叫奖金，放在工资下面", "category_create"),
     ("把「宠物」这个分类改名叫猫主子", "category_update"),
+    # REQ-73（T19-2）：改图标是 category_update 的新用法，量的是它会不会被
+    # account_update（同样有 icon 参数）或读工具抢走。
+    ("把交通分类的图标改成 🚗", "category_update"),
+    ("加一个支出分类叫宠物，图标用 🐶", "category_create"),
     ("夜宵这个分类我不用了，归档掉", "category_archive"),
     ("帮我把账本里的分类列出来看看", "category_list"),
     # ── 账户域 ──
@@ -192,12 +196,14 @@ _FAKE_READS: dict[str, dict] = {
          "accountName": "现金", "note": "打车", "bizDate": "2026-09-17"},
     ]},
     "category_list": {"categories": [
-        {"name": "餐饮", "kind": "expense", "parentName": None},
-        {"name": "交通", "kind": "expense", "parentName": None},
-        {"name": "夜宵", "kind": "expense", "parentName": None},
-        {"name": "宠物", "kind": "expense", "parentName": None},
-        {"name": "工资", "kind": "income", "parentName": None},
-        {"name": "奖金", "kind": "income", "parentName": None},
+        # REQ-73（T19-2）：icon 随读结果出——假结果必须跟着真处理器一起长出这个键，
+        # 否则「模型照着现有风格挑图标」那条路在本探针里永远看不到。
+        {"name": "餐饮", "kind": "expense", "parentName": None, "icon": "🍜"},
+        {"name": "交通", "kind": "expense", "parentName": None, "icon": "🚗"},
+        {"name": "夜宵", "kind": "expense", "parentName": None, "icon": None},
+        {"name": "宠物", "kind": "expense", "parentName": None, "icon": None},
+        {"name": "工资", "kind": "income", "parentName": None, "icon": "💰"},
+        {"name": "奖金", "kind": "income", "parentName": None, "icon": None},
     ], "total": 6},
     "account_list": {"accounts": [{"name": "招行卡", "icon": None},
                                   {"name": "现金", "icon": None},

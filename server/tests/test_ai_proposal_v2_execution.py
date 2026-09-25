@@ -279,6 +279,66 @@ class TestV2LedgerOps:
         assert archived.archived_at is not None
         assert archived.version > row.version
 
+    def test_category_create_and_update_carry_the_icon(self, v2_env):
+        """REQ-73（T19-2，ADR-014）：图标真的落库，且**键缺省不清图标**。
+
+        与上一条账户用例同一对钉子：只给工具加参数而执行体不读，就是 REQ-69 里
+        ``account_type`` 的原型（客户端一直在发、服务端一直不丢）；反过来，缺省
+        键若被当作「清空」，一次改名就会把用户的图标抹掉。
+        """
+        from src.models.ledger import Category
+
+        c, factory = v2_env
+        user = _guest(v2_env)
+        book_id = _mk_book(c, user)
+
+        create = _execute(v2_env, user, book_id, _v2("category_create", {
+            "name": "交通", "kind": "expense", "bookId": str(book_id),
+            "parentId": None, "icon": "🚗",
+        }))
+        assert create.status_code == 200
+        cat_id = uuid.UUID(create.json()["transaction_ids"][0])
+        assert _rows(factory, Category, id=cat_id)[0].icon == "🚗"
+
+        row = _rows(factory, Category, id=cat_id)[0]
+        update = _execute(v2_env, user, book_id, _v2("category_update", {
+            "categoryId": str(cat_id), "version": row.version, "icon": "🚇",
+        }))
+        assert update.status_code == 200
+        bumped = _rows(factory, Category, id=cat_id)[0]
+        assert bumped.icon == "🚇"
+
+        # 只改名（icon 键缺省）→ 图标原样保留
+        rename = _execute(v2_env, user, book_id, _v2("category_update", {
+            "categoryId": str(cat_id), "version": bumped.version, "name": "通勤",
+        }))
+        assert rename.status_code == 200
+        after = _rows(factory, Category, id=cat_id)[0]
+        assert (after.name, after.icon) == ("通勤", "🚇")
+
+    def test_an_overlong_icon_is_a_400_and_writes_nothing(self, v2_env):
+        """64 字符上限是**兜底**（ADR-014 决策 2：主要防线是客户端「超长省略键」）。
+
+        服务端这一侧必须挡住超长值——AI 面一旦把照片那种 48KB 的 data URI 吃进去，
+        灌的是 change 表与每一份 bootstrap 快照（ADR-014 方案 A 被否决的理由）。
+        形状不对要报 400 而不是 500，且一个字节都不写。
+        """
+        from src.models.ledger import Category
+
+        c, factory = v2_env
+        user = _guest(v2_env)
+        book_id = _mk_book(c, user)
+        cat_id = _mk_category(c, user, name="交通")
+        row = _rows(factory, Category, id=cat_id)[0]
+
+        resp = _execute(v2_env, user, book_id, _v2("category_update", {
+            "categoryId": str(cat_id), "version": row.version, "icon": "x" * 65,
+        }))
+        assert resp.status_code == 400
+        assert resp.json()["code"] == "ai_invalid_payload"
+        after = _rows(factory, Category, id=cat_id)[0]
+        assert (after.name, after.icon, after.version) == ("交通", None, row.version)
+
     def test_account_create_update_archive(self, v2_env):
         from src.models.ledger import Account
 

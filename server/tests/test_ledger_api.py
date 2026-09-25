@@ -190,6 +190,48 @@ class TestCategoriesAPI:
         assert data["name"] == "餐饮"
         assert data["kind"] == "expense"
 
+    def test_category_icon_round_trips_and_survives_an_omitted_key(self, auth_client, user):
+        """REQ-73（T19-2，ADR-014）：REST 面的 icon 与同步/AI 面同一条口径。
+
+        「写进去了但读不回来」与「改个名字把图标清零」是这条路上的两种半截子；
+        超长值（照片）必须被 64 上限挡下——服务端不放宽（ADR-014 决策 2）。
+        """
+        resp = auth_client.post(
+            "/categories",
+            json={"name": "交通", "kind": "expense", "icon": "🚗"},
+            headers=_auth_header(user),
+        )
+        assert resp.status_code == 201
+        cat = resp.json()
+        assert cat["icon"] == "🚗"
+
+        # 键在场才改：只改名时图标原样保留
+        patched = auth_client.patch(
+            f"/categories/{cat['id']}",
+            json={"name": "通勤", "version": cat["version"]},
+            headers=_auth_header(user),
+        )
+        assert patched.status_code == 200
+        assert patched.json()["icon"] == "🚗"
+
+        changed = auth_client.patch(
+            f"/categories/{cat['id']}",
+            json={"icon": "🚇", "version": patched.json()["version"]},
+            headers=_auth_header(user),
+        )
+        assert changed.status_code == 200
+        assert changed.json()["icon"] == "🚇"
+
+        # 超长（照片 data URI 的形状）：422，且库里的值不动
+        overlong = auth_client.patch(
+            f"/categories/{cat['id']}",
+            json={"icon": "x" * 65, "version": changed.json()["version"]},
+            headers=_auth_header(user),
+        )
+        assert overlong.status_code == 422
+        fetched = auth_client.get(f"/categories/{cat['id']}", headers=_auth_header(user))
+        assert fetched.json()["icon"] == "🚇"
+
     def test_list_categories_by_kind(self, auth_client, user):
         """GET /categories?kind=expense should filter by kind."""
         auth_client.post("/categories", json={"name": "餐饮", "kind": "expense"}, headers=_auth_header(user))

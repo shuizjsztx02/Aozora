@@ -1828,21 +1828,24 @@ async def _handle_category_list(ctx: ToolContext, params: dict[str, Any]) -> Too
         return book_id
 
     rows = await ctx.db.execute(
-        select(Category.id, Category.name, Category.kind, Category.parent_id).where(
+        select(Category.id, Category.name, Category.kind, Category.parent_id, Category.icon).where(
             Category.owner_id == ctx.user_id,
             (Category.book_id == book_id) | (Category.book_id.is_(None)),
             Category.archived_at.is_(None),
         ).order_by(Category.kind, Category.created_at),
     )
     raw = rows.all()
-    id_to_name = {str(cid): name for cid, name, _kind, _parent in raw}
+    id_to_name = {str(cid): name for cid, name, _kind, _parent, _icon in raw}
     categories = [
         {
             "name": name,
             "kind": kind,
             "parentName": id_to_name.get(str(parent_id)) if parent_id else None,
+            # REQ-73（T19-2，ADR-014）：图标随读结果出，让模型能参照现有风格
+            # 挑一个（``None`` = 客户端按名字映射默认 emoji，不是「没有图标」）。
+            "icon": icon,
         }
-        for cid, name, kind, parent_id in raw
+        for cid, name, kind, parent_id, icon in raw
     ]
     return ToolOutcome.result({"categories": categories, "total": len(categories)})
 
@@ -1879,14 +1882,19 @@ async def _handle_category_create(ctx: ToolContext, params: dict[str, Any]) -> T
             return resolved
         parent_id = resolved
 
+    payload: dict[str, Any] = {
+        "name": name,
+        "kind": kind,
+        "bookId": str(book_id),
+        "parentId": parent_id,
+    }
+    # REQ-73（T19-2）：用户没提图标就不发这个键（与 account_create 同）。
+    if params.get("icon"):
+        payload["icon"] = str(params["icon"])
+
     return ToolOutcome.proposal({
         "action": "category_create",
-        "payload": {
-            "name": name,
-            "kind": kind,
-            "bookId": str(book_id),
-            "parentId": parent_id,
-        },
+        "payload": payload,
         "message": (
             f"新建{_tx_verb(kind)}分类「{name}」"
             + (f"，放在「{parent_name}」下" if parent_name else "")
@@ -1911,6 +1919,10 @@ async def _handle_category_update(ctx: ToolContext, params: dict[str, Any]) -> T
     if params.get("newName"):
         payload["name"] = str(params["newName"])
         notes.append(f"改名为「{params['newName']}」")
+    # REQ-73（T19-2）：只换图标也是一种改动（与 account_update / book_update 同）。
+    if params.get("icon"):
+        payload["icon"] = str(params["icon"])
+        notes.append("更换图标")
     if params.get("parentName"):
         parent = _resolve_category(ctx, kind, str(params["parentName"]))
         if isinstance(parent, ToolOutcome):
@@ -3681,8 +3693,9 @@ TOOLS: tuple[Tool, ...] = (
         domain=DOMAIN_CATEGORY,
         kind="read",
         description=(
-            "列出可用的分类（名称、收支类型、上级分类）。在你不确定分类的准确名称时"
-            "用它核对，分类名必须与这里的名称逐字一致才能用于记账。"
+            "列出可用的分类（名称、收支类型、上级分类、当前图标 emoji）。在你不确定"
+            "分类的准确名称时用它核对，分类名必须与这里的名称逐字一致才能用于记账；"
+            "给分类改图标时也可以照这里的现有风格挑一个。"
             "不传账本名则看当前账本（含全局分类）。"
         ),
         parameters=_object_schema({
@@ -3713,6 +3726,11 @@ TOOLS: tuple[Tool, ...] = (
                     "description": "分类名。",
                 },
                 "kind": _TX_TYPE_SCHEMA,
+                "icon": {
+                    "type": "string",
+                    "maxLength": 64,
+                    "description": "分类图标的 emoji（如 🚗），最多 64 字符；用户没提就不要填。",
+                },
                 "parentName": {
                     "type": "string",
                     "description": "上级分类名（可选），必须是同类型下已有的分类。",
@@ -3732,10 +3750,10 @@ TOOLS: tuple[Tool, ...] = (
         kind="write",
         proposal_action="category_update",
         description=(
-            "修改一个已有分类的名称或它挂在哪个上级分类下。用户说「把宠物改叫"
-            "猫主子」时用它。categoryName + kind 一起定位要改的分类（同名跨收支"
-            "类型时靠 kind 区分）。不能改收支类型——那等于换一个分类，请用"
-            "category_create 建新的。"
+            "修改一个已有分类的名称、图标或它挂在哪个上级分类下。用户说「把宠物改叫"
+            "猫主子」「把交通分类的图标改成 🚗」时用它。categoryName + kind 一起定位"
+            "要改的分类（同名跨收支类型时靠 kind 区分）。不能改收支类型——那等于换"
+            "一个分类，请用 category_create 建新的。"
         ),
         parameters=_object_schema(
             {
@@ -3749,6 +3767,11 @@ TOOLS: tuple[Tool, ...] = (
                     "minLength": 1,
                     "maxLength": 64,
                     "description": "新的分类名；不改名字就不要填。",
+                },
+                "icon": {
+                    "type": "string",
+                    "maxLength": 64,
+                    "description": "新的分类图标 emoji（如 🚗），最多 64 字符；不换图标就不要填。",
                 },
                 "parentName": {
                     "type": "string",

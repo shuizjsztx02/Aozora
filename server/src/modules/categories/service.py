@@ -84,7 +84,9 @@ class CategoryService:
         # N-09 note: no cycle check needed at creation — the id is
         # server-generated, so the new category cannot yet be part of
         # any parent chain.
-        return await self.repo.create(user_id, data.name, data.kind, data.book_id, data.parent_id)
+        return await self.repo.create(
+            user_id, data.name, data.kind, data.book_id, data.parent_id, data.icon,
+        )
 
     async def update_category(self, category_id: uuid.UUID, user_id: uuid.UUID, data: CategoryUpdate) -> Category:
         category = await self.get_category(category_id, user_id)
@@ -101,7 +103,7 @@ class CategoryService:
         if data.parent_id is not None:
             await self._validate_parent(category_id, data.parent_id, user_id)
 
-        return await self.repo.update(category, data.name, data.parent_id)
+        return await self.repo.update(category, data.name, data.parent_id, data.icon)
 
     async def archive_category(self, category_id: uuid.UUID, user_id: uuid.UUID) -> None:
         category = await self.get_category(category_id, user_id)
