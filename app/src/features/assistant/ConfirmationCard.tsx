@@ -244,7 +244,8 @@ function ConfirmationCardBody({
     setEditing(false)
   }
 
-  // ─── 分类宫格（T12-9 v3：QuickEntry 同款平铺，含二级，过滤口径 categories.kind） ───
+  // ─── 分类宫格（T12-9 v3：QuickEntry 同款，过滤口径 categories.kind） ───
+  // T19-5：二级不再与一级平铺——`CategoryPager` 自己按 parentId 分组，二级进展开面板
   const catInfo = (catId: string) => catInfoOf(categories, catId)
   const accountLabel = (id: string | null) => accountLabelOf(accounts, id)
   const pagerCats = categories.filter(c => c.kind === txType)

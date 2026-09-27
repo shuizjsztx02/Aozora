@@ -1205,23 +1205,6 @@
       ]
     },
     {
-      "id": "DEV-VOICE-01",
-      "domain": "device",
-      "layer": "device",
-      "text": "我要用语音说一句话记一笔账",
-      "expect": [
-        "device_transcribe_voice",
-        "device_request_permission"
-      ],
-      "kind": "device",
-      "landing": "na",
-      "note": "需结果类：自动化环境无人应答会超时；重点看模型是否**先申请 RECORD_AUDIO**",
-      "device_expect": [
-        "permissions.request",
-        "voice.transcribe"
-      ]
-    },
-    {
       "id": "DEV-IMG-01",
       "domain": "device",
       "layer": "device",

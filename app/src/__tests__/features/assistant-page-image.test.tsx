@@ -49,24 +49,6 @@ const mockAssistant = vi.hoisted(() => ({
 vi.mock('../../platform/hooks/use-bridge', () => ({ useBridge: () => mockBridge }))
 vi.mock('../../features/assistant/use-assistant', () => ({ useAssistant: () => mockAssistant }))
 // T12-1：页面新增 usePermissions（mic 按需授权）——本文件不点 mic，默认已授予即可
-vi.mock('../../platform/hooks/use-permissions', () => ({
-  usePermissions: () => ({
-    canRecord: true,
-    loading: false,
-    status: {
-      permissions: { RECORD_AUDIO: 'granted', CAMERA: 'not_requested', READ_MEDIA_IMAGES: 'not_requested', POST_NOTIFICATIONS: 'not_requested' },
-      canRecordAudio: true,
-      canUseCamera: false,
-      canAccessImages: false,
-    },
-    canCamera: false,
-    canGallery: false,
-    shouldGuideSettings: false,
-    requestPermission: vi.fn().mockResolvedValue(undefined),
-    openSettings: vi.fn().mockResolvedValue(undefined),
-    refresh: vi.fn().mockResolvedValue(undefined),
-  }),
-}))
 
 const batchProposal = {
   proposalId: 'prop-batch',

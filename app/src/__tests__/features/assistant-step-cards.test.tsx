@@ -42,15 +42,6 @@ const mockBridge = vi.hoisted(() => ({
 }))
 
 vi.mock('../../platform/hooks/use-bridge', () => ({ useBridge: () => mockBridge }))
-vi.mock('../../platform/hooks/use-permissions', () => ({
-  usePermissions: () => ({
-    canRecord: false,
-    status: { permissions: { RECORD_AUDIO: 'not_requested' } },
-    requestPermission: vi.fn().mockResolvedValue(undefined),
-    openSettings: vi.fn().mockResolvedValue(undefined),
-    refresh: vi.fn().mockResolvedValue(undefined),
-  }),
-}))
 vi.mock('../../features/assistant/use-assistant', async () => {
   const { useAssistantChatStore } = await import('../../platform/store/assistant-chat-store')
   return {
