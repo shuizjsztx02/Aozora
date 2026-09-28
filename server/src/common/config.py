@@ -269,24 +269,6 @@ class Settings(BaseSettings):
             "AI_AGENT_SUMMARY_CHARS", "ai_agent_summary_chars",
         ),
     )
-    # 会话级双限（R-PROD-15；§12.2 未决 #8：数值由 P1 实测确定，此处取初始值）。
-    # 轮数按 02d 实测「单轮多步 ≈ 8.2k prompt tokens」估算：50 轮 ≈ 500k tokens，
-    # 故 token 上限取与之同量级的 500000。两者都是**上限哨兵**，不是成本目标。
-    ai_agent_conversation_max_turns: int = Field(
-        default=50,
-        gt=0,
-        validation_alias=AliasChoices(
-            "AI_AGENT_CONVERSATION_MAX_TURNS", "ai_agent_conversation_max_turns",
-        ),
-    )
-    ai_agent_conversation_max_tokens: int = Field(
-        default=500_000,
-        gt=0,
-        validation_alias=AliasChoices(
-            "AI_AGENT_CONVERSATION_MAX_TOKENS", "ai_agent_conversation_max_tokens",
-        ),
-    )
-
     # --- AI 会话日志保留期 (T-M7-04d) ---
     # 事件正文的保留窗口（天）。security.md 的有条件例外要求「保留期对齐
     # D-PROD-08」——D-PROD-08 的 7 天是**账号删除的宽限期**，不是内容保留期；

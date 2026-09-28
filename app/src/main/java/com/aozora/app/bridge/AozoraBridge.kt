@@ -81,6 +81,11 @@ class AozoraBridge(
         // T-M7-02h: 仅用于识别流是否已收到终态帧（服务端 EventType 的两端）
         private const val EVENT_DONE = "done"
         private const val EVENT_ERROR = "error"
+
+        // T20-9（REQ-82）：服务端 429 的**配额**子码（`service.check_daily_quota`）。
+        // 唯一一个被桥放行的 429 子码——与 T18-1 放行 `image_parsing_disabled` 同法：
+        // 只放行已知值，未知一律回落各 handler 既有的笼统码。
+        private const val CODE_AI_QUOTA_EXCEEDED = "ai_quota_exceeded"
     }
 
     // NEW-R6-2 fix: 追踪当前活跃的 parse Job，以便取消
@@ -1157,7 +1162,7 @@ class AozoraBridge(
         } catch (e: AiGatewayClient.AiError.Network) {
             BridgeResponse.error(requestId, "network", e.message ?: "Network error")
         } catch (e: AiGatewayClient.AiError.RateLimited) {
-            BridgeResponse.error(requestId, "429", "AI rate limit exceeded")
+            rateLimitedError(requestId, e, "429")
         } catch (e: AiGatewayClient.AiError.Unavailable) {
             BridgeResponse.error(requestId, "503", "AI service unavailable")
         } catch (e: AiGatewayClient.AiError.AuthLost) {
@@ -1184,7 +1189,7 @@ class AozoraBridge(
         } catch (e: AiGatewayClient.AiError.Network) {
             BridgeResponse.error(requestId, "network", e.message ?: "Network error")
         } catch (e: AiGatewayClient.AiError.RateLimited) {
-            BridgeResponse.error(requestId, "429", "AI rate limit exceeded")
+            rateLimitedError(requestId, e, "429")
         } catch (e: AiGatewayClient.AiError.Unavailable) {
             BridgeResponse.error(requestId, "503", "AI service unavailable")
         } catch (e: AiGatewayClient.AiError.AuthLost) {
@@ -1209,7 +1214,7 @@ class AozoraBridge(
         } catch (e: AiGatewayClient.AiError.Network) {
             BridgeResponse.error(requestId, "network", e.message ?: "Network error")
         } catch (e: AiGatewayClient.AiError.RateLimited) {
-            BridgeResponse.error(requestId, "429", "AI rate limit exceeded")
+            rateLimitedError(requestId, e, "429")
         } catch (e: AiGatewayClient.AiError.Unavailable) {
             BridgeResponse.error(requestId, "503", "AI service unavailable")
         } catch (e: AiGatewayClient.AiError.AuthLost) {
@@ -1235,7 +1240,7 @@ class AozoraBridge(
         } catch (e: AiGatewayClient.AiError.Network) {
             BridgeResponse.error(requestId, "network", e.message ?: "Network error")
         } catch (e: AiGatewayClient.AiError.RateLimited) {
-            BridgeResponse.error(requestId, "429", "AI rate limit exceeded")
+            rateLimitedError(requestId, e, "429")
         } catch (e: AiGatewayClient.AiError.Unavailable) {
             BridgeResponse.error(requestId, "503", "AI service unavailable")
         } catch (e: AiGatewayClient.AiError.AuthLost) {
@@ -1353,11 +1358,41 @@ class AozoraBridge(
         }
     }
 
+    /**
+     * T20-9（REQ-82）：HTTP 429 的**归因分层**——与本文件 503 那条（T18-1）同法。
+     *
+     * 429 **不是一个语义**：`ai_quota_exceeded`（guest 日配额用尽，明天再来）与
+     * 「请求太密，缓一下」对用户是两件事，恢复路径也不同。桥以前只按状态码映射，
+     * 于是两类都被译成「AI rate limit exceeded」——前端拿到的码说不清前因，只能
+     * 落「连接中断」兜底，用户看到的因此是「网断了」，而实际是服务端**明确拒绝**。
+     *
+     * 只放行**已知**子码（未知值会让前端回退原生英文 message，比笼统码更糟），
+     * 未知一律回落调用方既有的笼统码（`handleAi*` 用 `429`、图片链路用
+     * `rate_limited`，各保持原样）。用户可见文案仍由前端归一
+     * （`features/assistant/ai-error-text.ts`），这里的 message 只是兜底。
+     */
+    private fun rateLimitedCodeAndMessage(
+        e: AiGatewayClient.AiError.RateLimited, fallbackCode: String,
+    ): Pair<String, String> =
+        if (e.serverCode == CODE_AI_QUOTA_EXCEEDED) {
+            CODE_AI_QUOTA_EXCEEDED to "AI quota exhausted"
+        } else {
+            fallbackCode to "AI rate limit exceeded"
+        }
+
+    /** 同上，直接成型成一条桥错误应答（`handleAi*` 与 `conversationCall` 用）。 */
+    private fun rateLimitedError(
+        requestId: String, e: AiGatewayClient.AiError.RateLimited, fallbackCode: String,
+    ): BridgeResponse {
+        val (code, message) = rateLimitedCodeAndMessage(e, fallbackCode)
+        return BridgeResponse.error(requestId, code, message)
+    }
+
     /** 桥侧本地失败的 error 事件载荷：码与既有桥错误码同族，文案固定、不泄正文。 */
     private fun localStreamError(e: AiGatewayClient.AiError): String {
         val (code, message) = when (e) {
             is AiGatewayClient.AiError.Timeout -> "timeout" to "AI agent request timed out"
-            is AiGatewayClient.AiError.RateLimited -> "429" to "AI rate limit exceeded"
+            is AiGatewayClient.AiError.RateLimited -> rateLimitedCodeAndMessage(e, "429")
             is AiGatewayClient.AiError.Unavailable -> "503" to "AI service unavailable"
             is AiGatewayClient.AiError.AuthLost -> "auth_lost" to "Authentication required"
             // T-M7-03d: 本轮带的 conversation_id 已失效（服务端开流前回 404）。
@@ -1397,7 +1432,7 @@ class AozoraBridge(
     } catch (e: AiGatewayClient.AiError.Network) {
         BridgeResponse.error(requestId, "network", e.message ?: "Network error")
     } catch (e: AiGatewayClient.AiError.RateLimited) {
-        BridgeResponse.error(requestId, "429", "AI rate limit exceeded")
+        rateLimitedError(requestId, e, "429")
     } catch (e: AiGatewayClient.AiError.Unavailable) {
         BridgeResponse.error(requestId, "503", "AI service unavailable")
     } catch (e: AiGatewayClient.AiError.AuthLost) {
@@ -1677,7 +1712,10 @@ class AozoraBridge(
         } catch (e: AiGatewayClient.AiError.Network) {
             BridgeResponse.error(requestId, "network_error", e.message ?: "Network error")
         } catch (e: AiGatewayClient.AiError.RateLimited) {
-            BridgeResponse.error(requestId, "rate_limited", "AI rate limit exceeded")
+            // T20-9（REQ-82）：与本文件 503 那条同法——图片链路也有日配额
+            // （`AIService.parse_image` 同样吃 `check_daily_quota`），故配额子码
+            // 同样放行；本 handler 既有的笼统码是 `rate_limited`，保持不动。
+            rateLimitedError(requestId, e, "rate_limited")
         } catch (e: AiGatewayClient.AiError.Unavailable) {
             // T18-1（REQ-66）：503 的**归因分层**——不再一律压成 no_ai_provider。
             // 服务端 body 带 code（ai_unavailable = provider 暂时故障或未配 key；
@@ -2352,7 +2390,7 @@ class AozoraBridge(
         } catch (e: AiGatewayClient.AiError.Network) {
             return BridgeResponse.error(requestId, "network", e.message ?: "Network error")
         } catch (e: AiGatewayClient.AiError.RateLimited) {
-            return BridgeResponse.error(requestId, "429", "AI rate limit exceeded")
+            return rateLimitedError(requestId, e, "429")
         } catch (e: AiGatewayClient.AiError.Unavailable) {
             return BridgeResponse.error(requestId, "503", "AI service unavailable")
         } catch (e: AiGatewayClient.AiError.AuthLost) {

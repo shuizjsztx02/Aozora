@@ -1,4 +1,4 @@
-"""T-M7-02f: 最小会话状态与配额双限。
+"""T-M7-02f: 最小会话状态与用量记账。
 
 服务端持有会话状态（架构 §6.3）——客户端只传 ``conversation_id`` + 本轮输入，
 历史由本模块读出并投影成下一次 ``AgentLoop.run(history=…)`` 的输入。P1 只做了
@@ -53,13 +53,20 @@ Event         会话日志里的一行，带轮号 ``turn``。
    尾巴（:func:`_paired_prefix_len`）。孤立的调用或结果会被 API 以 400 拒绝，而
    那个 400 要到下一轮请求才炸、归因困难——所以三道防线都要在。
 
-配额（R-PROD-15）
-----------------
+用量记账（T-M7-02f；会话级双限已由 T20-9 / REQ-82 移除）
+------------------------------------------------------
 
-``ai_usage`` 上**一个 Turn 一条行**、带 ``conversation_id``，于是会话级「轮数 +
-token」双限就是同一张表上的 ``COUNT(*)`` / ``SUM(tokens)`` 聚合——不引 Redis
-（生产单 worker，架构 §12.2 已定表第 3 项）。超限沿用快路径的 429
-``ai_quota_exceeded``，客户端据此降级到本地规则 NLU。
+``ai_usage`` 上**一个 Turn 一条行**、带 ``conversation_id``——它仍是**日配额**
+（``service.check_daily_quota``，按用户/按天）与审计的计数基座，故本模块照旧
+每轮写一行（:meth:`ConversationService.record_turn`）。
+
+**会话级「轮数 + token」双限（R-PROD-15 的原缓解手段）在 T20-9 被删掉**：用户
+与 AI 的长期会话属正常用法，被 429 拦在中途是把「用了很久」当成故障——而配置项
+带 ``gt=0``、没有关闭语义，设成极大值只是把缺陷藏起来（每轮仍跑两次聚合查询，
+下一个人调小它缺陷原样回来）。成本护栏只剩两条真实存在的：**摘要压缩**
+（:meth:`ConversationService.summarize_overflow`，窗口之外的正文不进上下文）与
+**guest 日配额**。``conversation_id`` 列与每轮写入因此都不能动——删它会同时打掉
+日配额与审计。
 
 会话列表、重命名与删除（T-M7-03a）
 ---------------------------------
@@ -161,7 +168,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from src.common.config import Settings, get_config
 from src.common.errors import AppException
-from src.models.ai import AIConversation, AIConversationEvent, AIUsage
+from src.models.ai import AIConversation, AIConversationEvent
 from src.models.ledger import Book
 from src.models.user import User
 
@@ -964,40 +971,6 @@ class ConversationService:
             )],
             same_turn=same_turn,
         )
-
-    # -- 配额 -------------------------------------------------------------
-
-    async def check_quota(self, conversation: AIConversation) -> None:
-        """会话级「轮数 + token」双限。超限一律 429 ``ai_quota_exceeded``。
-
-        与快路径的 guest 日配额**叠加**而非替代：日配额按用户/按天，本档按
-        会话/按整个会话生命周期。两个数字都是**上限哨兵**——拦住失控的长会话，
-        不是成本目标（成本口径见 02d：工具任务第 2 步起恒为深档）。
-
-        轮数以 ``ai_usage`` 的**行数**为准（调用方一轮记一行），不取事件条数：
-        一轮产生几条消息取决于模型调了几次工具，还可能没有 assistant 事件
-        （provider 失败、空回答），拿它当轮数会让上限随消息数漂移。
-        """
-        if await self._db.scalar(
-            select(func.count())
-            .select_from(AIUsage)
-            .where(AIUsage.conversation_id == conversation.id)
-        ) >= self._cfg.ai_agent_conversation_max_turns:
-            raise AppException(
-                429, "ai_quota_exceeded",
-                "This conversation has reached its turn limit, please start a new one",
-            )
-
-        used = await self._db.scalar(
-            select(func.coalesce(func.sum(AIUsage.tokens), 0)).where(
-                AIUsage.conversation_id == conversation.id,
-            )
-        )
-        if used >= self._cfg.ai_agent_conversation_max_tokens:
-            raise AppException(
-                429, "ai_quota_exceeded",
-                "This conversation has reached its token limit, please start a new one",
-            )
 
     # -- 清理 -------------------------------------------------------------
 

@@ -777,7 +777,9 @@ export function AssistantPage() {
             }}
             data-testid="interrupted-banner"
           >
-            <span className="truncate">⚠️ 连接中断，这一步没做完</span>
+            {/* T20-9（REQ-82）：服务端**明确拒绝**（配额 / 限流）时用 hook 给的那句
+                如实文案——「连接中断」只对真断连成立。缺省仍是原来那句。 */}
+            <span className="truncate">{interrupted.note ?? '⚠️ 连接中断，这一步没做完'}</span>
             <button
               type="button"
               onClick={retryInterrupted}

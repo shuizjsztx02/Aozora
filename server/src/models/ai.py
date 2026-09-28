@@ -186,9 +186,13 @@ class AIUsage(Base):
     """Per-request AI usage record — append-only audit trail.
 
     T-M7-02f：一个 agent **Turn 一条行**（``tokens`` 为该轮全部 provider 调用
-    之和），``conversation_id`` 落在这条行上——会话级「轮数 + token」双限因此
-    是同一张表上的 COUNT / SUM 聚合查询（架构 §12.2 已定表第 3 项）。快路径
-    的 interpret / report / parse-image 各行保持 ``conversation_id = NULL``。
+    之和），``conversation_id`` 落在这条行上。快路径的 interpret / report /
+    parse-image 各行保持 ``conversation_id = NULL``。
+
+    **会话级「轮数 + token」双限已由 T20-9（REQ-82）移除**——它曾是这张表上的
+    COUNT / SUM 聚合（架构 §12.2 已定表第 3 项），现只留数据：每轮照旧写一行、
+    带 ``conversation_id``，供 guest **日配额**（按 user / 按天）、审计与投影 C
+    使用。
     """
 
     __tablename__ = "ai_usage"
@@ -196,8 +200,7 @@ class AIUsage(Base):
         # T-M4-01: guest daily-quota check counts rows by
         # (user_id, created_at >= day start) on every /ai/interpret call.
         Index("ix_ai_usage_user_created", "user_id", "created_at"),
-        # T-M7-02f: conversation-level turn / token quota aggregates by
-        # conversation_id over the conversation's lifetime.
+        # T-M7-02f: 会话维度的用量查询（审计 / 投影 C；双限已由 T20-9 移除）。
         Index("ix_ai_usage_conversation_created", "conversation_id", "created_at"),
     )
 

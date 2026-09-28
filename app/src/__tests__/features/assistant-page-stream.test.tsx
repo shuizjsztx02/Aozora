@@ -17,7 +17,7 @@ import type { AssistantMessage } from '../../features/assistant/use-assistant'
 const hookState = vi.hoisted(() => ({
   phase: 'idle' as 'idle' | 'processing' | 'executing',
   streaming: null as { text: string; reasoning: string } | null,
-  interrupted: null as { input: string } | null,
+  interrupted: null as { input: string; note?: string } | null,
   cancelStream: vi.fn(),
   retryInterrupted: vi.fn(),
 }))
@@ -167,5 +167,18 @@ describe('AssistantPage — agent 流式气泡（T-M7-02i）', () => {
     expect(banner).toHaveTextContent('连接中断')
     fireEvent.click(screen.getByTestId('interrupted-retry'))
     expect(hookState.retryInterrupted).toHaveBeenCalledTimes(1)
+  })
+
+  it('★ T20-9：服务端明确拒绝（配额用尽）→ 提示条用如实文案，不落「连接中断」', async () => {
+    // REQ-82：气泡与提示条是两处文案，两处都不能说「连接中断」——只改气泡的话
+    // 用户在同一屏上仍会看到那句谎（提示条就在输入框上方）。
+    hookState.interrupted = { input: '再记一笔', note: '⚠️ 今天的 AI 额度用完了，明天再试试' }
+    renderPage()
+
+    const banner = await screen.findByTestId('interrupted-banner')
+    expect(banner).toHaveTextContent('额度用完了')
+    expect(banner).not.toHaveTextContent('连接中断')
+    // 重发入口照旧在（限流一会儿就恢复；配额到顶时重发也无害）
+    expect(screen.getByTestId('interrupted-retry')).toBeInTheDocument()
   })
 })

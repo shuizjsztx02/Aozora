@@ -342,15 +342,18 @@ class TestQuotaBaseIntact:
         # 关键：外键**没有**被置空——置空即会话级配额被绕过。
         assert all(r.conversation_id == conv.id for r in rows)
 
-    async def test_conversation_quota_aggregate_is_unchanged(
+    async def test_conversation_usage_aggregate_is_unchanged(
         self, db_session, sample_data,
     ):
-        """会话级「轮数 + token」双限在清扫前后完全一致（用户刷不回满额）。"""
+        """会话维度的用量聚合在清扫前后完全一致——清扫不得动 ``ai_usage``。
+
+        T20-9（REQ-82）起会话级双限已移除，这条聚合的消费者只剩日配额与审计，
+        但**行本身一行都不能少**：保留期只管事件正文，用量行是配额基座。
+        """
         conv = await _conversation(db_session, sample_data)
         await _turn(db_session, conv, turn=1, at=LONG_AGO)
         await self._seed_usage(db_session, sample_data, conv)
 
-        service = ConversationService(db_session, _cfg())
         before = (
             await db_session.scalar(
                 select(func.count()).select_from(AIUsage)
@@ -375,8 +378,6 @@ class TestQuotaBaseIntact:
             ),
         )
         assert before == after == (3, 3000)
-        # 配额门也不该因为清扫而变化
-        await service.check_quota(conv)
 
     async def test_expired_events_do_not_touch_other_users_usage(
         self, db_session, sample_data,

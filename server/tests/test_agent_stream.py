@@ -7,7 +7,7 @@
 - 事件逐条下发而非攒批      → TestIncrementalDelivery（直连 ASGI）
 - X-Accel-Buffering 响应头  → TestStreamEvents::test_headers_disable_buffering
 - 开关关闭时端点不可用、旧客户端行为不变 → TestFeatureFlag
-- 配额（日 + 会话）在跑 loop 之前 → TestQuota
+- 配额：日配额在跑 loop 之前（**会话双限已由 T20-9 移除**，用例改为「不再拦」的守护）→ TestQuota
 - 落库与多轮上下文          → TestPersistence
 - 写路径（挂起确认卡 / 自动执行）→ TestWritePath
 - 失败收尾                  → TestFailure
@@ -38,6 +38,7 @@ import tempfile
 import uuid
 from collections.abc import AsyncIterator
 from copy import deepcopy
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
@@ -1266,23 +1267,37 @@ class TestQuota:
         assert response.json()["code"] == "ai_quota_exceeded"
         assert stream_env.provider.calls == []
 
-    async def test_conversation_turn_limit_blocks_the_next_turn(
+    async def test_a_conversation_past_the_old_session_limits_keeps_running(
         self, stream_env: StreamEnv,
     ):
+        """T20-9（REQ-82）：原「50 轮 / 500k token」双限的**会话仍能继续跑 loop**。
+
+        卡面判据是「不再抛 429」，所以这里必须**把超限的用量真的造出来**再发一轮
+        ——只断言 ``check_quota`` 不存在是自反的（恒真 ⇒ 假绿，见 R-PROD-46 那类
+        「没测」）。种子行落在 40 天前：它们要穿过**会话维度**的聚合（按整个会话
+        生命周期），又不能触发 guest 的**日配额**（按用户/按天，另一把尺子）——
+        故本用例同时证明了两道闸门是分开的。
+        """
         stream_env.provider.reset([_text("你好呀！")])
         _, body = await stream_env.turn("你好")
         conversation_id = payload_of(body, "done")["conversation_id"]
 
-        set_config(stream_env.cfg.model_copy(
-            update={"ai_agent_conversation_max_turns": 1},
-        ))
-        try:
-            response = await stream_env.post_turn("再来一句", conversation_id=conversation_id)
-        finally:
-            set_config(stream_env.cfg)
+        async with stream_env.factory() as session:
+            long_ago = datetime.now(UTC) - timedelta(days=40)
+            for index in range(60):          # 原轮数上限 50
+                session.add(AIUsage(
+                    user_id=stream_env.user_id, conversation_id=uuid.UUID(conversation_id),
+                    provider="seed", model="seed", tokens=10_000,   # 60 万 > 原 500k
+                    cost=0, request_id=f"seed-{index}", created_at=long_ago,
+                ))
+            await session.commit()
 
-        assert response.status_code == 429
-        assert response.json()["code"] == "ai_quota_exceeded"
+        stream_env.provider.reset([_text("还在呢")])
+        response, body = await stream_env.turn("再来一句", conversation_id=conversation_id)
+
+        assert response.status_code == 200
+        assert payload_of(body, "done")["conversation_id"] == conversation_id
+        assert len(stream_env.provider.calls) == 1
 
     async def test_unknown_conversation_is_404(self, stream_env: StreamEnv):
         response = await stream_env.post_turn("你好", conversation_id=str(uuid.uuid4()))

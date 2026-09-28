@@ -40,6 +40,38 @@ export function isAiUnavailable(code: string | null | undefined): boolean {
 }
 
 /**
+ * T20-9（REQ-82）：**服务端明确拒绝**类错误码——它与「链路断了」是两件事。
+ *
+ * 这组码以前到达聊天页时一律落 `INTERRUPTED_TURN_NOTE`（「连接中断，本轮未完成」）：
+ * 那句对**真断连**是对的，对这里却是谎——请求明明到了服务端、服务端也答了 429，
+ * 而用户的下一步动作完全不同（等额度恢复 / 缓一缓再发，不是查网络再重试）。
+ * 成因是两层翻译丢信息：Kotlin 只看状态码 → 桥硬编码文案 → 前端统一兜底。
+ * T20-9 把服务端的 429 子码透出来（`AozoraBridge.rateLimitedCodeAndMessage`），
+ * 这里据此给出**如实**的一段话。
+ */
+export const AI_QUOTA_EXCEEDED_CODE = 'ai_quota_exceeded'
+
+/**
+ * 拒绝类码 → 聊天气泡文案。三个限流键是**同一个语义的三种码**：`429` 是桥在认不出
+ * 子码时的笼统码，`rate_limited` 是图片链路的既有码，`ai_rate_limited` 是服务端
+ * 自己的码（桥当前不产出，留着是为了「码先于接线」时不用再来改一次）。
+ */
+const AI_REFUSAL_ZH: Record<string, string> = {
+  [AI_QUOTA_EXCEEDED_CODE]: '⚠️ 今天的 AI 额度用完了，明天再试试',
+  '429': '⚠️ AI 请求太频繁了，缓一会儿再发',
+  rate_limited: '⚠️ AI 请求太频繁了，缓一会儿再发',
+  ai_rate_limited: '⚠️ AI 请求太频繁了，缓一会儿再发',
+}
+
+/**
+ * 该错误码对应的**拒绝文案**；`null` = 不是这一类，调用方照旧用
+ * `INTERRUPTED_TURN_NOTE`（真断连、超时、网络故障都归那句）。
+ */
+export function aiRefusalNote(code: string | null | undefined): string | null {
+  return (code && AI_REFUSAL_ZH[code]) || null
+}
+
+/**
  * 图片（小票）解析链路：桥错误码 → 中文文案。未知码由调用方回退原生 message。
  *
  * T12-1（REQ-29 / 决策 #9）：本表最初只有 `no_ai_provider` 一条「配置指引」

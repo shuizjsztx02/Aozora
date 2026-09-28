@@ -74,7 +74,17 @@ class AiGatewayClient(
             AiError("AI request timed out", cause)
         class Network(message: String, cause: Throwable? = null) :
             AiError(message, cause)
-        class RateLimited :
+        /**
+         * HTTP 429。
+         *
+         * T20-9（REQ-82）：带上服务端 body 里的 `code`——429 **不是一个语义**，
+         * 与 [Unavailable] 同理。`ai_quota_exceeded`（guest 日配额用尽，明天再来）
+         * 与 `ai_rate_limited`（请求太密，缓一下）对用户是两件事、恢复路径也不同；
+         * 桥侧只按状态码映射时它们一律变成「rate limit exceeded」，于是前端拿到
+         * 一个说不清前因的码、只能落「连接中断」兜底——用户看到「网断了」，而
+         * 实际是服务端**明确拒绝**了这次请求（会话级双限已删，见 REQ-82）。
+         */
+        class RateLimited(val serverCode: String? = null) :
             AiError("AI rate limit exceeded")
         /**
          * HTTP 503。
@@ -351,7 +361,7 @@ class AiGatewayClient(
                             val body = resp.body?.string().orEmpty()
                             val result = when {
                                 resp.isSuccessful -> body
-                                resp.code == 429 -> throw AiError.RateLimited()
+                                resp.code == 429 -> throw AiError.RateLimited(serverErrorCode(body))
                                 // P2#4: 401 → AuthLost so the bridge can prompt re-login.
                                 // 403 is NOT auth — /ai/execute uses it for proposal
                                 // rejection, so it falls through to the 4xx branch below.
@@ -425,14 +435,15 @@ class AiGatewayClient(
      * SSE 链路的失败映射。**HTTP 状态优先**——okhttp-sse 在非 2xx 时带 response
      * 回调 `onFailure`（`processResponse` 里那次），而流中途断开时 response 是
      * 已经开始的 200，那时才看异常类型。口径与服务端的 `error` 帧一致：只给
-     * 状态码与类型，**不回显正文**。
+     * 状态码与类型，**不回显正文**（唯一的例外是 429 的服务端子码，见
+     * [streamErrorCode]——那是归因用的码，不是给用户看的正文）。
      */
     private fun mapStreamFailure(t: Throwable?, response: Response?): AiError {
         val code = response?.code ?: 0
         if (code != 0 && code != 200) {
             return when (code) {
                 401 -> AiError.AuthLost()
-                429 -> AiError.RateLimited()
+                429 -> AiError.RateLimited(streamErrorCode(response))
                 503 -> AiError.Unavailable(code)
                 // T-M7-03d: `POST /ai/agent` 带一个已失效的 conversation_id 时，服务端在
                 // **开流之前**就回 404（`conversation.py:load_owned`）。它必须与普通链路
@@ -472,6 +483,23 @@ class AiGatewayClient(
             ""
         }
         return code.takeIf { it.isNotBlank() }
+    }
+
+    /**
+     * T20-9（REQ-82）：SSE 非 2xx 响应体里的服务端 `code`。
+     *
+     * 与 [serverErrorCode] 同源（同样只读 `code`、不碰正文），差别只在**读的时机**：
+     * okhttp-sse 是在 `processResponse` 的 `response.use { … }` **内部**回调
+     * `onFailure` 的，正文在那时还没被读走；出了那个回调就再没有第二次机会，而
+     * 429 的两种语义（日配额用尽 / 请求太密）只写在正文的 `code` 里。
+     *
+     * 任何失败（无 response、正文为空、不是 JSON、已被读走）都退化成 null——
+     * 读不出子码就仍是笼统的 `429`，不把这次失败升级成别的错误。
+     */
+    private fun streamErrorCode(response: Response?): String? = try {
+        serverErrorCode(response?.body?.string().orEmpty())
+    } catch (_: Exception) {
+        null
     }
 
     companion object {

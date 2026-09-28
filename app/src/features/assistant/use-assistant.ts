@@ -99,6 +99,9 @@ import {
 } from './use-assistant-stream'
 // T-M7-04e：中断轮的文案与重建侧共用一份（同一件事只有一句说法）
 import { INTERRUPTED_TURN_NOTE } from './history-projection'
+// T20-9（REQ-82）：服务端**明确拒绝**（配额用尽 / 请求过密）另有如实文案——
+// 它不该被套上「连接中断」那句（那句只对真断连成立）
+import { aiRefusalNote } from './ai-error-text'
 import { newUuid } from '../../platform/uuid'
 import { todayBizDate } from '../../domain/date'
 // REQ-69（T18-6）：余额（可负）的显示口径，与账户页同一 helper
@@ -329,6 +332,15 @@ export const DEVICE_OP_DISPATCH: Record<
 export interface InterruptedTurn {
   /** 本轮的用户输入（重发用） */
   input: string
+  /**
+   * T20-9（REQ-82）：提示条的那句话。缺省 = 既有的「连接中断，这一步没做完」。
+   *
+   * 只有**服务端明确拒绝**类（配额用尽 / 请求过密，见 `aiRefusalNote`）才带它——
+   * 那类失败里服务端答了话，「连接中断」是谎。重发入口两类都留着：限流一会儿
+   * 就恢复，重发是有用的；配额到顶时重发无害（撞同一句如实文案），而不给入口
+   * 反而让用户以为得去别处找按钮。
+   */
+  note?: string
 }
 
 /**
@@ -544,6 +556,10 @@ export function localizeBridgeError(raw: string): string {
  * 注意：handleAiInterpret 把服务端 503 统一压成 code='503'，响应体子码（ai_unavailable=
  * 未配置 key 或 provider 故障/超时）不透传，本链路无法区分「未配置」——no_ai_provider 分支
  * 预留给桥透传后启用（决策 #9 专属文案）；未知 code 回退「暂时不可用」。
+ *
+ * T20-9（REQ-82）：`429` 一支**从这里移出**——它不再是「理由」而是一整句独立的
+ * 文案（`aiRefusalNote`），因为「服务端明确拒绝」不该被套上「连接中断（…）」的
+ * 前缀。本表只留「链路与配置」类的理由。
  */
 const AI_INTERPRET_ERROR_ZH: Record<string, string> = {
   no_ai_provider: 'AI 服务未配置：需在服务器 .env 填 AI_PROVIDER_API_KEY 并重启',
@@ -551,7 +567,6 @@ const AI_INTERPRET_ERROR_ZH: Record<string, string> = {
   unavailable: '云端 AI 暂时不可用',
   timeout: '云端 AI 响应超时',
   network: '网络异常，云端 AI 未接通',
-  '429': '云端 AI 请求过于频繁',
   auth_lost: '登录已失效，云端 AI 不可用',
 }
 
@@ -1180,16 +1195,20 @@ export function useAssistant({
       // （本地半截气泡已经包含那些正文，见 `recoveredMessages` 的规则 ③）。
       for (const item of p.recovered) appendAssistantMessage(item.text)
       const dropped = dropApprovals(() => true)
-      setInterrupted({ input: lastTurnInputRef.current })
+      // T20-9（REQ-82）：**服务端明确拒绝**（配额用尽 / 请求过密）有如实文案——
+      // 气泡与提示条两处共用它，两处都不再落「连接中断」（那句只对真断连成立）。
+      const refusal = aiRefusalNote(p.error?.code)
+      setInterrupted({ input: lastTurnInputRef.current, note: refusal ?? undefined })
       const note = dropped > 0 ? '；未确认的改动没有记录' : ''
       // T-M7-04e：失败轮的日志位置也要落盘。续读（`catchUp`）刚把游标推到了服务端日志
       // 的真实位置，`logCursor` 带的就是它——不写的话，这一轮留在日志里的 `user` 事件
       // 会在下一次增量补齐时**重复显示一次**。取的是**常量**：同一件事只有一份文案
       // （重建侧用同一个，`history-projection.ts`）。
       if (activeKey !== null && p.logCursor > 0) setCursor(activeKey, p.logCursor)
+      const failureNote = refusal ?? INTERRUPTED_TURN_NOTE
       appendAssistantMessage(text
-        ? `${text}\n\n${INTERRUPTED_TURN_NOTE}${note}`
-        : `${INTERRUPTED_TURN_NOTE}${note}`)
+        ? `${text}\n\n${failureNote}${note}`
+        : `${failureNote}${note}`)
       return
     }
 
@@ -1525,13 +1544,16 @@ export function useAssistant({
     // 打开；而本地解析恰好在复合句 / 操作句上会记错（R-PROD-28），那正是本轮要拆的。
     // 两条链路原先一个回退本地、一个中断重试，「同一句话有时有结果、有时没有」——统一到后者。
     let cloudSettled = false
-    const failCloudTurn = (reason: string) => {
+    // `code` 是桥给的错误码（可选）：T20-9 起**服务端明确拒绝**类（配额 / 限流）
+    // 在这里换成自己的整句话，不再套「连接中断（…）」的前缀——理由见 `aiRefusalNote`。
+    const failCloudTurn = (reason: string, code?: string) => {
       if (cloudSettled) return
       cloudSettled = true
       // 这次判「可达」已经不作数了：下一次输入重新探，别在 TTL 内反复撞同一堵墙
       invalidateCloudReachability()
-      setInterrupted({ input: text.trim() })
-      appendAssistantMessage(`${INTERRUPTED_TURN_NOTE}（${reason}）`)
+      const refusal = aiRefusalNote(code)
+      setInterrupted({ input: text.trim(), note: refusal ?? undefined })
+      appendAssistantMessage(refusal ?? `${INTERRUPTED_TURN_NOTE}（${reason}）`)
       finishProcessing()
     }
 
@@ -1609,7 +1631,7 @@ export function useAssistant({
         // T12-8（REQ-30 ② / 决策 #9）：云端失败不再静默——原因如实透出，但**不再回落本地**。
         const code = typeof err === 'object' && err !== null && 'code' in err
           ? String((err as { code: unknown }).code) : ''
-        failCloudTurn(AI_INTERPRET_ERROR_ZH[code] ?? AI_INTERPRET_ERROR_ZH.unavailable)
+        failCloudTurn(AI_INTERPRET_ERROR_ZH[code] ?? AI_INTERPRET_ERROR_ZH.unavailable, code)
       }
     }
   }, [

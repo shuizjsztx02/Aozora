@@ -536,6 +536,27 @@ describe('use-assistant — 免确认本地记账（T8-6）', () => {
     expect(result.current.phase).toBe('idle')
   })
 
+  it('★ T20-9：配额用尽（ai_quota_exceeded）→ 如实文案，不落「连接中断」', async () => {
+    // REQ-82：单发链路与 agent 流转两条路的失败出口**逐条对齐**（T18-8 的口径），
+    // 故「服务端明确拒绝」那一类在两边都换了说法——只改一边等于用户换个说法就
+    // 看到不同的谎。
+    vi.mocked(parseInput).mockReturnValue(txProposal({ confidence: 0.3 }))
+    mockBridge.isAvailable.mockReturnValue(true)
+    mockBridge.interpretAI.mockRejectedValue(
+      Object.assign(new Error('AI quota exhausted'), { code: 'ai_quota_exceeded' }),
+    )
+    const { result } = setup()
+
+    await act(async () => { await result.current.submitInput('午饭吃了十二块五') })
+
+    expect(mockBridge.insertTransaction).not.toHaveBeenCalled()
+    const texts = result.current.messages.map(m => m.text).join('\n')
+    expect(texts).not.toContain(INTERRUPTED_TURN_NOTE)
+    expect(texts).toContain('额度用完了')
+    expect(result.current.interrupted?.note).toContain('额度用完了')
+    expect(result.current.phase).toBe('idle')
+  })
+
   it('code=no_ai_provider → 决策 #9 配置指引专属文案', async () => {
     vi.mocked(parseInput).mockReturnValue(txProposal({ confidence: 0.3 }))
     mockBridge.isAvailable.mockReturnValue(true)

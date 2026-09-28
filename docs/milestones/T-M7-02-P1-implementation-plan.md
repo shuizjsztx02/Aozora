@@ -97,6 +97,7 @@
 - **产出：** 新模型文件 + Alembic 迁移（紧接 `0016_cloud_entities`）+ `AIUsage` 加列
 - **验证：** 多轮澄清用例（问 → 追问 → 简答「500」→ 正确解析）；会话级轮数 / token 超限返回 429（code 沿用 `ai_quota_exceeded`）；历史窗口无 UUID；登出 / 删号清理会话行。
 - **前置动作：** 先把 `config.py:184` 的 `ai_daily_quota_guest` 从联测临时的 `100000` **恢复为 `20`**（注释自陈「联测结束后必须恢复为 20」），否则配额实测与 R-PROD-15 成本评估数据失真。
+- **变更（2026-09-28，T20-9 / REQ-82）：** 本卡的**会话级「轮数 + token」双限已被整体移除**——`check_quota`、`ai_agent_conversation_max_turns` / `_max_tokens`、`routes.py` 的调用全部删除；`AIUsage.conversation_id` 的**每轮写入与列本身保留**（guest 日配额 / 审计 / 投影 C 的基座）。理由与取舍见 `docs/risk-register.md` R-PROD-15 的 2026-09-28 段。上方「验证」一条里的「会话级轮数 / token 超限返回 429」**随之作废**，改由「超原双限的会话仍能正常跑 loop」守护（`test_agent_stream.py::TestQuota`）。
 
 ### 02g SSE 端点与部署配置
 
@@ -729,6 +730,10 @@ cd app && npx vitest run                                           # 1107 passed
 ---
 
 ### 02f · 会话状态与配额双限（✅ 2026-09-18）
+
+> **2026-09-28（T20-9 / REQ-82）：本节描述的会话级双限已被整体移除。** 下面
+> 是当时的事实记录，**不改写**——当前口径见 R-PROD-15 与 `conversation.py` 的
+> 模块 docstring（「用量记账」一节）。
 
 **任务编号：** T-M7-02f
 

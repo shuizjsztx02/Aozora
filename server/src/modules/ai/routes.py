@@ -456,10 +456,9 @@ async def agent(
         conversation = await conversations.resolve(
             current_user, book_uuid, body.conversation_id,
         )
-        # 配额两道都在跑 loop 之前（02f 的交接）：日配额按用户/按天，
-        # 会话配额按会话/按整个会话生命周期。
+        # 配额在跑 loop 之前：guest 日配额（按用户/按天）。**会话级双限已在
+        # T20-9 / REQ-82 移除**——长会话是正常用法，不是故障。
         await check_daily_quota(session, current_user, cfg)
-        await conversations.check_quota(conversation)
         await session.commit()
         conversation_id = conversation.id
 

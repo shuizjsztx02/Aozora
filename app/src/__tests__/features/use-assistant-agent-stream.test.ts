@@ -408,6 +408,45 @@ describe('use-assistant — agent 流式消费（T-M7-02i）', () => {
     expect(result.current.interrupted).toEqual({ input: '你好' })
   })
 
+  it('★ T20-9：error 帧带 ai_quota_exceeded → 如实文案，不落「连接中断」', async () => {
+    // REQ-82：服务端**明确拒绝**（日配额用尽）不是链路断了。该子码由桥在 T20-9
+    // 起从 429 里分出来透传（`AozoraBridge.rateLimitedCodeAndMessage`），前端据此
+    // 换掉收尾那句话——半截文本照旧保留（架构 §8.5）。
+    const { result } = setup()
+
+    await act(async () => {
+      const p = result.current.submitInput('你好')
+      await flush()
+      emit('delta', { text: '我正在', channel: 'content', step: 1 })
+      emit('error', { code: 'ai_quota_exceeded', message: 'AI quota exhausted' })
+      await p
+    })
+
+    const last = result.current.messages[result.current.messages.length - 1]
+    expect(last.text).toContain('我正在')
+    expect(last.text).not.toContain('连接中断')
+    expect(last.text).toContain('额度用完了')
+    // 提示条那处文案同源（两处都说「连接中断」等于没修）
+    expect(result.current.interrupted?.note).toContain('额度用完了')
+  })
+
+  it('★ T20-9：笼统 429（认不出子码）→ 限流文案，仍不落「连接中断」', async () => {
+    // 桥在 429 但没有子码时给的就是 `429`。它同样是「服务端答了话」——
+    // 与 ai_quota_exceeded 的区别只是恢复快慢（缓一会儿 vs 明天）。
+    const { result } = setup()
+
+    await act(async () => {
+      const p = result.current.submitInput('你好')
+      await flush()
+      emit('error', { code: '429', message: 'AI rate limit exceeded' })
+      await p
+    })
+
+    const last = result.current.messages[result.current.messages.length - 1]
+    expect(last.text).not.toContain('连接中断')
+    expect(last.text).toContain('请求太频繁')
+  })
+
   it('桥层拒绝（旧 APK 无该命令）→ 同样按失败收尾，不静默回落', async () => {
     mockBridge.runAgent.mockRejectedValue(new Error('unknown command'))
     const { result } = setup()

@@ -13,6 +13,7 @@ import okhttp3.mockwebserver.MockWebServer
 import org.json.JSONObject
 import org.junit.After
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Assert.fail
 import org.junit.Before
@@ -135,11 +136,28 @@ class AiGatewayClientStreamTest {
             assertEquals(503, e.httpCode)
         }
 
+        // T20-9（REQ-82）：429 的**服务端子码**要一路带上来。okhttp-sse 是在
+        // `response.use { … }` 内部回调 onFailure 的，正文只有那一次读取机会——
+        // 出了那个回调就再也拿不到「是配额用尽还是请求太密」。
+        server.enqueue(
+            MockResponse().setResponseCode(429)
+                .setBody("{\"code\":\"ai_quota_exceeded\",\"message\":\"Daily AI quota used up\"}"),
+        )
+        try {
+            client.agentStream("hi", "book-1") { _, _ -> }
+            fail("429 必须抛出")
+        } catch (e: AiGatewayClient.AiError.RateLimited) {
+            assertEquals("ai_quota_exceeded", e.serverCode)
+        }
+
+        // 读不出子码（body 空 / 非 JSON）→ null：桥据此回落各 handler 既有的笼统码，
+        // **不把这次失败升级成别的错误**。
         server.enqueue(MockResponse().setResponseCode(429).setBody("{}"))
         try {
             client.agentStream("hi", "book-1") { _, _ -> }
             fail("429 必须抛出")
-        } catch (_: AiGatewayClient.AiError.RateLimited) {
+        } catch (e: AiGatewayClient.AiError.RateLimited) {
+            assertNull(e.serverCode)
         }
 
         server.enqueue(MockResponse().setResponseCode(401).setBody("{}"))

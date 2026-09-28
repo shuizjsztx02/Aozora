@@ -1,13 +1,16 @@
-"""T-M7-02f: 最小会话状态与配额双限测试。
+"""T-M7-02f: 最小会话状态与用量记账测试。
 
 验收映射（docs/milestones/production-execution-plan.md T-M7-02f）：
 - 多轮澄清（问 → 追问 → 简答「500」→ 正确解析） → TestMultiTurnClarification
-- 会话级轮数 / token 超限返回 429                → TestConversationQuota
+- 会话维度用量记账仍可用（双限见下）             → TestConversationUsageAccounting
 - 历史窗口无 UUID                                → TestHistoryWindow
 - 登出 / 删号清理会话行                          → TestCleanup
 
+**T20-9（REQ-82）：会话级轮数 / token 双限已移除**——原 ``TestConversationQuota``
+的用例改造为用量记账的守护 + 「双限不会回来」的守护（见该类 docstring）。
+
 全部用例走真实 DB（内存 SQLite）+ 真实工具注册表；模型侧用脚本化 provider，
-无网络。窗口与配额的档位经 ``ConversationService(cfg=…)`` 注入，不依赖生产默认值。
+无网络。窗口的档位经 ``ConversationService(cfg=…)`` 注入，不依赖生产默认值。
 """
 
 from __future__ import annotations
@@ -54,7 +57,7 @@ _UUID_RE = re.compile(
 
 
 def _cfg(**overrides: Any) -> Settings:
-    """独立 Settings——窗口与配额档位由此注入，不吃生产默认值。"""
+    """独立 Settings——窗口档位由此注入，不吃生产默认值。"""
     base: dict[str, Any] = {
         "database_url": "sqlite+aiosqlite:///:memory:",
         "secret_key": "test-secret",
@@ -621,10 +624,20 @@ class TestMultiTurnClarification:
         assert not _UUID_RE.search(json.dumps(final, ensure_ascii=False))
 
 
-# ── 会话级配额双限 ─────────────────────────────────────────────────────────
+# ── 会话用量记账（会话级双限已由 T20-9 / REQ-82 移除）──────────────────────
 
 
-class TestConversationQuota:
+class TestConversationUsageAccounting:
+    """``ai_usage`` 的**会话维度记账**仍是日配额与审计的基座——双限删了，这一半不动。
+
+    本类由 T20-9 从原 ``TestConversationQuota`` 改造而来。卡面要求「**不得只删**」：
+    判定删掉之后必须留下「它不会回来」的守护，否则下一次有人把双限加回来时四板
+    全绿——缺陷原样复现（这正是 REQ-82 决策 #18 拒绝「把阈值调大」的理由）。
+
+    E2E 一侧的守护（超原双限的会话仍能从 ``POST /ai/agent`` 正常拿到流）在
+    ``test_agent_stream.py::TestQuota``；这里量的是服务层与配置面的移除本身。
+    """
+
     async def _seed_usage(self, db, user, conversation, *, rows: int, tokens: int):
         for index in range(rows):
             db.add(AIUsage(
@@ -634,42 +647,36 @@ class TestConversationQuota:
             ))
         await db.flush()
 
-    async def test_turn_limit_exceeded_raises_429(self, db_session, sample_data):
+    async def test_usage_aggregates_per_conversation(self, db_session, sample_data):
+        """会话维度的计数与求和仍在——日配额与审计指着它，不得随双限一起消失。
+
+        用原「超轮数」用例的同一份种子数据（3 行 / 3 token）：改前那次聚合是为了
+        判上限，现在它自身就是被守护的对象。``conversation_id`` 列与写入路径
+        （``record_turn``）是这条聚合的唯一来源，故一并钉住。
+        """
         db, user, book = db_session, sample_data["user"], sample_data["book"]
-        service = ConversationService(db, _cfg(ai_agent_conversation_max_turns=3))
+        service = ConversationService(db)
         conversation = await service.resolve(user, book.id)
-        await self._seed_usage(db, user, conversation, rows=3, tokens=1)
+        await self._seed_usage(db, user, conversation, rows=3, tokens=1000)
 
-        with pytest.raises(AppException) as exc:
-            await service.check_quota(conversation)
-        assert exc.value.status_code == 429
-        assert exc.value.code == "ai_quota_exceeded"
+        assert await db.scalar(
+            select(func.count()).select_from(AIUsage)
+            .where(AIUsage.conversation_id == conversation.id)
+        ) == 3
+        assert await db.scalar(
+            select(func.coalesce(func.sum(AIUsage.tokens), 0))
+            .where(AIUsage.conversation_id == conversation.id)
+        ) == 3000
 
-    async def test_token_limit_exceeded_raises_429(self, db_session, sample_data):
+    async def test_fast_path_rows_stay_out_of_the_conversation_aggregate(
+        self, db_session, sample_data,
+    ):
+        """快路径的行 ``conversation_id`` 为 NULL——不并入任何**会话维度**的聚合。
+
+        （它们照样并入日配额的用户维度聚合，那是另一把尺子。）
+        """
         db, user, book = db_session, sample_data["user"], sample_data["book"]
-        service = ConversationService(db, _cfg(ai_agent_conversation_max_tokens=1000))
-        conversation = await service.resolve(user, book.id)
-        await self._seed_usage(db, user, conversation, rows=2, tokens=500)
-
-        with pytest.raises(AppException) as exc:
-            await service.check_quota(conversation)
-        assert exc.value.status_code == 429
-        assert exc.value.code == "ai_quota_exceeded"
-
-    async def test_within_limits_passes(self, db_session, sample_data):
-        db, user, book = db_session, sample_data["user"], sample_data["book"]
-        service = ConversationService(db, _cfg(
-            ai_agent_conversation_max_turns=3, ai_agent_conversation_max_tokens=1000,
-        ))
-        conversation = await service.resolve(user, book.id)
-        await self._seed_usage(db, user, conversation, rows=2, tokens=499)
-
-        await service.check_quota(conversation)
-
-    async def test_fast_path_usage_rows_do_not_count(self, db_session, sample_data):
-        """快路径的行 ``conversation_id`` 为 NULL——不占会话配额。"""
-        db, user, book = db_session, sample_data["user"], sample_data["book"]
-        service = ConversationService(db, _cfg(ai_agent_conversation_max_turns=1))
+        service = ConversationService(db)
         conversation = await service.resolve(user, book.id)
         for index in range(5):
             db.add(AIUsage(
@@ -678,9 +685,14 @@ class TestConversationQuota:
             ))
         await db.flush()
 
-        await service.check_quota(conversation)
+        assert await db.scalar(
+            select(func.count()).select_from(AIUsage)
+            .where(AIUsage.conversation_id == conversation.id)
+        ) == 0
 
-    async def test_record_turn_writes_one_row_with_conversation_id(self, db_session, sample_data):
+    async def test_record_turn_writes_one_row_with_conversation_id(
+        self, db_session, sample_data,
+    ):
         db, user, book = db_session, sample_data["user"], sample_data["book"]
         service = ConversationService(db)
         conversation = await service.resolve(user, book.id)
@@ -694,6 +706,18 @@ class TestConversationQuota:
             select(AIUsage).where(AIUsage.conversation_id == conversation.id)
         )).one()
         assert row.tokens == 120
+
+    def test_session_quota_is_not_reintroducible_by_config(self):
+        """T20-9（REQ-82）决策 #18：**删判定与配置**，不是把阈值调大。
+
+        两个配置项带 ``gt=0``、没有关闭语义——留着一个「设成极大值就等于关掉」的
+        旋钮，等于把缺陷藏起来：每轮仍旧跑两次聚合查询，下一个人调小它缺陷原样
+        回来。所以守护的是**配置面与判定面都不存在**：这个断言会在双限被加回来
+        的那一刻变红（那是本卡唯一能防住的回归形态，因为不存在「正确行为」可断言）。
+        """
+        assert "ai_agent_conversation_max_turns" not in Settings.model_fields
+        assert "ai_agent_conversation_max_tokens" not in Settings.model_fields
+        assert not hasattr(ConversationService, "check_quota")
 
 
 # ── 登出 / 删号清理 ────────────────────────────────────────────────────────
