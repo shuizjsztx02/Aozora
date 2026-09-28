@@ -11,6 +11,7 @@ import { describe, it, expect, vi, beforeEach } from 'vitest'
 import { render, screen, fireEvent } from '@testing-library/react'
 import { MemoryRouter } from 'react-router'
 import { AssistantPage } from '../../features/assistant/AssistantPage'
+import { aiRefusalNote, AI_QUOTA_EXHAUSTED_ZH } from '../../features/assistant/ai-error-text'
 import { useAssistantChatStore } from '../../platform/store/assistant-chat-store'
 import type { AssistantMessage } from '../../features/assistant/use-assistant'
 
@@ -172,11 +173,14 @@ describe('AssistantPage — agent 流式气泡（T-M7-02i）', () => {
   it('★ T20-9：服务端明确拒绝（配额用尽）→ 提示条用如实文案，不落「连接中断」', async () => {
     // REQ-82：气泡与提示条是两处文案，两处都不能说「连接中断」——只改气泡的话
     // 用户在同一屏上仍会看到那句谎（提示条就在输入框上方）。
-    hookState.interrupted = { input: '再记一笔', note: '⚠️ 今天的 AI 额度用完了，明天再试试' }
+    hookState.interrupted = {
+      input: '再记一笔',
+      note: aiRefusalNote('ai_quota_exceeded') ?? undefined,
+    }
     renderPage()
 
     const banner = await screen.findByTestId('interrupted-banner')
-    expect(banner).toHaveTextContent('额度用完了')
+    expect(banner).toHaveTextContent(AI_QUOTA_EXHAUSTED_ZH)
     expect(banner).not.toHaveTextContent('连接中断')
     // 重发入口照旧在（限流一会儿就恢复；配额到顶时重发也无害）
     expect(screen.getByTestId('interrupted-retry')).toBeInTheDocument()

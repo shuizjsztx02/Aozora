@@ -18,6 +18,9 @@ import {
 import {
   useAssistantStream, type AgentStreamProjection,
 } from '../../features/assistant/use-assistant-stream'
+// T20-9（REQ-82）：服务端拒绝类文案的单一来源——断言钉它，不钉子串
+// （措辞改一次就断一批用例，是仓里「宽匹配＝没测」的反面：窄到语义本身）
+import { AI_QUOTA_EXHAUSTED_ZH } from '../../features/assistant/ai-error-text'
 import { useAssistantChatStore } from '../../platform/store/assistant-chat-store'
 import { resetCloudReachabilityForTest } from '../../platform/cloud-reachability'
 import { parseInput } from '../../domain/nlu/parser'
@@ -425,9 +428,9 @@ describe('use-assistant — agent 流式消费（T-M7-02i）', () => {
     const last = result.current.messages[result.current.messages.length - 1]
     expect(last.text).toContain('我正在')
     expect(last.text).not.toContain('连接中断')
-    expect(last.text).toContain('额度用完了')
+    expect(last.text).toContain(AI_QUOTA_EXHAUSTED_ZH)
     // 提示条那处文案同源（两处都说「连接中断」等于没修）
-    expect(result.current.interrupted?.note).toContain('额度用完了')
+    expect(result.current.interrupted?.note).toContain(AI_QUOTA_EXHAUSTED_ZH)
   })
 
   it('★ T20-9：笼统 429（认不出子码）→ 限流文案，仍不落「连接中断」', async () => {

@@ -52,12 +52,20 @@ export function isAiUnavailable(code: string | null | undefined): boolean {
 export const AI_QUOTA_EXCEEDED_CODE = 'ai_quota_exceeded'
 
 /**
+ * 配额用尽的**一句话**（无 emoji、无前缀）——给「不是聊天气泡」的场景用。
+ *
+ * 聊天气泡那一处要带 `⚠️ `（与 `INTERRUPTED_TURN_NOTE` 同位置同形态），图片链路的
+ * 状态行则不带（既有那几条都不带）。**两种形态共用这一句**，免得同一件事两处措辞。
+ */
+export const AI_QUOTA_EXHAUSTED_ZH = '今天的 AI 额度已经用完了，明天再试试'
+
+/**
  * 拒绝类码 → 聊天气泡文案。三个限流键是**同一个语义的三种码**：`429` 是桥在认不出
  * 子码时的笼统码，`rate_limited` 是图片链路的既有码，`ai_rate_limited` 是服务端
  * 自己的码（桥当前不产出，留着是为了「码先于接线」时不用再来改一次）。
  */
 const AI_REFUSAL_ZH: Record<string, string> = {
-  [AI_QUOTA_EXCEEDED_CODE]: '⚠️ 今天的 AI 额度用完了，明天再试试',
+  [AI_QUOTA_EXCEEDED_CODE]: `⚠️ ${AI_QUOTA_EXHAUSTED_ZH}`,
   '429': '⚠️ AI 请求太频繁了，缓一会儿再发',
   rate_limited: '⚠️ AI 请求太频繁了，缓一会儿再发',
   ai_rate_limited: '⚠️ AI 请求太频繁了，缓一会儿再发',
@@ -78,6 +86,10 @@ export function aiRefusalNote(code: string | null | undefined): string | null {
  * 文案；T18-1 起该类一律落到 {@link AI_UNAVAILABLE_ZH}。
  * T14-3（REQ-40）：补 `execute` 分支的码集（`network`/`429`/`503`）与服务端
  * 400 `ai_missing_category`、500 `database_error` 防御键。
+ * T20-9（REQ-82）：补 `ai_quota_exceeded`——图片链路同样吃日配额
+ * （`AIService.parse_image` 走同一个 `check_daily_quota`），而桥自本卡起会**透传**
+ * 这个子码；**不补这一条，未知码就会回退桥的原生英文 message**（见下方消费点
+ * `setImageError(… ?? rawMessage)`），那是比笼统文案更糟的结果。
  */
 export const IMAGE_ERROR_ZH: Record<string, string> = {
   ai_unavailable: AI_UNAVAILABLE_ZH,
@@ -85,6 +97,7 @@ export const IMAGE_ERROR_ZH: Record<string, string> = {
   no_ai_provider: AI_UNAVAILABLE_ZH,
   server_error: AI_UNAVAILABLE_ZH,
   '503': AI_UNAVAILABLE_ZH,
+  [AI_QUOTA_EXCEEDED_CODE]: AI_QUOTA_EXHAUSTED_ZH,
   timeout: '图片解析超时，请检查网络后重试',
   network_error: '网络错误，请检查网络连接后重试',
   network: '网络错误，请检查网络后重试',

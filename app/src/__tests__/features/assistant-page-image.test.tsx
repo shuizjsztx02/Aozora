@@ -17,6 +17,7 @@ import { render, screen, waitFor } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { MemoryRouter, useLocation } from 'react-router'
 import { AssistantPage } from '../../features/assistant/AssistantPage'
+import { AI_QUOTA_EXHAUSTED_ZH } from '../../features/assistant/ai-error-text'
 
 const mockBridge = vi.hoisted(() => ({
   listCategories: vi.fn().mockResolvedValue([]),
@@ -163,6 +164,24 @@ describe('AssistantPage — 图片上传链路 (T9-8)', () => {
       expect(bar.textContent).not.toContain('.env')
     },
   )
+
+  // T20-9（REQ-82）：配额类 429 的子码自本卡起被桥**透传**（此前与「请求太密」
+  // 一起被压成笼统的 `rate_limited`）。新码必须有中文文案——`IMAGE_ERROR_ZH` 查不到
+  // 就会回退桥的原生英文 message（`setImageError(… ?? rawMessage)`），
+  // 那是比笼统文案更糟的结果（同 T18-1 对未知 503 子码的判据）。
+  it('parse 429（code=ai_quota_exceeded）→ 中文配额文案，不透桥的英文原文（T20-9 / REQ-82）', async () => {
+    mockBridge.parseImage.mockRejectedValueOnce(
+      bridgeError('AI quota exhausted', 'ai_quota_exceeded'),
+    )
+    const user = userEvent.setup()
+    renderPage()
+    await waitFor(() => expect(mockBridge.listBooks).toHaveBeenCalled())
+
+    await user.click(screen.getByTestId('image-upload-button'))
+    const bar = await screen.findByTestId('image-error')
+    expect(bar.textContent).toContain(AI_QUOTA_EXHAUSTED_ZH)
+    expect(bar.textContent).not.toContain('AI quota exhausted')
+  })
 
   // T18-1（REQ-66 ④ / APP-CONTEXT §6.4）：图片这条路走不通时给退路——
   // 重试仍在（附件没丢），并且可以直接去首页手写记账。

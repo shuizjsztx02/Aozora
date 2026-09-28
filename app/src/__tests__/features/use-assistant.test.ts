@@ -13,6 +13,8 @@ import { describe, it, expect, vi, beforeEach } from 'vitest'
 import { renderHook, act, waitFor } from '@testing-library/react'
 import { useAssistant, AI_OFFLINE_CANNED } from '../../features/assistant/use-assistant'
 import { INTERRUPTED_TURN_NOTE } from '../../features/assistant/history-projection'
+// T20-9（REQ-82）：拒绝类文案的单一来源（断言钉它，不钉措辞子串）
+import { AI_QUOTA_EXHAUSTED_ZH } from '../../features/assistant/ai-error-text'
 import { resetCloudReachabilityForTest } from '../../platform/cloud-reachability'
 import { useAssistantChatStore } from '../../platform/store/assistant-chat-store'
 import { parseInput } from '../../domain/nlu/parser'
@@ -552,8 +554,8 @@ describe('use-assistant — 免确认本地记账（T8-6）', () => {
     expect(mockBridge.insertTransaction).not.toHaveBeenCalled()
     const texts = result.current.messages.map(m => m.text).join('\n')
     expect(texts).not.toContain(INTERRUPTED_TURN_NOTE)
-    expect(texts).toContain('额度用完了')
-    expect(result.current.interrupted?.note).toContain('额度用完了')
+    expect(texts).toContain(AI_QUOTA_EXHAUSTED_ZH)
+    expect(result.current.interrupted?.note).toContain(AI_QUOTA_EXHAUSTED_ZH)
     expect(result.current.phase).toBe('idle')
   })
 
