@@ -560,7 +560,9 @@ export function AssistantPage() {
                     />
                   </div>
                 )}
-                {/* T18-3（REQ-67②③）：v2 提案的只读历史卡——正文 = 主行 + 执行凭据 */}
+                {/* T18-3（REQ-67②③）：v2 提案的只读历史卡——正文 = 主行 + 执行凭据。
+                    T20-2（REQ-77）：记账三 op 在这里出业务卡（四行口径 / 新旧对照），
+                    所以名单与账本一并下传（通用卡不需要它们，传了也不用）。 */}
                 {historyV2Proposal && (
                   <div className="w-full">
                     <V2ConfirmationCard
@@ -569,6 +571,11 @@ export function AssistantPage() {
                       status={v2HistoryStatus(msg.proposalStatus)}
                       executions={msg.executions}
                       busy={false}
+                      categories={categories}
+                      accounts={accounts}
+                      books={books}
+                      bookId={bookId}
+                      bookName={bookName}
                     />
                   </div>
                 )}
@@ -674,6 +681,12 @@ export function AssistantPage() {
               executions={activeExecutions}
               onConfirm={() => { void editProposal(activeProposal) }}
               onReject={rejectApproval}
+              /* T20-2（REQ-77）：记账三 op 的业务卡要的名单与账本 */
+              categories={categories}
+              accounts={accounts}
+              books={books}
+              bookId={bookId}
+              bookName={bookName}
             />
           ) : (
           <ConfirmationCard

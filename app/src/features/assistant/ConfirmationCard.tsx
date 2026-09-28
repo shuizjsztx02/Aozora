@@ -79,8 +79,9 @@ interface ConfirmationCardProps {
 }
 
 /** 已保存值快照，避免同值重复触发替换写；展示态渲染以此为准。
- *  T12-9：bookId/includeInBudget = 卡内生效值（chip 切换进快照比较，同值守卫同款）。 */
-interface CommittedSnapshot {
+ *  T12-9：bookId/includeInBudget = 卡内生效值（chip 切换进快照比较，同值守卫同款）。
+ *  T20-2（REQ-77）：导出给 v2 业务卡——它的「旧 / 新」两侧与这里的快照同形。 */
+export interface CommittedSnapshot {
   type: TransactionItem['type']
   amountCents: number
   categoryId: string
@@ -670,8 +671,10 @@ function ConfirmationCardBody({
   )
 }
 
-/** T16-3（REQ-59）：两份快照的逐字段差异掩码（对照区高亮依据）。 */
-interface DiffMask {
+/** T16-3（REQ-59）：两份快照的逐字段差异掩码（对照区高亮依据）。
+ *  T20-2（REQ-77）：连同 `diffMask` / `SnapshotCard` 一并导出——v2 业务卡的
+ *  新旧对照复用同一份比对口径与视觉（**只导出，行为未改**）。 */
+export interface DiffMask {
   cat: boolean
   type: boolean
   amount: boolean
@@ -682,7 +685,7 @@ interface DiffMask {
   budget: boolean
 }
 
-function diffMask(a: CommittedSnapshot, b: CommittedSnapshot): DiffMask {
+export function diffMask(a: CommittedSnapshot, b: CommittedSnapshot): DiffMask {
   return {
     cat: a.categoryId !== b.categoryId,
     type: a.type !== b.type,
@@ -720,9 +723,10 @@ function accountLabelOf(accounts: AccountData[], id: string | null) {
 }
 
 /** T16-3（REQ-59）：对照区单卡——只读渲染一份快照（展示态四行 + 预算行）。
- *  差异字段高亮、未变更字段弱化（`diff` 掩码由两份快照比对得出）。 */
-function SnapshotCard({
-  testId, snapshot, categories, accounts, books, bookName, diff,
+ *  差异字段高亮、未变更字段弱化（`diff` 掩码由两份快照比对得出）。
+ *  T20-2（REQ-77）：导出给 v2 业务卡复用（只导出，行为未改）；`hideBudget` 见下。 */
+export function SnapshotCard({
+  testId, snapshot, categories, accounts, books, bookName, diff, hideBudget = false,
 }: {
   testId: string
   snapshot: CommittedSnapshot
@@ -731,6 +735,11 @@ function SnapshotCard({
   books: BookData[]
   bookName: string
   diff: DiffMask
+  /** T20-2（REQ-77）：**不渲染预算位**。v2 的 `before` / `payload` 都不带这一位
+   *  （T20-1 决策 #4 的字段集是六项），照默认值渲染等于把「不知道」显示成
+   *  「计入预算」——宁可不显示（同 `_snapshot_before` 里「少一个键就是一次错误的
+   *  显示」的理由）。v1 车道的两处调用不传（默认 false），行为一字未改。 */
+  hideBudget?: boolean
 }) {
   const view = catInfoOf(categories, snapshot.categoryId)
   const viewAccount = accounts.find(a => a.id === snapshot.accountId) ?? null
@@ -817,13 +826,15 @@ function SnapshotCard({
         <span className="text-xs truncate px-1 rounded" style={{ color: 'var(--ink2)', ...mark(diff.book) }} data-testid={`${testId}-book`}>
           {viewBookName}
         </span>
-        <span
-          className="shrink-0 text-[10px] px-1.5 py-0.5 rounded-full"
-          style={{ ...chip, color: 'var(--ink3)', ...mark(diff.budget) }}
-          data-testid={`${testId}-budget`}
-        >
-          {snapshot.includeInBudget ? '计入预算' : '不计入预算'}
-        </span>
+        {!hideBudget && (
+          <span
+            className="shrink-0 text-[10px] px-1.5 py-0.5 rounded-full"
+            style={{ ...chip, color: 'var(--ink3)', ...mark(diff.budget) }}
+            data-testid={`${testId}-budget`}
+          >
+            {snapshot.includeInBudget ? '计入预算' : '不计入预算'}
+          </span>
+        )}
       </div>
     </div>
   )
