@@ -39,6 +39,7 @@ from typing import Any, Literal
 
 from jsonschema import Draft7Validator
 
+from .tools import ToolRisk
 from .validator import _FORMAT_CHECKER
 
 # ---------------------------------------------------------------------------
@@ -97,11 +98,19 @@ class DeviceTool:
     ``description`` 是**模型看到的唯一语义来源**，与 ``tools.py`` 的工具同口径：
     人工撰写、不机器直译。``parameters`` 是 Draft-07，参数只收原始值（模型给的
     名字 / 枚举，不收 id）。
+
+    ``risk`` 与 ``tools.Tool.risk`` **同款同判据**（判据原文见那一边的 docstring），
+    但**行为含义不同**：设备能力**不参与服务端审批策略**——它们在
+    ``AgentLoop._handle_proposal`` 的第一步就一律挂起（服务端没有它们的存储位置，
+    见 ``tools.DEVICE_EXECUTED_OPS``），审批发生在设备侧的确认卡上。这里的取值
+    因此是**宣告性的**：它让「哪些指令低风险 / 哪些要人工确认」这份清单对设备能力
+    也完整，并让新增能力漏标在导入期即红。
     """
 
     name: str
     capability: str
     kind: DeviceKind
+    risk: ToolRisk
     description: str
     parameters: dict[str, Any]
     #: 步骤卡片上的人类可读文案（``stream.tool_progress`` 的兜底来源）。
@@ -121,6 +130,7 @@ DEVICE_TOOLS: tuple[DeviceTool, ...] = (
         name="device_haptic",
         capability="haptic.feedback",
         kind=ONE_WAY,
+        risk="low",
         description=(
             "在用户设备上给一次触感反馈（震动）。用于「已记好」「办完了」这类确认"
             "时刻，或提示出错。不需要结果，调用后立即返回。"
@@ -142,6 +152,7 @@ DEVICE_TOOLS: tuple[DeviceTool, ...] = (
         name="device_widget_refresh",
         capability="widget.refresh",
         kind=ONE_WAY,
+        risk="low",
         description=(
             "刷新用户主屏幕上的小组件，让刚写入的数据立刻显示出来。记账等写操作"
             "完成后调用；不需要结果。"
@@ -153,6 +164,7 @@ DEVICE_TOOLS: tuple[DeviceTool, ...] = (
         name="device_share_text",
         capability="share.text",
         kind=ONE_WAY,
+        risk="low",
         description=(
             "调起用户设备的系统分享面板，分享一段文本（例如账单摘要）。文本要"
             "短、是给外人看的，不要含账户余额以外的隐私细节。不需要结果。"
@@ -181,6 +193,7 @@ DEVICE_TOOLS: tuple[DeviceTool, ...] = (
         name="device_request_permission",
         capability="permissions.request",
         kind=NEEDS_RESULT,
+        risk="low",
         description=(
             "向用户申请一项系统权限（弹出系统权限对话框），返回 granted / denied / "
             "permanently_denied。只在确有必要时调用：拍照前申请 CAMERA，读取相册前"
@@ -205,6 +218,7 @@ DEVICE_TOOLS: tuple[DeviceTool, ...] = (
         name="device_pick_image",
         capability="image.pick",
         kind=NEEDS_RESULT,
+        risk="low",
         description=(
             "让用户从相册选一张图或直接拍一张，返回图片附件（随后可用 "
             "image.parse 之类的服务端能力解析）。用户取消时返回 denied。"

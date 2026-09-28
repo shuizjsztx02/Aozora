@@ -1734,6 +1734,53 @@ class TestContractLane:
         changes = await _rows(stream_env, SyncChange, entity_id=created[0].id)
         assert [str(c.operation) for c in changes] == ["insert"]
 
+    async def test_a_v2_medium_risk_write_hangs_instead_of_autoexecuting(
+        self, stream_env: StreamEnv,
+    ):
+        """REQ-78（T20-3）：**v2 车道上删一笔账不再自动执行**——单 Step + 高置信也
+        要挂起出确认卡。改前这条走的是快路径，真机上的表现就是「不问一声就删了」。
+
+        这是验收里「真机弹确认卡」那条在链路上的可自动化替身：走的是真实端点
+        （``/ai/agent``）、真实组装 / 校验 / payload 授权，只有模型是脚本化的
+        （真机那一遍归收口卡 T20-7）。**为什么强调 v2**：v1 车道只注入
+        ``V1_LANE_OPS`` 里的记账 op，``transaction_delete`` 在那边根本不可见——
+        生产客户端声明 ``proposal_contract_version = 2``，风险分级影响的正是它。
+        """
+        from datetime import UTC, date, datetime
+
+        from src.models.ledger import Transaction, TxSource, TxType
+
+        async with stream_env.factory() as session:
+            category = (await session.scalars(
+                select(Category).where(Category.name == CATEGORY),
+            )).one()
+            tx = Transaction(
+                id=uuid.uuid4(), book_id=uuid.UUID(stream_env.book_id),
+                type=TxType.EXPENSE, amount_cents=3000, category_id=category.id,
+                account_id=None, note="打车", biz_date=date(2026, 9, 18),
+                source=TxSource.MANUAL, occurred_at=datetime.now(UTC),
+            )
+            session.add(tx)
+            await session.commit()
+
+        stream_env.provider.reset([
+            _tool_turn(_call(
+                "transaction_delete",
+                {"locator": {"bizDate": "2026-09-18", "amountCents": 3000}},
+                id="w1",
+            )),
+            _text("先跟你确认一下。"),
+        ])
+        _, body = await stream_env.turn("把打车那笔删了", contract_version=2)
+
+        confirm = payload_of(body, "confirm")
+        assert confirm["proposal"]["action"] == "transaction_delete"
+        assert confirm["proposal"]["requiresConfirmation"] is True
+        assert payload_of(body, "done")["executions"] == []
+
+        rows = await _rows(stream_env, Transaction, id=tx.id)
+        assert len(rows) == 1 and rows[0].deleted_at is None, "挂起＝软删也没发生"
+
     async def test_a_device_op_hangs_instead_of_executing(self, stream_env: StreamEnv):
         """``sync_trigger`` 的执行位置在设备（T-M7-05j 后 ``meta_set`` 已迁回
         服务端执行，不再是设备 op）：服务端**只挂起**，不参与审批策略的判定

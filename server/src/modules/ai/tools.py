@@ -214,13 +214,9 @@ DEVICE_EXECUTED_OPS: frozenset[str] = frozenset({
     "persona_switch", "consent_record", "sync_trigger", "reminder_set",
 })
 
-#: **不可自动执行的 op**：即使单 Step + 高置信，也必须过确认卡（架构 §7.4 的
-#: 「高风险」一类——此前没有信号源，05d 的删号是它的第一个）。
-#: 判据不是「会写库」（写库的 op 有二十多个），而是**后果不可通过 App 内的任何
-#: 操作挽回**：``account_deletion_request`` 会把账号冻结进 7 天冷静期，期间同步
-#: 与遥测全停（``sync/routes.py`` / ``telemetry/routes.py`` 的 frozen 分支），
-#: 用户唯一能做的是撤销。把它放进 PR-2 的高置信快速通道，等于让一句话注销账号。
-HIGH_RISK_OPS: frozenset[str] = frozenset({"account_deletion_request"})
+#: **不可自动执行的 op**（架构 §7.4 的「高风险」一类）。定义在 ``TOOLS`` 之后
+#: ——它**从注册表派生**，不再手写第二份（REQ-78 / T20-3：``Tool.risk == "high"``
+#: 是唯一事实源，判据原文见 :class:`Tool` 的 ``risk`` 字段）。
 
 #: 单次批量的交易条数上限（``transaction_add_batch``）。执行是原子的，
 #: 上限保护单次写操作的影响面（架构 §4.4「单 Turn 最大写操作数」的下游）。
@@ -309,6 +305,11 @@ _TOOL_ERROR_MESSAGES: dict[str, str] = {
 
 ToolKind = Literal["read", "write"]
 OutcomeKind = Literal["result", "proposal", "error"]
+
+#: 写工具的**风险分级**（REQ-78 / T20-3）。**判据原文见 :class:`Tool` 的
+#: ``risk`` 字段**——三档的口径在那里，这里是类型。读工具不产提案，一律 ``low``
+#: （「不为读工具分级」不是漏标，是它们的处置恒为「直接执行」）。
+ToolRisk = Literal["low", "medium", "high"]
 
 
 # ---------------------------------------------------------------------------
@@ -464,11 +465,36 @@ class Tool:
     ``parameters`` 是 Draft-07 JSON Schema；``proposal_action`` 仅写工具使用，
     必须是 ``contracts/action-proposal/schema.json`` action 枚举中服务端可执行
     的值（见模块 docstring）。读工具该字段为 ``None``。
+
+    ``risk`` 是**审批口径的单一事实源**（REQ-78）。三档判据**逐字如下**，
+    标注时照它判、不要各判各的：
+
+    - ``low`` —— **直接执行**。新增类写操作（往账上添、新建对象）、查询类、
+      以及**可一键改回的设置项**（默认账本 / 默认账户 / 当前角色指针 / 提醒配置 /
+      小组件配置）。它们的共同点是**不碰用户已有的数据行**：写坏了也就是多了一条
+      或换了个默认值，用户自己再点一下就能改回来。
+    - ``medium`` —— **需确认**。会**改动或删除用户既有数据**的写：交易 / 预算 /
+      账户 / 账本 / 分类 / 定时 / 角色 / 余额，**以及导出域与隐私域的写**
+      （数据离开 App 或涉及隐私同意——这一条按**域**判，不逐 op 再议）。
+    - ``high`` —— **强制确认，且卡片明示高风险**。后果**不可通过 App 内的任何
+      操作挽回**：注销账号、**清空或批量删除语义**的 op、隐私同意撤回。这把尺子
+      下 56 个工具里达标的是两个——``account_deletion_request``（7 天冷静期后数据
+      永久删除）与 ``book_delete``（账本连同其中**全部流水**一并不可见，是唯一带
+      批量删除语义的 op）。
+
+    **这不是「会不会写库」的分级**——写库的 op 有三十多个，全是写库就没法区分了。
+    它分的是**后果的形状**：多一条 / 少一条（low）、改了用户攒下来的东西
+    （medium）、改完在 App 里找不回来（high）。
+
+    **新增工具必须显式标注**：本字段**没有默认值**，漏标在导入期就 ``TypeError``
+    （不是静默降级成 low 而悄悄自动执行），``test_ai_confirmation_policy.py``
+    另有一条遍历注册表的守护用例。
     """
 
     name: str
     domain: str
     kind: ToolKind
+    risk: ToolRisk
     description: str
     parameters: dict[str, Any]
     handler: ToolHandler
@@ -3098,6 +3124,7 @@ TOOLS: tuple[Tool, ...] = (
         name="transaction_add",
         domain=DOMAIN_TRANSACTION,
         kind="write",
+        risk="low",
         proposal_action="transaction_add",
         description=(
             "新增一笔收支记录。用户说「记一笔」「花了 30 块打车」「今天收入 500」"
@@ -3112,6 +3139,7 @@ TOOLS: tuple[Tool, ...] = (
         name="transaction_add_batch",
         domain=DOMAIN_TRANSACTION,
         kind="write",
+        risk="low",
         proposal_action="transaction_add",
         description=(
             "一次新增多笔收支记录，整批要么全部写入要么全部不写。用户一口气报"
@@ -3136,6 +3164,7 @@ TOOLS: tuple[Tool, ...] = (
         name="transaction_update",
         domain=DOMAIN_TRANSACTION,
         kind="write",
+        risk="medium",
         proposal_action="transaction_update",
         description=(
             "修改**已经记过**的一笔交易的金额、分类、账户、备注、日期或收支类型。"
@@ -3164,6 +3193,7 @@ TOOLS: tuple[Tool, ...] = (
         name="transaction_delete",
         domain=DOMAIN_TRANSACTION,
         kind="write",
+        risk="medium",
         proposal_action="transaction_delete",
         description=(
             "删除一笔已经记过的交易（软删除，记录不再出现在流水里）。用户说"
@@ -3186,6 +3216,7 @@ TOOLS: tuple[Tool, ...] = (
         name="transaction_list",
         domain=DOMAIN_TRANSACTION,
         kind="read",
+        risk="low",
         description=(
             "按条件查询交易明细，返回每笔的收支类型、金额、分类名、账户名、备注和日期。"
             "用户想看「上周都记了什么」「餐饮花了哪些」这类带条件的明细时用它。"
@@ -3226,6 +3257,7 @@ TOOLS: tuple[Tool, ...] = (
         name="transaction_recent",
         domain=DOMAIN_TRANSACTION,
         kind="read",
+        risk="low",
         description=(
             "查看最近几笔交易，不含任何筛选条件。结果按**业务日期**倒序"
             "（补充录入的旧日期账目会排在后面），**不是按录入顺序**。用户说"
@@ -3246,6 +3278,7 @@ TOOLS: tuple[Tool, ...] = (
         name="transaction_summary",
         domain=DOMAIN_TRANSACTION,
         kind="read",
+        risk="low",
         description=(
             "统计某段时间的收支合计与笔数（收入、支出、结余），可选按分类、按日或"
             "按月分组。用户问「这个月花了多少」「上个月收支情况」「最近哪天花得最多」"
@@ -3297,6 +3330,7 @@ TOOLS: tuple[Tool, ...] = (
         name="budget_list",
         domain=DOMAIN_BUDGET,
         kind="read",
+        risk="low",
         description=(
             "列出某个月的月度预算，含每项的分类名、额度、已用、剩余与使用百分比。"
             "用户问「我这个月有哪些预算」「预算都设了多少」时用它。"
@@ -3309,6 +3343,7 @@ TOOLS: tuple[Tool, ...] = (
         name="budget_status",
         domain=DOMAIN_BUDGET,
         kind="read",
+        risk="low",
         description=(
             "查某个分类在某个月的预算执行情况：额度、已用、剩余、百分比、是否已超支。"
             "用户问「餐饮预算还剩多少」「这个月交通超了吗」时用它。"
@@ -3330,6 +3365,7 @@ TOOLS: tuple[Tool, ...] = (
         name="budget_check",
         domain=DOMAIN_BUDGET,
         kind="read",
+        risk="low",
         description=(
             "预检：如果现在某分类再花掉一笔金额，会不会超出该月预算。返回追加后的"
             "占用额与 willExceed 判断。用户问「再花 200 会超预算吗」「这笔能花吗」"
@@ -3356,6 +3392,7 @@ TOOLS: tuple[Tool, ...] = (
         name="budget_summary",
         domain=DOMAIN_BUDGET,
         kind="read",
+        risk="low",
         description=(
             "某个月预算的整体执行概览：总预算（若设了）的额度/已用/剩余，加上"
             "分类预算的条数、额度合计与已用合计，以及超支项数与超支清单。"
@@ -3370,6 +3407,7 @@ TOOLS: tuple[Tool, ...] = (
         name="budget_overspent",
         domain=DOMAIN_BUDGET,
         kind="read",
+        risk="low",
         description=(
             "列出某个月已经超支的预算项（分类名、额度、已用、剩余为负表示超出的"
             "金额）。用户问「我哪些预算超了」「有没有超支」时用它。"
@@ -3381,6 +3419,7 @@ TOOLS: tuple[Tool, ...] = (
         name="budget_set",
         domain=DOMAIN_BUDGET,
         kind="write",
+        risk="medium",
         proposal_action="budget_set",
         description=(
             "设置某个月的**整体预算**（这个月全部支出的上限，不分分类）。用户说"
@@ -3406,6 +3445,7 @@ TOOLS: tuple[Tool, ...] = (
         name="budget_set_category",
         domain=DOMAIN_BUDGET,
         kind="write",
+        risk="medium",
         proposal_action="budget_set_category",
         description=(
             "设置某个月**某个分类**的预算（如「餐饮每月 1500」）。用户说「给餐饮"
@@ -3435,6 +3475,7 @@ TOOLS: tuple[Tool, ...] = (
         name="budget_delete",
         domain=DOMAIN_BUDGET,
         kind="write",
+        risk="medium",
         proposal_action="budget_delete",
         description=(
             "删除某个月的预算：只给 period 表示删**整体预算**，再给 categoryName "
@@ -3458,6 +3499,7 @@ TOOLS: tuple[Tool, ...] = (
         name="account_list",
         domain=DOMAIN_ACCOUNT,
         kind="read",
+        risk="low",
         description=(
             "列出用户现有的全部账户（名称与图标），不含已归档账户。用户问「我有"
             "哪些账户」时用它，或在需要确认账户名时用它核对。"
@@ -3470,6 +3512,7 @@ TOOLS: tuple[Tool, ...] = (
         name="account_balances",
         domain=DOMAIN_ACCOUNT,
         kind="read",
+        risk="low",
         description=(
             "按账户汇总：每个账户在某段时间内的收入、支出、净额，以及账户的"
             "**当前余额**。用户问「招行卡花了多少」「各账户的收支」「我这张卡还有"
@@ -3498,6 +3541,7 @@ TOOLS: tuple[Tool, ...] = (
         name="account_create",
         domain=DOMAIN_ACCOUNT,
         kind="write",
+        risk="low",
         proposal_action="account_create",
         description=(
             "新建一个账户（如「招行卡」「现金」「支付宝」）。用户说「帮我建一个"
@@ -3529,6 +3573,7 @@ TOOLS: tuple[Tool, ...] = (
         name="account_update",
         domain=DOMAIN_ACCOUNT,
         kind="write",
+        risk="medium",
         proposal_action="account_update",
         description=(
             "修改一个已有账户的名称、图标、分类或当前余额。用户说「把招行卡改名成"
@@ -3565,6 +3610,7 @@ TOOLS: tuple[Tool, ...] = (
         name="account_archive",
         domain=DOMAIN_ACCOUNT,
         kind="write",
+        risk="medium",
         proposal_action="account_archive",
         description=(
             "归档（停用）一个账户。用户说「这个账户不用了」「把旧卡删掉」时用它。"
@@ -3587,6 +3633,7 @@ TOOLS: tuple[Tool, ...] = (
         name="book_list",
         domain=DOMAIN_BOOK,
         kind="read",
+        risk="low",
         description=(
             "列出用户现有的全部账本（名称、图标，并标出当前正在使用的账本）。"
             "用户问「我有几个账本」「现在用的是哪个账本」时用它，"
@@ -3599,6 +3646,7 @@ TOOLS: tuple[Tool, ...] = (
         name="book_detail",
         domain=DOMAIN_BOOK,
         kind="read",
+        risk="low",
         description=(
             "看某个账本的概况：分类数、交易笔数、记账的时间跨度。用户问「这个账本"
             "记了多少笔」「XX 账本是记什么的」时用它。不传账本名则看当前账本。"
@@ -3615,6 +3663,7 @@ TOOLS: tuple[Tool, ...] = (
         name="book_create",
         domain=DOMAIN_BOOK,
         kind="write",
+        risk="low",
         proposal_action="book_create",
         description=(
             "新建一个账本（如「家庭账本」「旅行账本」）。用户说「再建一个账本」时"
@@ -3642,6 +3691,7 @@ TOOLS: tuple[Tool, ...] = (
         name="book_update",
         domain=DOMAIN_BOOK,
         kind="write",
+        risk="medium",
         proposal_action="book_update",
         description=(
             "修改一个已有账本的名称或图标。用户说「把旅行账本改名成蜜月账本」时用"
@@ -3673,6 +3723,7 @@ TOOLS: tuple[Tool, ...] = (
         name="book_delete",
         domain=DOMAIN_BOOK,
         kind="write",
+        risk="high",
         proposal_action="book_delete",
         description=(
             "删除一个账本及其中的记录。用户说「把这个账本删掉」时用它。删除前"
@@ -3692,6 +3743,7 @@ TOOLS: tuple[Tool, ...] = (
         name="category_list",
         domain=DOMAIN_CATEGORY,
         kind="read",
+        risk="low",
         description=(
             "列出可用的分类（名称、收支类型、上级分类、当前图标 emoji）。在你不确定"
             "分类的准确名称时用它核对，分类名必须与这里的名称逐字一致才能用于记账；"
@@ -3710,6 +3762,7 @@ TOOLS: tuple[Tool, ...] = (
         name="category_create",
         domain=DOMAIN_CATEGORY,
         kind="write",
+        risk="low",
         proposal_action="category_create",
         description=(
             "新建一个分类。用户说「加一个分类叫宠物」「收入里加个奖金」时用它。"
@@ -3748,6 +3801,7 @@ TOOLS: tuple[Tool, ...] = (
         name="category_update",
         domain=DOMAIN_CATEGORY,
         kind="write",
+        risk="medium",
         proposal_action="category_update",
         description=(
             "修改一个已有分类的名称、图标或它挂在哪个上级分类下。用户说「把宠物改叫"
@@ -3786,6 +3840,7 @@ TOOLS: tuple[Tool, ...] = (
         name="category_archive",
         domain=DOMAIN_CATEGORY,
         kind="write",
+        risk="medium",
         proposal_action="category_archive",
         description=(
             "归档（停用）一个分类。用户说「这个分类不用了」时用它。归档不是删除："
@@ -3809,6 +3864,7 @@ TOOLS: tuple[Tool, ...] = (
         name="savings_list",
         domain=DOMAIN_SAVINGS,
         kind="read",
+        risk="low",
         description=(
             "列出全部存钱目标（名称、目标金额、已存金额、还差多少、进度百分比、"
             "图标、存款期限）。用户问「我的存钱目标有哪些」「旅行基金存到多少了」"
@@ -3821,6 +3877,7 @@ TOOLS: tuple[Tool, ...] = (
         name="savings_create",
         domain=DOMAIN_SAVINGS,
         kind="write",
+        risk="low",
         proposal_action="savings_create",
         description=(
             "新建一个存钱目标（如「旅行基金，目标 8000」）。用户说「我想攒钱买个"
@@ -3866,6 +3923,7 @@ TOOLS: tuple[Tool, ...] = (
         name="savings_update",
         domain=DOMAIN_SAVINGS,
         kind="write",
+        risk="medium",
         proposal_action="savings_update",
         description=(
             "修改一个已有存钱目标：改名、改目标金额、换图标、调整期限，以及"
@@ -3928,6 +3986,7 @@ TOOLS: tuple[Tool, ...] = (
         name="savings_archive",
         domain=DOMAIN_SAVINGS,
         kind="write",
+        risk="medium",
         proposal_action="savings_archive",
         description=(
             "归档（停用）一个存钱目标。用户说「旅行基金不攒了」「把这个目标删掉」"
@@ -3950,6 +4009,7 @@ TOOLS: tuple[Tool, ...] = (
         name="scheduled_list",
         domain=DOMAIN_SCHEDULED,
         kind="read",
+        risk="low",
         description=(
             "列出**当前账本**的定时记账规则（名称、收支类型、金额、分类、账户、"
             "重复方式、起止日期、每天几点执行、是否启用、最近一次生成日期）。"
@@ -3963,6 +4023,7 @@ TOOLS: tuple[Tool, ...] = (
         name="scheduled_create",
         domain=DOMAIN_SCHEDULED,
         kind="write",
+        risk="low",
         proposal_action="scheduled_create",
         description=(
             "新建一条定时记账规则（到期自动记一笔账，如「每个月 1 号自动记房租"
@@ -4038,6 +4099,7 @@ TOOLS: tuple[Tool, ...] = (
         name="scheduled_update",
         domain=DOMAIN_SCHEDULED,
         kind="write",
+        risk="medium",
         proposal_action="scheduled_update",
         description=(
             "修改一条已有的定时记账规则：金额、分类、账户、重复方式、起止日期、"
@@ -4122,6 +4184,7 @@ TOOLS: tuple[Tool, ...] = (
         name="scheduled_archive",
         domain=DOMAIN_SCHEDULED,
         kind="write",
+        risk="medium",
         proposal_action="scheduled_archive",
         description=(
             "归档（删掉）一条定时记账规则，之后不再自动记账。用户说「房租那条规则"
@@ -4145,6 +4208,7 @@ TOOLS: tuple[Tool, ...] = (
         name="persona_list",
         domain=DOMAIN_PERSONA,
         kind="read",
+        risk="low",
         description=(
             "列出全部聊天角色（名称、头像、人设描述）。用户问「我有哪些角色」"
             "「知性姐姐的人设是怎么写的」时用它。**它只读不改**：改人设用 "
@@ -4160,6 +4224,7 @@ TOOLS: tuple[Tool, ...] = (
         name="persona_create",
         domain=DOMAIN_PERSONA,
         kind="write",
+        risk="low",
         proposal_action="persona_create",
         description=(
             "新建一个聊天角色。用户说「再建一个角色叫猫娘」「加一个会毒舌的角色」"
@@ -4194,6 +4259,7 @@ TOOLS: tuple[Tool, ...] = (
         name="persona_update",
         domain=DOMAIN_PERSONA,
         kind="write",
+        risk="medium",
         proposal_action="persona_update",
         description=(
             "修改一个已有角色的名称、头像或人设描述。用户说「把猫娘改叫小猫咪」"
@@ -4232,6 +4298,7 @@ TOOLS: tuple[Tool, ...] = (
         name="persona_archive",
         domain=DOMAIN_PERSONA,
         kind="write",
+        risk="medium",
         proposal_action="persona_archive",
         description=(
             "归档（删掉）一个聊天角色。用户说「猫娘这个角色不要了」时用它。"
@@ -4252,6 +4319,7 @@ TOOLS: tuple[Tool, ...] = (
         name="persona_switch",
         domain=DOMAIN_PERSONA,
         kind="write",
+        risk="low",
         proposal_action="persona_switch",
         description=(
             "把**当前聊天角色**切换成某一个（之后聊天就用这个人设）。用户说"
@@ -4275,6 +4343,7 @@ TOOLS: tuple[Tool, ...] = (
         name="meta_set",
         domain=DOMAIN_META,
         kind="write",
+        risk="low",
         proposal_action="meta_set",
         description=(
             "设置用户级偏好：默认账本（记账时默认用哪个账本）/ 默认账户（新记录默认"
@@ -4338,6 +4407,7 @@ TOOLS: tuple[Tool, ...] = (
         name="stats_monthly",
         domain=DOMAIN_ANALYSIS,
         kind="read",
+        risk="low",
         description=(
             "查某个月的收支全貌：收入、支出、结余、笔数、支出与收入的分类明细、"
             "当月预算执行情况、最大的一笔收入与支出，以及包含该月在内的近 6 个月"
@@ -4351,6 +4421,7 @@ TOOLS: tuple[Tool, ...] = (
         name="stats_trends",
         domain=DOMAIN_ANALYSIS,
         kind="read",
+        risk="low",
         description=(
             "查一段时间的逐月收支趋势，用来做跨月对比（「最近半年」「今年前三个月」）。"
             "起止月份都要填，区间内没有记录的月份也会以 0 出现。"
@@ -4370,6 +4441,7 @@ TOOLS: tuple[Tool, ...] = (
         name="export_create",
         domain=DOMAIN_EXPORT,
         kind="write",
+        risk="medium",
         proposal_action="export_create",
         description=(
             "把当前账本的流水导出成文件。用户说「把账导出来」「导一份 CSV」时用它。"
@@ -4394,6 +4466,7 @@ TOOLS: tuple[Tool, ...] = (
         name="export_list",
         domain=DOMAIN_EXPORT,
         kind="read",
+        risk="low",
         description=(
             "列出这个账号已经建过的导出任务（格式、状态、生成时间、过期时间、文件大小）。"
             "用户问「我之前导出的文件还在吗」时用它。结果里没有下载地址——下载请让"
@@ -4407,6 +4480,7 @@ TOOLS: tuple[Tool, ...] = (
         name="feedback_submit",
         domain=DOMAIN_PRIVACY,
         kind="write",
+        risk="medium",
         proposal_action="feedback_submit",
         description=(
             "把用户对产品的反馈提交给开发团队。用户说「我要反馈一个问题」"
@@ -4442,6 +4516,7 @@ TOOLS: tuple[Tool, ...] = (
         name="consent_record",
         domain=DOMAIN_PRIVACY,
         kind="write",
+        risk="medium",
         proposal_action="consent_record",
         description=(
             "记录这台设备已同意隐私政策。**只有用户在对话里明确表达了同意**"
@@ -4462,6 +4537,7 @@ TOOLS: tuple[Tool, ...] = (
         name="consent_status",
         domain=DOMAIN_PRIVACY,
         kind="read",
+        risk="low",
         description=(
             "查这个账号是否同意过隐私政策，以及同意的是哪一版、什么时候同意的。"
             "用户问「我同意过隐私政策吗」时用它。没同意过时只返回 hasConsented=false。"
@@ -4474,6 +4550,7 @@ TOOLS: tuple[Tool, ...] = (
         name="auth_update_profile",
         domain=DOMAIN_SECURITY,
         kind="write",
+        risk="medium",
         proposal_action="auth_update_profile",
         description=(
             "修改用户**账号资料里的昵称**——「账号安全」页面顶部显示的那个名字。"
@@ -4501,6 +4578,7 @@ TOOLS: tuple[Tool, ...] = (
         name="account_deletion_request",
         domain=DOMAIN_SECURITY,
         kind="write",
+        risk="high",
         proposal_action="account_deletion_request",
         description=(
             "申请注销账号。账号会进入 7 天冷静期：期间同步与数据上报立即停止，"
@@ -4516,6 +4594,7 @@ TOOLS: tuple[Tool, ...] = (
         name="sync_status",
         domain=DOMAIN_SYNC,
         kind="read",
+        risk="low",
         description=(
             "查同步能不能跑：账号是否处于可同步状态（注销冷静期、未同意隐私政策都会"
             "让同步停摆），以及服务端最后一笔数据变更发生在什么时候。"
@@ -4528,6 +4607,7 @@ TOOLS: tuple[Tool, ...] = (
         name="sync_trigger",
         domain=DOMAIN_SYNC,
         kind="write",
+        risk="low",
         proposal_action="sync_trigger",
         description=(
             "让这台设备立刻同步一次：把本机的改动推上去、把云端的变更拉下来。"
@@ -4542,6 +4622,7 @@ TOOLS: tuple[Tool, ...] = (
         name="reminder_set",
         domain=DOMAIN_REMINDER,
         kind="write",
+        risk="low",
         proposal_action="reminder_set",
         description=(
             "给**这台设备**设每日提醒：到点弹一条通知。用户说「提醒我」"
@@ -4571,6 +4652,7 @@ TOOLS: tuple[Tool, ...] = (
         name="help_search",
         domain=DOMAIN_HELP,
         kind="read",
+        risk="low",
         description=(
             "查这个 App 自己的用法：功能在哪里、怎么设置、有什么限制"
             "（「怎么导出数据」「在哪改默认账户」「预算怎么用」「能不能语音记账」）。"
@@ -4598,6 +4680,41 @@ TOOLS: tuple[Tool, ...] = (
 )
 
 TOOLS_BY_NAME: dict[str, Tool] = {tool.name: tool for tool in TOOLS}
+
+#: **op（``proposal_action``）→ 风险等级**。审批策略的判定量是 **op**，不是工具名
+#: （``AgentLoop._handle_proposal`` 把 ``canonical_op(tool.proposal_action)`` 交给
+#: :func:`agent.confirm_reason`），所以索引按 op 建。**两个工具可以共用一个 op**
+#: ——``transaction_add_batch`` 的 ``proposal_action`` 就是 ``transaction_add``
+#: （单条与批量的差别只在 payload 的条数）。共用时**风险必须一致**：不一致在这里
+#: 就炸，而不是让「先注册的那个」静默赢。
+TOOL_RISK_BY_OP: dict[str, ToolRisk] = {}
+for _tool in TOOLS:
+    if _tool.proposal_action is None:
+        continue
+    _seen = TOOL_RISK_BY_OP.setdefault(_tool.proposal_action, _tool.risk)
+    if _seen != _tool.risk:
+        raise RuntimeError(
+            f"op {_tool.proposal_action!r} 被两个工具标成了不同的风险"
+            f"（{_seen} / {_tool.risk}）——共用一个 op 的工具必须同级"
+        )
+del _tool, _seen
+
+#: **不可自动执行的 op**：即使单 Step + 高置信，也必须过确认卡（架构 §7.4）。
+#: 判据不是「会写库」（写库的 op 有三十多个），而是**后果不可通过 App 内的任何
+#: 操作挽回**——两个都达标：``account_deletion_request`` 把账号冻结进 7 天冷静期，
+#: 期间同步与遥测全停（``sync/routes.py`` / ``telemetry/routes.py`` 的 frozen
+#: 分支），用户唯一能做的是撤销；``book_delete`` 删掉的账本**连同里面的全部流水**
+#: 一并不可见（本工具集里唯一的批量删除语义）。
+#:
+#: **从注册表派生，不另写一份**：这正是 R-PROD-47「同一把尺子有三层、必须同时是
+#: 64」的同族陷阱——``frozenset({"account_deletion_request"})`` 手写在两个文件里，
+#: 迟早有一处忘记跟。守护用例（``tests/test_ai_confirmation_policy.py``）另钉两条：
+#: 本集合 == 「注册表里 risk=="high" 的 op」，且 == 「risk=="high" 的**工具名**」
+#: ——第二条把「名与 op 恰好同名」也钉住，防将来出现一个名字与 op 不同名的高风险
+#: 工具（那时按名查的口径会静默漏掉它）。
+HIGH_RISK_OPS: frozenset[str] = frozenset(
+    op for op, risk in TOOL_RISK_BY_OP.items() if risk == "high"
+)
 
 
 # ---------------------------------------------------------------------------

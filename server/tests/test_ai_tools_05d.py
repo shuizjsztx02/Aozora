@@ -329,8 +329,16 @@ class TestSyncTools:
 class TestApprovalPolicy:
     """删号是**不可自动执行**的：单 Step + 高置信也必须过确认卡。
 
-    ``confirm_reason`` 是纯函数，这里直接对三条理由的**优先级**下断言；loop 里的
+    ``confirm_reason`` 是纯函数，这里直接对理由的**优先级**下断言；loop 里的
     接线（真的出确认卡）在 ``test_ai_proposal_v2_05d.py`` 的端到端用例。
+
+    **T20-3（REQ-78）扩了理由表**：原先只有 high / multi_step / low_confidence
+    三条，现在多一条 ``medium_risk``（改动或删除用户既有数据的写）。本类里
+    ``test_ordinary_ops_keep_the_fast_path`` 原来拿 ``export_create`` 当「普通写」
+    的例子，而导出按 REQ-78 的判据已归 ``medium``——那条断言随之下架，换成
+    ``low`` 档的例子（快路径仍要不被击穿）。逐 op 的完整清单见
+    ``docs/product/ai-confirmation-policy.md``，全量对账在
+    ``test_ai_confirmation_policy.py``。
     """
 
     def test_high_risk_outranks_the_fast_path(self):
@@ -347,13 +355,48 @@ class TestApprovalPolicy:
         assert reason == "high_risk", "两条理由都在场时，报最严的那条"
 
     def test_ordinary_ops_keep_the_fast_path(self):
-        """05d 的其余 op 不受影响——PR-2 的高置信快速通道不能被本卡击穿。"""
+        """``low`` 档仍走快路径——PR-2 的高置信快速通道不能被审批分级击穿。
+
+        挑的是每一种 ``low`` 形态各一条：新增一笔 / 新增对象 / 可一键改回的设置项。
+        """
         from src.modules.ai.agent import confirm_reason
 
         for op in (
-            "export_create", "feedback_submit", "auth_update_profile", "transaction_add",
+            "transaction_add",  # 新增一笔
+            "account_create",  # 新增对象
+            "book_create",
+            "category_create",
+            "meta_set",  # 可一键改回的设置项
+            "persona_switch",
+            "sync_trigger",
         ):
             assert confirm_reason(step=1, confidence=1.0, op=op) is None, op
+
+    def test_medium_risk_asks_without_looking_at_step_or_confidence(self):
+        """REQ-78：改动 / 删除既有数据的写**单 Step + 高置信也要问**。
+
+        改前这些 op 走的是快路径——「让 AI 删掉这笔账」不问一声就落了库，
+        这正是 REQ-78 的原始问题（用户第 2 项）。
+        """
+        from src.modules.ai.agent import confirm_reason
+
+        for op in (
+            "transaction_delete",  # 删除既有交易（真机验的那条）
+            "transaction_update",
+            "budget_delete",
+            "account_archive",
+            "export_create",  # 导出域的写
+            "auth_update_profile",  # 改动账号资料
+        ):
+            assert confirm_reason(step=1, confidence=1.0, op=op) == "medium_risk", op
+
+    def test_risk_outranks_multi_step_and_low_confidence(self):
+        """风险两级排在步数与置信度之前——它们判的是「做什么」，另两条判「有多稳」。"""
+        from src.modules.ai.agent import confirm_reason
+
+        assert confirm_reason(step=3, confidence=1.0, op="budget_delete") == "medium_risk"
+        assert confirm_reason(step=1, confidence=0.5, op="budget_delete") == "medium_risk"
+        assert confirm_reason(step=3, confidence=0.5, op="book_delete") == "high_risk"
 
     def test_the_op_argument_is_optional(self):
         """不传 op 的老调用方行为逐字不变（fail-open 到旧口径，不是 fail-closed）。"""
@@ -362,8 +405,18 @@ class TestApprovalPolicy:
         assert confirm_reason(step=1, confidence=1.0) is None
         assert confirm_reason(step=1, confidence=0.5) == "low_confidence"
 
-    def test_only_the_deletion_op_is_high_risk(self):
-        assert T.HIGH_RISK_OPS == frozenset({"account_deletion_request"})
+    def test_only_two_ops_are_high_risk(self):
+        """高风险是两个：注销账号 + 删账本（唯一的批量删除语义）。
+
+        05d 时这里只有一个；T20-3 把判据从「注销是唯一不可挽回的」扩展到
+        「清空或批量删除语义的 op」——``book_delete`` 删掉的账本连同其中**全部流水**
+        一并不可见，达标。集合本身**从注册表派生**（``tools.py`` 的
+        ``TOOL_RISK_BY_OP``），本断言是它的人肉护栏；派生关系在
+        ``test_ai_confirmation_policy.py`` 里另有两条机器断言。
+        """
+        assert T.HIGH_RISK_OPS == frozenset(
+            {"account_deletion_request", "book_delete"},
+        )
 
 
 # ── 注册表增量 ─────────────────────────────────────────────────────────────

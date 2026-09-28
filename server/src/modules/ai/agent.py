@@ -181,9 +181,9 @@ from .tools import (
     DOMAINS,
     ERR_INVALID_ARGUMENTS,
     ERR_UNKNOWN_TOOL,
-    HIGH_RISK_OPS,
     PROPOSAL_CONTRACT_V1,
     PROPOSAL_CONTRACT_V2,
+    TOOL_RISK_BY_OP,
     Tool,
     ToolContext,
     ToolOutcome,
@@ -747,28 +747,52 @@ def confirm_reason(
 ) -> str | None:
     """是否需要用户确认；``None`` = 可自动执行（沿用快路径策略）。
 
-    判定口径（架构 §7.4「审批触发策略」；实施口径见 P1 计划 §三 02e）：
+    判定口径（架构 §7.4「审批触发策略」；REQ-78 的完整清单见
+    ``docs/product/ai-confirmation-policy.md``）：
 
-    - ``op`` 在 ``HIGH_RISK_OPS`` 里 → 强制确认（**05d 补上的第三个理由**，
-      架构 §7.4 那张表里的「高风险」一类此前没有信号源）。判据是「后果不可
-      通过 App 内的任何操作挽回」，目前只有注销账号一条。
-    - ``step >= 2`` → 强制确认。取**提案产出时**的步号而非回合总步数：总步数在
-      产出那一刻还不可知，而「第 2 步才写出提案」恰恰说明模型先查了别的东西
+    - ``op`` 的风险是 ``high`` → ``"high_risk"``（**05d 落地、T20-3 改为从注册表
+      派生**）。判据是「后果不可通过 App 内的任何操作挽回」，达标的是注销账号与
+      删账本两条；判据原文见 :class:`tools.Tool` 的 ``risk`` 字段。
+    - ``op`` 的风险是 ``medium`` → ``"medium_risk"``（**T20-3 新增的第四档理由**）。
+      会改动或删除**用户既有数据**的写（交易 / 预算 / 账户 / 账本 / 分类 / 定时 /
+      角色 / 余额）以及导出域与隐私域的写。改前这些 op 在「单 Step + 高置信」下
+      是直接执行的——「让 AI 删掉这笔账」不问一声就落了库。
+    - ``step >= 2`` → ``"multi_step"``。取**提案产出时**的步号而非回合总步数：总步数
+      在产出那一刻还不可知，而「第 2 步才写出提案」恰恰说明模型先查了别的东西
       （多步形态，连续写库的累积风险高）；第 1 步就写出提案的是单发形态，
       与快路径同待遇，PR-2 的高置信快速通道因此不被击穿。
-    - ``confidence < CONFIDENCE_THRESHOLD`` → 强制确认（架构 §7.4 的「低置信出
-      确认卡」）。P1 的置信度只有两档（``1.0`` / 带 ``warnings`` 的 ``0.8``）。
+    - ``confidence < CONFIDENCE_THRESHOLD`` → ``"low_confidence"``（架构 §7.4 的
+      「低置信出确认卡」）。P1 的置信度只有两档（``1.0`` / 带 ``warnings`` 的 ``0.8``）。
 
-    **顺序即优先级**：高风险排在最前。注销账号的工具同时带着 ``warnings``
-    （置信度因此是 0.8），两条路径都会要求确认——双保险是刻意的，任一条被将来
-    的改动放松，另一条仍然拦得住。
+    **顺序即优先级：风险两级排在最前，然后是步数、置信度**。前两条判的是「**做什么**」
+    （后果的形状，与模型的把握无关），后两条判的是「**模型自己有多稳**」——两类正交，
+    同时命中时报前者：用户问「为什么问我」时，「这个操作会改掉你已有的数据」比
+    「这一步是第 2 步」有用得多。``low`` 的 op 不受影响（``transaction_add`` 在两步
+    流程里仍报 ``multi_step``，在单步高置信下仍是 ``None``），记账那条主路径的
+    快路径因此没被本卡击穿。
+
+    注销账号的工具同时带着 ``warnings``（置信度因此是 0.8），多条路径都会要求确认
+    ——双保险是刻意的，任一条被将来的改动放松，另一条仍然拦得住。
+
+    **未注册的 op 落回旧口径**（不在 ``TOOL_RISK_BY_OP`` 里就跳过前两条）：与
+    ``op=None`` 的老调用方同待遇，是 fail-open 到「步数 / 置信度」而不是 fail-closed。
+    能走到这里而未注册的 op 本就不该存在（``_handle_proposal`` 用
+    ``canonical_op`` 收窄过），真出现了也执行不了——``proposal_ops`` 只接线了注册表
+    里的 op。
 
     **设备类 op（``tools.DEVICE_EXECUTED_OPS``）不走这里**——它们不参与审批策略的
     判定，而是在 :meth:`AgentLoop._handle_proposal` 里直接挂起（服务端执行不了
     它们，问一次批准没有任何意义）。
     """
-    if op is not None and op in HIGH_RISK_OPS:
-        return "high_risk"
+    if op is not None:
+        # 按 **op** 查而不是按工具名：判定量本来就是 op，且两个工具可以共用一个 op
+        # （见 ``tools.TOOL_RISK_BY_OP``）。high 也走这张表——按名查的老写法在今天
+        # 恰好等价（两个高风险工具名与 op 同名），但名与 op 一旦分叉就会静默漏掉。
+        risk = TOOL_RISK_BY_OP.get(op)
+        if risk == "high":
+            return "high_risk"
+        if risk == "medium":
+            return "medium_risk"
     if step >= 2:
         return "multi_step"
     if confidence < CONFIDENCE_THRESHOLD:

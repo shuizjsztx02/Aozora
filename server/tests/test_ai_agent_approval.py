@@ -785,8 +785,14 @@ class TestHighRiskApproval:
         assert outcome.kind == "result", "用户同意之后照常执行"
         assert len(executor.calls) == 1
 
-    async def test_other_05d_writes_keep_the_fast_path(self):
-        """导出这类普通写不受影响——PR-2 的高置信快速通道不能被本卡击穿。"""
+    async def test_low_risk_write_keeps_the_fast_path(self):
+        """``low`` 档仍走快路径——审批分级不能击穿 PR-2 的高置信快速通道。
+
+        挑 ``account_create``（新增类，``risk="low"``）。本类原先是拿
+        ``export_create`` 当「普通写」的例子，T20-3 之后导出归 ``medium``
+        （REQ-78 的判据：「导出与隐私类的写」需确认），那条断言随之换成真正的
+        ``low`` op，并另加下方 ``test_medium_risk_write_asks_even_in_one_step``。
+        """
         approver = FakeApprover(ApprovalDecision.REJECTED)
         executor = FakeExecutor()
         loop = _loop(
@@ -797,16 +803,48 @@ class TestHighRiskApproval:
 
         await loop._handle_proposal(
             {
-                "action": "export_create",
-                "payload": {"bookId": str(uuid.uuid4()), "format": "csv"},
-                "message": "导出当前账本",
+                "action": "account_create",
+                "payload": {"name": "现金", "kind": "expense"},
+                "message": "新建账户「现金」",
                 "warnings": [],
             },
-            tool=T.get_tool("export_create"),
+            tool=T.get_tool("account_create"),
         )
 
-        assert approver.requests == [], "普通写不因本卡多一次征询"
+        assert approver.requests == [], "新增类写不因分级多一次征询"
         assert len(executor.calls) == 1
+
+    async def test_medium_risk_write_asks_even_in_one_step(self):
+        """REQ-78（T20-3）：**删一笔账**单 Step + 高置信也必须过确认卡。
+
+        改前这条走的是自动执行——真机上「让 AI 删掉这笔账」不问一声就落了库，
+        这正是本卡要修的行为。举一反三的完整名单见
+        ``docs/product/ai-confirmation-policy.md``。
+        """
+        approver = FakeApprover(ApprovalDecision.REJECTED)
+        executor = FakeExecutor()
+        loop = _loop(
+            ScriptedProvider([]), approver=approver, executor=executor,
+            contract_version=2,
+        )
+        loop._steps = 1
+
+        outcome = await loop._handle_proposal(
+            {
+                "action": "transaction_delete",
+                "payload": {"transactionId": str(uuid.uuid4())},
+                "message": "删掉这笔 30 元的打车",
+                "warnings": [],
+            },
+            tool=T.get_tool("transaction_delete"),
+        )
+
+        assert executor.calls == [], "medium 不走自动执行"
+        assert len(approver.requests) == 1
+        assert approver.requests[0].reason == "medium_risk"
+        assert approver.requests[0].proposal["requiresConfirmation"] is True
+        assert outcome.kind == "error"
+        assert outcome.data["code"] == ERR_APPROVAL_REJECTED
 
 
 # ── 执行通道接线 ───────────────────────────────────────────────────────────
