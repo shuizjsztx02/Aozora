@@ -261,7 +261,8 @@ export function DetailPage() {
           className="flex items-center justify-between py-3"
           style={{ borderBottom: '1px solid var(--glass-border)' }}
         >
-          <div className="flex items-center gap-1">
+          {/* REQ-81：窄屏 (<380px) 左侧期间区按决策 #17「允许被压缩」——缩字号而非折行 */}
+          <div className="flex items-center gap-1 shrink-0 max-[380px]:gap-0.5">
             <button
               onClick={() => setPeriod(shiftMonth(period, -1))}
               className="flex items-center justify-center w-8 h-8 rounded-full active:opacity-60"
@@ -272,7 +273,7 @@ export function DetailPage() {
             </button>
             <button
               onClick={() => { setPickerYear(parseInt(period)); setPickerOpen(v => !v) }}
-              className="flex items-center gap-1 px-2 py-1 text-[17px] font-semibold active:opacity-60"
+              className="flex items-center gap-1 px-2 py-1 text-[17px] font-semibold whitespace-nowrap max-[380px]:text-[15px] active:opacity-60"
               style={{ color: 'var(--ink)' }}
               aria-label="切换年份和月份"
             >
@@ -288,13 +289,19 @@ export function DetailPage() {
               <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round"><polyline points="9 18 15 12 9 6" /></svg>
             </button>
           </div>
-          <div className="text-sm" style={{ color: 'var(--ink2)' }}>
+          {/*
+            REQ-81：右侧汇总优先保宽度（决策 #17）。窄屏空间不足时按允许的唯一降级
+            「汇总缩字号一档」处理——不折行、不截断、不溢出。
+            阈值 400px：390 视口下内容需求 357px vs 可用 358px 仅余 1px，
+            字体渲染差异即会溢出，故不依赖这点余量。
+          */}
+          <div className="text-sm ml-2 shrink-0 whitespace-nowrap max-[400px]:text-[13px] max-[400px]:ml-1" style={{ color: 'var(--ink2)' }}>
             <span>支出 </span>
-            <span className="money-num font-bold text-[15px]" style={{ color: 'var(--ink)' }}>{fmtTotal(monthExpense)}</span>
+            <span className="money-num font-bold text-[15px] max-[400px]:text-[13px]" style={{ color: 'var(--ink)' }}>{fmtTotal(monthExpense)}</span>
             {monthIncome > 0 && (
               <>
-                <span className="ml-2">收入 </span>
-                <span className="money-num font-bold text-[15px]" style={{ color: 'var(--ink)' }}>{fmtTotal(monthIncome)}</span>
+                <span className="ml-2 max-[400px]:ml-1">收入 </span>
+                <span className="money-num font-bold text-[15px] max-[400px]:text-[13px]" style={{ color: 'var(--ink)' }}>{fmtTotal(monthIncome)}</span>
               </>
             )}
           </div>
