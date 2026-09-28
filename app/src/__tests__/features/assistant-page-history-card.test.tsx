@@ -348,6 +348,50 @@ describe('AssistantPage — v2 提案的历史只读卡（T18-3 / REQ-67②③�
     await waitFor(() => expect(screen.getByTestId('v2-card-done')).toBeInTheDocument())
   })
 
+  /**
+   * T20-2（REQ-77 上层）：**页面把名单下传的那一段**——业务卡的四行口径要靠
+   * `categories` / `accounts` / `books` 才能把 id 翻成人看的名字（`AssistantPage`
+   * 两处 `<V2ConfirmationCard>` 各传了一次）。这条用例钉住这条**接线**：
+   * 分类名来自服务端名单（`cat-lunch` → 「午饭」），不是卡自己编的。
+   */
+  it('记账卡接上了页面下传的名单：分类 id 翻成名字，而不是「未分类」', async () => {
+    useAssistantChatStore.setState({
+      messages: [{
+        id: 'msg-1',
+        role: 'assistant',
+        text: '记好了\n\n已记录 1 笔交易',
+        proposal: {
+          contractVersion: 2,
+          proposalId: 'agent-add-lists',
+          action: 'transaction_add',
+          confidence: 1,
+          requiresConfirmation: false,
+          message: '记一笔支出 ¥45.00 · 午饭',
+          warnings: [],
+          payload: {
+            transactions: [{
+              type: 'expense', amountCents: 4500, categoryId: 'cat-lunch',
+              bizDate: '2026-09-16', note: '午饭',
+            }],
+          },
+        } satisfies ActionProposalV2,
+        proposalStatus: 'committed',
+        executions: [{
+          lane: 'server', entityIds: ['tx-45'], action: 'transaction_add', before: null,
+        }],
+      }],
+    })
+    renderPage()
+    // 名单异步到货（bridge.listCategories），等一行分类名解析出来
+    await waitFor(() => expect(screen.getByTestId('v2-card-tx-0-cat').textContent).toBe('🥟午饭'))
+    expect(screen.getByTestId('v2-card-tx-0-amount').textContent).toContain('45.00')
+    expect(screen.getByTestId('v2-card-tx-0-note').textContent).toBe('午饭')
+    expect(screen.getByTestId('v2-card-tx-0-date').textContent).toBe('2026-09-16')
+    // 业务卡与 payload 表互斥；历史卡不是写入口
+    expect(screen.queryByTestId('v2-card-payload')).toBeNull()
+    expect(screen.queryByTestId('v2-card-confirm')).toBeNull()
+  })
+
   it('同提案不重复出卡：当轮那张仍是活动卡（有确认入口），历史卡不渲染', () => {
     useAssistantChatStore.setState({ messages: [v2Msg('msg-1', 'prop-v2', 'pending')] })
     mockAssistantState.activeProposal = v2Proposal('prop-v2')
