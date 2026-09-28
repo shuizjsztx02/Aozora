@@ -147,6 +147,21 @@ class RepositorySeedTest {
     }
 
     @Test
+    fun clearAllEntities_invalidatesCategorySeedVersion(): Unit = runBlocking {
+        repository.ensureSeedDefaults()
+        assertEquals(
+            Repository.CATEGORY_SEED_VERSION,
+            db.syncMetaDao().getValue(SyncMetaEntity.KEY_CATEGORY_SEED_VERSION)
+        )
+
+        // bootstrap 重建清空实体后，「本地已补齐」这个断言必须一并作废 ——
+        // 否则下次冷启动会跳过补齐，分类只剩服务端快照那一批。
+        repository.clearAllEntities()
+
+        assertNull(db.syncMetaDao().getValue(SyncMetaEntity.KEY_CATEGORY_SEED_VERSION))
+    }
+
+    @Test
     fun ensureSeedDefaults_upgrade_backfillsMasterBook(): Unit = runBlocking {
         // 模拟旧版本升级：只有"默认账本"，没有 master_book_id 键
         repository.insertBook(

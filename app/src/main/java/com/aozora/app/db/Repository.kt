@@ -1419,6 +1419,12 @@ class Repository(private val db: AozoraDatabase) {
             db.syncMetaDao().upsert(
                 SyncMetaEntity(SyncMetaEntity.KEY_CURSOR, "0")
             )
+            // REQ-79（T20-5）：分类种子版本同属「本地实体已作废」的断言。本方法清空了
+            // categories，若不一并作废本键，下次冷启动会因「版本已是最新」跳过补齐 ——
+            // 本地分类只剩服务端快照那一批，补齐的那几十条要靠 pending mutation 的
+            // push/pull 兜回来（mutation 进终态失败就长期缺失）。作废后冷启动重跑一次
+            // diff：快照里已有的名字跳过、缺的补回，幂等且自愈。
+            db.syncMetaDao().delete(SyncMetaEntity.KEY_CATEGORY_SEED_VERSION)
         }
     }
 
