@@ -87,3 +87,34 @@ describe('CategoryIcon 存量兜底裸词容错（REQ-68 / T18-4）', () => {
     expect(el.textContent).toBe('旅行')
   })
 })
+
+// ─── REQ-79（T20-5）：新种子分类的兜底映射 ───
+
+describe('getCategoryEmoji — 新种子分类兜底（REQ-79）', () => {
+  it.each([
+    ['宠物', '🐱'],
+    ['养娃', '🍼'],
+    ['买菜', '🥬'],
+    ['住房', '🏠'],
+    ['烟酒', '🚬'],
+    ['人情社交', '🎁'],
+    ['休闲娱乐', '🎮'],
+    ['交通', '🚇'],
+    ['打车', '🚕'],
+    ['地铁', '🚇'],
+    ['投资理财', '📈'],
+  ])('%s → %s', (name, emoji) => {
+    expect(getCategoryEmoji(name)).toBe(emoji)
+  })
+
+  it('旧种子名一条不丢（老账户的分类仍有图标）', () => {
+    for (const legacy of ['餐饮', '交通', '购物', '娱乐', '居住', '医疗', '通讯', '学习']) {
+      expect(getCategoryEmoji(legacy)).not.toBe('💰')
+    }
+    expect(getCategoryEmoji('居住')).toBe('🏠')
+  })
+
+  it('未知分类名回退钱包 emoji', () => {
+    expect(getCategoryEmoji('某个自建分类')).toBe('💰')
+  })
+})

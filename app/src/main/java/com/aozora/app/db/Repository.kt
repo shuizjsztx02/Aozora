@@ -468,7 +468,9 @@ class Repository(private val db: AozoraDatabase) {
      * 背景：此前默认数据完全依赖"服务端 guest 注册 → sync bootstrap"拉取；
      * 真机连不通服务端时分类九宫格为空，手动记账与聊天记账都无法完成。
      * 三段（同一事务内）：
-     * 1. 分类表为空 → 种子分类
+     * 1. 分类：新账户全量种；存量账户按「kind + name」diff 补齐缺的默认分类
+     *    （REQ-79 / T20-5，版本键 = [SyncMetaEntity.KEY_CATEGORY_SEED_VERSION]，
+     *    **只增不改不删**——用户已有分类一行不动）
      * 2. 账本表为空 → 种"默认账本"（记账目标）
      * 3. master_book_id 未设 → 种"总账本"（📊）并写键；
      *    键存在但指向的 book 缺失/已归档 → 清键后重走补种
@@ -481,9 +483,19 @@ class Repository(private val db: AozoraDatabase) {
     suspend fun ensureSeedDefaults() {
         db.withTransaction {
             // 段 1：分类
-            if (db.categoryDao().listActive().isEmpty()) {
-                DEFAULT_EXPENSE_CATEGORIES.forEach { seedCategory(it, "expense") }
-                DEFAULT_INCOME_CATEGORIES.forEach { seedCategory(it, "income") }
+            val existingCats = db.categoryDao().listActive().associateBy { it.kind to it.name }
+            if (existingCats.isEmpty()) {
+                DEFAULT_EXPENSE_CATEGORIES.forEach { seedCategoryTree(it, "expense") }
+                DEFAULT_INCOME_CATEGORIES.forEach { seedCategoryTree(it, "income") }
+                setCategorySeedVersion()
+            } else if (
+                db.syncMetaDao().getValue(SyncMetaEntity.KEY_CATEGORY_SEED_VERSION)
+                != CATEGORY_SEED_VERSION
+            ) {
+                // 存量账户：按名字 diff 补齐（同名一律跳过，二级挂到**已有**的那条一级上）
+                DEFAULT_EXPENSE_CATEGORIES.forEach { backfillSeedTree(it, "expense", existingCats) }
+                DEFAULT_INCOME_CATEGORIES.forEach { backfillSeedTree(it, "income", existingCats) }
+                setCategorySeedVersion()
             }
             // 段 2：默认账本
             if (db.bookDao().listActive().isEmpty()) {
@@ -517,19 +529,62 @@ class Repository(private val db: AozoraDatabase) {
         }
     }
 
-    private suspend fun seedCategory(name: String, kind: String) {
+    /**
+     * REQ-79（T20-5）：插入一条种子分类并返回其 id——父 id 是随机 UUID，不能预置，
+     * 二级必须在父插入拿到真实 id 之后再插。
+     */
+    private suspend fun seedCategory(
+        name: String,
+        kind: String,
+        icon: String? = null,
+        parentId: String? = null,
+    ): String {
         val cat = CategoryEntity(
             id = java.util.UUID.randomUUID().toString(),
             ownerId = "local",
             bookId = null,
-            parentId = null,
+            parentId = parentId,
             kind = kind,
             name = name,
+            icon = icon,
             archivedAt = null,
             version = 1
         )
         db.categoryDao().insert(cat)
         enqueueInsert("category", cat.id, categoryToJson(cat))
+        return cat.id
+    }
+
+    /** 新账户：种一棵完整的一级分类树（先父后子）。 */
+    private suspend fun seedCategoryTree(seed: SeedCategory, kind: String) {
+        val parentId = seedCategory(seed.name, kind, seed.icon)
+        seed.children.forEach { seedCategory(it.name, kind, it.icon, parentId) }
+    }
+
+    /**
+     * 存量账户：只补「名字还不在库里」的分类（决策 #9：**只增不改不删**）。
+     *
+     * 一级已存在时用**已有那条**的 id 作二级的 parentId（不造影子父），
+     * 已存在的分类也不补 icon——用户可见的既有行一行不动（旧分类的空图标
+     * 由渲染层 [getCategoryEmoji] 兜底）。
+     */
+    private suspend fun backfillSeedTree(
+        seed: SeedCategory,
+        kind: String,
+        existing: Map<Pair<String, String>, CategoryEntity>,
+    ) {
+        val parentId = existing[kind to seed.name]?.id
+            ?: seedCategory(seed.name, kind, seed.icon)
+        seed.children.forEach { child ->
+            if (existing.containsKey(kind to child.name)) return@forEach
+            seedCategory(child.name, kind, child.icon, parentId)
+        }
+    }
+
+    private suspend fun setCategorySeedVersion() {
+        db.syncMetaDao().upsert(
+            SyncMetaEntity(SyncMetaEntity.KEY_CATEGORY_SEED_VERSION, CATEGORY_SEED_VERSION)
+        )
     }
 
     private suspend fun enqueueInsert(entityType: String, entityId: String, payload: String) {
@@ -2104,12 +2159,79 @@ class Repository(private val db: AozoraDatabase) {
     }
 
     companion object {
-        // 与 domain/nlu/category.ts 内置别名对齐，保证聊天短句能命中真实分类行
-        val DEFAULT_EXPENSE_CATEGORIES = listOf(
-            "餐饮", "交通", "购物", "娱乐", "居住", "医疗", "通讯", "学习"
+        // 与 domain/nlu/category.ts 内置别名、components/category-emoji.ts 兜底表对齐，
+        // 保证聊天短句能命中真实分类行、图标可渲染——三处任一改动都要同步另外两处。
+        /** REQ-79（T20-5）：种子分类版本。'1' = 旧的 13 个扁平分类（无二级/无图标），
+         *  '2' = 28 支出 + 15 收入 + 二级清单。存量账户按此键判断是否需补齐。 */
+        const val CATEGORY_SEED_VERSION = "2"
+
+        /** REQ-79：支出默认分类（28 个一级，照人工测试参考图 #417–#420）。 */
+        val DEFAULT_EXPENSE_CATEGORIES: List<SeedCategory> = listOf(
+            SeedCategory("餐饮", "🍽️"),
+            SeedCategory("休闲娱乐", "🎮"),
+            SeedCategory("购物", "🛍️"),
+            SeedCategory("穿搭美容", "💄"),
+            SeedCategory("水果零食", "🍎"),
+            SeedCategory(
+                "交通", "🚌",
+                listOf(
+                    SeedCategory("公交", "🚌"),
+                    SeedCategory("打车", "🚕"),
+                    SeedCategory("地铁", "🚇"),
+                    SeedCategory("火车", "🚆"),
+                    SeedCategory("飞机", "✈️"),
+                )
+            ),
+            SeedCategory("生活日用", "🧴"),
+            SeedCategory(
+                "人情社交", "🎁",
+                listOf(
+                    SeedCategory("职场", "💼"),
+                    SeedCategory("亲戚", "👪"),
+                    SeedCategory("借用", "🤝"),
+                    SeedCategory("借出", "📤"),
+                    SeedCategory("回礼", "🎀"),
+                )
+            ),
+            SeedCategory("宠物", "🐱"),
+            SeedCategory("养娃", "🍼"),
+            SeedCategory("运动", "⚽"),
+            SeedCategory("生活服务", "🛠️"),
+            SeedCategory("买菜", "🥬"),
+            SeedCategory("住房", "🏠"),
+            SeedCategory("爱车", "🚗"),
+            SeedCategory("发红包", "🧧"),
+            SeedCategory("转账", "💸"),
+            SeedCategory("学习教育", "📚"),
+            SeedCategory("网络虚拟", "💻"),
+            SeedCategory("烟酒", "🚬"),
+            SeedCategory("医疗保健", "🏥"),
+            SeedCategory("金融保险", "🏦"),
+            SeedCategory("家居家电", "🛋️"),
+            SeedCategory("酒店旅行", "🏨"),
+            SeedCategory("公益", "❤️"),
+            SeedCategory("互助保障", "🤲"),
+            SeedCategory("其他", "📌"),
+            SeedCategory("约会", "💕"),
         )
-        val DEFAULT_INCOME_CATEGORIES = listOf(
-            "工资", "奖金", "红包收入", "退款", "报销"
+
+        /** REQ-79：收入默认分类（15 个一级）。 */
+        val DEFAULT_INCOME_CATEGORIES: List<SeedCategory> = listOf(
+            SeedCategory("工资", "💰"),
+            SeedCategory("兼职", "🧰"),
+            SeedCategory("投资理财", "📈"),
+            SeedCategory("人情社交", "🎁"),
+            SeedCategory("奖金补贴", "🏆"),
+            SeedCategory("报销", "🧾"),
+            SeedCategory("生意", "🏪"),
+            SeedCategory("卖二手", "📦"),
+            SeedCategory("生活费", "🍚"),
+            SeedCategory("中奖", "🎰"),
+            SeedCategory("收红包", "🧧"),
+            SeedCategory("收转账", "💸"),
+            SeedCategory("保险理赔", "🛡️"),
+            SeedCategory("退款", "↩️"),
+            SeedCategory("其他", "📌"),
         )
         /** 服务端 book/account icon 列上限（String(64)，_validate_name 强校验）——
          *  照片 data URI 超长 push 必 422 成毒丸，见第九轮决策 #7。 */
@@ -2171,3 +2293,15 @@ class Repository(private val db: AozoraDatabase) {
         )
     }
 }
+
+/**
+ * REQ-79（T20-5）：种子分类 = 名称 + 图标 + 二级。
+ *
+ * 图标随种子直接上行（emoji 远小于服务端 icon 列 64 字符上限），新账户开箱即有
+ * 图标；二级在父插入拿到真实 UUID **之后**再插（父 id 是随机 UUID，不能预置）。
+ */
+data class SeedCategory(
+    val name: String,
+    val icon: String,
+    val children: List<SeedCategory> = emptyList(),
+)

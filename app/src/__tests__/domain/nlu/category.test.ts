@@ -148,3 +148,68 @@ describe('matchCategory — 幂等性', () => {
     expect(a).toEqual(b)
   })
 })
+
+// ─── REQ-79（T20-5）：新默认分类名的别名 ───
+
+describe('matchCategory — 新种子分类别名（REQ-79）', () => {
+  it.each([
+    ['猫粮 200', '宠物'],
+    ['狗粮 200', '宠物'],
+    ['健身卡 3000', '运动'],
+    ['基金 1000', '投资理财'],
+    ['股票 5000', '投资理财'],
+    ['学费 8000', '学习教育'],
+    ['菜市场 50', '买菜'],
+    ['基金定投 500', '投资理财'],
+  ])('%s → %s', (text, name) => {
+    expect(matchCategory(text, []).match!.categoryName).toBe(name)
+  })
+
+  it('旧种子名的别名一条不动（决策 #10：旧名保留）', () => {
+    expect(matchCategory('房租 3000', []).match!.categoryId).toBe('cat-housing')
+    expect(matchCategory('药 50', []).match!.categoryId).toBe('cat-medical')
+    expect(matchCategory('打车 25', []).match!.categoryId).toBe('cat-transport')
+  })
+})
+
+// ─── REQ-79：新旧种子名并存时「谁在库里用谁」 ───
+
+describe('matchCategory — 新旧名并存解析（REQ-79）', () => {
+  const cat = (id: string, name: string, kind: 'expense' | 'income'): Category => ({
+    id, ownerId: 'local', name, parentId: null, kind, archivedAt: null, version: 1,
+  })
+
+  it('只有新名「住房」的账户：房租解析到住房的真实 UUID', () => {
+    const result = matchCategory('房租 3000', [cat('uuid-housing', '住房', 'expense')])
+    expect(result.match!.categoryId).toBe('uuid-housing')
+    expect(result.match!.categoryName).toBe('住房')
+  })
+
+  it('只有旧名「居住」的账户：房租照旧解析到居住', () => {
+    const result = matchCategory('房租 3000', [cat('uuid-legacy', '居住', 'expense')])
+    expect(result.match!.categoryId).toBe('uuid-legacy')
+    expect(result.match!.categoryName).toBe('居住')
+  })
+
+  it('只有新名「收红包」的账户：红包解析到收红包', () => {
+    const result = matchCategory('红包 200', [cat('uuid-gift', '收红包', 'income')])
+    expect(result.match!.categoryId).toBe('uuid-gift')
+    expect(result.match!.categoryName).toBe('收红包')
+  })
+
+  it('两级都命中同一分类时不算多匹配（新房：猫粮狗粮 → 宠物）', () => {
+    const result = matchCategory('猫粮狗粮 300', [cat('uuid-pet', '宠物', 'expense')])
+    expect(result.match!.categoryId).toBe('uuid-pet')
+    expect(result.warnings.some((w) => w.includes('多个分类匹配'))).toBe(false)
+  })
+
+  it('二级分类名直接命中（优先二级：打车 → 「交通 · 打车」里的打车）', () => {
+    const sub: Category = {
+      id: 'uuid-taxi', ownerId: 'local', name: '打车', parentId: 'uuid-traffic',
+      kind: 'expense', archivedAt: null, version: 1,
+    }
+    const result = matchCategory('打车 25', [cat('uuid-traffic', '交通', 'expense'), sub])
+    expect(result.match!.categoryId).toBe('uuid-taxi')
+    expect(result.match!.confidence).toBe(0.95)
+  })
+})

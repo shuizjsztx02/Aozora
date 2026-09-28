@@ -44,6 +44,12 @@ data class SyncMetaEntity(
         // 仅 Repository.migrateCloudEntitiesUp 自管写入（镜像 personas_seeded 模式），
         // 随 clearAllTables 一并清空（登出/删号后按新账号重新判定）。
         const val KEY_CLOUD_ENTITIES_UPLOADED = "cloud_entities_uploaded_v1"
+        // REQ-79（T20-5）：分类种子版本。'2' = 28 支出 / 15 收入 + 二级清单。
+        // 冷启动时若键缺失或落后，按「kind + name」diff 把缺失的默认分类补进本地
+        // （**只增不改不删**：用户已有分类一行不动，新旧名并存是刻意接受的）。
+        // 与 master_book_id / personas_seeded 同款「Repository 自管键」，不进
+        // SYNCABLE_PREFERENCE_KEYS（meta 白名单仍 11 键）。
+        const val KEY_CATEGORY_SEED_VERSION = "category_seed_version"
 
         /**
          * T-M7-05j（偏好项上云）：可上行到服务端的偏好键白名单。
@@ -52,7 +58,8 @@ data class SyncMetaEntity(
          * 客户端这份是"钉住清单"的唯一来源，白名单外一律不上行（守护用例见
          * RepositoryUserPreferenceSyncTest）。本表里其余键都是设备自管量：
          * sync_cursor / master_book_id / personas_seeded / budget_carryover(_mark) /
-         * cloud_entities_uploaded_v1 / active_persona_id / avatar_uri / display_name。
+         * cloud_entities_uploaded_v1 / active_persona_id / avatar_uri / display_name /
+         * category_seed_version。
          *
          * 顺序即上行入队顺序，固定可复现。
          */

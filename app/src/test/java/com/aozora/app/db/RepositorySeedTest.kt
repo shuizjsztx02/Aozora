@@ -2,6 +2,7 @@ package com.aozora.app.db
 
 import com.aozora.app.db.entity.AccountEntity
 import com.aozora.app.db.entity.BookEntity
+import com.aozora.app.db.entity.CategoryEntity
 import com.aozora.app.db.entity.SyncMetaEntity
 import kotlinx.coroutines.runBlocking
 import org.json.JSONObject
@@ -52,9 +53,10 @@ class RepositorySeedTest {
         // 键已写入且指向总账本
         assertEquals(master.id, repository.getMasterBookId())
 
-        // 分类同批种子
+        // 分类同批种子（含二级；REQ-79 起种子是树，不只是一级名单）
         assertEquals(
-            Repository.DEFAULT_EXPENSE_CATEGORIES.size + Repository.DEFAULT_INCOME_CATEGORIES.size,
+            seedNodeCount(Repository.DEFAULT_EXPENSE_CATEGORIES) +
+                seedNodeCount(Repository.DEFAULT_INCOME_CATEGORIES),
             repository.listCategories().size
         )
 
@@ -73,6 +75,75 @@ class RepositorySeedTest {
 
         assertEquals(booksAfterFirst, repository.listBooks().size)
         assertEquals(masterKeyAfterFirst, repository.getMasterBookId())
+    }
+
+    // ─── REQ-79（T20-5）：默认分类种子扩充 + 存量补齐 ───
+
+    @Test
+    fun ensureSeedDefaults_seedsTwoLevelCategoriesWithIcons(): Unit = runBlocking {
+        repository.ensureSeedDefaults()
+
+        val cats = repository.listCategories()
+        val transport = cats.single { it.kind == "expense" && it.name == "交通" }
+        assertNull("一级无父", transport.parentId)
+        assertNotNull("种子自带图标", transport.icon)
+
+        val expectedChildren = Repository.DEFAULT_EXPENSE_CATEGORIES
+            .single { it.name == "交通" }.children.map { it.name }.toSet()
+        val children = cats.filter { it.parentId == transport.id }
+        assertEquals("二级名单与种子一致", expectedChildren, children.map { it.name }.toSet())
+        assertTrue("二级都带图标", children.all { it.icon != null })
+
+        // 所有二级都指向同 kind 的一级（限两级）
+        val byId = cats.associateBy { it.id }
+        cats.filter { it.parentId != null }.forEach { sub ->
+            val parent = byId[sub.parentId]
+            assertNotNull("二级的父必须在库里", parent)
+            assertNull("只允许两级", parent!!.parentId)
+            assertEquals("父子同 kind", parent.kind, sub.kind)
+        }
+    }
+
+    @Test
+    fun ensureSeedDefaults_backfillsLegacyAccountWithoutTouchingUserRows(): Unit = runBlocking {
+        // v1 存量账户：旧 8 个扁平支出分类（无图标无二级）+ 一条用户自建分类
+        val legacyNames = listOf("餐饮", "交通", "购物", "娱乐", "居住", "医疗", "通讯", "学习")
+        legacyNames.forEach {
+            repository.insertCategory(expenseCat("legacy-$it", it), "m-legacy-$it")
+        }
+        repository.insertCategory(expenseCat("my-cat", "我的分类"), "m-my-cat")
+
+        repository.ensureSeedDefaults()
+
+        val cats = repository.listCategories()
+        // 旧行一行不动：id、名字、空图标都保持原样（只增不改不删）
+        val food = cats.single { it.name == "餐饮" }
+        assertEquals("legacy-餐饮", food.id)
+        assertNull("既有分类不补图标", food.icon)
+        assertEquals("my-cat", cats.single { it.name == "我的分类" }.id)
+        // 新分类补进来
+        assertNotNull("缺失的新分类应补齐", cats.find { it.name == "宠物" })
+        // 二级挂到**已有**的那条「交通」上，不造影子父
+        assertEquals("legacy-交通", cats.single { it.name == "打车" }.parentId)
+        assertEquals("legacy-交通", cats.single { it.name == "公交" }.parentId)
+        // 新旧名并存是刻意接受的（决策 #10）
+        assertNotNull(cats.find { it.name == "娱乐" })
+        assertNotNull(cats.find { it.name == "休闲娱乐" })
+        // 无重复：每个 (kind, name) 只有一行
+        assertEquals(cats.size, cats.distinctBy { it.kind to it.name }.size)
+    }
+
+    @Test
+    fun ensureSeedDefaults_backfillIsIdempotent(): Unit = runBlocking {
+        repository.insertCategory(expenseCat("legacy-餐饮", "餐饮"), "m-legacy-food")
+
+        repository.ensureSeedDefaults()
+        val idsAfterFirst = repository.listCategories().map { it.id }.sorted()
+
+        repository.ensureSeedDefaults()
+
+        // 不只看数量：id 集合逐字相等（防「删了又建」式假绿）
+        assertEquals(idsAfterFirst, repository.listCategories().map { it.id }.sorted())
     }
 
     @Test
@@ -248,6 +319,15 @@ class RepositorySeedTest {
     }
 
     // ─── 测试数据 helper ───
+
+    /** 种子树节点数（一级 + 二级；种子不做三级）。 */
+    private fun seedNodeCount(seeds: List<SeedCategory>): Int =
+        seeds.sumOf { 1 + it.children.size }
+
+    private fun expenseCat(id: String, name: String) = CategoryEntity(
+        id = id, ownerId = "local", bookId = null, parentId = null,
+        kind = "expense", name = name, icon = null, archivedAt = null, version = 1
+    )
 
     private fun account(
         id: String,
