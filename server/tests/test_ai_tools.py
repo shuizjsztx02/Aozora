@@ -560,7 +560,8 @@ class TestValidatorHardening:
 
 @pytest_asyncio.fixture()
 async def seeded():
-    """一个有数据的库：2 账本 / 3 分类 / 2 账户 / 4 笔交易 / 2 条预算。"""
+    """一个有数据的库：2 账本 / 6 分类（含一对父子 + 一个父已归档的子）/ 2 账户 /
+    4 笔交易 / 2 条预算。"""
     engine = create_async_engine("sqlite+aiosqlite:///:memory:")
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
@@ -579,6 +580,12 @@ async def seeded():
     cash = Account(id=uuid.uuid4(), owner_id=user.id, name="现金")
     archived = Category(id=uuid.uuid4(), owner_id=user.id, book_id=book.id,
                         kind=CategoryKind.EXPENSE, name="已归档", archived_at=datetime.now(UTC))
+    # T20-6（REQ-80）：二级分类与它的父（注入面的层级渲染靠这条边）。
+    taxi = Category(id=uuid.uuid4(), owner_id=user.id, book_id=book.id,
+                    kind=CategoryKind.EXPENSE, name="打车", parent_id=traffic.id)
+    # 父已归档 → 这条边**不该**进上下文（子按一级独立列出，名字不丢）。
+    orphan = Category(id=uuid.uuid4(), owner_id=user.id, book_id=book.id,
+                      kind=CategoryKind.EXPENSE, name="孤儿", parent_id=archived.id)
     # 同名但收支类型不同：数据库的唯一约束是 (book_id, kind, name)，两者可以共存。
     misc_expense = Category(id=uuid.uuid4(), owner_id=user.id, book_id=book.id,
                             kind=CategoryKind.EXPENSE, name="其他")
@@ -617,13 +624,15 @@ async def seeded():
 
     async with factory() as session:
         session.add_all([user, book, other_book, food, traffic, salary,
-                         card, cash, archived, misc_expense, misc_income, *txs, *budgets])
+                         card, cash, archived, misc_expense, misc_income,
+                         taxi, orphan, *txs, *budgets])
         await session.commit()
 
         ctx = await T.load_tool_context(session, user.id, book.id)
         yield {"ctx": ctx, "user": user, "book": book, "other_book": other_book,
                "food": food, "traffic": traffic, "salary": salary,
                "card": card, "cash": cash, "archived": archived,
+               "taxi": taxi, "orphan": orphan,
                "misc_expense": misc_expense, "misc_income": misc_income}
 
     await engine.dispose()
@@ -639,6 +648,28 @@ class TestToolContextLoading:
 
     async def test_archived_categories_are_not_offered(self, seeded):
         assert seeded["ctx"].resolve_category("expense", "已归档") is None
+
+    async def test_parent_child_edges_reach_the_injection_surface(self, seeded):
+        """T20-6（REQ-80）：二级与父的边进上下文——注入面的层级渲染靠它。
+
+        这条同时是**那条改动过的 SQL 的唯一覆盖**：``load_tool_context`` 的分类
+        查询在本卡加了 ``Category.parent_id`` 列。纯函数用例测的是渲染，列名写错
+        时它们**全绿**，而生产上每次加载上下文都 500——正是「假绿」的典型形态。
+        """
+        ctx = seeded["ctx"]
+        assert ctx.category_children_by_kind["expense"]["交通"] == ("打车",)
+        # 没有二级的 kind 不出现在表里（渲染时空表与「零二级」等价）。
+        assert "income" not in ctx.category_children_by_kind
+
+    async def test_a_child_of_an_archived_parent_is_still_offered(self, seeded):
+        """父已归档 → 边不成立（子按一级列出），但**子自己的名字不能消失**。
+
+        与 ``categories_by_kind`` 那条「宁可多出现一次，也不让合法分类名不见」
+        同一取向：模型看不到的名字就是不可用的能力。
+        """
+        ctx = seeded["ctx"]
+        assert ctx.resolve_category("expense", "孤儿") == str(seeded["orphan"].id)
+        assert "已归档" not in ctx.category_children_by_kind.get("expense", {})
 
     async def test_category_of_one_kind_is_not_reachable_through_another(self, seeded):
         """同名的支出分类与收入分类靠 kind 区分；用错类型解析不到，而不是落到
@@ -1221,7 +1252,7 @@ class TestLedgerReadTools:
         outcome = await T.invoke_tool("book_detail", seeded["ctx"], {})
         assert outcome.data["name"] == "日常"
         assert outcome.data["current"] is True
-        assert outcome.data["categoryCount"] == 5  # 已归档的那个不算
+        assert outcome.data["categoryCount"] == 7  # 已归档的那个不算（T20-6 加了打车 / 孤儿）
         # 4 笔可见：软删除的那笔与另一个账本的那笔都不计入
         assert outcome.data["transactionCount"] == 4
         assert outcome.data["firstBizDate"] == "2026-08-20"
@@ -1245,7 +1276,7 @@ class TestLedgerReadTools:
     async def test_category_list(self, seeded):
         outcome = await T.invoke_tool("category_list", seeded["ctx"], {})
         assert {c["name"] for c in outcome.data["categories"]} == {
-            "餐饮", "交通", "工资", "其他",
+            "餐饮", "交通", "工资", "其他", "打车", "孤儿",
         }
         kinds = {c["name"]: c["kind"] for c in outcome.data["categories"]}
         assert kinds["工资"] == "income"

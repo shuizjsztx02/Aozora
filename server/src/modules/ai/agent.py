@@ -382,7 +382,17 @@ def classify_reasoning(text: str) -> ReasoningLevel:
 # 系统提示
 # ---------------------------------------------------------------------------
 
-_MAX_PROMPT_OBJECTS = 30
+#: 一次注入里**每一行**最多渲染多少个名字（T20-6 起：一级与二级同等计费）。
+#:
+#: 取值依据是 token 实测（REQ-80 决策 #12），不是拍脑袋：T20-5 把种子扩到
+#: **支出 28 一级 + 10 二级 / 收入 15**，旧的 30 会把 38 个支出名截到 30——而
+#: ``sorted()`` 是**按 Unicode 码点切**的，丢的是一整片同部首的名字（实测丢掉
+#: 「职场、购物、转账、运动、酒店旅行、金融保险、飞机、餐饮」，「餐饮」这种最
+#: 常用的记账分类也在里面）。40 让当前种子全量可见，并留一点余量给用户自建。
+#: 改前 / 改后的 ``prompt_tokens`` 实测（含本卡的规则文案）：14 013 → 14 514
+#: （+501 / +3.6%，``deepseek-flash``，58 个工具的定义占基数的大头）——数字与
+#: 口径见 T20-6 交付记录 §4.2。
+_MAX_PROMPT_OBJECTS = 40
 _MAX_PROMPT_NAME_CHARS = 16
 
 #: Agent 的系统提示。**模型可见的唯一行为说明**，与工具 description（工具可见
@@ -396,6 +406,14 @@ _AGENT_SYSTEM_PROMPT = """\
 - 分类 / 账户 / 账本一律用**名称**指代，绝不输出 UUID 或任何内部 ID。
 - 名称必须来自下方「现有对象」；名单里没有的，先调用查询工具确认，不要猜、
   不要自己编一个近似的名字。
+- 分类尽量选具体：名单里带括号的（如「交通（公交 / 打车 / 地铁）」）括号内是它
+  的**二级分类**；能对上某个二级就用二级名（如「打车」），别停在上级的「交通」。
+  没有贴切的二级时，一级本身就是合法选择。**括号只是标注归属，填的时候只填
+  名字本身，别连括号一起抄。**
+- 候选里没有完全贴切的分类，也必须选**一个**最接近的：不要留空、不要编一个
+  名单外的名字，**也不要为分类追问用户**（用户下一轮自己会改）。
+- 一个都不合适时，先照上一条选最近的记上，再问一句要不要新建分类；**不要自己
+  调 category_create**——等用户答「好」了下一轮再建。
 - 金额与统计由工具计算。不要自己心算后把结果当成事实告诉用户。
 - 写操作的工具可能直接完成，也可能产出**待用户确认**的提案：以工具结果里的
   ``status`` 为准——``executed`` 才是真的记好了；``proposal_pending`` 说明还在
@@ -426,6 +444,51 @@ def _clip_name(name: str) -> str:
     return name
 
 
+def _render_category_line(kind: str, label: str, ctx: ToolContext) -> str | None:
+    """一行「现有分类」：一级照常列出，**它的二级跟在同行括号里**（T20-6）。
+
+    改前的形态是一串扁平的名字（``sorted(...)[:30]``），模型因此**看不到谁是谁的
+    子类**——REQ-80 的「优先二级」没有落脚点：就算模型碰巧选中了「打车」，那也是
+    因为这个名字孤零零地躺在名单里，不是因为它知道「打车」比「交通」更具体。
+    层级化之后「能落到具体二级就落二级」才是一句**可执行**的指令。
+
+    截断以**一级条目为原子单位**（父与它的二级一起进退）：从树中间切开会渲染出
+    半棵树（父在、子在名单外），而模型对半棵树的推断与整棵树不同——与
+    ``skills.render_skill_section``「半句规则比没有规则更误导」同一取向。
+    """
+    names = ctx.categories_by_kind.get(kind, {})
+    if not names:
+        return None
+    children = ctx.category_children_by_kind.get(kind, {})
+    #: 已经有可见父名的二级——它们在父那一行里出现，不再单独占一个条目。
+    inline = {
+        child
+        for parent, kids in children.items()
+        if parent in names
+        for child in kids
+    }
+    items: list[str] = []
+    used = 0
+    for name in sorted(names):
+        if name in inline:
+            continue
+        kids = sorted(c for c in children.get(name, ()) if c in names)
+        # 单个父的子树也限长（与整行的预算同一个常量）：注入面里不能出现
+        # 一行由一千个二级铺成的分类。
+        kids = kids[:_MAX_PROMPT_OBJECTS]
+        # 第一个条目无条件进——预算再紧也要让模型看见至少一个合法分类名
+        # （否则写路径恒 ``unknown_category``，模型无路可走）。
+        if items and used + 1 + len(kids) > _MAX_PROMPT_OBJECTS:
+            break
+        used += 1 + len(kids)
+        if kids:
+            rendered = " / ".join(_clip_name(kid) for kid in kids)
+            items.append(f"{_clip_name(name)}（{rendered}）")
+        else:
+            items.append(_clip_name(name))
+    return f"- 现有分类（{label}）：{'、'.join(items)}"
+
+
 def _render_object_section(ctx: ToolContext) -> str:
     """把工具上下文里的对象名渲染成系统提示尾部的「现有对象」。
 
@@ -438,9 +501,9 @@ def _render_object_section(ctx: ToolContext) -> str:
     """
     lines: list[str] = []
     for kind, label in (("expense", "支出"), ("income", "收入")):
-        names = sorted(ctx.categories_by_kind.get(kind, {}))[:_MAX_PROMPT_OBJECTS]
-        if names:
-            lines.append(f"- 现有分类（{label}）：{'、'.join(_clip_name(n) for n in names)}")
+        line = _render_category_line(kind, label, ctx)
+        if line:
+            lines.append(line)
     if ctx.account_names:
         names = sorted(ctx.account_names)[:_MAX_PROMPT_OBJECTS]
         lines.append(f"- 现有账户：{'、'.join(_clip_name(n) for n in names)}")

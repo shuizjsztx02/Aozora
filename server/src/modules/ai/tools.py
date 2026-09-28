@@ -342,6 +342,21 @@ class ToolContext:
     #: 唯一约束含 ``book_id``，两者可以共存，而随手拒绝解析会让模型看到合法
     #: 分类名却永远写不进去。
     categories_by_kind: Mapping[str, Mapping[str, str]] = field(default_factory=dict)
+    #: T20-6（REQ-80）：kind → 一级分类名 → 它的二级分类名。**只为注入面的层级
+    #: 渲染服务**——名字解析仍由 ``categories_by_kind`` 独占权威，写路径一个字
+    #: 都没变（``resolve_category`` 依旧要求逐字一致）。
+    #:
+    #: 为什么必须让模型看见父子：REQ-80 的「优先二级」无从判定——模型看到的是
+    #: 一堆平铺的名字，它不知道「打车」是「交通」的子类，也就无从知道该选谁。
+    #: 只列一级而把二级藏着（旧形态）更糟：二级名压根不可见时，模型连「有更
+    #: 具体的选择」都不知道。
+    #:
+    #: 父不在可见集里（已归档 / 在别的账本）时**子不进这张表**——渲染时它会按
+    #: 一级独立列出，名字不丢（与 ``categories_by_kind`` 的「本账本覆盖全局」
+    #: 同一取向：宁可让名字多出现一次，也不让合法分类名消失）。
+    category_children_by_kind: Mapping[str, Mapping[str, tuple[str, ...]]] = field(
+        default_factory=dict,
+    )
     #: 未归档分类的 id → 名字（不剔除重名，服务于反查与存在性判断）。
     category_names_by_id: Mapping[str, str] = field(default_factory=dict)
     #: 账户名 → id。**只含名字唯一的账户**——账户没有唯一性约束，重名的挑任何
@@ -565,7 +580,10 @@ async def load_tool_context(
         raise AppException(404, "not_found", "Book not found")
 
     cat_rows = await db.execute(
-        select(Category.kind, Category.name, Category.id, Category.book_id).where(
+        select(
+            Category.kind, Category.name, Category.id, Category.book_id,
+            Category.parent_id,
+        ).where(
             Category.owner_id == user_id,
             (Category.book_id == book_id) | (Category.book_id.is_(None)),
             Category.archived_at.is_(None),
@@ -578,12 +596,28 @@ async def load_tool_context(
     # 否则模型会看到合法分类名却永远写不进去（category_list 显示两行同名，
     # 写操作恒 unknown_category，模型无路可走）。
     by_kind: dict[str, dict[str, str]] = {}
-    for kind, name, cid, book_scoped in categories:
+    for kind, name, cid, book_scoped, _parent in categories:
         if book_scoped is None:
             by_kind.setdefault(kind, {})[name] = str(cid)
-    for kind, name, cid, book_scoped in categories:
+    for kind, name, cid, book_scoped, _parent in categories:
         if book_scoped is not None:
             by_kind.setdefault(kind, {})[name] = str(cid)
+
+    # T20-6（REQ-80）：父子关系（只服务注入面的层级渲染，见
+    # ``ToolContext.category_children_by_kind``）。id→名这一跳**不剔除重名**：
+    # 本账本与全局可能各有一个同名分类，而父名对两者是同一个——重名在这里
+    # 不产生歧义（渲染与解析都只认名字）。
+    name_of_id = {str(cid): name for _kind, name, cid, _b, _p in categories}
+    children_by_kind: dict[str, dict[str, list[str]]] = {}
+    for kind, name, _cid, _book_scoped, parent_id in categories:
+        parent_name = name_of_id.get(str(parent_id)) if parent_id else None
+        # 父不可见（已归档 / 在别的账本）或成环时不认这条边：子会在渲染时按
+        # 一级独立列出，名字不丢。
+        if not parent_name or parent_name == name:
+            continue
+        if parent_name not in by_kind.get(kind, {}):
+            continue
+        children_by_kind.setdefault(kind, {}).setdefault(parent_name, []).append(name)
 
     acc_rows = await db.execute(
         select(Account.name, Account.id).where(
@@ -629,7 +663,11 @@ async def load_tool_context(
         user_id=user_id,
         book_id=book_id,
         categories_by_kind=by_kind,
-        category_names_by_id={str(cid): name for _kind, name, cid, _b in categories},
+        category_children_by_kind={
+            kind: {parent: tuple(kids) for parent, kids in buckets.items()}
+            for kind, buckets in children_by_kind.items()
+        },
+        category_names_by_id={str(cid): name for _kind, name, cid, _b, _p in categories},
         account_names=_unique_name_map((name, str(aid)) for name, aid in accounts),
         account_names_by_id={str(aid): name for name, aid in accounts},
         book_names=_unique_name_map((name, str(bid)) for name, bid in books),
@@ -708,7 +746,12 @@ _TX_ITEM_PROPERTIES: dict[str, Any] = {
         "minLength": 1,
         "description": (
             "分类名，必须与现有分类完全一致（不要写简称、不要改写）。"
-            "拿不准时先调用 category_list 查询。"
+            "**能对上二级就用二级**：系统提示里「交通（公交 / 打车 / 地铁…）」"
+            "括号内的是二级分类，打车就填「打车」而不是「交通」；没有贴切的二级"
+            "时一级本身就是合法选择。**括号只是标注归属，这里只填名字本身**"
+            "（填「人情社交」，不要填「人情社交（亲戚 / 借用）」）。"
+            "候选里没有完全贴切的也必须选一个最接近的，"
+            "不要留空、不要编一个名单外的名字。拿不准时先调用 category_list 查询。"
         ),
     },
     "bizDate": _BIZ_DATE_SCHEMA,
@@ -3129,7 +3172,9 @@ TOOLS: tuple[Tool, ...] = (
         description=(
             "新增一笔收支记录。用户说「记一笔」「花了 30 块打车」「今天收入 500」"
             "这类要往账上添一笔的诉求时用它。金额单位是分，你需要自己把口语金额"
-            "换算成分。分类名必须与现有分类完全一致。只记一笔时用它；一次要记"
+            "换算成分。分类名必须与现有分类完全一致，且**尽量落到最具体的那个**"
+            "（有贴切的二级就用二级名，如「打车」而非「交通」）；一个都不合适时"
+            "也要选个最近的，再顺口问一句要不要新建分类。只记一笔时用它；一次要记"
             "多笔请用 transaction_add_batch。"
         ),
         parameters=_tx_item_schema(),
@@ -3765,9 +3810,11 @@ TOOLS: tuple[Tool, ...] = (
         risk="low",
         proposal_action="category_create",
         description=(
-            "新建一个分类。用户说「加一个分类叫宠物」「收入里加个奖金」时用它。"
-            "必须给出收支类型（expense 支出 / income 收入）——同名的支出分类与"
-            "收入分类是两个不同的分类。可选用 parentName 挂在某个已有分类下面。"
+            "新建一个分类。**只在用户明确要求时用它**（「加一个分类叫宠物」）——"
+            "记账时分类都不合适只在回复里问一句，等用户答「好」了下一轮再建，"
+            "不要顺手建一个。必须给出收支类型（expense 支出 / income 收入）——"
+            "同名的支出分类与收入分类是两个不同的分类。可选用 parentName 挂在某个"
+            "已有分类下面（分类只有两级，二级挂在一级下）。"
             "新分类建在当前账本下。"
         ),
         parameters=_object_schema(

@@ -53,6 +53,7 @@ from dataclasses import dataclass
 
 from .prompts import PromptTemplate
 from .tools import (
+    DOMAIN_CATEGORY,
     DOMAIN_SAVINGS,
     DOMAIN_SCHEDULED,
     DOMAINS,
@@ -140,7 +141,27 @@ _SAVINGS = _skill(
     "- 反过来，用户说「记一笔」时不要动存钱目标。",
 )
 
-SKILLS: tuple[Skill, ...] = (_SCHEDULED, _SAVINGS)
+#: T20-6（REQ-80）：分类的层级与维护。**「记账时怎么选分类」不在这里**——那三条
+#: 规则（优先二级 / 必选一个 / 都是先记上再问）写在系统提示里，因为记账句未必
+#: 路由得到 category 域（「打车 25」命不中任何信号 → 兜底全量 → 本模块按既定
+#: 口径**不带任何 Skill**），把选分类的规则放这儿等于在最需要它的轮次缺席。
+#:
+#: 这条管的是**另一件事**：用户真的在谈分类本身（建 / 改 / 挂到哪一级）时的规则，
+#: 横跨 ``category_create`` / ``category_update`` / ``category_list`` 三个工具，
+#: 而每个工具的 description 只讲得清自己那一段。
+_CATEGORY = _skill(
+    "category",
+    (DOMAIN_CATEGORY,),
+    "分类的层级与维护",
+    "- 分类只有**两级**：一级（如「交通」）与其下的二级（公交 / 打车 / 地铁…）。"
+    "建二级要用 parentName 挂到对应的一级下面，不要平铺成又一个一级。\n"
+    "- 用户说「加一个分类」时先看名单里有没有语义相同的（含二级）：能挂到某个"
+    "一级下就用它作 parentName，别建一个近义的新一级。\n"
+    "- 改已有分类用 category_update；不要「建一个新的、把旧的留着」。\n"
+    "- 记账时觉得分类都不合适，只在回复里问一句，**不要**顺手 category_create。",
+)
+
+SKILLS: tuple[Skill, ...] = (_SCHEDULED, _SAVINGS, _CATEGORY)
 
 #: 域 → 该域上的 Skill（注册表顺序）。域是命中面，因此一个 Skill 出现在它绑定的
 #: 每一个域下；:func:`skills_for_domains` 负责去重。
