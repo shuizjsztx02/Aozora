@@ -12,6 +12,9 @@
  *
  * T20-2（REQ-77 上层）追加**业务卡**面（文件末那个 describe）：记账三 op 出
  * 记账卡 / 修改卡（新旧对照）/ 删除卡，其余 op 与「拿不到旧值」的改删卡回落通用卡。
+ *
+ * T20-4（REQ-78 上层）再追加**确认口径**面（最后一个 describe）：卡上那句
+ * 「这次为什么问我 / 为什么没问我」——理由码来自服务端，客户端只做映射与呈现。
  */
 import { describe, it, expect, vi } from 'vitest'
 import { render, screen, within } from '@testing-library/react'
@@ -58,6 +61,7 @@ interface RenderProps {
   readonly?: boolean
   onConfirm?: () => void
   onReject?: () => void
+  confirmReason?: string | null
 }
 
 const renderCard = (props: RenderProps = {}) => render(
@@ -69,6 +73,7 @@ const renderCard = (props: RenderProps = {}) => render(
     readonly={props.readonly}
     onConfirm={props.onConfirm}
     onReject={props.onReject}
+    confirmReason={props.confirmReason}
     categories={CATS}
     accounts={ACCOUNTS}
     books={BOOKS}
@@ -344,5 +349,133 @@ describe('V2ConfirmationCard — 记账三 op 的业务卡（T20-2 / REQ-77 上�
     expect(screen.queryByTestId('v2-card-ledger')).toBeNull()
     expect(screen.getByTestId('v2-card-payload').textContent).toContain('icon')
     expect(screen.getByTestId('v2-card-message').textContent).toContain('把「餐饮」的图标改成 🍜')
+  })
+})
+/**
+ * T20-4（REQ-78 上层）：卡上那句「**这次为什么问我**」。
+ *
+ * 判定的单一事实源在服务端（`agent.confirm_reason` + `docs/product/ai-confirmation-policy.md`），
+ * 客户端只做两件事：把理由码翻成中文、按「本来要不要确认」区分自动执行。这里钉住的
+ * 正是这两件事的边界——**说不出来就不说**。
+ */
+describe('V2ConfirmationCard — 确认口径的呈现（T20-4 / REQ-78）', () => {
+  /** 自动执行那条路建出来的提案：`requiresConfirmation: false` + 服务端回执
+   *  （T20-1 的 `done.executions` 分支，见 `use-assistant`）。 */
+  const autoProposal = (over: Partial<ActionProposalV2> = {}) => proposal({
+    action: 'transaction_add',
+    requiresConfirmation: false,
+    message: '记一笔支出 ¥30.00 · 午饭',
+    payload: { transactions: [] },
+    ...over,
+  })
+
+  /** 执行前的那份快照（服务端 `_snapshot_before` 的形状）。 */
+  const beforeTx = {
+    type: 'expense', amountCents: 3000, categoryId: 'cat-lunch', accountId: null,
+    note: '午饭', bizDate: '2026-09-28', bookId: 'book-1',
+  }
+
+  it('待确认 + 服务端给了理由码 → 卡上标出理由（用户一眼看出为什么问）', () => {
+    renderCard({ confirmReason: 'medium_risk' })
+    expect(screen.getByTestId('v2-card-reason').textContent).toContain('会改动你已有的记录')
+    // 结果行仍在：先看状态，再看理由
+    expect(screen.getByTestId('v2-card-not-executed')).toBeInTheDocument()
+  })
+
+  it('高风险与低置信各有各的说法（不是同一句话）', () => {
+    const { unmount } = renderCard({ confirmReason: 'high_risk' })
+    const high = screen.getByTestId('v2-card-reason').textContent
+    expect(high).toContain('高风险')
+    unmount()
+    renderCard({ confirmReason: 'low_confidence' })
+    const low = screen.getByTestId('v2-card-reason').textContent
+    expect(low).toContain('没能完全确定')
+    expect(low).not.toBe(high)
+  })
+
+  it('多步理由也有自己的文案（`multi_step` 是四码里的第三档）', () => {
+    renderCard({ confirmReason: 'multi_step' })
+    expect(screen.getByTestId('v2-card-reason').textContent).toContain('后续步骤')
+  })
+
+  it('**没有理由码 → 不显示理由行**（设备 op / 没人可问那一档）', () => {
+    renderCard({ confirmReason: null })
+    expect(screen.queryByTestId('v2-card-reason')).toBeNull()
+    // 也没把「已按低风险直接执行」误挂上来——它压根没执行
+    expect(screen.queryByTestId('v2-card-auto')).toBeNull()
+  })
+
+  it('老消息没有这个字段（undefined）同样不显示——不推断理由', () => {
+    renderCard({})
+    expect(screen.queryByTestId('v2-card-reason')).toBeNull()
+  })
+
+  it('**不认识的码不显示**：服务端将来多一档理由时安静地少一行，而不是编一句解释', () => {
+    renderCard({ confirmReason: 'brand_new_reason' })
+    expect(screen.queryByTestId('v2-card-reason')).toBeNull()
+  })
+
+  it('自动执行的卡标出「已按低风险直接执行」（`requiresConfirmation: false` + 有凭据）', () => {
+    renderCard({
+      proposal: autoProposal(),
+      status: 'committed',
+      executions: [{ lane: 'server', entityIds: ['tx-1'], action: 'transaction_add', before: null }],
+    })
+    expect(screen.getByTestId('v2-card-done').textContent).toContain('已执行')
+    expect(screen.getByTestId('v2-card-auto').textContent).toBe('已按低风险直接执行')
+    expect(screen.queryByTestId('v2-card-reason')).toBeNull()
+  })
+
+  it('**用户点过确认的卡不说「没问你」**：理由行优先，且挂起过的提案不带自动执行那句话', () => {
+    renderCard({
+      // 默认 proposal() 就是 requiresConfirmation: true —— 服务端挂起过，用户点了确认
+      confirmReason: 'medium_risk',
+      status: 'committed',
+      executions: [{ lane: 'server', entityIds: ['tx-1'], action: 'transaction_update', before: beforeTx }],
+    })
+    expect(screen.getByTestId('v2-card-done')).toBeInTheDocument()
+    expect(screen.getByTestId('v2-card-reason')).toBeInTheDocument()
+    expect(screen.queryByTestId('v2-card-auto')).toBeNull()
+  })
+
+  /**
+   * **这一条测的是 `requiresConfirmation` 那道闸本身**，所以它**不能**带理由码——
+   * 带了就被上面第 ① 支先接住，闸门根本没被走到（首版用例就是这么写的，变异探针
+   * 一测才发现是假绿）。场景是真实存在的：`confirm` 帧掉了、这张卡由
+   * `done.proposals` 兜底补出来，理由码因此缺席，而提案**是挂起过的**
+   * （`requiresConfirmation: true`）——执行只可能来自用户点确认，不能报「没问你」。
+   */
+  it('理由码缺席 + 已执行 + 挂起过的提案 → **不冒充**「已按低风险直接执行」', () => {
+    renderCard({
+      status: 'committed',
+      executions: [{ lane: 'server', entityIds: ['tx-1'], action: 'transaction_update', before: beforeTx }],
+    })
+    expect(screen.getByTestId('v2-card-done')).toBeInTheDocument()
+    expect(screen.queryByTestId('v2-card-auto')).toBeNull()
+  })
+
+  it('**设备执行的凭据不算「没问你」**：它永远是用户点了才动的', () => {
+    renderCard({
+      proposal: proposal({ action: 'persona_switch', requiresConfirmation: false, payload: {} }),
+      status: 'committed',
+      executions: [receipt('device')],
+    })
+    expect(screen.getByTestId('v2-card-done').textContent).toContain('已在本机执行')
+    expect(screen.queryByTestId('v2-card-auto')).toBeNull()
+  })
+
+  it('待确认的设备 op → 同样不出理由行（它没有理由码，见文件头的挂账说明）', () => {
+    renderCard({
+      proposal: proposal({ action: 'persona_switch', payload: { personaId: 'p-1' } }),
+      confirmReason: null,
+    })
+    expect(screen.queryByTestId('v2-card-reason')).toBeNull()
+    expect(screen.queryByTestId('v2-card-auto')).toBeNull()
+  })
+
+  it('只读历史卡同样带理由（留档要能回看当时的口径）', () => {
+    renderCard({ readonly: true, confirmReason: 'high_risk' })
+    expect(screen.getByTestId('v2-card-reason').textContent).toContain('高风险')
+    expect(screen.queryByTestId('v2-card-confirm')).toBeNull()
   })
 })

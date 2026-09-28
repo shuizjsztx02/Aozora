@@ -1386,6 +1386,9 @@ class TestWritePath:
         assert proposal["requiresConfirmation"] is True
         assert proposal["proposalId"].startswith("agent-")
         assert confirm["step"] == 2
+        # T20-4（REQ-78）：卡上「为什么问我」的来源——记账 op 是 low（风险两级不命中），
+        # 挂起是**步数**触发的，所以理由码是 multi_step。
+        assert confirm["confirmReason"] == "multi_step"
 
         done = payload_of(body, "done")
         assert [p["proposalId"] for p in done["proposals"]] == [proposal["proposalId"]]
@@ -1776,6 +1779,10 @@ class TestContractLane:
         confirm = payload_of(body, "confirm")
         assert confirm["proposal"]["action"] == "transaction_delete"
         assert confirm["proposal"]["requiresConfirmation"] is True
+        # T20-4（REQ-78）：理由码随挂起帧下发（卡上那句「会改动你已有的记录」）。
+        # **这一格是判别性的**：单 Step + 高置信 + 无 warnings 的形态，改前连卡都没有；
+        # 有了它，卡片才答得上「为什么这次问我」而不是让用户猜。
+        assert confirm["confirmReason"] == "medium_risk"
         assert payload_of(body, "done")["executions"] == []
 
         rows = await _rows(stream_env, Transaction, id=tx.id)
@@ -1794,11 +1801,38 @@ class TestContractLane:
         ])
         _, body = await stream_env.turn("同步一下", contract_version=2)
 
-        proposal = payload_of(body, "confirm")["proposal"]
+        confirm = payload_of(body, "confirm")
+        proposal = confirm["proposal"]
         assert proposal["contractVersion"] == 2
         assert proposal["action"] == "sync_trigger"
+        assert "confirmReason" not in confirm
 
         done = payload_of(body, "done")
         assert [p["proposalId"] for p in done["proposals"]] == [proposal["proposalId"]]
         assert done["executions"] == []
         assert len(await _rows(stream_env, SyncChange)) == before, "设备 op 不动服务端数据"
+
+    async def test_a_medium_risk_device_op_still_carries_no_reason(
+        self, stream_env: StreamEnv,
+    ):
+        """T20-4（REQ-78）：设备 op **不带理由码**，哪怕它的风险档是 ``medium``。
+
+        **这条是判别性的**（上面那条 ``sync_trigger`` 不是）：``sync_trigger`` 是
+        ``low``，``confirm_reason`` 对它本来就返回 ``None``——「帧里没有理由码」在
+        那里是必然的，把理由码硬塞进设备分支也看不出来。``consent_record`` 是
+        ``medium``：**若不显式拦住，``confirm_reason`` 会给出 ``medium_risk``**，
+        卡片就会说「会改动你已有的记录」——而它的挂起理由其实是「这条要在设备上执行，
+        服务端做不了」（`tools.DEVICE_EXECUTED_OPS`）。变异探针（把设备分支也传
+        ``confirm_reason``）在这条上会红。
+        """
+        stream_env.provider.reset([
+            _tool_turn(_call("consent_record", {}, id="w1")),
+            _text("等你在手机上确认。"),
+        ])
+        _, body = await stream_env.turn("我同意隐私政策", contract_version=2)
+
+        confirm = payload_of(body, "confirm")
+        assert confirm["proposal"]["action"] == "consent_record"
+        assert confirm["proposal"]["requiresConfirmation"] is True
+        assert "confirmReason" not in confirm
+        assert payload_of(body, "done")["executions"] == []

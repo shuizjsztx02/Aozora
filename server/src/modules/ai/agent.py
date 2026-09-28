@@ -1814,6 +1814,11 @@ class AgentLoop:
         #    ``tools.DEVICE_EXECUTED_OPS``），在 loop 里问一次批准除了多一次征询
         #    什么也换不来——真正执行它的是客户端（05f 的执行器按 op 分派），
         #    批准也随之在客户端的确认卡上做（03e 的审批四值）。
+        #    **不带理由码**（T20-4）：上一步算出的 ``reason`` 对设备 op 是宣告性的
+        #    （风险值不参与它们的挂起判定），带上会让卡片说「因为它是高风险操作」
+        #    这种半真的话——它们的真实理由是「服务端执行不了它」。卡片那一侧因此
+        #    宁可**不说**（`V2ConfirmationCard` 的 `reasonNote` 只认理由码），
+        #    而不是替服务端编一句解释。
         if op is not None and op in DEVICE_EXECUTED_OPS:
             self._proposals.append(proposal)
             return ToolOutcome.proposal(proposal)
@@ -1826,9 +1831,14 @@ class AgentLoop:
         # 3) 无人可问（没执行通道，或没审批通道）→ **挂起**，交回调用方走确认卡。
         #    这不是「视为拒绝」：把「没接通道」判成拒绝会让 P1 的确认卡路径自我
         #    堵死。「视为拒绝」只留给审批通道真的给了 unavailable。
+        #
+        #    理由码随产物带出去（T20-4）：挂起是**结论**，而「为什么挂起」这个结论
+        #    只在这里算得出来——下行帧（``stream.py`` 的 ``confirm``）据此把
+        #    「为什么问你」写进确认卡。``reason`` 可以是 ``None``（下方注释：那是
+        #    「没人可问」而不是「策略要求确认」），那时卡片就不说理由。
         if self._executor is None or not self._gate.has_approver:
             self._proposals.append(proposal)
-            return ToolOutcome.proposal(proposal)
+            return ToolOutcome.proposal(proposal, confirm_reason=reason)
 
         # 4) 必须确认：问一次，只有 allowed-once 会落到执行。
         #    （前两个分支已覆盖「reason is None」的全部去向，故此处必有理由。）

@@ -429,4 +429,45 @@ describe('AssistantPage — v2 提案的历史只读卡（T18-3 / REQ-67②③�
     expect(screen.getByTestId('v2-confirmation-card')).toBeInTheDocument()
     expect(screen.getAllByTestId('history-card')).toHaveLength(1)
   })
+
+  /**
+   * T20-4（REQ-78 上层）：**页面把理由码下传的那一段**。
+   *
+   * 理由码不是卡自己的状态，它跟着**消息**走（`showPendingApproval` 建的），页面两处
+   * `<V2ConfirmationCard>` 各取一次（当轮那张按 proposalId 取回，与 `activeExecutions`
+   * 同一条路）。这两条用例钉住这条**接线**：历史卡与当轮卡都说得出「为什么问我」。
+   */
+  it('历史卡带出当时的确认口径：理由码 → 卡上那行「为什么问我」', () => {
+    useAssistantChatStore.setState({
+      messages: [{ ...v2Msg('msg-1', 'prop-v2', 'pending'), confirmReason: 'medium_risk' }],
+    })
+    renderPage()
+    expect(screen.getByTestId('v2-card-reason').textContent).toContain('会改动你已有的记录')
+    // 只读态仍无写入口（理由行不改这条边界）
+    expect(screen.queryByTestId('v2-card-confirm')).toBeNull()
+  })
+
+  it('当轮那张卡也说得出理由：页面按 proposalId 从消息取回，卡自身不持有它', () => {
+    useAssistantChatStore.setState({
+      messages: [{ ...v2Msg('msg-1', 'prop-v2', 'pending'), confirmReason: 'high_risk' }],
+    })
+    mockAssistantState.activeProposal = v2Proposal('prop-v2')
+    mockAssistantState.cardStatus = 'pending-confirm'
+    renderPage()
+    // 只此一张（历史那张被同提案判据挡掉）
+    expect(screen.getAllByTestId('v2-confirmation-card')).toHaveLength(1)
+    expect(screen.getByTestId('v2-card-reason').textContent).toContain('高风险')
+    expect(screen.getByTestId('v2-card-confirm')).toBeInTheDocument()
+  })
+
+  it('没有理由码的老消息：卡上安静（不编一句解释）', () => {
+    useAssistantChatStore.setState({
+      messages: [v2Msg('msg-1', 'prop-v2', 'pending')],
+    })
+    mockAssistantState.activeProposal = v2Proposal('prop-v2')
+    mockAssistantState.cardStatus = 'pending-confirm'
+    renderPage()
+    expect(screen.queryByTestId('v2-card-reason')).toBeNull()
+    expect(screen.queryByTestId('v2-card-auto')).toBeNull()
+  })
 })

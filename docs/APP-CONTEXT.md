@@ -349,10 +349,15 @@ aozora/
                                   ↓
                         schema + business validation
                                   ↓
-               高置信快速执行 / 低置信确认卡 / 无效则追问
+       按风险分级 / 步数 / 置信度出确认卡，或直接执行 / 无效则追问
                                   ↓
                      normal ledger API / sync mutation
 ```
+
+> **确认口径（REQ-78，2026-09-28 起）：** 上图的「高置信快速执行 / 低置信确认卡」已细化为
+> 四条判据（风险 `high` / 风险 `medium` / 多步 / 低置信），**逐条 op 清单与三档判据原文见
+> `docs/product/ai-confirmation-policy.md`**——那是给人看的唯一一份；机器读的那一份在
+> `server/src/modules/ai/tools.py` 的 `Tool.risk`，两处由用例对账。
 
 ### 6.3 ActionProposal 最小契约
 

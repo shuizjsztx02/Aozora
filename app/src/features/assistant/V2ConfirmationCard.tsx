@@ -54,6 +54,26 @@
  *    安全门（T18-3 口径未变）。
  * 3. **预算位不渲染**：`before` / `payload` 都不带这一位，照默认值画等于编造
  *    （见 `SnapshotCard` 的 `hideBudget`）。
+ *
+ * T20-4（REQ-78 上层）：**卡上回答「这次为什么问我」**。服务的判定早就在服务端做完
+ * （`docs/product/ai-confirmation-policy.md`），客户端这一侧只做**呈现**，一行小字
+ * 分两种情形（**互斥**，且说不出来就不说）：
+ *
+ *   · 待确认 + 服务端给了理由码 → 按码出文案（高风险 / 会改动既有记录 / 后续步骤 /
+ *     把握不大）。**码→文案是这里唯一的映射**，判定不在客户端重算。
+ *   · 已执行 + 本条提案**本来就不需要确认**（`requiresConfirmation === false`，只有
+ *     自动执行那条路会这么标）→「已按低风险直接执行」。
+ *
+ * **不认识的理由码 / 老消息没有这个字段 → 不显示**：编一句解释比不解释更糟，这也正是
+ * 本卡一贯的口径（没凭据就不说「已执行」）。
+ *
+ * **没做的那一条（T20-3 交接项，挂账）**：设备 op 的 4 条（`persona_switch` /
+ * `consent_record` / `sync_trigger` / `reminder_set`）没有理由码，T20-3 建议卡片自己
+ * 说明「这条由本机执行」。**未做**——认设备 op 要么把 `use-assistant` 的
+ * `DEVICE_OP_DISPATCH` 这个**运行期值**导进渲染层（T20-2 已记过这条约定：渲染代码只
+ * 从契约层取判据，否则七个页面用例的 `vi.mock` 都要补导出），要么往线协议上再加一个
+ * 字段去绕开 T20-3 冻结的四码词汇。两条都比这一行字贵。设备 op 的卡照旧出、照旧要
+ * 确认，只是少一行解释；执行完仍由结果行说「已在本机执行」。
  */
 import type { ActionProposalV2 } from '../../domain/action-proposal'
 import type { AccountData, BookData, CategoryData } from '../../platform/bridge/bridge-types'
@@ -83,6 +103,9 @@ interface Props {
   /** 业务卡上那笔所记的账本（v2 的执行落在 hook 层这个账本上，见 `commitV2Proposal`）。 */
   bookId?: string | null
   bookName?: string
+  /** T20-4（REQ-78）：服务端**为什么**要问的理由码（`confirm` 帧的 `confirmReason`，
+   *  由消息带到这里）。`null` / `undefined` = 服务端没给理由 → 卡上不显示理由行。 */
+  confirmReason?: string | null
 }
 
 /**
@@ -108,6 +131,23 @@ type LedgerCard =
 const NO_DIFF: DiffMask = {
   cat: false, type: false, amount: false, date: false, note: false,
   account: false, book: false, budget: false,
+}
+
+/**
+ * T20-4（REQ-78）：理由码 → 卡面那一行小字。
+ *
+ * 码是服务端的（T20-3 定死四档，逐条判据见 `docs/product/ai-confirmation-policy.md`），
+ * 客户端只负责说人话。文案对着用户那句「为什么这次问我」写：
+ * 前两条说**这件事的后果**，后两条说**模型有多稳**（与服务端的优先级同一取向）。
+ *
+ * **表里没有的码一律不显示**——服务端将来多一档理由，这里会安静地少一行字，
+ * 而不是显示一个编出来的解释。
+ */
+const REASON_LABELS: Record<string, string> = {
+  high_risk: '⚠️ 高风险操作：改完在应用里找不回来',
+  medium_risk: '⚠️ 会改动你已有的记录',
+  multi_step: '⚠️ 这是本次任务的后续步骤，前面的动作已经查过你的数据',
+  low_confidence: '⚠️ 没能完全确定你的意思',
 }
 
 /**
@@ -173,9 +213,38 @@ function ledgerCard(
   return { kind: 'update', before: old, after, diff: diffMask(after, old) }
 }
 
+/**
+ * T20-4（REQ-78）：卡上那一行「为什么」——两种情形**互斥**，都不成立时返回 `null`。
+ *
+ * 「说不出来就不说」是本卡一贯的口径（同「没凭据就不说已执行」）：编一句解释比不解释
+ * 更糟，尤其在这一行——它正是用户在问的那句「这次为什么问我」。
+ *
+ * 判定**只在客户端做呈现，不重算审批策略**：理由码是服务端给的，自动执行那一支靠的是
+ * 「挂起的提案恒为 `requiresConfirmation: true`」这条服务端不变式（T-M7-02e 决策 2）。
+ */
+function reasonNote(
+  confirmReason: string | null | undefined,
+  proposal: ActionProposalV2,
+  receipts: ExecutionEvidence[],
+  onDevice: boolean,
+): { text: string; tone: string; testId: string } | null {
+  // ① 服务端说了理由（不认识的码不显示，见 `REASON_LABELS`）
+  const label = confirmReason ? REASON_LABELS[confirmReason] : undefined
+  if (label) {
+    return { text: label, tone: 'var(--warn, #b45309)', testId: 'v2-card-reason' }
+  }
+  // ② 已经执行、且这条提案**本来就不需要确认**——所以它走的正是「低风险直接执行」
+  //    那条路。设备执行的凭据不算：设备 op 永远要用户点了才动，说「没问你」是假的。
+  if (!proposal.requiresConfirmation && receipts.length > 0 && !onDevice) {
+    return { text: '已按低风险直接执行', tone: 'var(--ink3)', testId: 'v2-card-auto' }
+  }
+  return null
+}
+
 export function V2ConfirmationCard({
   proposal, status, busy, executions, readonly = false, onConfirm, onReject,
   categories = [], accounts = [], books = [], bookId = null, bookName = '',
+  confirmReason = null,
 }: Props) {
   const undone = status === 'undone'
   const failed = status === 'error'
@@ -206,6 +275,8 @@ export function V2ConfirmationCard({
   const ledger = ledgerCard(proposal.action, proposal.payload ?? {}, before, bookId ?? '')
   // 业务卡上的快照共用这几个下传项：名单（名→显示）+ 隐藏预算位（数据里没有它）。
   const snapProps = { categories, accounts, books, bookName, hideBudget: true } as const
+  // T20-4（REQ-78）：那句「为什么问我 / 为什么没问我」（说不出来时为 null）
+  const note = reasonNote(confirmReason, proposal, receipts, onDevice)
 
   return (
     <div className={shell} style={cardStyle} data-testid="v2-confirmation-card">
@@ -289,6 +360,15 @@ export function V2ConfirmationCard({
         <div className="mt-2 text-xs" style={{ color: 'var(--ink3)' }}
              data-testid="v2-card-not-executed">
           未执行 · 待确认
+        </div>
+      )}
+
+      {/* T20-4（REQ-78）：口径呈现——**为什么问你 / 为什么没问你**。紧挨结果行：
+          用户先看到「这张卡在等你」或者「这件事已经做完了」，紧接着就是那句解释。
+          说不出来（理由码不认识 / 老消息没这个字段 / 设备 op 已执行）时整行不出现。 */}
+      {note && (
+        <div className="mt-1 text-xs" style={{ color: note.tone }} data-testid={note.testId}>
+          {note.text}
         </div>
       )}
 

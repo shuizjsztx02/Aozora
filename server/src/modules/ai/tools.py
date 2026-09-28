@@ -451,14 +451,26 @@ class ToolOutcome:
 
     kind: OutcomeKind
     data: dict[str, Any] = field(default_factory=dict)
+    #: 服务端**为什么**把这条提案挂起来等用户点头（T20-4 / REQ-78 的下发通道）。
+    #: 值是审批策略给出的理由码（``agent.confirm_reason`` 的四档：``high_risk`` /
+    #: ``medium_risk`` / ``multi_step`` / ``low_confidence``）；``None`` = **不是**
+    #: 审批策略挂的（设备 op、读工具、不需要确认的那一档）。
+    #:
+    #: **它是记录，不是依据**：判定本身在 ``AgentLoop._handle_proposal`` 里做完了，
+    #: 这里只是把那个结论带到下行帧上（客户端据此回答「为什么问我」）。因此本字段
+    #: 只影响确认卡的文案，**不参与任何放行判断**——没有它，卡片少一行解释；有它，
+    #: 也不会让哪条提案多或少了确认。
+    confirm_reason: str | None = None
 
     @classmethod
     def result(cls, data: dict[str, Any]) -> ToolOutcome:
         return cls(kind="result", data=data)
 
     @classmethod
-    def proposal(cls, draft: dict[str, Any]) -> ToolOutcome:
-        return cls(kind="proposal", data=draft)
+    def proposal(
+        cls, draft: dict[str, Any], *, confirm_reason: str | None = None,
+    ) -> ToolOutcome:
+        return cls(kind="proposal", data=draft, confirm_reason=confirm_reason)
 
     @classmethod
     def failure(cls, code: str, **extra: Any) -> ToolOutcome:

@@ -132,6 +132,18 @@ export interface AssistantMessage {
   transactionIds?: string[]
   /** T18-3（REQ-67②）：这一轮**实际执行**的凭据（见 `ExecutionEvidence`）。 */
   executions?: ExecutionEvidence[]
+  /**
+   * T20-4（REQ-78）：服务端**为什么**要求确认的理由码（`confirm` 帧的
+   * `confirmReason`）——卡上那句「为什么问我」的唯一来源。
+   *
+   * 三态，**语义各不相同**：
+   * - 理由码字符串 = 服务端说了理由（`high_risk` / `medium_risk` / `multi_step` /
+   *   `low_confidence`），卡片按码出文案；
+   * - `null` = 服务端**没带**（设备 op / 「没人可问」那一档），卡片不说话；
+   * - `undefined` = 这条消息根本没有过这个字段（T20-4 之前落盘的老消息），
+   *   卡片同样不说话——**不推断**，理由码是服务端的判定，客户端无权重算。
+   */
+  confirmReason?: string | null
   verdict?: AiValidateVerdict
   validationErrors?: string[]
 }
@@ -250,6 +262,12 @@ export type ApprovalOutcome = 'allowed-once' | 'rejected' | 'cancelled' | 'unava
 export interface PendingApproval {
   proposal: AnyProposal
   step: number | null
+  /**
+   * T20-4（REQ-78）：服务端**为什么**要问的理由码（`confirm` 帧的 `confirmReason`）。
+   * `null` 有两种来源，卡片的处理相同（都不显示理由）：帧里没带（设备 op / 没人可问），
+   * 或这条是从 `done.proposals` 兜底补进来的（那一份是契约信封，装不下额外字段）。
+   */
+  reason: string | null
 }
 
 /**
@@ -634,13 +652,16 @@ export function useAssistant({
   // T-M7-03e：确认门（挂起提案的四值处置）
   // ───────────────────────────────────────────────────────────────────────────
 
-  /** 把一张挂起提案放进确认门队列。重复的 / 已处置的 → false（不成第二张卡）。 */
-  const enqueueApproval = useCallback((proposal: AnyProposal, step: number | null): boolean => {
+  /** 把一张挂起提案放进确认门队列。重复的 / 已处置的 → false（不成第二张卡）。
+   *  `reason`（T20-4）随卡记下，供卡面回答「为什么问我」。 */
+  const enqueueApproval = useCallback((
+    proposal: AnyProposal, step: number | null, reason: string | null,
+  ): boolean => {
     const id = proposal.proposalId
     if (!id) return false
     if (handledApprovalsRef.current.has(id)) return false
     if (approvalsRef.current.some(a => a.proposal.proposalId === id)) return false
-    approvalsRef.current = [...approvalsRef.current, { proposal, step }]
+    approvalsRef.current = [...approvalsRef.current, { proposal, step, reason }]
     return true
   }, [])
 
@@ -680,6 +701,9 @@ export function useAssistant({
           text: display,
           proposal: head.proposal,
           proposalStatus: 'pending' as const,
+          // T20-4（REQ-78）：把「为什么问我」记在消息上——卡随后从消息取它
+          // （`AssistantPage` 按 proposalId 取回，与 `activeExecutions` 同一条路）。
+          confirmReason: head.reason,
         }]
       }
       // 已有这条（流式期间随 `confirm` 帧建过）→ 把兜底文案换成收尾后的正文，其余不动
@@ -1189,7 +1213,9 @@ export function useAssistant({
       appendAssistantMessage(`⚠️ 有 ${stranded} 项改动未取得确认，没有记录`)
     }
     for (const pr of done.proposals) {
-      enqueueApproval(pr as unknown as ActionProposal, null)
+      // 理由码在这里取不到（`done.proposals` 是契约信封，装不下额外字段，T20-4）：
+      // 补进来的卡因此不显示理由——**宁可少一行解释，也不猜一个**。
+      enqueueApproval(pr as unknown as ActionProposal, null, null)
     }
 
     if (done.executions.length > 0) {
@@ -1284,9 +1310,9 @@ export function useAssistant({
    * 清单，中途来的提案在收尾核对时若不在清单上，按 `unavailable` 收敛（见 settleStream）。
    */
   const handleApprovalEvent = useCallback((
-    raw: Record<string, unknown>, step: number | null,
+    raw: Record<string, unknown>, step: number | null, reason: string | null,
   ) => {
-    if (!enqueueApproval(raw as unknown as ActionProposal, step)) return
+    if (!enqueueApproval(raw as unknown as ActionProposal, step, reason)) return
     showPendingApproval()
   }, [enqueueApproval, showPendingApproval])
 

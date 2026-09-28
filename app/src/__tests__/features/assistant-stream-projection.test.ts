@@ -109,10 +109,32 @@ describe('agent 流投影 — 八类事件逐类落进投影', () => {
   it('confirm 原样留存（**实时信号**，非权威清单——权威是 done.proposals）', () => {
     const proposal = { proposalId: 'p-1', action: 'add_tx' }
     const p = run(ev('confirm', { step: 2, proposal }))
-    expect(p.confirmProposals).toEqual([{ step: 2, proposal }])
+    // T20-4（REQ-78）：帧里没带 `confirmReason` → `reason` 记 null（卡片不显示理由），
+    // 不是 undefined——「服务端没给理由」与「这条记录没有该字段」在卡上表现相同，
+    // 但投影这一层应当把帧的实况如实记下来。
+    expect(p.confirmProposals).toEqual([{ step: 2, proposal, reason: null }])
     // 未收尾：confirm 不是收尾信号
     expect(p.settled).toBe(false)
     expect(p.done).toBeNull()
+  })
+
+  it('confirm 带上服务端的理由码（T20-4 / REQ-78：卡上「为什么问我」的来源）', () => {
+    const p = run(
+      ev('confirm', {
+        step: 1, proposal: { proposalId: 'p-1', action: 'transaction_delete' },
+        confirmReason: 'medium_risk',
+      }),
+    )
+    expect(p.confirmProposals[0].reason).toBe('medium_risk')
+  })
+
+  it('confirm 的 reason 只认字符串：畸形载荷记 null（不把非字符串透给卡片）', () => {
+    const p = run(
+      ev('confirm', {
+        step: 1, proposal: { proposalId: 'p-1' }, confirmReason: { code: 'medium_risk' },
+      }),
+    )
+    expect(p.confirmProposals[0].reason).toBeNull()
   })
 
   it('confirm 多帧累积成队列（一轮多步可以有多张挂起提案）', () => {

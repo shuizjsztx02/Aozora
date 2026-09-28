@@ -133,7 +133,15 @@ export interface AgentStreamProjection {
    * T-M7-03e 起由 `use-assistant` 消费它**事件驱动**地建确认卡（03b 时只留存不渲染）；
    * 收尾时仍以 `done.proposals` 核对——不在权威清单里的提案不可被确认。
    */
-  confirmProposals: Array<{ step: number | null; proposal: Record<string, unknown> }>
+  confirmProposals: Array<{
+    step: number | null
+    proposal: Record<string, unknown>
+    /** T20-4（REQ-78）：服务端**为什么**要问的理由码（`confirmReason`，
+     *  `high_risk` / `medium_risk` / `multi_step` / `low_confidence`）。
+     *  `null` = 帧里没带（设备 op，或「没人可问」那一档）——卡片那时不显示理由。
+     *  **不认识的值也不显示**：理由码是服务端的判定，客户端只做码→文案的映射。 */
+    reason: string | null
+  }>
   /** `device_request` 帧（T-M7-05e 起有生产者，ADR-010）；原样留存，不丢帧。
    *  **执行不在这里**——帧到达即由 `onDeviceRequest` 转发给上层（`device-executor`），
    *  本投影只让步骤卡片看得见「助手在做一次设备操作」。 */
@@ -291,7 +299,9 @@ export function applyStreamEvent(
       // 同一提案重复到达（重发帧 / 畸形流）不重复成卡——`proposalId` 是服务端 id
       const id = proposalIdOf(proposal)
       if (id && p.confirmProposals.some(c => proposalIdOf(c.proposal) === id)) return p
-      return { ...p, confirmProposals: [...p.confirmProposals, { step: stepOf(d), proposal }] }
+      return { ...p, confirmProposals: [...p.confirmProposals, {
+        step: stepOf(d), proposal, reason: str(d.confirmReason),
+      }] }
     }
     case 'device_request':
       return { ...p, deviceRequests: [...p.deviceRequests, d] }
@@ -318,8 +328,12 @@ export interface UseAssistantStreamOptions {
    *  实现方（use-assistant）负责落点与三态收敛。 */
   onSettled: (projection: AgentStreamProjection) => void
   /** T-M7-03e：`confirm` 帧到达时**实时**转发一次（事件驱动建卡）。
-   *  本 hook 仍不碰业务状态——只把「又有了一张挂起提案」这件事告诉上层。 */
-  onConfirm?: (proposal: Record<string, unknown>, step: number | null) => void
+   *  本 hook 仍不碰业务状态——只把「又有了一张挂起提案」这件事告诉上层。
+   *  T20-4（REQ-78）：`reason` 是同一帧带下来的**理由码**（null = 没带），
+   *  上层把它记在卡上——本 hook 同样不解释它（码→文案的映射在卡片里）。 */
+  onConfirm?: (
+    proposal: Record<string, unknown>, step: number | null, reason: string | null,
+  ) => void
   /**
    * T-M7-05f：`device_request` 帧到达时**实时**转发一次（事件驱动执行设备动作）。
    *
@@ -495,7 +509,7 @@ export function useAssistantStream({
       // T-M7-03e：事件驱动的确认卡——`confirm` 帧当场转发（新累积的那一条）
       if (next.confirmProposals.length > before.confirmProposals.length) {
         const added = next.confirmProposals[next.confirmProposals.length - 1]
-        onConfirmRef.current?.(added.proposal, added.step)
+        onConfirmRef.current?.(added.proposal, added.step, added.reason)
       }
       // T-M7-05f：事件驱动的设备执行——`device_request` 帧当场转发（新到达的那一条）
       if (next.deviceRequests.length > before.deviceRequests.length) {

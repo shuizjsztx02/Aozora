@@ -1139,6 +1139,37 @@ describe('use-assistant — 确认门四值（T-M7-03e）', () => {
     expect(result.current.interrupted).toBeNull()
   })
 
+  /**
+   * T20-4（REQ-78 上层）：`confirm` 帧的**理由码**要活到消息上。
+   *
+   * 卡自己不持有它（`activeProposal` 只是个提案对象），页面是**按 proposalId 从消息
+   * 取回**的（与 `activeExecutions` 同一条路）——所以这一格没落到消息上，卡上那行
+   * 「为什么问我」就是空的。这里钉住的是这条链路的**第一段**。
+   */
+  it('confirm 帧的理由码落到消息上（卡上「为什么问我」的来源）', async () => {
+    const { result } = setup()
+    await act(async () => { await result.current.submitInput(TURN_INPUT) })
+    const proposal = pendingProposal()
+    await act(async () => {
+      emit('confirm', {
+        step: 1, proposal: proposal as unknown as Record<string, unknown>,
+        confirmReason: 'medium_risk',
+      })
+    })
+    expect(lastMsg(result).proposal?.proposalId).toBe(proposal.proposalId)
+    expect(lastMsg(result).confirmReason).toBe('medium_risk')
+  })
+
+  it('帧里没有理由码 → 消息上记 null（设备 op / 没人可问那一档，卡片不显示理由）', async () => {
+    const { result } = setup()
+    await act(async () => { await result.current.submitInput(TURN_INPUT) })
+    const proposal = pendingProposal()
+    await act(async () => {
+      emit('confirm', { step: 1, proposal: proposal as unknown as Record<string, unknown> })
+    })
+    expect(lastMsg(result).confirmReason).toBeNull()
+  })
+
   it('动作只在收尾后启用：流式期间点确认被拒（零写 + 明确提示）', async () => {
     const { result } = setup()
     const proposal = await openApproval(result)

@@ -82,7 +82,12 @@
 ``tool_result``  ``tool``、``step``、``status``（ok / error）、
                  ``code``* / ``message``*（仅 ``status="error"``，安全枚举码）
 ``confirm``      ``step``、``proposal``（**完整 ActionProposal**，含服务端解析的
-                 id——客户端要拿它回投 ``/ai/execute``）
+                 id——客户端要拿它回投 ``/ai/execute``）、
+                 ``confirmReason``*（T20-4：服务端**为什么**要问的理由码——
+                 ``high_risk`` / ``medium_risk`` / ``multi_step`` / ``low_confidence``，
+                 逐条判据见 ``docs/product/ai-confirmation-policy.md``。**缺席** =
+                 不是审批策略挂的，即设备 op 或「没人可问」那一档；客户端据此在卡上
+                 标出理由，不认识的值一律不显示）
 ``delta``        ``text``（增量）、``channel``（``content`` / ``reasoning``，
                  见上「delta 的粒度与两个通道」）、``step``
 ``done``         ``conversation_id``、``stop_reason``、``steps``、``tool_calls``、
@@ -456,9 +461,13 @@ class QueueObserver:
             # 挂起的提案（``kind="proposal"`` 只在挂起那条路上出现——自动执行
             # 与执行失败分别返回 ``kind="result"`` / ``"error"``）。载荷是完整
             # ActionProposal：客户端要拿它渲染确认卡并回投 ``/ai/execute``。
-            self._queue.put_nowait((EventType.CONFIRM, {
-                "step": step, "proposal": dict(outcome.data),
-            }))
+            payload = {"step": step, "proposal": dict(outcome.data)}
+            # 理由码**是 loop 的结论，在这里只是透传**（T20-4）：本层不重算审批策略
+            # ——重算等于把同一把尺子摆两处，改动一处就会静默漂移。缺席 = 不是审批
+            # 策略挂的（设备 op / 没人可问），那时客户端不显示理由，而不是显示一个猜的。
+            if outcome.confirm_reason is not None:
+                payload["confirmReason"] = outcome.confirm_reason
+            self._queue.put_nowait((EventType.CONFIRM, payload))
             return
         self._queue.put_nowait((EventType.TOOL_RESULT, {
             "tool": name, "step": step, **summarize_outcome(outcome),

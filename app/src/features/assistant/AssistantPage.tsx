@@ -416,6 +416,11 @@ export function AssistantPage() {
   const activeExecutions = messages.find(
     m => m.proposal?.proposalId === activeProposal?.proposalId,
   )?.executions
+  // T20-4（REQ-78）：当轮那张卡还要说得出「为什么问你」——理由码同样挂在**消息**上
+  // （`showPendingApproval` 建的），与上面那条走同一条取回路径。
+  const activeConfirmReason = messages.find(
+    m => m.proposal?.proposalId === activeProposal?.proposalId,
+  )?.confirmReason
 
   return (
     <div
@@ -570,6 +575,8 @@ export function AssistantPage() {
                       proposal={historyV2Proposal}
                       status={v2HistoryStatus(msg.proposalStatus)}
                       executions={msg.executions}
+                      /* T20-4（REQ-78）：历史卡同样说明当时的确认口径 */
+                      confirmReason={msg.confirmReason}
                       busy={false}
                       categories={categories}
                       accounts={accounts}
@@ -681,6 +688,8 @@ export function AssistantPage() {
               executions={activeExecutions}
               onConfirm={() => { void editProposal(activeProposal) }}
               onReject={rejectApproval}
+              /* T20-4（REQ-78）：这一轮为什么问你（见 activeConfirmReason） */
+              confirmReason={activeConfirmReason}
               /* T20-2（REQ-77）：记账三 op 的业务卡要的名单与账本 */
               categories={categories}
               accounts={accounts}
