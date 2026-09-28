@@ -18,7 +18,7 @@ import time
 import uuid
 from collections import defaultdict
 from datetime import UTC, date, datetime
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from sqlalchemy import func, select
@@ -53,6 +53,7 @@ from .schemas import (
     TransactionFactSchema,
     TrendFactSchema,
 )
+from .tools import PROPOSAL_CONTRACT_V2
 
 if TYPE_CHECKING:
     from .context import ProposalValidationContext
@@ -92,6 +93,50 @@ MAX_ATTEMPTS = 2
 # the contract is (a) staying inside the budget and (b) flagging requests
 # that crossed the 12 s line for monitoring (T-M5-05b latency dashboard).
 SLOW_HINT_SECONDS = 12.0
+
+#: 回执里**带 `before` 快照**的 op（T20-1 / REQ-77 决策 #4）：只有改 / 删类需要新旧
+#: 对照——新增没有「旧」。快照必须在**执行之前**抓：执行之后本地与服务端都可能已经
+#: 查不到那笔（软删 / 同步时序），事后取必然拿不全。
+_BEFORE_SNAPSHOT_OPS: frozenset[str] = frozenset(
+    {"transaction_update", "transaction_delete"},
+)
+
+
+def _execute_receipt(
+    proposal: dict[str, Any],
+    transaction_ids: list[str],
+    *,
+    lane: int,
+    before: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """组装 ``/ai/execute`` 的回执（T20-1 / REQ-77 决策 #2）。
+
+    回执从「一串实体 id」扩成**能渲染业务卡的一整份**：客户端拿到 id 之外的
+    ``action`` / ``message`` / ``payload`` / ``before``，才画得出记账卡与新旧对照。
+    四个新键**全部是回带**（v2 信封本来就带前三个，``before`` 由调用方在执行前抓
+    好），服务端不新增任何计算。
+
+    **v1 车道逐字不变**：那条车道的信封只有 action + ``transactions``（``_v1_envelope``），
+    没有 ``message`` / ``payload`` 可回带；补空壳进去只会让既有契约多三个恒空的键。
+
+    `transaction_ids` 的语义两条车道不同（v1 = 交易 id；v2 = **被影响的实体** id，
+    改 / 归档是同一个 id 的新版本），字段名沿用的理由见 ``execute_proposal`` 内的
+    注释——本函数不改这层语义。
+    """
+    receipt: dict[str, Any] = {
+        "transaction_ids": transaction_ids,
+        "proposal_id": proposal.get("proposalId") or "",
+        "undo_window_seconds": 5,
+    }
+    if lane != PROPOSAL_CONTRACT_V2:
+        return receipt
+    payload = proposal.get("payload")
+    receipt["action"] = str(proposal.get("action") or "")
+    receipt["message"] = str(proposal.get("message") or "")
+    receipt["payload"] = dict(payload) if isinstance(payload, dict) else {}
+    if before is not None:
+        receipt["before"] = before
+    return receipt
 
 
 def _cleanup_expired(now: float) -> None:
@@ -740,6 +785,10 @@ class AIService:
         from .validator import validate_proposal_any
 
         proposal_id = proposal.get("proposalId")
+        # 车道判定（纯函数、无副作用）：幂等命中与正常回执**都要**按它决定回执形状，
+        # 故提到幂等检查之前——幂等命中若不带回卡片信息，重放那一次客户端手里又只剩
+        # 一串 id（T20-1 的同一个坑，只是发生在第二次调用上）。
+        lane = validate_proposal_any(proposal)["contractVersion"]
 
         # ── Idempotency check ────────────────────────────────────────────
         if proposal_id:
@@ -758,11 +807,11 @@ class AIService:
                         "cached_transaction_count": len(existing.transaction_ids),
                     },
                 )
-                return {
-                    "transaction_ids": existing.transaction_ids,
-                    "proposal_id": proposal_id,
-                    "undo_window_seconds": 5,
-                }
+                # 幂等命中不带 `before`：那次执行已经发生，此刻再去查「执行前」只会
+                # 拿到被改过之后的值——宁可缺一个键，也不给一张假的「旧卡」。
+                return _execute_receipt(
+                    proposal, existing.transaction_ids, lane=lane,
+                )
 
         # Re-validate
         ctx = await self._load_context(book_id, user.id)
@@ -784,7 +833,6 @@ class AIService:
 
         # Extract action and transactions
         action = proposal.get("action")
-        lane = validate_proposal_any(proposal)["contractVersion"]
         #: 对外回执里的 id 列表。**v1 车道是交易的 id**（字段名 ``transaction_ids``
         #: 即由此而来）；v2 车道是本次 op 影响的**实体** id（改 / 归档是同一个 id
         #: 的新版本，新建是新 id）——列名沿用是为了不动既有回执契约，语义见
@@ -812,6 +860,16 @@ class AIService:
                     403, "ai_proposal_rejected",
                     "Proposal payload failed authorization",
                 )
+
+        # ── T20-1（REQ-77 决策 #4）：执行前抓「旧值」快照 ─────────────────
+        # 只对改 / 删类 op。抓在这一层而不是执行器内部：执行权威在本函数，快照必须与
+        # 「执行前」是同一个瞬间；交给执行器抓也行，但那样 `before` 得穿过 `OpReceipt`
+        # 才能回到这里，多一层转手（且注册表面是 T20-3 的地盘）。
+        before = (
+            await self._snapshot_before(user, book_id, proposal.get("payload"))
+            if lane == 2 and action in _BEFORE_SNAPSHOT_OPS
+            else None
+        )
 
         if lane == 2 and action != "transaction_add":
             # ── v2 车道：非记账 op（T-M7-05b）────────────────────────────
@@ -980,10 +1038,52 @@ class AIService:
             },
         )
 
+        return _execute_receipt(
+            proposal, transaction_ids, lane=lane, before=before,
+        )
+
+    async def _snapshot_before(
+        self,
+        user: User,
+        book_id: uuid.UUID,
+        payload: Any,
+    ) -> dict[str, Any] | None:
+        """改 / 删类 op 的「旧值」快照（T20-1 / REQ-77 决策 #4）。
+
+        字段集 = 卡片要显示的那几项（分类 / 收支 / 金额 / 日期 / 备注 / 账本），键名与
+        payload 逐字对齐，卡上的新旧对照才能按字段比对。**账户在决策点名的六项之外，
+        这里照样带上**：卡的展示口径含账户 chip（`SnapshotCard`），不带的话「有账户」
+        会显示成「不使用账户」——少一个键就是一次错误的显示。
+
+        **取不到就返回 `None`，本函数从不报错**：payload 形状不对 / 不是本人的 / 不在
+        本账本，这三件事执行器马上要用同一份 payload 再判一次，在这里抢先报只会让同一个
+        错误有两个出口、两套文案。快照是锦上添花——缺了它卡上少两行，执行该怎么报错
+        还怎么报错。
+        """
+        from src.modules.transactions.service import TransactionService
+
+        if not isinstance(payload, dict):
+            return None
+        try:
+            tx_id = uuid.UUID(str(payload.get("transactionId")))
+        except (ValueError, AttributeError, TypeError):
+            return None
+        try:
+            tx = await TransactionService(self._db).get_transaction(tx_id, user.id)
+        except AppException:
+            return None
+        if tx.book_id != book_id:
+            return None
         return {
-            "transaction_ids": transaction_ids,
-            "proposal_id": proposal_id or "",
-            "undo_window_seconds": 5,
+            # ``TxType`` 是 ``(str, Enum)``：``str(tx.type)`` 会给出 ``"TxType.EXPENSE"``，
+            # 必须取 ``.value``（卡上要显示的是 "expense"，对照才比得中）。
+            "type": str(getattr(tx.type, "value", tx.type)),
+            "amountCents": tx.amount_cents,
+            "categoryId": str(tx.category_id),
+            "accountId": str(tx.account_id) if tx.account_id else None,
+            "note": tx.note,
+            "bizDate": tx.biz_date.isoformat(),
+            "bookId": str(tx.book_id),
         }
 
     async def _load_context(

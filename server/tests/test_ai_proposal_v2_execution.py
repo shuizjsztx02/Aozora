@@ -246,6 +246,150 @@ class TestV2TransactionOps:
         assert len(_rows(factory, Transaction, book_id=book_id)) == 1
 
 
+# ── T20-1（REQ-77）：回执要够画一张业务卡 ──────────────────────────────────
+
+
+class TestExecutionReceiptCardFields:
+    """T20-1：``/ai/execute`` 的回执从「一串实体 id」扩成**能渲染业务卡的一整份**。
+
+    用户的诉求是「记账后弹一张卡，并长期留在聊天历史里」，而历史卡的唯一载体是消息上
+    的 ``proposal``；自动执行那一轮客户端手里**只有回执**（服务端只在挂起时发 confirm
+    帧）。回执不带 ``action`` / ``message`` / ``payload``，卡上就只剩一串 UUID——
+    这与 REQ-69 的 ``account_type``、REQ-73 的 ``category.icon`` 是同一形态：上层要用
+    的字段，底层没有落点。
+
+    ``before`` 是修改卡 / 删除卡的新旧对照数据源，**必须在执行之前抓**——软删之后连
+    服务端都查不到那笔了，事后取必然拿不全。
+    """
+
+    def test_add_receipt_carries_action_message_and_payload(self, v2_env):
+        c, _ = v2_env
+        user = _guest(v2_env)
+        book_id = _mk_book(c, user)
+        category_id = _mk_category(c, user)
+
+        proposal = _v2("transaction_add", {"transactions": [{
+            "type": "expense", "amountCents": 3000, "categoryId": str(category_id),
+            "bizDate": "2026-09-28", "note": "午餐",
+        }]})
+        resp = _execute(v2_env, user, book_id, proposal)
+        assert resp.status_code == 200
+        body = resp.json()
+
+        assert body["action"] == "transaction_add"
+        assert body["message"] == "（测试提案）"
+        assert body["payload"] == proposal["payload"]
+        assert body["before"] is None, "新增没有「旧值」可对照"
+
+    def test_update_receipt_carries_the_pre_execution_snapshot(self, v2_env):
+        c, _ = v2_env
+        user = _guest(v2_env)
+        book_id = _mk_book(c, user)
+        category_id = _mk_category(c, user)
+        created = c.post("/transactions", json={
+            "book_id": str(book_id), "type": "expense", "amount_cents": 1250,
+            "category_id": str(category_id), "note": "午饭", "biz_date": "2026-09-18",
+            "occurred_at": "2026-09-18T12:00:00+00:00",
+        }, headers=_auth(user)).json()
+
+        resp = _execute(v2_env, user, book_id, _v2("transaction_update", {
+            "transactionId": created["id"], "version": created["version"],
+            "amountCents": 1500, "note": "午饭（改）",
+        }))
+        assert resp.status_code == 200
+        before = resp.json()["before"]
+
+        # 卡片要显示的那几项，键名与 payload 逐字对齐（卡上按字段做新旧对照）。
+        # 值是**执行前**的那一份：金额 1250 / 备注「午饭」——执行后的 1500 /「午饭（改）」
+        # 在 payload 里，两者不同才谈得上对照。
+        assert before == {
+            "type": "expense",
+            "amountCents": 1250,
+            "categoryId": str(category_id),
+            "accountId": None,
+            "note": "午饭",
+            "bizDate": "2026-09-18",
+            "bookId": str(book_id),
+        }
+        assert resp.json()["payload"]["amountCents"] == 1500
+
+    def test_delete_receipt_carries_the_row_being_deleted(self, v2_env):
+        """删除卡要显示「将删的那一笔」——软删之后查不到，只能执行前抓。"""
+        c, _ = v2_env
+        user = _guest(v2_env)
+        book_id = _mk_book(c, user)
+        category_id = _mk_category(c, user)
+        created = c.post("/transactions", json={
+            "book_id": str(book_id), "type": "expense", "amount_cents": 3000,
+            "category_id": str(category_id), "note": "打车", "biz_date": "2026-09-17",
+            "occurred_at": "2026-09-17T12:00:00+00:00",
+        }, headers=_auth(user)).json()
+
+        resp = _execute(v2_env, user, book_id, _v2(
+            "transaction_delete", {"transactionId": created["id"]},
+        ))
+        assert resp.status_code == 200
+        before = resp.json()["before"]
+        assert before["amountCents"] == 3000
+        assert before["note"] == "打车"
+        assert before["type"] == "expense"
+
+    def test_snapshot_does_not_leak_across_users(self, v2_env):
+        """别人的交易抢不到快照——取不到就返回 None，而不是把别人的数据回带出去。"""
+        c, _ = v2_env
+        owner = _guest(v2_env)
+        other = c.post("/auth/guest", json={
+            "device_id": "v2-device-2", "nickname": "other",
+        }).json()
+        other_user = {"id": other["user_id"], "token": other["tokens"]["access_token"]}
+        book_id = _mk_book(c, owner)
+        category_id = _mk_category(c, owner)
+        created = c.post("/transactions", json={
+            "book_id": str(book_id), "type": "expense", "amount_cents": 999,
+            "category_id": str(category_id), "note": "别人的", "biz_date": "2026-09-18",
+            "occurred_at": "2026-09-18T12:00:00+00:00",
+        }, headers=_auth(owner)).json()
+
+        # 授权门先挡下这份 payload（403），回执根本不会生成
+        resp = _execute(v2_env, other_user, book_id, _v2(
+            "transaction_update", {"transactionId": created["id"], "version": 1,
+                                   "amountCents": 1},
+        ))
+        assert resp.status_code == 403
+        assert "999" not in resp.text
+
+    def test_v1_receipt_carries_no_card_fields(self, v2_env):
+        """v1 车道**不填**这四个键：它的信封没有 message / payload 可回带。
+
+        响应模型统一带这四个键，v1 走空默认——v1 客户端按字段取值，多出来的空键不影响
+        它（``BridgeResponse.success`` 原样透传 JSON 字符串）。值层面 v1 逐字不变。
+        """
+        c, _ = v2_env
+        user = _guest(v2_env)
+        book_id = _mk_book(c, user)
+        category_id = _mk_category(c, user)
+
+        resp = _execute(v2_env, user, book_id, {
+            "proposalId": f"v1-{uuid.uuid4().hex[:12]}",
+            "action": "add_tx",
+            "confidence": 0.95,
+            "requiresConfirmation": False,
+            "transactions": [{
+                "type": "expense", "amountCents": 1000, "categoryId": str(category_id),
+                "bizDate": "2026-09-28", "note": "v1",
+            }],
+            "message": "v1 的 message 不该被回带",
+            "warnings": [],
+        })
+        assert resp.status_code == 200
+        body = resp.json()
+        assert body["action"] == ""
+        assert body["message"] == ""
+        assert body["payload"] == {}
+        assert body["before"] is None
+        assert len(body["transaction_ids"]) == 1
+
+
 # ── 执行面：账户账本域 ─────────────────────────────────────────────────────
 
 

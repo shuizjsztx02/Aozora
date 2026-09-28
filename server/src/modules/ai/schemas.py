@@ -106,6 +106,27 @@ class AIExecuteProposalResponse(BaseModel):
     # duplicates.
     proposal_id: str
 
+    # ── T20-1（REQ-77 决策 #2）：回执从「一串实体 id」扩成**能渲染业务卡的一整份** ──
+    # 三个新字段（外加只在改 / 删类 op 在场的 ``before``）都是**回带**，服务端不新增
+    # 计算：v2 信封本来就带 action / message / payload，`execute_proposal` 只是把它们
+    # 抄进回执。没有这一段，客户端手里只有实体 id——记账卡上的分类、金额、日期一个都
+    # 画不出来（与 REQ-69 的 `account_type`、REQ-73 的 `category.icon` 同一形态：
+    # 上层要用的字段，底层没有落点）。
+    #
+    # **v1 车道不填**（默认值即空）：那条车道的信封没有 ``message`` / ``payload``，
+    # 回执对 v1 客户端逐字不变（既有契约不扰动）——`/ai/agent` 的 agent 车道恒发 v2。
+    #
+    # op 名（客户端据此分型：记账三 op 出业务卡，其余回落通用卡）。
+    action: str = ""
+    # 工具产出的那句人类可读中文（通用卡的主行，也是非记账 op 的回执文案）。
+    message: str = ""
+    # 工具产出的参数原样回带（含服务端确定性解析出的 id）。
+    payload: dict[str, Any] = Field(default_factory=dict)
+    # **仅** ``transaction_update`` / ``transaction_delete``：执行**之前**的关键字段
+    # 快照（分类 / 收支 / 金额 / 日期 / 备注 / 账本 + 账户），供卡上的新旧对照。
+    # 必须在执行前取——执行之后本地与服务端都可能已经查不到那笔（软删 / 同步时序）。
+    before: dict[str, Any] | None = None
+
 
 # ─── T-M4-03: AI report / insight ─────────────────────────────────────
 

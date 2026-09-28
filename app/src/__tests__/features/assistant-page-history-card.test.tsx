@@ -304,6 +304,50 @@ describe('AssistantPage — v2 提案的历史只读卡（T18-3 / REQ-67②③�
     expect(screen.queryByTestId('v2-card-done')).toBeNull()
   })
 
+  /**
+   * T20-1（REQ-77）：**自动执行那轮的卡**——客户端从 `/ai/execute` 的回执组装出来的
+   * 那一条（形状见 `use-assistant` 的 `done.executions` 分支）。这条用例盯的是
+   * 「组装出来的东西真能渲染成卡」，且切页重挂载后仍在：数据全在消息上，不需要任何
+   * 库查询，所以它不依赖服务端或 Room 的时序。
+   */
+  it('自动执行那轮的卡（客户端由回执组装）同样常驻，并如实说「已执行」', async () => {
+    useAssistantChatStore.setState({
+      messages: [{
+        id: 'msg-1',
+        role: 'assistant',
+        text: '记好了\n\n已记录 1 笔交易',
+        proposal: {
+          contractVersion: 2,
+          proposalId: 'agent-add-1',
+          action: 'transaction_add',
+          confidence: 1,
+          // 已经执行完了：这张卡是**回执**不是安全门
+          requiresConfirmation: false,
+          message: '记录一笔 支出 ¥30.00（餐饮）',
+          warnings: [],
+          payload: {
+            transactions: [{ type: 'expense', amountCents: 3000, categoryId: 'cat-lunch' }],
+          },
+        } satisfies ActionProposalV2,
+        proposalStatus: 'committed',
+        executions: [{
+          lane: 'server', entityIds: ['tx-30'], action: 'transaction_add', before: null,
+        }],
+        transactionIds: ['tx-30'],
+      }],
+    })
+    const { unmount } = renderPage()
+    expect(screen.getByTestId('v2-card-message').textContent).toContain('记录一笔 支出 ¥30.00')
+    expect(screen.getByTestId('v2-card-done').textContent).toContain('已执行')
+    // 历史卡不是写入口：没有确认 / 拒绝
+    expect(screen.queryByTestId('v2-card-confirm')).toBeNull()
+    expect(screen.queryByTestId('v2-card-reject')).toBeNull()
+
+    unmount()
+    renderPage()
+    await waitFor(() => expect(screen.getByTestId('v2-card-done')).toBeInTheDocument())
+  })
+
   it('同提案不重复出卡：当轮那张仍是活动卡（有确认入口），历史卡不渲染', () => {
     useAssistantChatStore.setState({ messages: [v2Msg('msg-1', 'prop-v2', 'pending')] })
     mockAssistantState.activeProposal = v2Proposal('prop-v2')

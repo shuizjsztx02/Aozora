@@ -79,7 +79,7 @@
 
 import { useState, useCallback, useRef, useEffect, useMemo } from 'react'
 import type { ActionProposal, ActionProposalV2 } from '../../domain/action-proposal'
-import { isV2Proposal } from '../../domain/action-proposal'
+import { isV2Proposal, PROPOSAL_CONTRACT_VERSION_V2 } from '../../domain/action-proposal'
 import { parseInput, type ParseContext } from '../../domain/nlu/parser'
 import {
   buildProposalFromAiOutput, parseAiInterpretOutput, hasOpConditions, applyOpFilter,
@@ -165,7 +165,30 @@ export interface ExecutionEvidence {
   lane: 'server' | 'device'
   /** 被影响的实体 id（服务端回执的 `transaction_ids`；设备执行恒为空）。 */
   entityIds: string[]
+  /**
+   * T20-1（REQ-77）：这次执行的是**哪个 op**——卡片分型的依据（记账三 op 出业务卡，
+   * 其余回落通用卡），也是「撤销窗只对记账开」的判据。设备执行的凭据没有服务端回执，
+   * 本字段缺席。
+   */
+  action?: string
+  /**
+   * T20-1（REQ-77）：改 / 删类 op 的「旧值」快照（服务端**执行前**抓，随回执下发）。
+   * 卡上的新旧对照以它为「旧」——**不能事后从本地 Room 反推**：v2 的执行权威在服务端，
+   * 本地那份可能过期（R-PROD-43 记过两端各自记账的情形），而删掉的那笔事后根本查不到。
+   */
+  before?: Record<string, unknown> | null
 }
+
+/**
+ * T20-1（REQ-77 决策 #3）：**享业务卡的记账三 op**——其余 op 一律回落通用卡。
+ *
+ * 通用卡是尾卡（R-PROD-31）的既定取向：v2 有 34+ 个 op、payload 形状各异，逐 op 写卡
+ * 等于把那些表单在客户端再实现一遍，且每加一个工具就要跟一次。用户要的也只是「记账
+ * 那几个」，所以边界划在这里，**不得**借这一轮把通用卡改成逐 op 卡。
+ */
+const LEDGER_OPS: ReadonlySet<string> = new Set([
+  'transaction_add', 'transaction_update', 'transaction_delete',
+])
 
 /** 第八轮：'confirming' 态随免确认改造移除——解析成功后直接本地提交。 */
 export type AssistantPhase = 'idle' | 'processing' | 'executing'
@@ -813,7 +836,14 @@ export function useAssistant({
         const receipt = await bridge.executeProposal(
           proposal as unknown as Record<string, unknown>, bookId, newUuid(),
         )
-        execution = { lane: 'server', entityIds: receipt?.transaction_ids ?? [] }
+        execution = {
+          lane: 'server',
+          entityIds: receipt?.transaction_ids ?? [],
+          // T20-1（REQ-77）：卡上的新旧对照从**凭据**里取「旧值」——它由服务端在执行前
+          // 抓（见 `ExecutionEvidence.before`），客户端无权也不该自己反推。
+          action: proposal.action,
+          before: receipt?.before ?? null,
+        }
       }
       setMessages(prev => prev.map(m =>
         m.proposal?.proposalId === proposal.proposalId
@@ -1163,19 +1193,65 @@ export function useAssistant({
     }
 
     if (done.executions.length > 0) {
-      const ids = done.executions.flatMap(e => (e.transaction_ids as string[] | undefined) ?? [])
-      activeTxIdsRef.current = ids
-      // 回执消息带上事务 id：撤销后消息要能翻成「已撤销」（undoExecution 按它匹配）。
-      // 已执行那笔拿不到提案正文（服务端只在**挂起**时发 confirm 帧，自动执行走
-      // tool_result 摘要），所以这里不渲染 ConfirmationCard——撤销入口因此只有
-      // activeTxIdsRef 这条内存态通道（切页即失效，与 T16-2 的历史卡同口径）。
-      setMessages(prev => [...prev, {
-        id: 'msg_' + Date.now() + '_assistant',
-        role: 'assistant' as const,
-        text: `${text ? text + '\n\n' : ''}已记录 ${ids.length} 笔交易`,
-        proposalStatus: 'committed' as const,
-        transactionIds: ids,
-      }])
+      // ── T20-1（REQ-77）：自动执行也留卡 ─────────────────────────────────
+      // 此前这条分支只写一行「已记录 N 笔交易」——而「单 Step + 高置信」的记账
+      // （**最常见的形态**）走的正是自动执行，历史卡的判据是消息上带 `proposal`，
+      // 于是聊天记录里那笔只剩一行字，卡一重挂载就不见了。现在服务端回执带回了
+      // action / message / payload / before（`execute_proposal` 的 `_execute_receipt`），
+      // 客户端据此把一次**没有过提案的**执行补成 v2 提案对象挂在消息上——历史渲染
+      // 循环一行未改（它只认 `isV2Proposal(p)`）。
+      const stamp = Date.now()
+      const ledgerIds: string[] = []
+      const receiptMessages = done.executions.map((receipt, i) => {
+        const action = typeof receipt.action === 'string' ? receipt.action : ''
+        // action 缺席（旧服务端的回执）按记账类处理：那时 `/ai/execute` 只会被记账
+        // 调用，沿用旧文案比新造一个说法更贴近事实。
+        const ledger = action === '' || LEDGER_OPS.has(action)
+        const ids = (receipt.transaction_ids as string[] | undefined) ?? []
+        if (ledger) ledgerIds.push(...ids)
+        const message = typeof receipt.message === 'string' ? receipt.message : ''
+        return {
+          id: `msg_${stamp}_${i}_assistant`,
+          role: 'assistant' as const,
+          // R-PROD-50 闭环（决策 #6）：回执文案**按 op 分型**。此前一律写「已记录 N 笔
+          // 交易」——对 transaction_update / meta_set 这类 op 恒为假（改一个分类图标
+          // 也会说「已记录 1 笔交易」）。记账类沿用旧文案（它说的是实话），其余用服务端
+          // 工具产出的那句 `message`。模型正文只挂在第一条消息上（它属于整轮，不属于
+          // 某一次执行）。
+          text: `${i === 0 && text ? `${text}\n\n` : ''}${ledger
+            ? `已记录 ${ids.length} 笔交易`
+            : (message || '已完成')}`,
+          // 已经执行完了：这张卡是**回执**不是安全门（`requiresConfirmation: false`），
+          // 没有任何可确认的东西——它进历史靠的是「消息上带 proposal」这一条判据。
+          proposal: {
+            contractVersion: PROPOSAL_CONTRACT_VERSION_V2,
+            proposalId: (typeof receipt.proposal_id === 'string' && receipt.proposal_id)
+              || `executed-${i}`,
+            action: action || 'transaction_add',
+            confidence: 1,
+            requiresConfirmation: false,
+            message,
+            warnings: [],
+            payload: (receipt.payload as Record<string, unknown> | undefined) ?? {},
+          } satisfies ActionProposalV2,
+          proposalStatus: 'committed' as const,
+          // T18-3（REQ-67②）：**执行凭据**——卡上那句「已执行」只认它，不许由正文
+          // 充当。自动执行这条路径此前没有凭据（消息上只有 transactionIds），卡就位后
+          // 一并补上。
+          executions: [{
+            lane: 'server' as const,
+            entityIds: ids,
+            action: action || undefined,
+            before: (receipt.before as Record<string, unknown> | undefined) ?? null,
+          }],
+          // 撤销窗只对**记账**开（决策 #6）：非记账 op 没有「撤销这笔交易」这回事，
+          // 把它们的实体 id 塞进这里，下一次撤销就会拿着一个分类 / 账本的 id 去删交易
+          // （R-PROD-50 记的「撤销窗污染」）。
+          ...(ledger ? { transactionIds: ids } : {}),
+        }
+      })
+      if (ledgerIds.length > 0) activeTxIdsRef.current = ledgerIds
+      setMessages(prev => [...prev, ...receiptMessages])
       await syncAfterWrite()
       return
     }

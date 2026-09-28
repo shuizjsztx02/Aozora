@@ -22,6 +22,7 @@ import { useAssistantChatStore } from '../../platform/store/assistant-chat-store
 import { resetCloudReachabilityForTest } from '../../platform/cloud-reachability'
 import { parseInput } from '../../domain/nlu/parser'
 import type { ActionProposal, ActionProposalV2 } from '../../domain/action-proposal'
+import { isV2Proposal } from '../../domain/action-proposal'
 import { todayBizDate } from '../../domain/date'
 
 const mockBridge = vi.hoisted(() => ({
@@ -532,6 +533,9 @@ describe('use-assistant — agent 流式消费（T-M7-02i）', () => {
     const proposal = pendingV2Proposal()
     mockBridge.executeProposal.mockResolvedValue({
       transaction_ids: ['tx-9'], proposal_id: proposal.proposalId, undo_window_seconds: 5,
+      // T20-1（REQ-77）：回执还带回了 op 名与「执行前」的快照——凭据原样收下，
+      // 卡的分型与新旧对照都从这里取（见 `ExecutionEvidence`）。
+      before: { amountCents: 1200, note: '祖传牛肉面' },
     })
 
     await submitPendingV2(result, proposal)
@@ -545,7 +549,11 @@ describe('use-assistant — agent 流式消费（T-M7-02i）', () => {
     expect(mockBridge.executeProposal).toHaveBeenCalledTimes(1)
     const msg = result.current.messages.find(m => m.proposal?.proposalId === proposal.proposalId)
     expect(msg?.proposalStatus).toBe('committed')
-    expect(msg?.executions).toEqual([{ lane: 'server', entityIds: ['tx-9'] }])
+    expect(msg?.executions).toEqual([{
+      lane: 'server', entityIds: ['tx-9'],
+      action: 'transaction_update',
+      before: { amountCents: 1200, note: '祖传牛肉面' },
+    }])
   })
 
   it('设备执行 op：凭据记在**设备**这一笔上，且不调 /ai/execute（服务端没有它的落点）', async () => {
@@ -652,6 +660,101 @@ describe('use-assistant — 流式消费重构（T-M7-03b）', () => {
     expect(lastMsg(result).text).toBe('已记录 1 笔交易')
     expect(lastMsg(result).transactionIds).toEqual(['tx-7'])
     expect(result.current.phase).toBe('idle')
+  })
+
+  // ─── T20-1（REQ-77）：自动执行也留卡 + 回执诚实化（R-PROD-50）───
+
+  /** T20-1：自动执行那轮的回执形状（服务端 `execute_proposal._execute_receipt`）。 */
+  function executedReceipt(over: Record<string, unknown> = {}): Record<string, unknown> {
+    return {
+      proposal_id: 'agent-add-1', transaction_ids: ['tx-30'], undo_window_seconds: 5,
+      action: 'transaction_add', message: '记录一笔 支出 ¥30.00（餐饮）',
+      payload: { transactions: [{ type: 'expense', amountCents: 3000, categoryId: 'cat-1' }] },
+      before: null,
+      ...over,
+    }
+  }
+
+  /** 跑一轮「服务端自动执行」的回合（done.executions 非空那条路径）。 */
+  async function runAutoExecuted(
+    result: { current: { submitInput: (t: string) => Promise<void> } },
+    executions: Array<Record<string, unknown>>, text = '',
+  ) {
+    await act(async () => {
+      const p = result.current.submitInput('记一笔午饭30块')
+      await flush()
+      if (text) emit('delta', { text, channel: 'content', step: 1 })
+      emit('done', donePayload({ tool_calls: 1, writes: 1, executions }))
+      await p
+    })
+  }
+
+  it('自动执行 → 消息上带 v2 提案（历史卡的判据），不再只剩一行文本', async () => {
+    const { result } = setup()
+    await runAutoExecuted(result, [executedReceipt()], '记好了')
+
+    const last = lastMsg(result)
+    expect(last.text).toBe('记好了\n\n已记录 1 笔交易')
+    // 历史卡的判据是消息上的 `proposal`。改前这条分支**不带它**——单 Step + 高置信的
+    // 记账（最常见的形态）因此在聊天记录里没有卡，切页重进就只剩一行字。
+    expect(last.proposal !== undefined && isV2Proposal(last.proposal)).toBe(true)
+    expect(last.proposal?.action).toBe('transaction_add')
+    // 已经执行完了：这是**回执**不是安全门，没有可确认的东西
+    expect((last.proposal as ActionProposalV2).requiresConfirmation).toBe(false)
+    expect(last.proposalStatus).toBe('committed')
+    // T18-3 口径：卡上「已执行」只认凭据（此前自动执行这轮根本没有凭据）
+    expect(last.executions).toEqual([{
+      lane: 'server', entityIds: ['tx-30'], action: 'transaction_add', before: null,
+    }])
+    expect(last.transactionIds).toEqual(['tx-30'])
+  })
+
+  it('非记账 op → 回执用服务端 message，不再谎报「已记录 N 笔交易」（R-PROD-50）', async () => {
+    const { result } = setup()
+    await runAutoExecuted(result, [executedReceipt({
+      proposal_id: 'agent-cat-1', transaction_ids: ['cat-1'],
+      action: 'category_update', message: '把「交通」的图标改成 🚗',
+      payload: { categoryId: 'cat-1', icon: '🚗' }, before: { name: '交通', icon: null },
+    })])
+
+    const last = lastMsg(result)
+    expect(last.text).toBe('把「交通」的图标改成 🚗')
+    expect(isV2Proposal(last.proposal!)).toBe(true)
+    // 撤销窗**不为它赋值**（决策 #6）：它不是记账，没有「撤销这笔交易」这回事
+    expect(last.transactionIds).toBeUndefined()
+  })
+
+  it('撤销窗只对记账开：非记账 op 的实体 id 不进撤销窗（R-PROD-50）', async () => {
+    const { result } = setup()
+    await runAutoExecuted(result, [executedReceipt()])
+    await runAutoExecuted(result, [executedReceipt({
+      proposal_id: 'agent-cat-1', transaction_ids: ['cat-1'],
+      action: 'category_update', message: '把「交通」的图标改成 🚗',
+      payload: { categoryId: 'cat-1', icon: '🚗' },
+    })])
+
+    await act(async () => { await result.current.undoExecution() })
+
+    // 撤的是上一次**记账**那笔；分类 id 从未进过撤销窗（改前会拿 cat-1 去删交易）
+    expect(mockBridge.softDeleteTransaction).toHaveBeenCalledWith('tx-30', expect.any(String))
+    expect(mockBridge.softDeleteTransaction).not.toHaveBeenCalledWith('cat-1', expect.any(String))
+  })
+
+  it('一轮多次执行 → 每条一张卡（模型正文只挂第一条，不重复）', async () => {
+    const { result } = setup()
+    await runAutoExecuted(result, [
+      executedReceipt(),
+      executedReceipt({ proposal_id: 'agent-add-2', transaction_ids: ['tx-31'] }),
+    ], '记好了')
+
+    const cards = result.current.messages.filter(m => m.proposal)
+    expect(cards).toHaveLength(2)
+    expect(cards[0].text).toBe('记好了\n\n已记录 1 笔交易')
+    expect(cards[1].text).toBe('已记录 1 笔交易')
+    expect(cards.map(m => m.proposal?.proposalId)).toEqual(['agent-add-1', 'agent-add-2'])
+    // 两笔都在撤销窗里（同一个 Turn 记的两笔，撤销要把它们一起撤掉）
+    expect(cards[0].transactionIds).toEqual(['tx-30'])
+    expect(cards[1].transactionIds).toEqual(['tx-31'])
   })
 
   // ─── 会话 id 提升到 store ───

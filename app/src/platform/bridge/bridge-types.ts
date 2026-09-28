@@ -559,6 +559,18 @@ export interface AiExecuteResponse {
   transaction_ids: string[]
   proposal_id: string
   undo_window_seconds: number
+  // ── T20-1（REQ-77 决策 #2）：回执带得出卡片信息 ────────────────────────
+  // 这一段是「自动执行也留卡」的地基：客户端手里只有 `transaction_ids` 时，卡上的
+  // 分类、金额、日期一个都画不出来（与 REQ-69 的 `account_type` 同一形态）。
+  // 四个键都是服务端**回带**（v2 信封本来就带前三个，`before` 在执行前抓）。
+  /** op 名——客户端据此分型：记账三 op 出业务卡，其余回落通用卡。v1 车道为空串。 */
+  action?: string
+  /** 工具产出的那句人类可读中文（通用卡主行，也是非记账 op 的回执文案）。 */
+  message?: string
+  /** 工具产出的参数原样回带（含服务端确定性解析出的 id）。 */
+  payload?: Record<string, unknown>
+  /** **仅**改 / 删类 op：执行**之前**的关键字段快照（卡上新旧对照的数据源）。 */
+  before?: Record<string, unknown> | null
 }
 
 // ─── T-M7-02h: agent 流式通道 ───
