@@ -127,9 +127,10 @@
 即便有人手工注入了也装不进 v1 信封（纵深防御）。
 
 另有一类 op 与车道无关：**执行位置在设备的 op**（``tools.DEVICE_EXECUTED_OPS``，
-当前 ``persona_switch`` / ``consent_record`` / ``sync_trigger`` 三者）。它们照样
-产出提案、照样过校验与授权，但服务端**不执行**——``_handle_proposal`` 对它们
-直接走挂起分支，不参与审批策略的判定（在 loop 里问一次批准换不来任何东西，
+当前 ``persona_switch`` / ``consent_record`` / ``sync_trigger`` / ``reminder_set``
+共四项）。它们照样产出提案、照样过校验与授权，但服务端**不执行**——
+``_handle_proposal`` 对它们直接走挂起分支，不参与审批策略的判定（在 loop 里问一次批准
+换不来任何东西，
 服务端没有可执行的落点），提案随 ``confirm`` 帧与 ``done.proposals`` 交回客户
 端，由它在设备上执行（05f 的执行器按 op 分派）。
 """

@@ -209,6 +209,12 @@ sync change，设备上线后 pull 到）写在 `proposal_ops.py` 的文件头�
 多个）。它排在 multi_step / low_confidence 之前，与 warnings 带来的低置信构成
 **双保险**：两条判据各自独立，任一条被将来的改动放松，另一条仍拦得住。
 
+> **订正（2026-09-28，T20-7 收口）**：以上是 T-M7-05d 当时的记录，**结论不改**。
+> 现状是**四档**理由 —— `high_risk` / `medium_risk` / `multi_step` / `low_confidence`
+> （逐 op 清单见 `docs/product/ai-confirmation-policy.md`），且 `HIGH_RISK_OPS`
+> 已改为**从注册表派生**（唯一事实源 = `Tool.risk == "high"`），不再手写第二份
+> （REQ-78 / T20-3）。
+
 **回执字段（`transaction_ids`）的第二次语义扩张：** 05d 的四个执行体返回的
 `entity_type` 是 `export` / `feedback` / `user`——都不是 sync 的实体类型。它们的
 回执**不登 sync change**（设备 pull 的八类白名单里没有它们），`entity_type` 只是
