@@ -683,12 +683,12 @@ adb -s emulator-5554 shell am start -n com.aozora.app/.MainActivity</code></pre>
       <div class="step-n">5</div>
       <div class="step-b">
         <h3>建 CDP 通路（设备自动化的入口）</h3>
-<pre><code><span class="cmt"># ① 找 WebView 的 devtools socket（PID 每次启动都会变）</span>
-adb -s emulator-5554 shell "cat /proc/net/unix | grep webview_devtools_remote"
-<span class="cmt"># ② 转发到本机端口</span>
-adb -s emulator-5554 forward tcp:9222 localabstract:webview_devtools_remote_&lt;pid&gt;
-<span class="cmt"># ③ 验证：应返回 JSON 数组，其中一项 title 为 "Aozora"</span>
+<pre><code><span class="cmt"># ① 取 app 的 PID 并一步转发到本机端口（PID 每次启动都会变）</span>
+adb -s emulator-5554 forward tcp:9222 \
+  localabstract:webview_devtools_remote_$(adb -s emulator-5554 shell pidof com.aozora.app)
+<span class="cmt"># ② 验证：应返回 JSON 数组，其中一项 title 为 "Aozora"</span>
 curl http://127.0.0.1:9222/json/list</code></pre>
+        <p><strong><code>am force-stop</code> + 重启 app 后 forward 会失效</strong>，必须按新 PID 重新转发再连。</p>
         <div class="note ok" style="margin-top:12px">
           <span class="note-k">实测确认 · 2026-09-29</span>
           <p>本项目源码里<strong>没有</strong>任何 <code>setWebContentsDebuggingEnabled(...)</code> 调用（全仓 grep 零命中），但通路照常可用。原因是 <code>dumpsys package</code> 显示 debug 包带 <code>flags=[ DEBUGGABLE ]</code>——<strong>WebView 远程调试对可调试的包是自动开启的</strong>。</p>
@@ -811,8 +811,12 @@ cd app &amp;&amp; npx vitest run src/__tests__/features/ai-tool-matrix-device-ga
 
   <h3><span class="h3-tag">5.5</span>真机专项：设备内数据取证</h3>
   <ul>
-    <li>设备上 <strong><code>sqlite3</code> 被禁</strong> → 用 <code>run-as</code> 把库文件读出来</li>
-    <li><strong>Room 的列名是 camelCase</strong>（不是 SQL 惯用的 snake_case），查库时别写错</li>
+    <li><strong>模拟器</strong>上 <code>run-as</code> 能直接调 <code>sqlite3</code> 查库，不必拉文件</li>
+    <li><strong>真机上 <code>sqlite3</code> 被禁</strong>（小米/HyperOS 实测），只能把库文件整个拉出来再本地查——<strong>这时必须用 <code>exec-out</code> 而不是 <code>shell</code></strong>：
+<pre style="margin:8px 0 10px"><code>adb exec-out "run-as com.aozora.app cat databases/aozora.db" &gt; f.db</code></pre>
+      <code>adb shell cat</code> 会做换行转换，拉出来的文件<strong>直接是「数据库映像损坏」</strong>。还要<strong>连 <code>-wal</code> / <code>-shm</code> 一起拉到同一目录</strong>，否则读到的是落后于 WAL 的旧值——本项目曾据此误判一个游标为 0，实际是 574。</li>
+    <li><strong>Room 的列名是 camelCase</strong>（<code>bookId</code> / <code>amountCents</code> / <code>bizDate</code> / <code>deletedAt</code>），不是 SQL 惯用的 snake_case，查库时别写错</li>
+    <li>页内存储（localStorage / IndexedDB）用 CDP 在页面里 eval 读即可，比拉库快</li>
     <li>清数据造「新账号」：<code>adb shell pm clear com.aozora.app</code>——<strong>会清掉本地库与偏好设置，动手前先确认不是别人的真机</strong></li>
   </ul>
 </section>
@@ -977,8 +981,8 @@ node server/scripts/ai_tool_matrix/device_flow.mjs TX-ADD-01            <span cl
 adb -s emulator-5554 install -r app/build/outputs/apk/debug/app-debug.apk
 adb -s emulator-5554 reverse tcp:8000 tcp:8000
 adb -s emulator-5554 shell dumpsys connectivity | grep Capabilities
-adb -s emulator-5554 shell "cat /proc/net/unix | grep webview_devtools_remote"
-adb -s emulator-5554 forward tcp:9222 localabstract:webview_devtools_remote_&lt;pid&gt;
+adb -s emulator-5554 forward tcp:9222 \
+  localabstract:webview_devtools_remote_$(adb -s emulator-5554 shell pidof com.aozora.app)
 
 <span class="cmt"># 三条不变量自检（见 6.3）</span>
 grep -c 'const val [A-Z_0-9]* = "' app/src/main/java/com/aozora/app/bridge/BridgeProtocol.kt

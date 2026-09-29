@@ -288,13 +288,16 @@ adb -s emulator-5554 shell am start -n com.aozora.app/.MainActivity
 ### Step 6 · 建 CDP 通路（设备自动化的入口）
 
 ```bash
-# ① 找 WebView 的 devtools socket（注意 PID 每次启动都会变）
-adb -s emulator-5554 shell "cat /proc/net/unix | grep webview_devtools_remote"
-# ② 把 tcp:9222 转发到那个 socket
-adb -s emulator-5554 forward tcp:9222 localabstract:webview_devtools_remote_<pid>
-# ③ 验证：应返回 JSON 数组，其中一项 title 为 "Aozora"
+# ① 取 app 的 PID 并一步转发到本机端口（PID 每次启动都会变）
+adb -s emulator-5554 forward tcp:9222 \
+  localabstract:webview_devtools_remote_$(adb -s emulator-5554 shell pidof com.aozora.app)
+# ② 验证：应返回 JSON 数组，其中一项 title 为 "Aozora"
 curl http://127.0.0.1:9222/json/list
 ```
+
+> 想确认 socket 确实存在时，用 `adb -s emulator-5554 shell "cat /proc/net/unix | grep webview_devtools_remote"`——但**取 PID 用 `pidof` 更直接**，不必去解析那一行。
+>
+> **`am force-stop` + 重启 app 后 forward 会失效**，必须按新 PID 重新转发再连。
 
 **为什么 debug 构建就能用 CDP（2026-09-29 实测确认）**：
 
@@ -465,9 +468,18 @@ adb shell am broadcast -a com.aozora.app.BRIDGE_COMMAND \
 
 ### 5.6 真机专项：设备内数据取证
 
-- 设备上 **`sqlite3` 被禁** → 用 `run-as com.aozora.app cat <db>` 或 `run-as` + 复制出来
-- **Room 的列名是 camelCase**（不是 SQL 惯用的 snake_case），查库时别写错
-- 清数据造「新账号」：`adb shell pm clear com.aozora.app`（**会清掉 Room + SharedPreferences**，先确认不是别人的真机）
+- **模拟器**上 `run-as` 能直接调 `sqlite3` 查库：`adb exec-out "run-as com.aozora.app sqlite3 databases/aozora.db '<SQL>'"`
+- **真机上 `sqlite3` 被禁**（小米/HyperOS 实测），只能把库文件整个拉出来再本地查。**这时必须用 `exec-out` 而不是 `shell`**：
+
+  ```bash
+  adb exec-out "run-as com.aozora.app cat databases/aozora.db" > f.db
+  ```
+
+  `adb shell cat` 会做换行转换，拉出来的文件**直接是 `database disk image is malformed`**。还要**连 `-wal` / `-shm` 一起拉到同一目录**，否则读到的是落后于 WAL 的旧值——本项目曾据此误判一个游标为 0，实际是 574。
+
+- **Room 的列名是 camelCase**（`bookId` / `amountCents` / `bizDate` / `deletedAt`），不是 SQL 惯用的 snake_case，查库时别写错
+- 页内存储（localStorage / IndexedDB）用 CDP 在页面里 eval 读即可，比拉库快
+- 清数据造「新账号」：`adb shell pm clear com.aozora.app`——**会清掉本地库 + 偏好设置，动手前先确认不是别人的真机**
 
 ---
 
@@ -592,8 +604,8 @@ adb devices -l
 adb -s emulator-5554 install -r app/build/outputs/apk/debug/app-debug.apk
 adb -s emulator-5554 reverse tcp:8000 tcp:8000
 adb -s emulator-5554 shell dumpsys connectivity | grep Capabilities
-adb -s emulator-5554 shell "cat /proc/net/unix | grep webview_devtools_remote"
-adb -s emulator-5554 forward tcp:9222 localabstract:webview_devtools_remote_<pid>
+adb -s emulator-5554 forward tcp:9222 \
+  localabstract:webview_devtools_remote_$(adb -s emulator-5554 shell pidof com.aozora.app)
 node server/scripts/ai_tool_matrix/device_flow.mjs
 
 # —— 四板 ——
