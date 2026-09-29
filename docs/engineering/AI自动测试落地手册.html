@@ -1,0 +1,1045 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>AI 自动测试落地手册</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Noto+Serif+SC:wght@500;700&family=Noto+Sans+SC:wght@400;500;700&family=IBM+Plex+Mono:wght@400;500;600&display=swap">
+
+<style>
+  :root {
+    --ground:      #EDF3F8;
+    --surface:     #FFFFFF;
+    --surface-2:   #F6FAFD;
+    --code-bg:     #E9F1F8;
+    --ink:         #122031;
+    --ink-2:       #3C5069;
+    --muted:       #69809B;
+    --rule:        #D6E2EC;
+    --rule-strong: #B6C7D8;
+    --accent:      #1D6CB0;
+    --accent-soft: #E2EEF9;
+    --warn:        #A8730F;
+    --warn-soft:   #FBF1DC;
+    --ok:          #1E9E6A;
+    --ok-soft:     #E1F4EC;
+
+    --serif: "Noto Serif SC", Georgia, "Songti SC", serif;
+    --sans:  "Noto Sans SC", -apple-system, "Segoe UI", "Microsoft YaHei", sans-serif;
+    --mono:  "IBM Plex Mono", "Cascadia Code", Consolas, monospace;
+
+    --measure: 764px;
+    --pad: clamp(18px, 4.5vw, 40px);
+    --r: 3px;
+  }
+
+  @media (prefers-color-scheme: dark) {
+    :root:not([data-theme="light"]) {
+      --ground:      #141A2E;
+      --surface:     #1D2440;
+      --surface-2:   #222A49;
+      --code-bg:     #171D33;
+      --ink:         #EFF1F8;
+      --ink-2:       #B6BCCF;
+      --muted:       #8892B0;
+      --rule:        #2E3856;
+      --rule-strong: #414D74;
+      --accent:      #7FB8EE;
+      --accent-soft: #1B2B45;
+      --warn:        #E0AE55;
+      --warn-soft:   #2E2718;
+      --ok:          #4CC38A;
+      --ok-soft:     #16302A;
+    }
+  }
+
+  :root[data-theme="dark"] {
+    --ground:      #141A2E;
+    --surface:     #1D2440;
+    --surface-2:   #222A49;
+    --code-bg:     #171D33;
+    --ink:         #EFF1F8;
+    --ink-2:       #B6BCCF;
+    --muted:       #8892B0;
+    --rule:        #2E3856;
+    --rule-strong: #414D74;
+    --accent:      #7FB8EE;
+    --accent-soft: #1B2B45;
+    --warn:        #E0AE55;
+    --warn-soft:   #2E2718;
+    --ok:          #4CC38A;
+    --ok-soft:     #16302A;
+  }
+
+  * { box-sizing: border-box; }
+
+  body {
+    margin: 0;
+    background: var(--ground);
+    color: var(--ink);
+    font-family: var(--sans);
+    font-size: 16px;
+    line-height: 1.78;
+    padding-left: max(var(--pad), env(safe-area-inset-left, 0px));
+    padding-right: max(var(--pad), env(safe-area-inset-right, 0px));
+    padding-block: env(safe-area-inset-top, 0px) calc(clamp(56px, 9vw, 112px) + env(safe-area-inset-bottom, 0px));
+    -webkit-font-smoothing: antialiased;
+  }
+
+  .wrap { max-width: var(--measure); margin-inline: auto; }
+
+  /* ---------- masthead ---------- */
+  .masthead {
+    max-width: var(--measure);
+    margin-inline: auto;
+    padding-block: clamp(44px, 8vw, 84px) clamp(26px, 4vw, 38px);
+    display: flex;
+    flex-direction: column;
+    gap: 18px;
+  }
+  .eyebrow {
+    font-family: var(--mono);
+    font-size: 11.5px;
+    font-weight: 500;
+    letter-spacing: .14em;
+    text-transform: uppercase;
+    color: var(--accent);
+  }
+  h1 {
+    font-family: var(--serif);
+    font-weight: 700;
+    font-size: clamp(29px, 6.2vw, 44px);
+    line-height: 1.24;
+    letter-spacing: -.005em;
+    margin: 0;
+    text-wrap: balance;
+  }
+  .standfirst {
+    font-size: clamp(16px, 2.4vw, 17.5px);
+    color: var(--ink-2);
+    margin: 0;
+    max-width: 60ch;
+  }
+  .meta {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px 20px;
+    font-family: var(--mono);
+    font-size: 12px;
+    color: var(--muted);
+    padding-top: 6px;
+    border-top: 1px solid var(--rule);
+    margin-top: 4px;
+  }
+
+  /* ---------- sections ---------- */
+  section {
+    max-width: var(--measure);
+    margin-inline: auto;
+    padding-block: clamp(34px, 6vw, 56px) 0;
+  }
+  .sec-head {
+    display: flex;
+    align-items: baseline;
+    gap: 14px;
+    padding-bottom: 12px;
+    border-bottom: 2px solid var(--ink);
+    margin-bottom: 26px;
+  }
+  .sec-num {
+    font-family: var(--mono);
+    font-size: 13px;
+    font-weight: 600;
+    color: var(--accent);
+    flex: none;
+    padding-top: 4px;
+  }
+  h2 {
+    font-family: var(--serif);
+    font-weight: 700;
+    font-size: clamp(21px, 3.6vw, 27px);
+    line-height: 1.3;
+    margin: 0;
+    text-wrap: balance;
+  }
+  h3 {
+    font-family: var(--sans);
+    font-weight: 700;
+    font-size: 16.5px;
+    line-height: 1.5;
+    margin: 34px 0 12px;
+    color: var(--ink);
+  }
+  h3 .h3-tag {
+    font-family: var(--mono);
+    font-weight: 500;
+    font-size: 12px;
+    color: var(--accent);
+    margin-right: 8px;
+  }
+  p { margin: 0 0 14px; }
+  .lede { color: var(--ink-2); }
+  strong { font-weight: 700; color: var(--ink); }
+  a { color: var(--accent); text-underline-offset: 3px; }
+
+  ul, ol { margin: 0 0 16px; padding-left: 1.35em; }
+  li { margin-bottom: 6px; }
+  li::marker { color: var(--muted); }
+
+  code {
+    font-family: var(--mono);
+    font-size: .875em;
+    background: var(--code-bg);
+    color: var(--ink);
+    padding: .12em .38em;
+    border-radius: var(--r);
+    word-break: break-word;
+  }
+  pre {
+    font-family: var(--mono);
+    font-size: 13px;
+    line-height: 1.72;
+    background: var(--code-bg);
+    border: 1px solid var(--rule);
+    border-radius: var(--r);
+    padding: 14px 16px;
+    margin: 0 0 16px;
+    overflow-x: auto;
+  }
+  pre code { background: none; padding: 0; font-size: inherit; }
+  .cmt { color: var(--muted); }
+
+  /* ---------- the fan-out diagram ---------- */
+  .flow {
+    border: 1px solid var(--rule-strong);
+    border-radius: var(--r);
+    background: var(--surface);
+    padding: 22px 20px;
+    margin-bottom: 26px;
+    display: grid;
+    gap: 14px;
+  }
+  .node {
+    font-family: var(--mono);
+    font-size: 12.5px;
+    line-height: 1.5;
+    padding: 9px 12px;
+    border-radius: var(--r);
+    text-align: center;
+  }
+  .node-src {
+    background: var(--accent-soft);
+    border: 1px solid var(--accent);
+    color: var(--accent);
+    font-weight: 600;
+  }
+  .node-judge {
+    background: var(--ok-soft);
+    border: 1px solid var(--ok);
+    color: var(--ok);
+    font-weight: 600;
+  }
+  .arrow { font-family: var(--mono); color: var(--muted); font-size: 15px; }
+  .arrow-down { text-align: center; font-size: 11px; line-height: 1; color: var(--rule-strong); }
+  .execs { display: grid; gap: 9px; }
+  .exec {
+    border: 1px solid var(--rule);
+    border-left: 3px solid var(--rule-strong);
+    background: var(--surface-2);
+    border-radius: var(--r);
+    padding: 10px 13px;
+  }
+  .exec-top { display: flex; justify-content: space-between; gap: 10px; align-items: baseline; flex-wrap: wrap; }
+  .exec-name { font-weight: 700; font-size: 14px; }
+  .exec-cost { font-family: var(--mono); font-size: 11.5px; color: var(--muted); white-space: nowrap; }
+  .exec-what { font-size: 13.5px; color: var(--ink-2); line-height: 1.6; margin-top: 3px; }
+  .exec.is-off  { border-left-color: var(--ok); }
+  .exec.is-srv  { border-left-color: var(--accent); }
+  .exec.is-dev  { border-left-color: var(--warn); }
+
+  /* ---------- tables ---------- */
+  .tscroll { overflow-x: auto; margin: 0 0 18px; border: 1px solid var(--rule); border-radius: var(--r); background: var(--surface); }
+  table { border-collapse: collapse; width: 100%; font-size: 13.5px; line-height: 1.62; }
+  th, td { text-align: left; padding: 10px 13px; border-bottom: 1px solid var(--rule); vertical-align: top; }
+  th {
+    font-family: var(--mono);
+    font-size: 11.5px;
+    font-weight: 600;
+    letter-spacing: .06em;
+    text-transform: uppercase;
+    color: var(--muted);
+    background: var(--surface-2);
+    white-space: nowrap;
+  }
+  tr:last-child td { border-bottom: none; }
+  td code { font-size: 12.5px; }
+  .num { font-family: var(--mono); font-variant-numeric: tabular-nums; white-space: nowrap; }
+
+  /* ---------- callouts ---------- */
+  .note {
+    background: var(--surface);
+    border: 1px solid var(--rule);
+    border-radius: var(--r);
+    padding: 14px 16px 12px;
+    margin: 0 0 20px;
+  }
+  .note-k {
+    display: inline-block;
+    font-family: var(--mono);
+    font-size: 11px;
+    font-weight: 600;
+    letter-spacing: .1em;
+    text-transform: uppercase;
+    color: var(--accent);
+    background: var(--accent-soft);
+    padding: 2px 7px;
+    border-radius: var(--r);
+    margin-bottom: 9px;
+  }
+  .note.warn { border-color: var(--rule-strong); }
+  .note.warn .note-k { color: var(--warn); background: var(--warn-soft); }
+  .note.ok .note-k { color: var(--ok); background: var(--ok-soft); }
+  .note p:last-child { margin-bottom: 0; }
+  .note ul { margin-bottom: 0; }
+
+  /* ---------- steps ---------- */
+  .steps { display: grid; gap: 0; counter-reset: step; }
+  .step {
+    display: grid;
+    grid-template-columns: 46px 1fr;
+    gap: 0 8px;
+    padding: 18px 0;
+    border-bottom: 1px solid var(--rule);
+  }
+  .step:last-child { border-bottom: none; }
+  .step-n {
+    font-family: var(--mono);
+    font-size: 12px;
+    font-weight: 600;
+    color: var(--accent);
+    padding-top: 3px;
+    font-variant-numeric: tabular-nums;
+  }
+  .step-b h3 { margin: 0 0 8px; font-size: 15.5px; }
+  .step-b > :last-child { margin-bottom: 0; }
+
+  /* ---------- pill row for the invariants ---------- */
+  .pills { display: flex; flex-wrap: wrap; gap: 8px; margin: 0 0 18px; }
+  .pill {
+    font-family: var(--mono);
+    font-size: 12px;
+    border: 1px solid var(--rule-strong);
+    border-radius: var(--r);
+    padding: 5px 10px;
+    color: var(--ink-2);
+    background: var(--surface);
+  }
+  .pill b { color: var(--accent); font-weight: 600; }
+
+  /* ---------- closing ---------- */
+  .close {
+    max-width: var(--measure);
+    margin: clamp(48px, 8vw, 76px) auto 0;
+    padding: 22px 22px 20px;
+    background: var(--surface);
+    border: 1px solid var(--rule-strong);
+    border-top: 3px solid var(--accent);
+    border-radius: var(--r);
+  }
+  .close h2 { font-size: 19px; margin-bottom: 10px; }
+  .close p:last-child { margin-bottom: 0; }
+  .close .quote {
+    font-family: var(--serif);
+    font-size: 17px;
+    line-height: 1.7;
+    color: var(--ink);
+  }
+
+  @media (max-width: 560px) {
+    .step { grid-template-columns: 1fr; gap: 6px; }
+    .step-n { padding-top: 0; }
+  }
+  @media (prefers-reduced-motion: reduce) {
+    * { animation: none !important; transition: none !important; }
+  }
+</style>
+</head>
+<body>
+
+<header class="masthead">
+  <div class="eyebrow">测试方法 · 内部手册</div>
+  <h1>AI 自动测试落地手册</h1>
+  <p class="standfirst">把「AI 自动测试」拆成三层可测量的面，用同一份语料库驱动三种执行器。<strong>日常只需要更新测试需求</strong>——加一条 JSON，不用碰任何脚本。</p>
+  <div class="meta">
+    <span>模拟器 + 安卓真机双端</span>
+    <span>Aozora · T17–T20 实战</span>
+    <span>2026-09-29</span>
+  </div>
+</header>
+
+<main>
+
+<!-- ===================== 0 ===================== -->
+<section>
+  <div class="sec-head">
+    <span class="sec-num">〇</span>
+    <h2>这套方法在测什么</h2>
+  </div>
+
+  <p class="lede">它不是「用 AI 代替人点按钮」。<strong>让 AI 去点按钮，反而比传统 UI 自动化更贵、更不稳定</strong>——模型每次点哪里是随机的，脚本不可复现，失败无法归因。</p>
+
+  <p>真正有价值的是把测试拆成三层测量面，每层各测一件事，而<strong>判据是数据，不是脚本</strong>：</p>
+
+  <div class="flow">
+    <div class="node node-src">corpus.json&nbsp;&nbsp;·&nbsp;&nbsp;测试需求 96 条&nbsp;&nbsp;<span style="font-weight:400">唯一需要日常维护的文件</span></div>
+    <div class="arrow arrow-down">▼</div>
+    <div class="execs">
+      <div class="exec is-off">
+        <div class="exec-top"><span class="exec-name">离线执行器</span><span class="exec-cost">秒级 · 0 模型调用</span></div>
+        <div class="exec-what">路由词表覆盖、客户端闸门、链式依赖——量<strong>确定性的东西</strong></div>
+      </div>
+      <div class="exec is-srv">
+        <div class="exec-top"><span class="exec-name">服务端执行器</span><span class="exec-cost">全量约 25 分钟</span></div>
+        <div class="exec-what">直打 <code>POST /ai/agent</code>，绕开客户端——量<strong>模型层</strong>：选对工具没有、写操作落库没有</div>
+      </div>
+      <div class="exec is-dev">
+        <div class="exec-top"><span class="exec-name">设备执行器</span><span class="exec-cost">每条 30–60 秒</span></div>
+        <div class="exec-what">经 CDP 驱动真实 WebView UI——量<strong>可达性</strong>：这句话能不能走到 AI、确认卡渲染没有</div>
+      </div>
+    </div>
+    <div class="arrow arrow-down">▼</div>
+    <div class="node node-judge">判据 · hit / landing / also / device_expect</div>
+  </div>
+
+  <div class="note warn">
+    <span class="note-k">为什么必须分三层</span>
+    <p>同一句话在三个面上量到的可能是三件事。举例：「刚收到工资 12000 <em>到卡里</em>」——</p>
+    <ul>
+      <li><strong>服务端面：失败。</strong>单字信号「卡」把整句路由进账户域，记账工具根本不在注入面，模型只能反问「记到哪个账户？」这是真缺陷。</li>
+      <li><strong>设备面：成功。</strong>因为客户端本地快路径先把句子接走了，用户看到的是正确结果。</li>
+    </ul>
+    <p>所以：<strong>只看服务端会高估危害，只看设备会漏掉缺陷。</strong></p>
+  </div>
+</section>
+
+<!-- ===================== 1 ===================== -->
+<section>
+  <div class="sec-head">
+    <span class="sec-num">一</span>
+    <h2>六条第一性原理</h2>
+  </div>
+
+  <h3><span class="h3-tag">1.1</span>语料库驱动：测试需求是数据，不是代码</h3>
+  <p>一条用例就是一段 JSON：</p>
+<pre><code>{ "id": "TX-ADD-01", "domain": "transaction", "layer": "core",
+  "kind": "write", "text": "记一笔 12.5 元的早餐",
+  "expect": ["transaction_add"], "landing": "landed",
+  "note": "最直白形态；「记一笔」是路由强信号" }</code></pre>
+  <p><strong>加测试需求 = 往数组里加一条 JSON。</strong>三个执行器共用同一份语料，量的永远是同一批需求。</p>
+
+  <div class="tscroll">
+    <table>
+      <thead><tr><th>层</th><th class="num">条数</th><th>写什么</th></tr></thead>
+      <tbody>
+        <tr><td><code>core</code></td><td class="num">59</td><td>每个工具的主干说法，直白式</td></tr>
+        <tr><td><code>para</code></td><td class="num">15</td><td>同一工具的<strong>换说法</strong>（口语、省略、中文数字、相对日期）</td></tr>
+        <tr><td><code>boundary</code></td><td class="num">15</td><td>负例与能力边界（不该写 / 该澄清 / 高风险该出卡）</td></tr>
+        <tr><td><code>gate</code></td><td class="num">4</td><td>客户端快路径闸门的对照样本</td></tr>
+        <tr><td><code>device</code></td><td class="num">3</td><td>设备能力通道（单向 / 需结果 / 副作用断言）</td></tr>
+      </tbody>
+    </table>
+  </div>
+  <p><code>para</code> 层是中文产品独有的价值：「记一笔早餐 12.5」「早饭花了十二块五」「刚吃早饭 12.5」是三种说法，模型准确率在这三种之间会差很多——<strong>这是传统自动化测不到的</strong>。</p>
+
+  <h3><span class="h3-tag">1.2</span>判据与执行分离</h3>
+  <p>判据变了不重跑模型：<code>run.py --rejudge report.json</code> 直接对已存的报告重算。这一条把「改判据」的成本从 25 分钟降到 0。</p>
+  <div class="tscroll">
+    <table>
+      <thead><tr><th>判据</th><th>含义</th></tr></thead>
+      <tbody>
+        <tr><td><code>hit</code></td><td>期望工具出现在本轮工具调用里（近义工具分属两域时任一都正确）</td></tr>
+        <tr><td><code>landing</code></td><td>写操作的产出形态。<code>landed</code> 真落库 / <code>produced</code> 落库或出确认卡有其一 / <code>proposal</code> 只挂起（设备 op 与高风险 op 的<strong>预期</strong>形态）/ <code>forbidden</code> 一条写路径都不该有 / <code>na</code></td></tr>
+        <tr><td><code>also</code></td><td>附加断言（如记账后应刷新小组件）</td></tr>
+        <tr><td><code>device_expect</code></td><td>设备能力看的是 <code>device_request</code> 帧的 capability 名</td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <div class="note warn">
+    <span class="note-k">三个判据陷阱</span>
+    <p><strong>不搞清楚这三条，量到的全是假数据。</strong></p>
+    <ul>
+      <li><strong><code>done.writes</code> 不是落库数。</strong>它是「写工具的调用次数（含只产出提案的）」。当成落库用，会把设备 op 与高风险 op 一律误判成「已执行」。<strong>落库只看 <code>executions</code>。</strong></li>
+      <li><strong>落库还是出卡由模型行为决定，不是用例的固定属性。</strong><code>confirm_reason</code> 规定：<code>step ≥ 2</code> 或低置信 → 强制确认。同一个工具，直接写就落库、先查再写就出卡，<em>两者都对</em>。真正的失败形态是<strong>两者皆无</strong>。</li>
+      <li><strong>前置数据必须覆盖用例点名的每一个名字。</strong>点名不存在的分类会让创建工具回 <code>unknown_category</code>，模型转去读工具——<strong>看起来像「读后不落子」，实际量到的是环境不是模型</strong>。</li>
+    </ul>
+  </div>
+
+  <h3><span class="h3-tag">1.3</span>闸门思维：逐级排查，不要跳着猜</h3>
+  <p>一个功能在设备上不通，按三道闸门逐级查。端到端不通时，先问「走到哪一道了」：</p>
+  <div class="tscroll">
+    <table>
+      <thead><tr><th>闸门</th><th>不通的后果</th><th>怎么开</th></tr></thead>
+      <tbody>
+        <tr><td>① 客户端 JS</td><td>本地快路径把句子吞了，<strong>云端 AI 根本看不到这句输入</strong></td><td>在线态一律走云端；离线态是设计内的快路径</td></tr>
+        <tr><td>② 客户端 Kotlin</td><td>整条退回旧单发链路</td><td>客户端 feature flag</td></tr>
+        <tr><td>③ 服务端</td><td><code>POST /ai/agent</code> <strong>恒 404</strong></td><td>两个服务端开关置 true</td></tr>
+      </tbody>
+    </table>
+  </div>
+  <p><strong>第一道闸最隐蔽</strong>：它不报错、不留痕，用户只看到「AI 好像变笨了」。为它付过一次大代价——怀疑了模型、prompt、桥命令，最后发现是客户端开关默认关，agent 路径<strong>编译期就不存在</strong>。</p>
+
+  <h3><span class="h3-tag">1.4</span>归因顺序：先查环境与前置，再谈模型行为</h3>
+  <div class="note">
+    <span class="note-k">这条最反直觉</span>
+    <p><strong>测试集自身的缺陷会伪装成模型缺陷，而且伪装得很像。</strong>「读了就收尾」与「对象不存在」在工具调用序列上<em>完全一样</em>——都是一串读工具、零写操作。</p>
+    <p>第一个案例里有 6 条「读后不落子」，逐条核对后<strong>全是模型的正确行为</strong>：上一轮的创建用例先读了一次，提案落在 step 2，按审批策略只出确认卡不落库，于是对象从未存在。</p>
+  </div>
+  <ul>
+    <li><strong>凡被「改 / 删 / 归档 / 切换」引用的对象一律直接播种</strong>，创建用例改用全新名字、作为<strong>终点</strong>，不与改/删目标重叠。</li>
+    <li><strong>加一道离线守卫</strong>：改/删用例必须点得到一个播种名，且不得指向一个已被更早用例改名的对象（改名链必然「找不到 X」）。守卫现在是 <strong>0 条违规</strong>——改了语料先跑 <code>--dry-run</code>，它把问题挡在花模型调用之前。</li>
+  </ul>
+
+  <h3><span class="h3-tag">1.5</span>判据必须能被反向验证（假绿识别）</h3>
+  <p>一个永远不会失败的断言比没有断言更糟，因为它提供<strong>虚假的安全感</strong>。五种实际踩过的假绿形态：</p>
+  <div class="tscroll">
+    <table>
+      <thead><tr><th>形态</th><th>反例</th><th>修法</th></tr></thead>
+      <tbody>
+        <tr><td>变异打在不可达分支</td><td>用例被投影层的同 id 去重先挡住了，改坏代码仍绿</td><td>变异必须打在<strong>真实可达路径</strong></td></tr>
+        <tr><td>自反断言</td><td>用被测代码自己的输出当期望值</td><td>期望值必须来自独立来源</td></tr>
+        <tr><td>触发点早于被测行为</td><td>断言在真正那行代码之前就通过了</td><td>让失败必须发生在被测行<strong>之后</strong></td></tr>
+        <tr><td>环境替身不真推</td><td>jsdom 里 <code>scrollTo</code> 不真的推 <code>scrollTop</code>，判据永远成立</td><td>让替身真的改变状态</td></tr>
+        <tr><td><strong>断言的是事实源的抄写</strong></td><td>某用例名叫「所有命令都已定义」，实际断言一个手写列表有 45 项——真实命令集从 45 涨到 83 期间<strong>它一直绿</strong></td><td>断言必须读<strong>规范清单本身</strong>并交叉核对</td></tr>
+      </tbody>
+    </table>
+  </div>
+  <p><strong>纪律</strong>：新增回归用例后，<strong>先把它打回缺陷形态，确认它确实变红，再恢复</strong>。</p>
+
+  <h3><span class="h3-tag">1.6</span>证据纪律</h3>
+  <ul>
+    <li><strong>不采信「已完成」这类自我报告</strong>，只采信命令与输出。</li>
+    <li>只有获得证据的检查才能标记为通过；无法确认时写「未能确认」，<strong>不得写成通过</strong>。</li>
+    <li>「用例绿」≠「代码对」；「本地绿」≠「HEAD 绿」≠「CI 绿」。</li>
+    <li>上报缺陷必须带：复现命令 / 设备与 APK 版本 / 实际观察 / 是否跨轮一致。<strong>单轮不足以定性</strong>——至少两轮一致，或对可疑用例单独复跑。</li>
+  </ul>
+</section>
+
+<!-- ===================== 2 ===================== -->
+<section>
+  <div class="sec-head">
+    <span class="sec-num">二</span>
+    <h2>基础配置清单</h2>
+  </div>
+
+  <h3><span class="h3-tag">2.1</span>工具链</h3>
+  <div class="tscroll">
+    <table>
+      <thead><tr><th>工具</th><th>版本 / 路径</th><th>说明</th></tr></thead>
+      <tbody>
+        <tr><td>JDK</td><td class="num">Temurin 17</td><td>Android 构建</td></tr>
+        <tr><td>Android SDK</td><td class="num">platforms;android-36<br>build-tools;36.1.0</td><td>经 <code>ANDROID_HOME</code> 定位</td></tr>
+        <tr><td>adb</td><td class="num">platform-tools</td><td><strong>不要</strong>用机器 PATH 里另一份旧 adb，版本会乱</td></tr>
+        <tr><td>Node</td><td class="num">≥ 22</td><td>CDP 脚本直接用全局 <code>WebSocket</code> + <code>http</code>，<strong>不需要任何 npm 依赖</strong></td></tr>
+        <tr><td>Python</td><td class="num">3.12+</td><td>服务端与执行器</td></tr>
+        <tr><td>Docker</td><td class="num">任意新稳定版</td><td>起数据库</td></tr>
+        <tr><td>模拟器</td><td class="num">Pixel_7_API_36</td><td>见 2.3</td></tr>
+      </tbody>
+    </table>
+  </div>
+  <div class="note ok">
+    <span class="note-k">为什么这套东西好推广</span>
+    <p>CDP 脚本<strong>零依赖</strong>——只用 Node 内置的 <code>http</code> 和全局 <code>WebSocket</code>。这意味着<strong>发一个 <code>.mjs</code> 文件给同事就能跑</strong>，不用 <code>npm install</code>、不用交接 node_modules。</p>
+  </div>
+
+  <h3><span class="h3-tag">2.2</span>服务三件套与四板</h3>
+  <div class="tscroll">
+    <table>
+      <thead><tr><th>件</th><th>命令</th><th>端口</th></tr></thead>
+      <tbody>
+        <tr><td>PostgreSQL 18</td><td><code>docker compose up -d db</code></td><td class="num">5432</td></tr>
+        <tr><td>FastAPI 服务端</td><td><code>uvicorn src.main:app --reload</code></td><td class="num">8000</td></tr>
+        <tr><td>Android APK</td><td><code>.\gradlew.bat :app:assembleDebug</code></td><td>—</td></tr>
+      </tbody>
+    </table>
+  </div>
+  <p><strong>起 uvicorn 之前先查端口</strong>——8000 常被上一轮的旧进程占着。<strong>四板基线</strong>（每次交付必报的四个数字）：</p>
+  <div class="pills">
+    <span class="pill"><b>板 1</b> 类型检查 <code>npm run typecheck</code></span>
+    <span class="pill"><b>板 2</b> 客户端单测 <code>npm test -- --run</code></span>
+    <span class="pill"><b>板 3</b> 服务端单测 <code>pytest tests/ -q</code></span>
+    <span class="pill"><b>板 4</b> Android <code>:app:testDebugUnitTest</code></span>
+  </div>
+
+  <h3><span class="h3-tag">2.3</span>开关矩阵 <span style="color:var(--warn)">★ 最容易漏</span></h3>
+  <p><strong>AI 路径默认全是关的。</strong>测试前必须逐个确认：</p>
+  <div class="tscroll">
+    <table>
+      <thead><tr><th>开关</th><th>默认</th><th>不打开的症状</th></tr></thead>
+      <tbody>
+        <tr><td><code>AI_AGENT_ENABLED</code></td><td><strong>false</strong></td><td><code>POST /ai/agent</code> 恒 404</td></tr>
+        <tr><td><code>AI_DEVICE_CHANNEL_ENABLED</code></td><td><strong>false</strong></td><td>设备能力（触感/小组件/分享/权限/选图）不注入，模型看不到这 6 个能力</td></tr>
+        <tr><td><code>AI_AGENT_PROVIDER_API_KEY</code></td><td>None</td><td>Agent 链路无 key</td></tr>
+        <tr><td><code>AI_PROVIDER_API_KEY</code></td><td>None</td><td>快路径网关降级 503——<strong>启动不报错，调用时才报</strong></td></tr>
+        <tr><td><code>AI_AGENT_CLIENT_ENABLED</code></td><td>false</td><td>客户端整条退回旧单发链路</td></tr>
+        <tr><td><code>AI_DAILY_QUOTA_GUEST</code></td><td class="num">20</td><td>连测时被打断——联调期在 <code>.env</code> 提到 100000（<strong>改配置不改代码</strong>）</td></tr>
+      </tbody>
+    </table>
+  </div>
+  <p>服务端单测<strong>不受这套开关影响</strong>：<code>conftest.py</code> 把 AI 相关开关全部钉死成「关」，防止本机 <code>.env</code> 里的真 key 污染「无 key → 降级」这类断言。注意 <code>AI_TIMEOUT_SECONDS</code> <strong>上限 12.0</strong>，配大了直接 <code>ValidationError</code> 起不来。</p>
+
+  <h3><span class="h3-tag">2.4</span>设备双端</h3>
+  <div class="tscroll">
+    <table>
+      <thead><tr><th></th><th>模拟器</th><th>真机</th></tr></thead>
+      <tbody>
+        <tr><td>装包</td><td><code>adb -s emulator-5554 install -r</code></td><td>常规即可；<strong>小米/HyperOS 会被拒 → 改 <code>push</code> + <code>pm install</code></strong></td></tr>
+        <tr><td>连服务端</td><td>默认 <code>10.0.2.2:8000</code>（模拟器专用宿主别名）</td><td><strong>必须 <code>adb reverse</code></strong>（手机与 PC 常不在同一网段）</td></tr>
+        <tr><td>网络前置</td><td><strong>必须 <code>VALIDATED</code></strong></td><td>一般正常</td></tr>
+        <tr><td>稳定性</td><td>稳，可反复重装</td><td><strong>USB 会中途掉线</strong>；走查优先模拟器</td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <div class="note warn">
+    <span class="note-k">最贵的一个假结论</span>
+    <p>模拟器 wifi 常是 <code>INTERNET</code> 但<strong>缺 <code>VALIDATED</code></strong>（探测不可达）→ 同步任务反复取消，<strong>表现为 UI 显示「已同步」而本地一条都没推出去</strong>。</p>
+<pre><code>adb -s emulator-5554 shell dumpsys connectivity | grep Capabilities
+<span class="cmt"># 没有 VALIDATED 就禁用探测（最省事）</span>
+adb -s emulator-5554 shell settings put global captive_portal_mode 0
+adb -s emulator-5554 shell svc wifi disable ; adb -s emulator-5554 shell svc wifi enable</code></pre>
+    <p>走 <code>adb reverse</code> 还有两个前提：debug APK 默认<strong>写死</strong> <code>10.0.2.2</code>，要走 reverse 必须<strong>重新构建</strong>；端口必须与 uvicorn 实际监听的一致。<strong><code>adb reverse</code> 的增删只影响新连接 → 改完杀进程重启 app 最可靠。</strong>模拟器重启后 reverse / forward / VALIDATED <strong>全丢，要重来</strong>。</p>
+  </div>
+
+  <h3><span class="h3-tag">2.5</span>测试资产骨架</h3>
+  <p>要跑起来，需要的不是「一套脚本」，而是这五样资产：</p>
+<pre><code>server/scripts/ai_tool_matrix/
+├── corpus.json        <span class="cmt"># ★ 测试需求（唯一需要日常维护的文件）</span>
+├── run.py             <span class="cmt"># 服务端执行器（打 /ai/agent）</span>
+├── device_flow.mjs    <span class="cmt"># 设备执行器（CDP 驱动真 UI）</span>
+├── report.json        <span class="cmt"># 逐条明细（--rejudge 的数据源）</span>
+└── routes.json        <span class="cmt"># 离线路由结果</span>
+app/src/__tests__/features/
+└── ai-tool-matrix-device-gate.test.ts   <span class="cmt"># 客户端闸门用例</span></code></pre>
+</section>
+
+<!-- ===================== 3 ===================== -->
+<section>
+  <div class="sec-head">
+    <span class="sec-num">三</span>
+    <h2>启动步骤</h2>
+  </div>
+  <p class="lede">前提：仓库已 clone，<code>app/</code> 下已 <code>npm ci</code>——Gradle 的 <code>preBuild</code> 会自动跑 Vite 构建并把产物同步进 APK assets，缺了会失败。</p>
+
+  <div class="steps">
+    <div class="step">
+      <div class="step-n">1</div>
+      <div class="step-b">
+        <h3>起数据库并跑迁移</h3>
+<pre><code>docker compose up -d db && docker compose ps
+cd server && alembic upgrade head && alembic current</code></pre>
+        <p>迁移配置里的 URL 是<strong>留空</strong>的，运行时从环境变量注入。报 "invalid URL" 是环境变量没设，不是配置写错。</p>
+      </div>
+    </div>
+
+    <div class="step">
+      <div class="step-n">2</div>
+      <div class="step-b">
+        <h3>配 .env 并起服务端</h3>
+<pre><code>cd server && cp .env.example .env      <span class="cmt"># 首次</span>
+uvicorn src.main:app --reload --host 127.0.0.1 --port 8000
+curl http://127.0.0.1:8000/api/v1/health/ready   <span class="cmt"># 含 DB 探活</span></code></pre>
+        <div class="note warn" style="margin-top:12px">
+          <span class="note-k">每次开工必做</span>
+          <p>确认 uvicorn 跑的是<strong>当前 HEAD 代码</strong>。沿用几天前的旧进程会让整轮结论建立在旧代码上——本项目为此付过两次代价。多实例并存时，旧进程还会让设备结果<strong>反向</strong>。</p>
+        </div>
+      </div>
+    </div>
+
+    <div class="step">
+      <div class="step-n">3</div>
+      <div class="step-b">
+        <h3>先跑离线面（0 成本）</h3>
+<pre><code>cd server && python scripts/ai_tool_matrix/run.py --dry-run</code></pre>
+        <p>不花任何模型调用，秒级返回，直接给出<strong>路由漏注入</strong>与<strong>链式依赖违规</strong>两个核验。<strong>改完语料第一件事就是跑它</strong>——把问题挡在花钱之前。</p>
+      </div>
+    </div>
+
+    <div class="step">
+      <div class="step-n">4</div>
+      <div class="step-b">
+        <h3>起设备、装 APK</h3>
+<pre><code>adb devices -l
+adb -s emulator-5554 install -r app/build/outputs/apk/debug/app-debug.apk
+adb -s emulator-5554 reverse tcp:8000 tcp:8000
+adb -s emulator-5554 shell am start -n com.aozora.app/.MainActivity</code></pre>
+        <p><strong>命令一律带 <code>-s</code></strong>。同时插着真机时，裸 <code>adb install</code> 会<strong>误装到真机</strong>。</p>
+      </div>
+    </div>
+
+    <div class="step">
+      <div class="step-n">5</div>
+      <div class="step-b">
+        <h3>建 CDP 通路（设备自动化的入口）</h3>
+<pre><code><span class="cmt"># ① 找 WebView 的 devtools socket（PID 每次启动都会变）</span>
+adb -s emulator-5554 shell "cat /proc/net/unix | grep webview_devtools_remote"
+<span class="cmt"># ② 转发到本机端口</span>
+adb -s emulator-5554 forward tcp:9222 localabstract:webview_devtools_remote_&lt;pid&gt;
+<span class="cmt"># ③ 验证：应返回 JSON 数组，其中一项 title 为 "Aozora"</span>
+curl http://127.0.0.1:9222/json/list</code></pre>
+        <div class="note ok" style="margin-top:12px">
+          <span class="note-k">实测确认 · 2026-09-29</span>
+          <p>本项目源码里<strong>没有</strong>任何 <code>setWebContentsDebuggingEnabled(...)</code> 调用（全仓 grep 零命中），但通路照常可用。原因是 <code>dumpsys package</code> 显示 debug 包带 <code>flags=[ DEBUGGABLE ]</code>——<strong>WebView 远程调试对可调试的包是自动开启的</strong>。</p>
+          <p>两条推论决定了适用边界：<strong>release APK 走不通这条路</strong>；<strong>如果哪天 <code>/json/list</code> 连不上，先查 <code>flags=</code> 里有没有 <code>DEBUGGABLE</code></strong>，而不是去改脚本。</p>
+        </div>
+      </div>
+    </div>
+
+    <div class="step">
+      <div class="step-n">6</div>
+      <div class="step-b">
+        <h3>跑设备面与服务端面</h3>
+<pre><code>node server/scripts/ai_tool_matrix/device_flow.mjs             <span class="cmt"># 默认 10 条子集</span>
+node server/scripts/ai_tool_matrix/device_flow.mjs TX-ADD-01   <span class="cmt"># 指定用例</span>
+cd server &amp;&amp; python -u scripts/ai_tool_matrix/run.py            <span class="cmt"># 服务端全量</span>
+cd app &amp;&amp; npx vitest run src/__tests__/features/ai-tool-matrix-device-gate.test.ts</code></pre>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- ===================== 4 ===================== -->
+<section>
+  <div class="sec-head">
+    <span class="sec-num">四</span>
+    <h2>日常运转：只更新测试需求</h2>
+  </div>
+  <p class="lede"><strong>这是整套配置存在的目的。</strong>一轮完整回归只有四步：</p>
+<pre><code>① 改 corpus.json          <span class="cmt">← 唯一需要人写的东西</span>
+② run.py --dry-run         <span class="cmt">← 秒级，核验路由与链式依赖</span>
+③ run.py（服务端全量）       <span class="cmt">← 量模型层</span>
+④ device_flow.mjs &lt;子集&gt;   <span class="cmt">← 量可达性与渲染</span></code></pre>
+
+  <h3><span class="h3-tag">4.1</span>加一条用例的三条自检</h3>
+  <p>对应 1.2 的三个陷阱，逐条问自己：</p>
+  <ol>
+    <li>这条用例点名的名字，在播种数据里<strong>存在吗</strong>？（点名不存在的对象 → 量到的是环境）</li>
+    <li>这是<strong>写</strong>用例吗？判据该是 <code>produced</code> 而不是 <code>landed</code>——除非它是「单发、无前置读取」的快路径用例。</li>
+    <li>它跟更早的用例<strong>撞名字</strong>吗？撞名会被模型正确地拒绝，然后被记成失败。</li>
+  </ol>
+
+  <h3><span class="h3-tag">4.2</span>加一个工具时的连带面</h3>
+  <p>工具注册表是权威源。<strong>加工具时这几处要一起改，而且很容易漏一处</strong>：注册表本身（含参数 schema）→ 域路由词表 → <strong>Skill 文档（漏写是静默的）</strong> → 执行器接线（服务端 or 设备端）→ 语料加至少一条 <code>core</code> 用例 → 契约 fixture 两套。</p>
+  <p><strong>单域上限 8 个工具</strong>——超过 8 个，模型的选择准确率显著下降。这条是实测结论，不是经验之谈。</p>
+
+  <h3><span class="h3-tag">4.3</span>一轮回归的产出</h3>
+  <ul>
+    <li><code>report.json</code>：逐条明细（<strong>这是交付物，不是中间产物</strong>）</li>
+    <li>通过率 + 按域拆解</li>
+    <li>未通过逐条：输入 / 实际 / 判定 / 归属（客户端 or 服务端）</li>
+    <li><strong>跨轮一致性</strong>：哪些结论跨轮稳定，哪些是波动</li>
+  </ul>
+  <div class="note warn">
+    <span class="note-k">一条容易犯的错</span>
+    <p><strong>缺陷清单必须合并三个测量面。</strong>只看服务端那几条会<strong>严重低估</strong>问题——因为设备上还有一道闸门挡在 AI 前面，那里的问题一次都没进过服务端测试集。合并后才是完整清单。</p>
+  </div>
+</section>
+
+<!-- ===================== 5 ===================== -->
+<section>
+  <div class="sec-head">
+    <span class="sec-num">五</span>
+    <h2>双端走查配方</h2>
+  </div>
+
+  <h3><span class="h3-tag">5.1</span>页面内注入 JS 的六条配方</h3>
+  <div class="tscroll">
+    <table>
+      <thead><tr><th>配方</th><th>为什么</th></tr></thead>
+      <tbody>
+        <tr><td><strong>点击必须走 <code>Input.dispatchMouseEvent</code></strong>，不要用 <code>el.click()</code></td><td><code>el.click()</code> 在 WebView 里触发不了某些合成事件（React 合成事件、hover 态）；CDP 的 Input 域走 Chromium 真实输入管线，等价于一次真触摸</td></tr>
+        <tr><td><strong>点击前先 <code>scrollIntoView({block:'center'})</code></strong></td><td>视口外的元素坐标算出来在屏幕外，事件直接打空</td></tr>
+        <tr><td><strong>React 受控 input 必须用 native setter</strong></td><td>直接 <code>el.value = x</code> 不会触发 React 的 onChange（React 在 value 上装了 descriptor 做劫持）。要用原型上的 setter 调用，再手工派发 <code>input</code> 事件</td></tr>
+        <tr><td><strong>路由是 hash 路由，用 <code>location.hash</code> 导航</strong></td><td>不能用路径导航；<strong>视觉基线就因为用路径导航，导致认证页 20 张基线全是首页</strong></td></tr>
+        <tr><td><strong><code>reload</code> 后页内记录器全丢</strong></td><td>注入的全局变量、事件钩子在 reload 后不存在。曾有整轮误判「没走 agent」，就是踩了这条</td></tr>
+        <tr><td><strong>断言优先读 <code>localStorage</code>，不要读 DOM</strong></td><td>持久化中间件把 store 序列化到存储里。<strong>DOM 是视图投影，存储是事实源</strong>。前端打的 <code>data-testid</code> 则是 UI 与测试的解耦契约</td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <div class="note">
+    <span class="note-k">测量学：让判据能区分两种可能</span>
+    <p>验证「进入会话即在最新消息、无滚动动画」时，用 <code>requestAnimationFrame</code> 采样 <code>scrollTop</code>：36 条消息的会话下<strong>第 1 帧即底</strong>（<code>scrollTop = scrollHeight − clientHeight</code>），其后 89 帧恒定、无中间值。</p>
+    <p><strong>再做一次灵敏度对照</strong>：手动触发平滑滚动，采样到 <strong>43 个不同值</strong>。两种行为在采样上截然可分，才排除了「测量方法本身分辨不出」的假绿。</p>
+  </div>
+
+  <h3><span class="h3-tag">5.2</span>绕过 UI 直调原生桥</h3>
+  <p>有些东西不必走 UI——直接调原生桥更快、更稳。关键难点是<strong>桥的响应是多路复用的</strong>：所有响应都走同一个回调，所以必须<strong>按 requestId 过滤</strong>，并<strong>链式保留原有回调</strong>（否则会冲掉前端自己注册的那个）。注入一个 Promise 包装：命中的 resolve 并还原，未命中的透传给原回调，超时也要还原。</p>
+  <p><strong>备用通道</strong>：debug 构建里还有一个只走 adb、<strong>完全不依赖 WebView</strong> 的桥入口——</p>
+<pre><code>adb shell am broadcast -a com.aozora.app.BRIDGE_COMMAND \
+  --es command "bridge.getVersion" --es payload "e30="</code></pre>
+  <p>它比 CDP 稳但更粗（拿不到页面上下文）。<strong>两条通道互为兜底</strong>：CDP 拿不到结果时，先用广播确认「桥本身是好的」，就能立刻把问题二分到「桥坏了」还是「页面驱动坏了」。</p>
+
+  <h3><span class="h3-tag">5.3</span>两条取证通道</h3>
+  <div class="tscroll">
+    <table>
+      <thead><tr><th>通道</th><th>抓到的层次</th><th>什么时候用</th></tr></thead>
+      <tbody>
+        <tr><td><strong>CDP <code>Network</code> 域</strong></td><td>Chromium 网络栈层，<strong>含 SSE 帧</strong></td><td>看流式响应、看真实请求体</td></tr>
+        <tr><td><strong>页内 monkey-patch <code>fetch</code></strong></td><td><strong>应用层</strong>，即状态机处理后的形态</td><td>看业务错误最直接；注意要 clone 响应才能取正文而不消费掉流</td></tr>
+      </tbody>
+    </table>
+  </div>
+  <p>抓不到或数据不对时，先确认<strong>服务端日志里到底有没有你这次的请求</strong>——多实例并存时，你打到的可能不是你以为的那个实例。</p>
+
+  <h3><span class="h3-tag">5.4</span>模拟器 vs 真机</h3>
+  <div class="tscroll">
+    <table>
+      <thead><tr><th>维度</th><th>差别</th><th>影响</th></tr></thead>
+      <tbody>
+        <tr><td>网络</td><td>模拟器可能缺 <code>VALIDATED</code></td><td>同步静默不跑，UI 却说「已同步」</td></tr>
+        <tr><td>连通方式</td><td>真机必须 <code>adb reverse</code></td><td>端口不一致 → 全部同步失败</td></tr>
+        <tr><td>装包</td><td>小米/HyperOS 拒 <code>adb install</code></td><td>改 <code>push</code> + <code>pm install</code></td></tr>
+        <tr><td>稳定性</td><td>真机 USB 会中途掉线</td><td>走查优先模拟器，真机只做最终确认</td></tr>
+        <tr><td><strong>字体度量</strong></td><td><strong>Android 的 <code>tabular-nums</code> 比桌面宽 4.6–6.3%</strong>（中文≈一致）</td><td>桌面视觉基线<strong>不能</strong>代替设备侧布局判定</td></tr>
+        <tr><td>渲染</td><td>桌面是 Chromium 渲染，设备是 WebView</td><td>两者<strong>互补而非等价</strong>——逐页主题覆盖靠桌面，字体与光栅靠设备</td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <h3><span class="h3-tag">5.5</span>真机专项：设备内数据取证</h3>
+  <ul>
+    <li>设备上 <strong><code>sqlite3</code> 被禁</strong> → 用 <code>run-as</code> 把库文件读出来</li>
+    <li><strong>Room 的列名是 camelCase</strong>（不是 SQL 惯用的 snake_case），查库时别写错</li>
+    <li>清数据造「新账号」：<code>adb shell pm clear com.aozora.app</code>——<strong>会清掉本地库与偏好设置，动手前先确认不是别人的真机</strong></li>
+  </ul>
+</section>
+
+<!-- ===================== 6 ===================== -->
+<section>
+  <div class="sec-head">
+    <span class="sec-num">六</span>
+    <h2>边界与坑清单</h2>
+  </div>
+
+  <h3><span class="h3-tag">6.1</span>先划清边界，避免过度承诺</h3>
+  <div class="tscroll">
+    <table>
+      <thead><tr><th>边界</th><th>说明</th></tr></thead>
+      <tbody>
+        <tr><td><strong>release APK 不可自动化</strong></td><td>CDP 需要可调试的包；设备自动化只覆盖 debug 构建</td></tr>
+        <tr><td><strong>物理真机未全覆盖</strong></td><td>本项目多轮设备回归实际在模拟器完成，触屏手感差异未覆盖</td></tr>
+        <tr><td><strong>无人值守的环境限制</strong></td><td>提醒类能力在无人值守下只能验到第一步（系统权限框会超时），完整路径只能人工验</td></tr>
+        <tr><td><strong>模型有非确定性</strong></td><td>单轮结果不足以定性；稳定结论至少两轮一致</td></tr>
+        <tr><td><strong>视觉基线 ≠ 设备渲染</strong></td><td>桌面基线是 Chromium，设备是 WebView，两者互补</td></tr>
+        <tr><td><strong>环境替身测不到布局时序</strong></td><td>「有没有机会先画出那一帧」的差别只有设备侧证据——已在测试文件头写明</td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <h3><span class="h3-tag">6.2</span>坑清单（按最容易踩排序）</h3>
+  <div class="tscroll">
+    <table>
+      <thead><tr><th class="num">#</th><th>坑</th><th>症状</th></tr></thead>
+      <tbody>
+        <tr><td class="num">1</td><td>模拟器缺 <code>VALIDATED</code></td><td>同步静默不跑，UI 显示「已同步」</td></tr>
+        <tr><td class="num">2</td><td>AI Agent 默认关</td><td><code>/ai/agent</code> 404（<strong>三个开关都要开</strong>）</td></tr>
+        <tr><td class="num">3</td><td>沿用旧 uvicorn 进程</td><td>结论建立在旧代码上；多实例还会让设备结果反向</td></tr>
+        <tr><td class="num">4</td><td><code>adb reverse</code> 端口与 uvicorn 不一致</td><td>全部同步失败</td></tr>
+        <tr><td class="num">5</td><td>debug APK 写死 <code>10.0.2.2</code></td><td>想走 reverse 必须重建</td></tr>
+        <tr><td class="num">6</td><td><code>adb</code> 命令没带 <code>-s</code></td><td>误装到真机</td></tr>
+        <tr><td class="num">7</td><td>模拟器重启后设置全丢</td><td>reverse / forward / VALIDATED 都要重来</td></tr>
+        <tr><td class="num">8</td><td><code>pm clear</code> 清了别人的真机</td><td>动手前确认设备归属</td></tr>
+        <tr><td class="num">9</td><td>guest 配额 20</td><td>连测被打断；在 <code>.env</code> 里提额，<strong>不改代码</strong></td></tr>
+        <tr><td class="num">10</td><td>超时常量有上限</td><td>配大了直接起不来</td></tr>
+        <tr><td class="num">11</td><td>环境文件不进仓库</td><td>首次必须从模板复制</td></tr>
+        <tr><td class="num">12</td><td>改了 prompts / 路由词表</td><td>必须重启服务端才生效</td></tr>
+        <tr><td class="num">13</td><td>服务端日志里没有你这次的请求</td><td>打到了别的实例上</td></tr>
+        <tr><td class="num">14</td><td><code>/json/list</code> 连不上</td><td>先查包是不是可调试，别急着改脚本</td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <h3><span class="h3-tag">6.3</span>三条不变量：每次改动必核</h3>
+  <p>判断「我这次动没动到跨层契约」，看这三个数——任一变化都要在交付记录里显式声明：</p>
+  <div class="tscroll">
+    <table>
+      <thead><tr><th>不变量</th><th>为什么危险</th></tr></thead>
+      <tbody>
+        <tr><td><strong>桥命令集</strong></td><td>前后端两侧各自维护，漏改一侧即静默失配</td></tr>
+        <tr><td><strong>本地库版本</strong></td><td>版本没升就改表 → 老用户升级后崩</td></tr>
+        <tr><td><strong>偏好白名单键数</strong></td><td>多一个键 = 多一条能被 AI 改写的偏好</td></tr>
+      </tbody>
+    </table>
+  </div>
+  <div class="note warn">
+    <span class="note-k">不要相信文档里的计数</span>
+    <p>本项目这个数字从 85 漂到过 83，两份不同时期的文档各写着一个数。<strong>要实测，并至少三处同步</strong>：Kotlin 侧命令表 / TypeScript 侧客户端 / 桥测试里的白名单断言。</p>
+  </div>
+
+  <h3><span class="h3-tag">6.4</span>跨层契约：改一处必须同时改</h3>
+  <div class="tscroll">
+    <table>
+      <thead><tr><th>契约</th><th>同步点与事实源</th></tr></thead>
+      <tbody>
+        <tr><td><strong>JS 桥命令集</strong></td><td>Kotlin 命令表 / TS 客户端 / 白名单 / 漂移检测用例——<strong>规范清单是唯一的权威源</strong>，检测用例必须读它并与另一侧交叉核对</td></tr>
+        <tr><td><strong>AI 工具名</strong></td><td>必须<strong>下划线</strong>不能点号——点号会让 provider 返回 400，整轮请求死掉</td></tr>
+        <tr><td><strong>金额符号</strong></td><td>收入 <code>+</code>、支出 <code>−</code>，是<strong>隐性跨端契约</strong></td></tr>
+        <tr><td><strong>契约 op 注册表</strong></td><td>两套版本 fixture 都要加</td></tr>
+      </tbody>
+    </table>
+  </div>
+  <div class="note">
+    <span class="note-k">一个现成的反面教材</span>
+    <p>某个用例名叫「所有命令都已定义」，但它实际断言的是<strong>一个手写字面量列表有 45 项</strong>，不读规范清单。于是真实命令集从 45 涨到 83 的过程中，<strong>它一直是绿的</strong>。</p>
+    <p>两个教训：<strong>断言的必须是事实源本身，不是事实源的一份抄写</strong>（抄写会漂移，且漂移时不报错）；<strong>测试的名字是对读者的承诺</strong>——名不副实比不写这个测试危害更大，它让后来的人以为这块已经被守住了。</p>
+  </div>
+</section>
+
+<!-- ===================== 7 ===================== -->
+<section>
+  <div class="sec-head">
+    <span class="sec-num">七</span>
+    <h2>迁移到你自己的项目</h2>
+  </div>
+
+  <h3><span class="h3-tag">7.1</span>第一周：最小可运行版本</h3>
+  <p>不必一次建成三层测量面。<strong>先做服务端面 + 离线面</strong>，它们成本最低、收益最大。</p>
+  <ul>
+    <li><strong>写语料库</strong>：先覆盖主干说法，20–30 条即可开工</li>
+    <li><strong>写服务端执行器</strong>：一个函数发请求、一个函数判结果。<strong>判据与执行分离</strong>（支持重判）</li>
+    <li><strong>加离线核验</strong>：把「前置数据是否齐」「链式依赖是否自洽」做成 0 成本检查</li>
+    <li><strong>建开关表</strong>：把所有 feature flag 列成一张表，写清「不开的症状」——这张表能省掉大量「功能没反应」的排查时间</li>
+    <li><strong>建四板基线</strong>：定下你的四个数字与命令，每次交付都报</li>
+  </ul>
+
+  <h3><span class="h3-tag">7.2</span>第二周：加上设备面</h3>
+  <ul>
+    <li>确认你的 App <strong>debug 包能开 WebView 调试</strong>，拿到调试端点列表返回你的页面</li>
+    <li>把「找 socket → 转发 → 连 WS → 求值 → 截图」抽成一个<strong>零依赖</strong>脚本</li>
+    <li>封装四个原语：按文本点击 / 输入（native setter）/ 导航（hash）/ 等待</li>
+    <li>让设备执行器<strong>读同一份语料库</strong>，只跑「必须真机才能验」的子集</li>
+  </ul>
+
+  <h3><span class="h3-tag">7.3</span>持续：立纪律</h3>
+  <ul>
+    <li><strong>每修一个缺陷 → 变成一条自动用例</strong>（回归集合来自真实咬痕，不是凭想象编写）</li>
+    <li><strong>每个新用例先反向验证它确实会红</strong></li>
+    <li><strong>每轮收口记下「今天有什么值得记的」</strong>：真实踩过的坑 / 反直觉的发现 / 会重犯的错</li>
+    <li><strong>失败归因先分三层</strong>：前置阻塞 → 环境不稳定 → 代码回归；<strong>不要默认「红 = 回归」</strong></li>
+  </ul>
+</section>
+
+<aside class="close">
+  <h2>交接给同事的一句话</h2>
+  <p class="quote">你只需要会两件事：<strong>往语料库里加一条 JSON</strong>，和<strong>看懂报告里的判定</strong>。环境怎么起、探针怎么打、判据怎么算，都已经固化成命令了。</p>
+  <p style="margin-top:14px; color:var(--ink-2); font-size:14.5px;">命令速查、语料模板与术语对照见下方附录。首个完整案例见 <code>docs/testing/T-M7-ai-tool-matrix-2026-09-21.md</code>；本页与仓库内 <code>docs/engineering/AI自动测试落地手册.md</code> 同源。</p>
+</aside>
+
+</main>
+
+<!-- ===================== 附录 A ===================== -->
+<section>
+  <div class="sec-head">
+    <span class="sec-num">A</span>
+    <h2>命令速查</h2>
+  </div>
+
+  <h3><span class="h3-tag">A.1</span>环境与四板</h3>
+<pre><code>docker compose up -d db &amp;&amp; docker compose ps
+cd server &amp;&amp; alembic upgrade head
+cd server &amp;&amp; uvicorn src.main:app --reload --host 127.0.0.1 --port 8000
+.\gradlew.bat :app:assembleDebug
+
+<span class="cmt"># 四板</span>
+cd app &amp;&amp; npm run typecheck &amp;&amp; npm test -- --run
+cd server &amp;&amp; pytest tests/ -q &amp;&amp; ruff check src/ tests/
+.\gradlew.bat :app:lintDebug :app:testDebugUnitTest :app:assembleDebugAndroidTest</code></pre>
+
+  <h3><span class="h3-tag">A.2</span>三层测量面</h3>
+<pre><code><span class="cmt"># 离线面（0 成本，最先跑）</span>
+cd server &amp;&amp; python scripts/ai_tool_matrix/run.py --dry-run
+cd app &amp;&amp; npx vitest run src/__tests__/features/ai-tool-matrix-device-gate.test.ts
+
+<span class="cmt"># 服务端面</span>
+cd server &amp;&amp; python -u scripts/ai_tool_matrix/run.py                    <span class="cmt"># 全量 ~25 min</span>
+cd server &amp;&amp; python scripts/ai_tool_matrix/run.py --domain savings      <span class="cmt"># 单域 ~2 min</span>
+cd server &amp;&amp; python scripts/ai_tool_matrix/run.py --rejudge scripts/ai_tool_matrix/report.json
+
+<span class="cmt"># 设备面</span>
+node server/scripts/ai_tool_matrix/device_flow.mjs                      <span class="cmt"># 默认 10 条子集</span>
+node server/scripts/ai_tool_matrix/device_flow.mjs TX-ADD-01            <span class="cmt"># 指定用例</span></code></pre>
+
+  <h3><span class="h3-tag">A.3</span>设备、不变量自检与清场</h3>
+<pre><code>adb devices -l
+adb -s emulator-5554 install -r app/build/outputs/apk/debug/app-debug.apk
+adb -s emulator-5554 reverse tcp:8000 tcp:8000
+adb -s emulator-5554 shell dumpsys connectivity | grep Capabilities
+adb -s emulator-5554 shell "cat /proc/net/unix | grep webview_devtools_remote"
+adb -s emulator-5554 forward tcp:9222 localabstract:webview_devtools_remote_&lt;pid&gt;
+
+<span class="cmt"># 三条不变量自检（见 6.3）</span>
+grep -c 'const val [A-Z_0-9]* = "' app/src/main/java/com/aozora/app/bridge/BridgeProtocol.kt
+grep -n "version = " app/src/main/java/com/aozora/app/db/AozoraDatabase.kt
+grep -c "=" app/src/main/java/com/aozora/app/bridge/MetaWhitelist.kt
+
+<span class="cmt"># 备用桥通道（不经 WebView）</span>
+adb shell am broadcast -a com.aozora.app.BRIDGE_COMMAND --es command "bridge.getVersion" --es payload "e30="
+
+<span class="cmt"># 清场</span>
+adb -s emulator-5554 shell pm clear com.aozora.app</code></pre>
+</section>
+
+<!-- ===================== 附录 B ===================== -->
+<section>
+  <div class="sec-head">
+    <span class="sec-num">B</span>
+    <h2>语料条目模板</h2>
+  </div>
+<pre><code>{
+  "id": "&lt;域缩写&gt;-&lt;动作&gt;-&lt;序号&gt;",
+  "domain": "transaction",
+  "layer": "core | para | boundary | gate | device",
+  "kind": "read | write | boundary | device",
+  "text": "&lt;用户会说的原话&gt;",
+  "expect": ["&lt;期望工具名&gt;"],
+  "landing": "landed | produced | proposal | forbidden | na",
+  "also": ["&lt;可选的附加断言&gt;"],
+  "note": "&lt;为什么这么判，写给自己三个月后看&gt;"
+}</code></pre>
+  <p><code>also</code> 是可选字段（当前 96 条里只有一条用了它）。<code>note</code> 强烈建议写——第一个案例里最好用的几条经验都留在这个字段里。</p>
+</section>
+
+<!-- ===================== 附录 C ===================== -->
+<section>
+  <div class="sec-head">
+    <span class="sec-num">C</span>
+    <h2>术语对照</h2>
+  </div>
+  <div class="tscroll">
+    <table>
+      <thead><tr><th>术语</th><th>含义</th></tr></thead>
+      <tbody>
+        <tr><td>测量面</td><td>一层测试执行环境（离线 / 服务端 / 设备）</td></tr>
+        <tr><td>语料库</td><td>测试需求的唯一载体，三个执行器共读</td></tr>
+        <tr><td>判据与执行分离</td><td>改判据不重跑执行</td></tr>
+        <tr><td>闸门</td><td>端到端通路上的逐级检查点（客户端 JS / 客户端 Kotlin / 服务端）</td></tr>
+        <tr><td>假绿</td><td>用例绿，但没盯住目标代码</td></tr>
+        <tr><td>变异</td><td>故意改坏目标代码，验证用例会变红</td></tr>
+        <tr><td>链式依赖</td><td>后面的用例依赖前面用例产出的对象</td></tr>
+        <tr><td>落库 / 出卡</td><td>写操作的两种正确产出形态；<strong>两者皆无才是失败</strong></td></tr>
+        <tr><td>四板</td><td>类型检查 / 客户端单测 / 服务端单测 / 集成测试</td></tr>
+        <tr><td>播种</td><td>测试前把用例要点名的对象预先建好</td></tr>
+      </tbody>
+    </table>
+  </div>
+</section>
+
+<footer style="max-width: var(--measure); margin: clamp(40px, 7vw, 64px) auto 0; padding-top: 16px; border-top: 1px solid var(--rule); font-size: 13.5px; color: var(--muted);">
+  <p>基于 Aozora 项目 T17–T20 轮次实战提炼。文中每一条「★」都对应一次真实事故或一次被推翻的结论。</p>
+</footer>
+
+</body>
+</html>
