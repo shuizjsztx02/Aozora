@@ -17,6 +17,20 @@ AI 只返回通过 JSON Schema 校验的 ActionProposal。金额、日期、权�
 
 `POST /ai/interpret` 返回**最小解析结果**（type/amountCents/category/note/bizDate/confidence 等中间表示），它**不是 ActionProposal**，服务端对其只做「是 JSON 对象」解析、不做提案 Schema 校验。ActionProposal 由**客户端组装**，随后必须通过 `POST /ai/validate`（JSON Schema Draft-07 + 账本上下文 categoryIds/accountIds）校验，方可提交 `POST /ai/execute`；执行前服务端做 TOCTOU 重校验。首段「AI 只返回通过 JSON Schema 校验的 ActionProposal」约束的是**写库路径**：任何 AI 来源的数据在写库前必经 Schema 校验，interpret 的输出本身永不直接入库。
 
+## 自动记账的文本解析入口（第二十一轮 REQ-83，口径见 `ADR-016`）
+
+自动记账的采集层（无障碍服务 + 通知监听）在客户端，**只做「预筛 + 落本地 `auto_captures` 表」，不做网络、不做解析**。解析在两步上完成：**本地规则**（`LocalCaptureParser`，纯函数 + 模板，离线可用）先行，未命中的**疑似交易文本**再上行服务端。
+
+**端点选择判据先行（T21-2 取数）：** 先用既有 `POST /ai/interpret` 直接喂**这两条通道的真实语料**（微信支付页 / 微信通知 / 支付宝页 / 支付宝通知 / 云闪付 / 银行 App / 银行短信）取一轮命中率与字段完整率实测——**够用就复用、不新增端点**（最小改动优先）；不够才新增 `POST /ai/parse-notification`（复用 v1 proposal 骨架与 `prompts._render_categories_section` 的分类注入面，**提示词独立**，因为页面 / 通知文案与用户口语差异大）。**判据与实测数字必须写进 T21-2 的交付记录。**
+
+**两条通道共用同一套解析**：两条通道产出的**都是文本**（无障碍按行拼装页面可见文本，通知取标题 + 正文），输入形态统一，因此不为无障碍单独造解析链。
+
+**必须显式处理四类「不是消费」的语义**（否则会记成消费污染收支统计）：**退款 / 转账（含信用卡还款）/ 理财基金买入 / 红包收发**。四类反例各有用例。
+
+**成本与配额：** 无论走哪个端点，解析调用**一律计入 `ai_usage`**（成本可观测），guest 日配额 `check_daily_quota` 照常生效。
+
+**与流水线的关系：** 解析产出的仍是**中间表示**（金额 / 商户 / 方向 / 时间 / 置信度），不是 ActionProposal——它不改 `interpret → validate → execute` 的既有形状，写库仍走既有的提案与确认门（高置信自动入账但**立即可见 + 可撤销**，低置信进待确认箱，PR-2 不放松）。**它不进 agent loop、不进工具注册表**（见 `ai-agent-architecture.md` §4.7）。
+
 ## WebView 调用通道
 
 客户端 WebView 经 `AozoraBridge` 的 `ai.*` 命令族调用服务端 `/ai/*`；Kotlin 层负责 token 注入，Bearer token 全程不出 Kotlin 层（详见 `docs/adr/ADR-003-webview-ai-channel.md`）。超时预算遵循 APP-CONTEXT §10.3：12 s 客户端慢速提示 / 25 s 取消并回退本地 NLU。

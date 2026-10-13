@@ -69,3 +69,34 @@
 - **pull 侧三态合并**：本地是 `data:` → 保留本地；服务端非空 → 服务端权威（AI / 跨设备改图标只走这条）；服务端为 `null` → 保留本地（存量行全是 NULL，照单全收会抹掉本地 emoji）。第三条与上面的 `account_type` **同口径**。
 
 **已知代价**：服务端 NULL 同时是「从未设置」与「他机清空」两种成因，而上面一律当「无信息」，故「清空图标」不能跨设备传播（须等对方走一次 bootstrap）。消除它需要显式哨兵值，本轮不做（ADR-014 后果 2）。
+
+## auto_captures 表（客户端 Room v12，第二十一轮 REQ-83，ADR-016）
+
+自动记账的采集层需要一张**只存在于客户端 Room**的表（服务端没有对应实体——采集发生在设备上，**上行的是解析结果与既有交易实体**，不是这张表本身）：承载「一条被捕获、尚未解析 / 尚未确认的**原始事件**」。
+
+**为什么必须新开一张表而不是复用 `pending_mutations`**：后者装的是**已定型的写操作**（entityType / operation / payload / expectedVersion），语义是「要推给服务端的变更」；而捕获来的是一条**原始素材**，它有**独立生命周期**（捕获 → 解析 → 待确认 → 入账 / 忽略 / 失败）、需要**去重键唯一索引**、需要**原文留档**，且**两条通道写同一张表**（靠 `sourceChannel` 区分）。两者语义不符，**不得挪用**。
+
+| 列 | 类型 | 说明 |
+|---|---|---|
+| `captureId` | TEXT PK | 捕获行唯一标识（客户端生成） |
+| `dedupeKey` | TEXT **唯一索引** | L1 去重键：`hash(sourceChannel + sourcePackage + 事件 key/postTime + 归一化文本)`。唯一索引 + 冲突即**自动丢弃**——无障碍的 `TYPE_WINDOW_CONTENT_CHANGED` 与通知的重复回调都靠它收口 |
+| `sourceChannel` | TEXT | `accessibility` │ `notification`（两条通道的区分位） |
+| `sourcePackage` / `sourceApp` | TEXT | 来源包名与应用名 |
+| `rawText` | TEXT（限长） | 采集到的**原文**（无障碍按行拼装、通知取标题 + 正文）。非支付类内容**在此之前**已被过滤器丢弃，不会到达本列 |
+| `postedAt` | INTEGER | 事件时间（通知 postTime / 页面事件时间，UTC ms） |
+| `merchantKey` | TEXT NULL | 商户归一化键（用于商户记忆回查，第一期复用本表，不新开表） |
+| `status` | TEXT | `captured` │ `parsing` │ `pending_confirm` │ `committed` │ `ignored` │ `failed` |
+| `parsedJson` / `confidence` | TEXT / REAL | 本地规则或服务端解析的结果与置信度 |
+| `transactionId` | TEXT NULL | 入账后指向生成的交易（`committed` 时非空） |
+| `mergedInto` | TEXT NULL | 被 L2 合并时指向保留行（留痕，不静默删除） |
+| `error` / `createdAt` / `updatedAt` | TEXT / INTEGER / INTEGER | 失败原因与时间戳 |
+
+**状态机**：采集即 `captured` →（联网 / 本地规则）`parsing` → 高置信走快速通道 `committed`（**立即可见 + 可撤销**，PR-2）、低置信 / 缺字段 `pending_confirm`（进待确认箱）；用户忽略 → `ignored`；解析失败 → `failed`（**保留原文，不丢弃**，对齐 REQ-72「丢弃后游标照常推进＝静默永久丢失」的教训）。
+
+**三级去重**（`DedupeKeys.kt`，**纯函数、确定性 hash、无 LLM 参与**；判据与理由见 `ADR-016` 决策 5 / 6）：
+
+- **L1 同通道同事件** → `dedupeKey` 唯一索引，冲突自动丢弃。
+- **L2 跨通道同笔** → `mergeKey = hash(方向 + 金额分 + 分钟级时间桶)` 命中**且**（两边都无商户名 **或** 商户名相同）→ 合并为一条，保留信息最全的一份（无障碍 > 通知），`mergedInto` 留痕，标 `multi_source`。
+- **L3 同额但不可判定**（商户名不同 / 时间窗外）→ **不合并**，只标「疑似重复」提示。
+
+**写库契约不变**：`committed` 的落账仍一律走 `Repository.enqueueInsert`，与对应 `pending_mutations` **在同一 Room 事务内**（本表自身的写入是采集侧的本地记录，不入队 mutation）。迁移走 `MIGRATION_11_12`，**不开启 `fallbackToDestructiveMigration`**，导出 `12.json`。
