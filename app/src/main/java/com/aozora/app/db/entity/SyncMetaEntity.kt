@@ -50,6 +50,15 @@ data class SyncMetaEntity(
         // 与 master_book_id / personas_seeded 同款「Repository 自管键」，不进
         // SYNCABLE_PREFERENCE_KEYS（meta 白名单仍 11 键）。
         const val KEY_CATEGORY_SEED_VERSION = "category_seed_version"
+        // 第二十一轮 REQ-83（T21-3）：自动记账的开关与来源清单 —— **设备本地自管键**。
+        // 两类授权（无障碍 / 通知使用权）本就是按设备在系统设置页授予的，故开关也
+        // 按设备独立：**不上云、不进 SYNCABLE_PREFERENCE_KEYS**（决策 #9，meta 白名单
+        // 仍 11 键）。镜像 master_book_id / personas_seeded / category_seed_version 的
+        // 既有做法，只由 AutoBookRepository 读写。
+        const val KEY_AUTOBOOK_ENABLED = "autobook_enabled"              // '1' | '0'；缺省 = '0'（默认关闭）
+        // 用户从已安装列表勾选的额外来源包（JSON 字符串数组）。内置三项是代码常量
+        // （AutoBookSources.DEFAULT_PACKAGES），此键只装用户追加项。
+        const val KEY_AUTOBOOK_SOURCE_PACKAGES = "autobook_source_packages"
 
         /**
          * T-M7-05j（偏好项上云）：可上行到服务端的偏好键白名单。

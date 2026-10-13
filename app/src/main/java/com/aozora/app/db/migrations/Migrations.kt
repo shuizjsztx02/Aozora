@@ -230,3 +230,51 @@ val MIGRATION_10_11: Migration = object : Migration(10, 11) {
         )
     }
 }
+
+/**
+ * 第二十一轮 REQ-83（T21-3）Room schema 迁移 —— 本轮唯一的红线变动。
+ *
+ * v11 → v12：
+ * - 新增 `auto_captures` 表（自动记账采集行，见 AutoCaptureEntity）。自动记账的
+ *   采集层需要承载"一条被捕获、尚未解析/确认的原始事件"，语义与 pending_mutations
+ *   不符（后者是已定型的写操作），故新开表而非挪用。
+ * - `dedupeKey` **唯一索引**不可省：L1 同通道同事件去重靠它（通知的重复回调与
+ *   无障碍的 TYPE_WINDOW_CONTENT_CHANGED 抖动都会重复投递），且 Room 的 schema
+ *   校验按生成代码逐项比对索引，漏建即 "Migration didn't properly handle" 打开失败。
+ * - `mergeKey` 普通索引：L2 跨通道同笔的候选查询（值为解析后回填）。
+ * 表结构与口径见 `docs/architecture/data-model.md` 的 `auto_captures` 节与 ADR-016。
+ * 本表只存本地（不上行），故不涉及服务端迁移。
+ */
+val MIGRATION_11_12: Migration = object : Migration(11, 12) {
+    override fun migrate(db: SupportSQLiteDatabase) {
+        db.execSQL(
+            "CREATE TABLE IF NOT EXISTS `auto_captures` (" +
+                "`captureId` TEXT NOT NULL, " +
+                "`dedupeKey` TEXT NOT NULL, " +
+                "`mergeKey` TEXT, " +
+                "`sourceChannel` TEXT NOT NULL, " +
+                "`sourcePackage` TEXT NOT NULL, " +
+                "`sourceApp` TEXT, " +
+                "`rawText` TEXT NOT NULL, " +
+                "`postedAt` INTEGER NOT NULL, " +
+                "`merchantKey` TEXT, " +
+                "`status` TEXT NOT NULL, " +
+                "`parsedJson` TEXT, " +
+                "`confidence` REAL, " +
+                "`transactionId` TEXT, " +
+                "`mergedInto` TEXT, " +
+                "`error` TEXT, " +
+                "`createdAt` INTEGER NOT NULL, " +
+                "`updatedAt` INTEGER NOT NULL, " +
+                "PRIMARY KEY(`captureId`))"
+        )
+        db.execSQL(
+            "CREATE UNIQUE INDEX IF NOT EXISTS `index_auto_captures_dedupeKey` " +
+                "ON `auto_captures` (`dedupeKey`)"
+        )
+        db.execSQL(
+            "CREATE INDEX IF NOT EXISTS `index_auto_captures_mergeKey` " +
+                "ON `auto_captures` (`mergeKey`)"
+        )
+    }
+}

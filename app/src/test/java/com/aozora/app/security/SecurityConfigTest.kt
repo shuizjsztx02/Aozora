@@ -161,4 +161,86 @@ class SecurityConfigTest {
             content.contains("android:dataExtractionRules")
         )
     }
+
+    // ------------------------------------------------------------------
+    // 第二十一轮 REQ-83（T21-3）：自动记账的两条红线
+    //
+    // 采集走「无障碍服务 + 通知监听」双通道，两条通道都靠 <service> +
+    // android:permission 声明、授权在系统设置页 —— 因此 <uses-permission> 集合
+    // **逐条不变**（决策 #3）。这不是"顺便看看"：权限面是这个能力对外最硬的
+    // 承诺（不读短信、不用悬浮窗），而且一旦被静默放宽，仓库里没有任何别的
+    // 机制会发现。故此处按"逐条钉住"而不是"不许出现某几个"来守
+    // （`AI协作稳定性守则.md` §3.1：跨层契约每一处都要有守护）。
+    // ------------------------------------------------------------------
+
+    /** 期望的 <uses-permission> 全集。**新增权限必须显式改这里**，改不动就别加。 */
+    private val expectedUsesPermissions = setOf(
+        "android.permission.INTERNET",
+        "android.permission.VIBRATE",
+        "android.permission.POST_NOTIFICATIONS",
+        "android.permission.RECEIVE_BOOT_COMPLETED",
+        "android.permission.SCHEDULE_EXACT_ALARM",
+        "com.aozora.app.permission.BRIDGE_COMMAND",
+        "android.permission.CAMERA",
+        "android.permission.READ_MEDIA_IMAGES",
+        "android.permission.READ_EXTERNAL_STORAGE",
+    )
+
+    /** 明确禁止的高危权限（各自对应一条产品承诺，见 ADR-016 决策 2）。 */
+    private val forbiddenPermissions = listOf(
+        "android.permission.READ_SMS",
+        "android.permission.RECEIVE_SMS",
+        "android.permission.SMS_RECEIVED",
+        "android.permission.SYSTEM_ALERT_WINDOW",
+        "android.permission.RECORD_AUDIO",
+    )
+
+    private fun usesPermissions(content: String): Set<String> =
+        Regex("<uses-permission\\s+android:name=\"([^\"]+)\"").findAll(content)
+            .map { it.groupValues[1] }
+            .toSet()
+
+    @Test
+    fun manifest_usesPermissionSetIsUnchangedByAutobook() {
+        val manifest = java.io.File("src/main/AndroidManifest.xml")
+        if (!manifest.exists()) return
+        val actual = usesPermissions(manifest.readText())
+        assertEquals(
+            "自动记账靠 <service> 授权，不得新增 <uses-permission>（ADR-016 决策 2）",
+            expectedUsesPermissions,
+            actual
+        )
+    }
+
+    @Test
+    fun manifest_hasNoSmsOrOverlayPermissions() {
+        val manifest = java.io.File("src/main/AndroidManifest.xml")
+        if (!manifest.exists()) return
+        val content = manifest.readText()
+        forbiddenPermissions.forEach { perm ->
+            assertFalse(
+                "AndroidManifest must not request $perm (ADR-016 决策 2)",
+                content.contains(perm)
+            )
+        }
+    }
+
+    @Test
+    fun manifest_declaresNotificationListenerServiceWithBindPermission() {
+        val manifest = java.io.File("src/main/AndroidManifest.xml")
+        if (!manifest.exists()) return
+        val content = manifest.readText()
+        assertTrue(
+            "通知监听服务必须以 BIND_NOTIFICATION_LISTENER_SERVICE 声明",
+            content.contains("android.permission.BIND_NOTIFICATION_LISTENER_SERVICE")
+        )
+        assertTrue(
+            "通知监听服务必须声明 .autobook.AutoBookNotificationListener",
+            content.contains(".autobook.AutoBookNotificationListener")
+        )
+        assertTrue(
+            "通知监听服务必须带 NotificationListenerService 的 intent-filter action",
+            content.contains("android.service.notification.NotificationListenerService")
+        )
+    }
 }

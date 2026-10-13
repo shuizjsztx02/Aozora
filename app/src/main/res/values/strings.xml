@@ -7,6 +7,11 @@
     <string name="reminder_channel_name">每日记账提醒</string>
     <string name="reminder_channel_desc">每天定时提醒你记录当日花销</string>
 
+    <!-- 第二十一轮 REQ-83（T21-3）：自动记账 · 通知通道在系统「通知使用权」页的条目名。
+         想清楚再改：这一行是用户在系统设置里核对"这个 App 为什么要读通知"时唯一看到的话，
+         口径与 docs/legal/accessibility-disclosure.md 及隐私政策 §2.4 一致 —— 只读支付类通知。 -->
+    <string name="autobook_notification_listener_label">自动记账（只读支付类通知）</string>
+
     <!-- T-M4-05b: 桌面小组件 -->
     <string name="widget_description">今日支出与预算进度</string>
     <string name="widget_label">Aozora 记账</string>

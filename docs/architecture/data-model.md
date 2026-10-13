@@ -80,6 +80,7 @@
 |---|---|---|
 | `captureId` | TEXT PK | 捕获行唯一标识（客户端生成） |
 | `dedupeKey` | TEXT **唯一索引** | L1 去重键：`hash(sourceChannel + sourcePackage + 事件 key/postTime + 归一化文本)`。唯一索引 + 冲突即**自动丢弃**——无障碍的 `TYPE_WINDOW_CONTENT_CHANGED` 与通知的重复回调都靠它收口 |
+| `mergeKey` | TEXT NULL（**普通索引**） | L2 跨通道同笔键：`hash(方向 + 金额分 + 分钟级时间桶)`。**采集时留空**——方向与金额是**解析**才有的量，采集层不做解析（ADR-016 决策 4）；解析完成后由 `AutoBookRepository.mergeIfSameTransaction` 回填并落合并。**存成列而不是读取时重算**：重算要从 `rawText` 反解金额与方向，等于把解析器拖进读取路径，且无法建索引 |
 | `sourceChannel` | TEXT | `accessibility` │ `notification`（两条通道的区分位） |
 | `sourcePackage` / `sourceApp` | TEXT | 来源包名与应用名 |
 | `rawText` | TEXT（限长） | 采集到的**原文**（无障碍按行拼装、通知取标题 + 正文）。非支付类内容**在此之前**已被过滤器丢弃，不会到达本列 |
@@ -96,7 +97,7 @@
 **三级去重**（`DedupeKeys.kt`，**纯函数、确定性 hash、无 LLM 参与**；判据与理由见 `ADR-016` 决策 5 / 6）：
 
 - **L1 同通道同事件** → `dedupeKey` 唯一索引，冲突自动丢弃。
-- **L2 跨通道同笔** → `mergeKey = hash(方向 + 金额分 + 分钟级时间桶)` 命中**且**（两边都无商户名 **或** 商户名相同）→ 合并为一条，保留信息最全的一份（无障碍 > 通知），`mergedInto` 留痕，标 `multi_source`。
-- **L3 同额但不可判定**（商户名不同 / 时间窗外）→ **不合并**，只标「疑似重复」提示。
+- **L2 跨通道同笔** → `mergeKey = hash(方向 + 金额分 + 分钟级时间桶)` 命中**且**（两边都无商户名 **或** 商户名相同）→ 合并为一条，保留信息最全的一份（无障碍 > 通知），`mergedInto` 留痕，标 `multi_source`（= 指向本行的行数 > 0，**派生量，不另设列**）。**判定时机在解析之后**：采集层拿不到方向与金额（ADR-016 决策 4），故 `mergeKey` 由解析侧回填——这是「合并只解决不重复入账」的落点。
+- **L3 同额但不可判定**（商户名不同 / 时间窗外）→ **不合并**，只标「疑似重复」提示（同为派生量）。
 
 **写库契约不变**：`committed` 的落账仍一律走 `Repository.enqueueInsert`，与对应 `pending_mutations` **在同一 Room 事务内**（本表自身的写入是采集侧的本地记录，不入队 mutation）。迁移走 `MIGRATION_11_12`，**不开启 `fallbackToDestructiveMigration`**，导出 `12.json`。
