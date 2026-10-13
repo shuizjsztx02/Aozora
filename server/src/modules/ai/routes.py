@@ -28,6 +28,8 @@ from .provider import (
 )
 from .schemas import (
     AIAgentRequest,
+    AICaptureParseRequest,
+    AICaptureParseResponse,
     AIConversationEventItem,
     AIConversationEventsResponse,
     AIConversationForkRequest,
@@ -84,6 +86,37 @@ async def interpret(
     _require_active(current_user)
     service = AIService(db, provider)
     return await service.interpret(current_user, request.state.request_id, body)
+
+
+@router.post("/parse-notification", response_model=AICaptureParseResponse)
+async def parse_notification(
+    body: AICaptureParseRequest,
+    request: Request,
+    current_user: Annotated[User, Depends(get_current_user)] = ...,
+    db: Annotated[AsyncSession, Depends(get_db_session)] = ...,
+    provider: Annotated[LLMProvider | None, Depends(get_llm_provider)] = ...,
+):
+    """T21-2（REQ-83）: 解析一段设备自动捕获的支付凭证文本。
+
+    **为什么不是 ``/ai/interpret``**（判据先行的结论，T21-2 实测）：口述模板的
+    意图空间里没有「不是消费」的表达位——退款 / 转账 / 信用卡还款 / 理财买入 /
+    红包收发 8/8 被记成账目；它还会把整段凭证文本当备注、把「-32.00」读成负
+    金额。故提示词独立（``prompts.CAPTURE_PARSE``），但**流程与注入面全部复用**
+    （同一套限流 / guest 日配额 / 重试 / ``ai_usage`` 记账，同一套 today /
+    categories 注入面）。
+
+    返回的是**中间表示**（kind / reason / type / amountCents / category / note /
+    bizDate / confidence），服务端已做形状消毒（``normalize_capture_output``）；
+    写库仍走既有的提案与确认门——本端点不改 ``interpret → validate → execute``
+    的既有形状，也不进 agent loop 与工具注册表。
+
+    Degradation contract 与 ``/ai/interpret`` 逐字相同：503 ``ai_unavailable`` /
+    ``ai_invalid_output`` 与 429 ``ai_rate_limited`` / ``ai_quota_exceeded`` 都
+    表示「回退本地规则解析」（ADR-016 决策 7：本地规则是离线兜底）。
+    """
+    _require_active(current_user)
+    service = AIService(db, provider)
+    return await service.parse_capture(current_user, request.state.request_id, body)
 
 
 @router.post("/validate", response_model=AIValidateProposalResponse)

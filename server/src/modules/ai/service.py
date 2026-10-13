@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import json
 import logging
+import math
 import re
 import time
 import uuid
@@ -32,6 +33,7 @@ from src.models.user import User, UserStatus
 
 from .authorization import authorize_payload
 from .prompts import (
+    CAPTURE_PARSE_TASK,
     INTERPRET_TASK,
     REPORT_TASK,
     PromptTemplate,
@@ -42,6 +44,8 @@ from .prompts import (
 from .proposal_ops import execute_op, register_balance_account_changes
 from .provider import LLMProvider, ProviderError, ProviderResult
 from .schemas import (
+    AICaptureParseRequest,
+    AICaptureParseResponse,
     AIInterpretRequest,
     AIInterpretResponse,
     AIParseImageResponse,
@@ -282,6 +286,104 @@ def build_usage_row(
     )
 
 
+# ─── T21-2（REQ-83）：捕获解析结果的形状消毒 ──────────────────────────────
+
+#: 解析结果 ``reason`` 的允许值（与 ``prompts.CAPTURE_PARSE`` 的输出格式一一对应）。
+_CAPTURE_REASONS = frozenset({
+    "refund", "transfer", "credit_card_repayment", "investment", "red_packet", "other",
+})
+
+#: ``note`` 的长度护栏：商户名本就短，模型照抄整段文本时（T21-2 第一轮实测出现过
+#: 「整段通知都进了 note」）截断兜底。
+_CAPTURE_NOTE_MAX_CHARS = 100
+
+_ISO_DATE_FULL = re.compile(r"^\d{4}-\d{2}-\d{2}$")
+
+
+def normalize_capture_output(output: object) -> dict:
+    """把模型输出消毒成**固定形状**的解析结果（T21-2，``/ai/parse-notification``）。
+
+    与 ``/ai/interpret`` 的差别在**消费者**：interpret 的 output 由客户端组装成
+    ActionProposal、还要过 ``/ai/validate``；捕获解析的结果直接喂自动入账（高置信
+    自动写库），所以形状必须由服务端先钉死——模型输出的负金额、越界 reason、
+    ``not_transaction`` 却带着金额，都不许流到客户端。
+
+    消毒只做**形状**、不做语义再判断（是不是消费仍由模型判），四条不变量：
+
+    1. ``kind`` 只能是 ``transaction`` / ``not_transaction``；坏值**归为
+       transaction + confidence=0**——刻意不归成 ``not_transaction``：后者意味着
+       「丢弃」，把坏输出静默丢掉正是本仓反复出现的丢账形态（REQ-72 的
+       「丢弃后游标照常推进 = 静默永久丢失」），低置信进待确认箱才是
+       「不产生不知情账目、也不静默丢」的处置。
+    2. ``not_transaction`` 时其余字段一律清空（``reason`` 走白名单，坏值 →
+       ``other``）。
+    3. 金额是**非负整数分**（NFR-7）：文本里的负号只表示方向，取绝对值——方向由
+       ``type`` 表达。
+    4. ``confidence`` 落在 [0, 1]；``bizDate`` 只接受 ``YYYY-MM-DD``；``note``
+       截到 :data:`_CAPTURE_NOTE_MAX_CHARS`。
+    """
+    raw = output if isinstance(output, dict) else {}
+
+    confidence = raw.get("confidence")
+    if isinstance(confidence, bool) or not isinstance(confidence, (int, float)):
+        confidence = 0.0
+    elif not math.isfinite(float(confidence)):
+        confidence = 0.0
+    else:
+        confidence = max(0.0, min(1.0, float(confidence)))
+
+    kind = raw.get("kind")
+    if kind not in ("transaction", "not_transaction"):
+        kind = "transaction"
+        confidence = 0.0
+
+    if kind == "not_transaction":
+        reason = raw.get("reason")
+        if reason not in _CAPTURE_REASONS:
+            reason = "other"
+        return {
+            "kind": "not_transaction",
+            "reason": reason,
+            "type": "",
+            "amountCents": 0,
+            "category": "",
+            "note": "",
+            "bizDate": "",
+            "confidence": confidence,
+        }
+
+    type_ = raw.get("type")
+    if type_ not in ("expense", "income"):
+        type_ = ""
+
+    amount = raw.get("amountCents")
+    if isinstance(amount, bool) or not isinstance(amount, (int, float)):
+        amount = 0
+    else:
+        amount = abs(int(amount))
+
+    def _text(value: object, limit: int | None = None) -> str:
+        if not isinstance(value, str):
+            return ""
+        text = value.strip()
+        return text[:limit] if limit else text
+
+    biz_date = _text(raw.get("bizDate"))
+    if not _ISO_DATE_FULL.match(biz_date):
+        biz_date = ""
+
+    return {
+        "kind": "transaction",
+        "reason": "",
+        "type": type_,
+        "amountCents": amount,
+        "category": _text(raw.get("category")),
+        "note": _text(raw.get("note"), _CAPTURE_NOTE_MAX_CHARS),
+        "bizDate": biz_date,
+        "confidence": confidence,
+    }
+
+
 class AIService:
     def __init__(
         self,
@@ -299,6 +401,54 @@ class AIService:
         self, user: User, request_id: str, req: AIInterpretRequest,
     ) -> AIInterpretResponse:
         tpl = get_template(INTERPRET_TASK)
+        model, output, usage = await self._run_json_task(
+            user, request_id, tpl, req.input, req.context,
+        )
+        return AIInterpretResponse(
+            request_id=request_id,
+            task=tpl.task_id,
+            model=model,
+            output=output,
+            usage=usage,
+        )
+
+    async def parse_capture(
+        self, user: User, request_id: str, req: AICaptureParseRequest,
+    ) -> AICaptureParseResponse:
+        """T21-2（REQ-83）：解析一段设备捕获的支付凭证文本。
+
+        与 :meth:`interpret` 共用整套限流 / 配额 / 重试 / 计费流程（``_run_json_task``），
+        只有模板与输出后处理不同：模板是 ``CAPTURE_PARSE``（凭证文本 ≠ 用户口述，
+        实测不可共用，见该模板的注释），后处理是 ``normalize_capture_output``
+        的形状消毒——自动记账的解析结果会喂给自动入账路径，比 interpret
+        （客户端还要自行组装 + validate）更需要服务端先钉死形状。
+        """
+        tpl = get_template(CAPTURE_PARSE_TASK)
+        model, output, usage = await self._run_json_task(
+            user, request_id, tpl, req.text, req.context,
+        )
+        return AICaptureParseResponse(
+            request_id=request_id,
+            task=tpl.task_id,
+            model=model,
+            output=normalize_capture_output(output),
+            usage=usage,
+        )
+
+    async def _run_json_task(
+        self,
+        user: User,
+        request_id: str,
+        tpl: PromptTemplate,
+        user_input: str,
+        context: dict | None,
+    ) -> tuple[str, object, AIUsageInfo]:
+        """单轮 JSON 任务的共用流程：限流 → 配额 → 取 provider → 重试 → 计费。
+
+        ``interpret``（用户口述）与 ``parse_capture``（捕获文本）除模板与输出
+        后处理外逐字相同；复制一份的代价不是行数，而是两条入口的限流 / 配额 /
+        成本口径慢慢漂开——T21-2 的判据先行要求两条入口吃同一套约束。
+        """
         self._check_rate_limit(user.id)
         await self._check_daily_quota(user)
 
@@ -311,7 +461,7 @@ class AIService:
         model = tpl.model or self._cfg.ai_provider_model
         # T11-6（REQ-27 / 决策 #7）：context（画像/人设）渲染进 system 尾部；
         # 无 context 时与 render_messages 等价，REPORT 月报路径不受影响。
-        messages = render_messages_with_context(tpl, req.input, req.context)
+        messages = render_messages_with_context(tpl, user_input, context)
         started = time.perf_counter()
 
         result: ProviderResult | None = None
@@ -386,12 +536,10 @@ class AIService:
             input_tokens=result.prompt_tokens + retry_prompt_tokens,
             output_tokens=result.completion_tokens + retry_completion_tokens,
         )
-        return AIInterpretResponse(
-            request_id=request_id,
-            task=tpl.task_id,
-            model=model,
-            output=output,
-            usage=AIUsageInfo(
+        return (
+            model,
+            output,
+            AIUsageInfo(
                 prompt_tokens=result.prompt_tokens + retry_prompt_tokens,
                 completion_tokens=result.completion_tokens + retry_completion_tokens,
             ),

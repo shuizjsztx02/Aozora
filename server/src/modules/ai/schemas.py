@@ -37,6 +37,44 @@ class AIInterpretResponse(BaseModel):
     usage: AIUsageInfo
 
 
+# ─── T21-2（REQ-83）: 自动记账的支付凭证解析端点 ──────────────────────
+
+# 捕获文本按行拼装（无障碍通道的页面可见文本），比一句口述长得多；仍需有界
+# ——上限直接决定 prompt 成本的上界（与 MAX_INPUT_CHARS 同一条理由）。
+MAX_CAPTURE_TEXT_CHARS = 2000
+
+
+class AICaptureParseRequest(BaseModel):
+    """自动记账上行的一段捕获文本 + 它的来路。
+
+    ``text`` 是两条采集通道产出的同一种东西：无障碍通道按行拼装的页面可见
+    文本，或通知通道的标题 + 正文（拼接由客户端完成，见 ADR-016 决策 1）。
+    ``source_channel`` 随行上报，供成本归因与排障；它**不参与解析**（两条通道
+    共用一套解析是 ADR-016 的既定口径）。
+    """
+
+    text: str = Field(min_length=1, max_length=MAX_CAPTURE_TEXT_CHARS)
+    source_channel: Literal["accessibility", "notification"]
+    # 与 /ai/interpret 的 context 同键同口径（today / categories 两段注入面）。
+    context: dict[str, Any] | None = None
+
+
+class AICaptureParseResponse(BaseModel):
+    """形状与 ``AIInterpretResponse`` 一致：中间表示 + usage，绝不直接入库。
+
+    output 的形状见 ``prompts.CAPTURE_PARSE``（kind / reason / type /
+    amountCents / category / note / bizDate / confidence）；服务端对它做一层
+    **确定性形状消毒**（``service.normalize_capture_output``），客户端拿到的
+    永远是消毒后的对象——写库仍走既有的提案与确认门（PR-2 不放松）。
+    """
+
+    request_id: str
+    task: str
+    model: str
+    output: Any
+    usage: AIUsageInfo
+
+
 # ─── T-M4-02: ActionProposal validation endpoint ────────────────────
 
 class AIValidateProposalRequest(BaseModel):

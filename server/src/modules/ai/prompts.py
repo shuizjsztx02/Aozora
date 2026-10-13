@@ -255,8 +255,78 @@ CONVERSATION_SUMMARY = PromptTemplate(
     max_tokens=1024,
 )
 
+# ── T21-2（REQ-83）: 自动记账的支付凭证解析 ─────────────────────────────
+#
+# 与 LEDGER_PARSE 的**分工**（ADR-016 决策 7 / ai-architecture「自动记账的文本
+# 解析入口」）：LEDGER_PARSE 解析的是**用户口述**（第一人称、口语金额、相对日期）；
+# 这条解析的是**设备捕获的文本**——支付页按行拼装的可见文本、支付类通知的标题 +
+# 正文。两者输入形态不同，T21-2 判据先行实测证明**不能共用一条提示词**：
+# ① 口述模板的意图空间里没有「不是消费」的表达位 → 退款 / 转账 / 信用卡还款 /
+# 理财买入 / 红包 8/8 被记成账目（其中信用卡还款记成 expense，直接污染收支统计）；
+# ② 凭证是事实陈述，口述模板会把整段文本当备注、把「-32.00」读成负金额。
+# 故**提示词独立**；但注入面（today / categories 两段）与调用流程（限流、配额、
+# 重试、ai_usage 记账）**全部复用**既有实现，输出字段命名也与 v1 记账字段一致
+# （type/amountCents/category/note/bizDate/confidence），客户端零映射组装草稿。
+CAPTURE_PARSE = PromptTemplate(
+    task_id="capture_parse",
+    system_prompt=(
+        "你是记账应用的**支付凭证解析引擎**。输入是设备自动捕获的一段文本——"
+        "可能是支付页面的可见文本（按行拼装），也可能是支付类通知的标题与正文。"
+        "它不是用户的口述，而是**一笔支付行为的事实描述**。"
+        "只输出 JSON 对象本身，不要输出解释、前后缀或 markdown 代码块。\n"
+        "输出格式：\n"
+        "{\n"
+        '  "kind": "transaction" 或 "not_transaction",\n'
+        '  "reason": ""，或 "refund" / "transfer" / "credit_card_repayment" / '
+        '"investment" / "red_packet" / "other" 之一,\n'
+        '  "type": "expense" 或 "income" 或 "",\n'
+        '  "amountCents": 整数（分，1 元 = 100 分）,\n'
+        '  "category": "分类名",\n'
+        '  "note": "商户名或对方名称",\n'
+        '  "bizDate": "YYYY-MM-DD" 或 "",\n'
+        '  "confidence": 0 到 1 之间的小数\n'
+        "}\n"
+        "规则：\n"
+        "1. kind=transaction 仅当这段文本描述了一笔**真实发生的消费或收入**；"
+        "其余一律 kind=not_transaction，此时 type/category/note/bizDate 输出 \"\"、"
+        "amountCents 输出 0，并在 reason 里给出原因。\n"
+        "2. **四类「不是消费」必须识别**——它们都带金额、都像一笔支出，但记成账目会"
+        "污染收支统计：\n"
+        '   "refund" = 退款 / 退货到账（钱回来了，但不是收入）；\n'
+        '   "transfer" = 转账（转给他人、本人账户之间的资金划转）；\n'
+        '   "credit_card_repayment" = 信用卡还款；\n'
+        '   "investment" = 理财 / 基金 / 余额宝等的买入、转入、转出；\n'
+        '   "red_packet" = 红包的发出或收到。\n'
+        '   以上四类之外的无关文本（余额提醒、账单汇总、验证码、广告等）用 "other"。\n'
+        "3. 金额一律输出**正整数的分**。文本里的负号、-32.00 这类写法只表示方向："
+        "支付 / 消费 / 支出 / 扣款 / 付款 → type=expense；"
+        "入账 / 收入 / 工资 / 到账 → type=income。**绝不输出负数**。\n"
+        "4. note 只放**商户名或对方名称**（如「星巴克」），不要照抄整段文本、"
+        "不要带「收款方：」「付款给」这类前缀或订单号；文本里没有商户名时输出 \"\"。\n"
+        "5. bizDate：文本里有明确日期时按 system 中「今天日期」换算成 YYYY-MM-DD；"
+        "没有日期时输出 \"\"——**绝不臆造日期**（精确时间戳由设备另行提供）。\n"
+        "6. 若 system 尾部给出「用户现有分类名列表」：category 必须从列表中选择——"
+        "优先精确匹配；没有精确项但有语义相近项时选最接近的；完全对不上时输出 \"\"。"
+        "列表之外名词一律不得输出。\n"
+        "7. 金额或方向无法确定时：kind 仍可为 transaction，但对应字段留空 / 0 并"
+        "**压低 confidence**——宁低置信、不猜字段。\n"
+        "8. 一段文本里出现多笔记录时（如账单列表、多条通知合并），只解析**最新的"
+        "一笔**。\n"
+    ),
+    output_format="json",
+    max_tokens=512,
+    # ★ 模型能力下限（T21-2 实测，勿删）：同一条提示词，**flash 级模型把四类
+    # 「不是消费」8/8 全判成账目**（退款→income、信用卡还款→expense、理财→income、
+    # 红包→expense，且 confidence 高达 0.95–1.0，会走自动入账、污染收支统计）；
+    # max 级 8/8 判对且类目精确。解析结果直接喂自动入账，所以这条路径的模型由
+    # 模板钉住、不跟随 `ai_provider_model`（其默认值正是 flash 级）——宁可慢一点、
+    # 贵一点，也不能把「不是消费」记成消费（数据正确性一票否决）。
+    model="qwen-max",
+)
+
 REGISTRY: dict[str, PromptTemplate] = {
-    t.task_id: t for t in (LEDGER_PARSE, REPORT, IMAGE_RECEIPT_PARSE, CONVERSATION_SUMMARY)
+    t.task_id: t
+    for t in (LEDGER_PARSE, REPORT, IMAGE_RECEIPT_PARSE, CAPTURE_PARSE, CONVERSATION_SUMMARY)
 }
 
 # v1 public endpoint maps to exactly one task.
@@ -267,6 +337,9 @@ REPORT_TASK = "monthly_report"
 
 # T-M4-04e: image receipt parse task
 IMAGE_PARSE_TASK = "image_receipt_parse"
+
+# T21-2（REQ-83）: 自动记账的支付凭证文本解析任务
+CAPTURE_PARSE_TASK = "capture_parse"
 
 
 def get_template(task_id: str) -> PromptTemplate:
