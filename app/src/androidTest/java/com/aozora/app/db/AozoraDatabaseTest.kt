@@ -61,8 +61,17 @@ class AozoraDatabaseTest {
         repo.insertTransaction(sample(), "keep-me")
         disk.close()
         val path = context.getDatabasePath(name).path
-        // 以未知的更高版本模拟缺失 downgrade；只改 user_version 不会触发已有迁移的重复 DDL。
-        SQLiteDatabase.openDatabase(path, null, SQLiteDatabase.OPEN_READWRITE).use { it.version = 11 }
+        // 以"当前版本 + 1"模拟 Room 没有迁移路径的库：高版本 → 无 downgrade 路径 → 拒绝打开，
+        // 且**不清空数据**。只改 user_version，不碰表结构。
+        //
+        // ★ 版本号从**文件本身**读，不手写常量。这条用例原先写死 `11`（当时的"当前版本+1"），
+        //   T18-5 把 Room 升到 11 后它就变成"相等"——Room 照常打开、用例静默失真，直到
+        //   T21-3 升 v12 才在设备上暴露（`missing migration accepted`）。取真实值 +1 之后，
+        //   下一次升版本不会再漂。
+        val currentVersion = SQLiteDatabase.openDatabase(path, null, SQLiteDatabase.OPEN_READONLY)
+            .use { it.version }
+        SQLiteDatabase.openDatabase(path, null, SQLiteDatabase.OPEN_READWRITE)
+            .use { it.version = currentVersion + 1 }
         val unsupported = AozoraDatabase.open(context, name)
         try {
             try { unsupported.transactionDao().getById("guard"); fail("missing migration accepted") }
