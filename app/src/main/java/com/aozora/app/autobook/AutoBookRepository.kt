@@ -144,13 +144,12 @@ class AutoBookRepository(private val db: AozoraDatabase) {
 
         val keepThis = AutoCaptureEntity.channelRank(row.sourceChannel) >=
             AutoCaptureEntity.channelRank(compatible.sourceChannel)
-        return if (keepThis) {
-            db.autoCaptureDao().markMergedInto(compatible.captureId, row.captureId, now)
-            MergeOutcome.Merged(keptCaptureId = row.captureId, keptIsThisRow = true)
-        } else {
-            db.autoCaptureDao().markMergedInto(row.captureId, compatible.captureId, now)
-            MergeOutcome.Merged(keptCaptureId = compatible.captureId, keptIsThisRow = false)
-        }
+        val keptId = if (keepThis) row.captureId else compatible.captureId
+        val mergedId = if (keepThis) compatible.captureId else row.captureId
+        // 条件更新：并发下若这一行已被别人先合并，让路而不是互相指向（见 DAO 注释）
+        val marked = db.autoCaptureDao().markMergedInto(mergedId, keptId, now)
+        if (marked == 0) return MergeOutcome.NoCandidate
+        return MergeOutcome.Merged(keptCaptureId = keptId, keptIsThisRow = keepThis)
     }
 
     // ─── 开关与来源清单（设备本地自管 meta 键，决策 #9）───

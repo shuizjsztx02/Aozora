@@ -50,9 +50,19 @@ interface AutoCaptureDao {
     @Query("UPDATE auto_captures SET mergeKey = :mergeKey, updatedAt = :now WHERE captureId = :captureId")
     suspend fun updateMergeKey(captureId: String, mergeKey: String, now: Long)
 
-    /** 合并留痕：被合并的行指向保留行，**不删除**（`mergedInto`）。 */
-    @Query("UPDATE auto_captures SET mergedInto = :keptId, updatedAt = :now WHERE captureId = :mergedId")
-    suspend fun markMergedInto(mergedId: String, keptId: String, now: Long)
+    /**
+     * 合并留痕：被合并的行指向保留行，**不删除**（`mergedInto`）。
+     *
+     * ★ 条件更新（`mergedInto IS NULL`）+ 返回受影响行数：**并发下不允许互相合并**。
+     * 两行同时判定"对方是候选"会各自把对方标成被合并行，结果是两行互相指向、
+     * 谁也没真的合并掉——而"两条通道同时抓到同一笔"恰恰是本表最核心的场景。
+     * 返回 0 = 这一行已被别人先合并了，调用方让路。
+     */
+    @Query(
+        "UPDATE auto_captures SET mergedInto = :keptId, updatedAt = :now " +
+            "WHERE captureId = :mergedId AND mergedInto IS NULL"
+    )
+    suspend fun markMergedInto(mergedId: String, keptId: String, now: Long): Int
 
     /** 来源数（"标 multi_source" 的派生量：指向本行的行数 > 0 即为多来源）。 */
     @Query("SELECT COUNT(*) FROM auto_captures WHERE mergedInto = :keptId")

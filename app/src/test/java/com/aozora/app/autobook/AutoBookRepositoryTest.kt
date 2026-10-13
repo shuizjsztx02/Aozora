@@ -325,6 +325,33 @@ class AutoBookRepositoryTest {
         )
     }
 
+    /**
+     * 合并留痕是**条件更新**（`WHERE mergedInto IS NULL`）：并发下两行不允许互相指向。
+     *
+     * 这是"两条通道同时抓到同一笔"这一核心场景的守护——若两行各自把对方标成被合并行，
+     * 结果是**两行互相指向、谁也没真的合并掉**，而且不留任何报错。
+     */
+    @Test
+    fun markMergedInto_isConditionalSoRowsCannotMergeIntoEachOther() = runBlocking {
+        val notif = capture(draft(text = "微信支付 已支付¥32.00", event = "n1"))
+        val acc = capture(
+            draft(
+                channel = AutoCaptureEntity.CHANNEL_ACCESSIBILITY,
+                text = "付款成功 ¥32.00",
+                event = "w1",
+                at = bucket + 2_000L,
+            )
+        )
+
+        assertEquals("首次留痕生效", 1, db.autoCaptureDao().markMergedInto(notif, acc, 1L))
+        assertEquals(
+            "已被合并的行不接受二次改指",
+            0,
+            db.autoCaptureDao().markMergedInto(notif, "someone-else", 2L)
+        )
+        assertEquals(acc, row(notif).mergedInto)
+    }
+
     // ─── 开关与来源清单 ───
 
     @Test
