@@ -102,7 +102,7 @@ object LocalCaptureParser {
         // 4. 商户名（先显式模板，再结果页形态）
         val merchant = extractMerchant(text)
         // 5. 分类提示（命中不了就给空——由编排侧决定是上行还是进待确认箱）
-        val hint = categoryHint(merchant, text, type)
+        val hint = categoryHint(merchant, text)
 
         return Draft(
             kind = KIND_TRANSACTION,
@@ -161,9 +161,9 @@ object LocalCaptureParser {
         return null
     }
 
-    /** 取到候选后的清洗：去掉包裹的括号/引号与结尾标点，限长。 */
+    /** 取到候选后的清洗：去掉包裹的引号与书名号，限长。 */
     private fun clean(raw: String): String? {
-        val trimmed = raw.trim().trim('「', '」', '"', '\'', '“', '”').trim().trimEnd('（', '(')
+        val trimmed = raw.trim().trim('「', '」', '"', '\'', '“', '”').trim()
         return trimmed.take(MAX_MERCHANT_CHARS).takeIf { it.isNotEmpty() }
     }
 
@@ -180,8 +180,13 @@ object LocalCaptureParser {
         return true
     }
 
-    /** 分类提示：商户名优先，其次整段文本（商户名常常取不到）。命中不了返回空串。 */
-    private fun categoryHint(merchant: String?, text: String, type: String): String {
+    /**
+     * 分类提示：商户名优先，其次整段文本（商户名常常取不到）。命中不了返回空串。
+     *
+     * 提示**不带 kind**：命中与否只看关键词，能不能用由编排侧按交易类型在本地分类上
+     * 解析一次定夺（收支类型对不上自然解析不到，退化成交给上行通道）。
+     */
+    private fun categoryHint(merchant: String?, text: String): String {
         val scope = merchant?.takeIf { it.isNotEmpty() } ?: text
         for ((pattern, name) in CATEGORY_HINTS) {
             if (pattern.containsMatchIn(scope)) return name
