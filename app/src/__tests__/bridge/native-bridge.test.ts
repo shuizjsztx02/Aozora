@@ -146,9 +146,14 @@ describe('Bridge types — 命令完整性', () => {
     // T-M7-05f：设备能力通道的客户端执行器（device.execute / device.result）
     'device.execute',
     'device.result',
+    // 第二十一轮 T21-5（REQ-83）：自动记账桥通道（autobook.* 4 条）
+    'autobook.get_status',
+    'autobook.set_enabled',
+    'autobook.list_captures',
+    'autobook.resolve_capture',
   ]
 
-  it('BridgeCommands 包含所有 83 个命令（含 AI 6 个 + 权限 3 个 + 图片 4 个 + 同意 2 个 + 导出 4 个 + 账号删除 2 个 + 反馈 1 个 + FIX 4 个 + T7-2 账户更新 1 个 + 第八轮分类/图标/存钱 7 个 + T9-5a meta 2 个 + T10-3 auth 4 个 + T11-2 widget 1 个 + T11-4 scheduled 4 个 + T11-7 persona 4 个 + T12-7 交易更新 1 个 + T14-2 账本更新 1 个 + T16-5 主题背景 1 个 + T-M7-02h agent 2 个 + T-M7-03d 会话索引 3 个 + T-M7-04b 会话事件 1 个 + T-M7-05f 设备通道 2 个）', () => {
+  it('BridgeCommands 包含所有 87 个命令（含 AI 6 个 + 权限 3 个 + 图片 4 个 + 同意 2 个 + 导出 4 个 + 账号删除 2 个 + 反馈 1 个 + FIX 4 个 + T7-2 账户更新 1 个 + 第八轮分类/图标/存钱 7 个 + T9-5a meta 2 个 + T10-3 auth 4 个 + T11-2 widget 1 个 + T11-4 scheduled 4 个 + T11-7 persona 4 个 + T12-7 交易更新 1 个 + T14-2 账本更新 1 个 + T16-5 主题背景 1 个 + T-M7-02h agent 2 个 + T-M7-03d 会话索引 3 个 + T-M7-04b 会话事件 1 个 + T-M7-05f 设备通道 2 个 + T21-5 自动记账 4 个）', () => {
     const actualCommands = Object.values(BridgeCommands)
     expect(actualCommands).toHaveLength(expectedCommands.length)
     for (const cmd of expectedCommands) {
@@ -1138,5 +1143,83 @@ describe('NativeBridge — agent 流式通道（T-M7-02h）', () => {
     expect(() => win.__aozoraAiStream__('{ not json')).not.toThrow()
     expect(received).toHaveLength(0)
     off()
+  })
+})
+
+// ─── 第二十一轮 T21-5（REQ-83）：自动记账桥命令 ───
+
+describe('NativeBridge — T21-5 自动记账', () => {
+  let bridge: NativeBridge
+  let mockNative: ReturnType<typeof installMockBridge>
+  let capturedCommand = ''
+  let capturedPayload = ''
+
+  beforeEach(() => {
+    bridge = new NativeBridge()
+    mockNative = installMockBridge()
+  })
+
+  it('getAutoBookStatus → autobook.get_status 并透出两类授权态与计数', async () => {
+    mockNative.call.mockImplementation((_v: number, requestId: string, cmd: string) => {
+      capturedCommand = cmd
+      setTimeout(() => simulateResponse(requestId, {
+        enabled: true,
+        accessibilityGranted: true,
+        notificationGranted: false,
+        todayCaptureCount: 3,
+        pendingConfirmCount: 2,
+      }), 0)
+    })
+    const status = await bridge.getAutoBookStatus()
+    expect(capturedCommand).toBe('autobook.get_status')
+    expect(status.enabled).toBe(true)
+    expect(status.accessibilityGranted).toBe(true)
+    expect(status.notificationGranted).toBe(false)
+    expect(status.todayCaptureCount).toBe(3)
+    expect(status.pendingConfirmCount).toBe(2)
+  })
+
+  it('setAutoBookEnabled → autobook.set_enabled，payload 含 enabled', async () => {
+    mockNative.call.mockImplementation((_v: number, requestId: string, cmd: string, payload: string) => {
+      capturedCommand = cmd
+      capturedPayload = payload
+      setTimeout(() => simulateResponse(requestId, { success: true, enabled: true }), 0)
+    })
+    const r = await bridge.setAutoBookEnabled(true)
+    expect(capturedCommand).toBe('autobook.set_enabled')
+    expect(JSON.parse(capturedPayload).enabled).toBe(true)
+    expect(r.enabled).toBe(true)
+  })
+
+  it('listAutoBookCaptures → autobook.list_captures，只带显式传入的分页参数', async () => {
+    mockNative.call.mockImplementation((_v: number, requestId: string, cmd: string, payload: string) => {
+      capturedCommand = cmd
+      capturedPayload = payload
+      setTimeout(() => simulateResponse(requestId, []), 0)
+    })
+    await bridge.listAutoBookCaptures({ status: 'pending_confirm', limit: 20, offset: 40 })
+    expect(capturedCommand).toBe('autobook.list_captures')
+    expect(JSON.parse(capturedPayload)).toEqual({ status: 'pending_confirm', limit: 20, offset: 40 })
+
+    await bridge.listAutoBookCaptures()
+    expect(JSON.parse(capturedPayload)).toEqual({})
+  })
+
+  it('resolveAutoBookCapture → autobook.resolve_capture，overrides 可选', async () => {
+    mockNative.call.mockImplementation((_v: number, requestId: string, cmd: string, payload: string) => {
+      capturedCommand = cmd
+      capturedPayload = payload
+      setTimeout(() => simulateResponse(requestId, { success: true, status: 'committed', transactionId: 'tx1' }), 0)
+    })
+    const r = await bridge.resolveAutoBookCapture('cap1', 'confirm_modified', { categoryId: 'c9' })
+    expect(capturedCommand).toBe('autobook.resolve_capture')
+    const payload = JSON.parse(capturedPayload)
+    expect(payload.captureId).toBe('cap1')
+    expect(payload.resolution).toBe('confirm_modified')
+    expect(payload.overrides).toEqual({ categoryId: 'c9' })
+    expect(r.transactionId).toBe('tx1')
+
+    await bridge.resolveAutoBookCapture('cap1', 'ignore')
+    expect(JSON.parse(capturedPayload)).toEqual({ captureId: 'cap1', resolution: 'ignore' })
   })
 })

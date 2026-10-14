@@ -163,6 +163,14 @@ export const BridgeCommands = {
   // 都在原生一侧），device.result 是需结果类的上行回传（Token 不出 Kotlin 层）。
   DEVICE_EXECUTE: 'device.execute',
   DEVICE_RESULT: 'device.result',
+
+  // 第二十一轮 T21-5（REQ-83，桥计数 83→87）：自动记账桥通道。四条命令的**方法段
+  // 用下划线**（`get_status` 而非 `getStatus`），与卡面及各下游卡（T21-7 设置页 /
+  // T21-8 待确认箱）的引用逐字一致。
+  AUTOBOOK_GET_STATUS: 'autobook.get_status',
+  AUTOBOOK_SET_ENABLED: 'autobook.set_enabled',
+  AUTOBOOK_LIST_CAPTURES: 'autobook.list_captures',
+  AUTOBOOK_RESOLVE_CAPTURE: 'autobook.resolve_capture',
 } as const
 
 export type BridgeCommandName = typeof BridgeCommands[keyof typeof BridgeCommands]
@@ -970,3 +978,69 @@ export type FeedbackSubmitErrorCode =
   | 'network_error'
   | 'server_error'
   | 'unavailable'
+
+// ─── 第二十一轮 T21-5（REQ-83）：自动记账 ───
+
+/** `autobook.get_status`：总开关 + 两类授权态 + 今日捕获数 + 待确认数。 */
+export interface AutoBookStatusData {
+  /** 总开关（设备本地自管键，默认关闭）。 */
+  enabled: boolean
+  /** 无障碍服务授权态（系统设置页授权，非运行时权限）。 */
+  accessibilityGranted: boolean
+  /** 通知使用权态（系统设置页授权，非运行时权限）。 */
+  notificationGranted: boolean
+  /** 今日捕获条数（本地日零点起）。 */
+  todayCaptureCount: number
+  /** 待确认数（未被 L2 合并的行）。 */
+  pendingConfirmCount: number
+}
+
+export type AutoBookCaptureChannel = 'accessibility' | 'notification'
+
+export type AutoBookCaptureStatus =
+  | 'captured'
+  | 'parsing'
+  | 'pending_confirm'
+  | 'committed'
+  | 'ignored'
+  | 'failed'
+
+/** `autobook.list_captures` 的单条（待确认箱卡片的数据源）。 */
+export interface AutoBookCaptureData {
+  captureId: string
+  sourceChannel: AutoBookCaptureChannel
+  sourcePackage: string
+  sourceApp: string | null
+  rawText: string
+  postedAt: number
+  merchantKey: string | null
+  status: AutoBookCaptureStatus
+  /** 解析结果（`/ai/parse-notification` 的消毒形状或本地规则同形输出）。 */
+  parsedJson: Record<string, unknown> | null
+  confidence: number | null
+  transactionId: string | null
+  /** 来源数 = 本行 + 被 L2 合并进来的留痕行（≥ 1）。 */
+  sourceCount: number
+  /** 是否多来源（`sourceCount > 1`）——待确认箱据此显示「已由 N 个来源确认」。 */
+  multiSource: boolean
+}
+
+/** `autobook.resolve_capture` 的处置值（待确认箱三个按钮）。 */
+export type AutoBookResolution = 'confirm' | 'confirm_modified' | 'ignore'
+
+/** 改后确认的可覆盖字段（缺省的字段沿用解析结果）。 */
+export interface AutoBookCaptureOverrides {
+  categoryId?: string
+  amountCents?: number
+  type?: 'expense' | 'income'
+  note?: string
+  bizDate?: string
+}
+
+export interface AutoBookResolveResult {
+  success: boolean
+  status?: AutoBookCaptureStatus
+  transactionId?: string | null
+  /** 重复确认已 committed 的行时为 true（幂等，未再写第二笔）。 */
+  alreadyResolved?: boolean
+}

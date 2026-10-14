@@ -68,6 +68,12 @@ import {
   type DeviceExecuteResult,
   type DeviceOutcomeStatus,
   type DeviceResultAck,
+  type AutoBookStatusData,
+  type AutoBookCaptureData,
+  type AutoBookCaptureStatus,
+  type AutoBookResolution,
+  type AutoBookCaptureOverrides,
+  type AutoBookResolveResult,
 } from './bridge-types'
 // T-M7-03d 收口：`ai.agent` 的 `conversation_id` 只认服务端 id，而会话桶的键空间
 // （本地会话 `local:*` / `__local__` vs 服务端会话）由 store 定义——单一事实源。
@@ -951,6 +957,47 @@ export class NativeBridge {
   /** 手动触发桌面小组件刷新（配置保存后 / "立即刷新"按钮）。 */
   async refreshWidget(): Promise<{ success: boolean }> {
     return this.call('widget.refresh', {})
+  }
+
+  // ─── 第二十一轮 T21-5（REQ-83）：自动记账（autobook.* 四条） ───
+
+  /** 自动记账总状态：开关 / 两类授权态 / 今日捕获数 / 待确认数。 */
+  async getAutoBookStatus(): Promise<AutoBookStatusData> {
+    return this.call<AutoBookStatusData>('autobook.get_status')
+  }
+
+  /** 写总开关（设备本地自管 meta 键，不进 meta 白名单、不上云）。 */
+  async setAutoBookEnabled(enabled: boolean): Promise<{ success: boolean; enabled: boolean }> {
+    return this.call('autobook.set_enabled', { enabled })
+  }
+
+  /** 待确认箱分页（默认 `status: 'pending_confirm'`；被 L2 合并的留痕行不返回）。 */
+  async listAutoBookCaptures(opts?: {
+    status?: AutoBookCaptureStatus
+    limit?: number
+    offset?: number
+  }): Promise<AutoBookCaptureData[]> {
+    const payload: Record<string, unknown> = {}
+    if (opts?.status !== undefined) payload.status = opts.status
+    if (opts?.limit !== undefined) payload.limit = opts.limit
+    if (opts?.offset !== undefined) payload.offset = opts.offset
+    return this.call<AutoBookCaptureData[]>('autobook.list_captures', payload)
+  }
+
+  /**
+   * 处置一条待确认捕获：确认 / 改后确认 / 忽略。
+   *
+   * 错误码：`not_found`（captureId 不存在）、`invalid_input`（解析结果不足以落账，
+   * 或缺字段 / 未知处置值）、`unavailable`（桥未注入自动记账库）。
+   */
+  async resolveAutoBookCapture(
+    captureId: string,
+    resolution: AutoBookResolution,
+    overrides?: AutoBookCaptureOverrides,
+  ): Promise<AutoBookResolveResult> {
+    const payload: Record<string, unknown> = { captureId, resolution }
+    if (overrides !== undefined) payload.overrides = overrides
+    return this.call<AutoBookResolveResult>('autobook.resolve_capture', payload)
   }
 
   // ─── 测试辅助 ───

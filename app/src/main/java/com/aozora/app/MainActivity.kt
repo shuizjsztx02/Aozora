@@ -126,7 +126,9 @@ class MainActivity : AppCompatActivity() {
             // T-M5-05c: 应用内反馈
             feedbackClient = app.feedbackClient,
             // 第十轮 T10-3（REQ-19）: auth.login/logout/me/updateProfile
-            authClient = app.authClient
+            authClient = app.authClient,
+            // 第二十一轮 T21-5（REQ-83）：autobook.* 四条（读 auto_captures + 开关）
+            autoBookDb = app.database
         )
         webView.addJavascriptInterface(bridge, "AozoraBridge")
 

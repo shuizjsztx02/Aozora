@@ -54,10 +54,14 @@ class SecurityConfigTest {
         // T19-7（REQ-75 / 决策 #1）: -VOICE_START_RECORDING/VOICE_STOP_RECORDING → 83。
         //   离线语音（Vosk）整体移除：连同 RECORD_AUDIO 权限族与设备能力
         //   voice.transcribe 一并下架（服务端侧见 T19-8）。
+        // 第二十一轮 T21-5（REQ-83 / 决策 #1 #12）: +AUTOBOOK_GET_STATUS/SET_ENABLED/
+        //   LIST_CAPTURES/RESOLVE_CAPTURE（autobook.*，4 条）→ 87。
+        //   自动记账桥通道（开关 + 两类授权态 + 待确认箱 + 处置）。方法段用下划线，
+        //   与 T21-5 卡面及各下游卡（T21-7 / T21-8）的引用逐字一致。
         val kotlinCommands = BridgeCommands.ALL
         assertEquals(
-            "Bridge command count must be 83 (sync with bridge-types.ts)",
-            83,
+            "Bridge command count must be 87 (sync with bridge-types.ts)",
+            87,
             kotlinCommands.size
         )
         assertEquals(

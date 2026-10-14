@@ -189,6 +189,21 @@ object BridgeCommands {
     const val DEVICE_EXECUTE = "device.execute"
     const val DEVICE_RESULT = "device.result"
 
+    // 第二十一轮 T21-5（REQ-83 / 决策 #1 #12：桥计数本轮唯一变更点 83→87）：
+    // 自动记账桥通道。四条命令的**方法段用下划线**（`get_status` 而非 `getStatus`），
+    // 与 T21-5 卡面及各下游卡（T21-7 设置页 / T21-8 待确认箱）的引用逐字一致——
+    // 卡面是这几条命令的唯一命名依据，改回 camelCase 会让下游卡引用失配。
+    //   get_status     = 总开关 + **两类授权各自的态**（无障碍 / 通知，决策 #10）
+    //                    + 今日捕获数 + 待确认数；前端据此渲染设置页与首页入口
+    //   set_enabled    = 写总开关（设备本地自管 meta 键，**不进 MetaWhitelist.KEYS**，决策 #9）
+    //   list_captures  = 待确认箱分页（读 `auto_captures`，T21-3 的表）
+    //   resolve_capture= 处置一条待确认捕获（确认 / 改后确认 / 忽略）；确认一律走
+    //                    `Repository.enqueueInsert` 的原子路径（insertTransaction，决策 #16）
+    const val AUTOBOOK_GET_STATUS = "autobook.get_status"
+    const val AUTOBOOK_SET_ENABLED = "autobook.set_enabled"
+    const val AUTOBOOK_LIST_CAPTURES = "autobook.list_captures"
+    const val AUTOBOOK_RESOLVE_CAPTURE = "autobook.resolve_capture"
+
     /**
      * T-M5-02a review: canonical list of every command constant above.
      *
@@ -231,6 +246,7 @@ object BridgeCommands {
         META_GET, META_SET,
         WIDGET_REFRESH,
         DEVICE_EXECUTE, DEVICE_RESULT,
+        AUTOBOOK_GET_STATUS, AUTOBOOK_SET_ENABLED, AUTOBOOK_LIST_CAPTURES, AUTOBOOK_RESOLVE_CAPTURE,
     )
 }
 

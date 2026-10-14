@@ -123,8 +123,13 @@ class BridgeProtocolTest {
             BridgeCommands.ACCOUNT_DELETE,
             // T-M5-05c: 应用内反馈
             BridgeCommands.FEEDBACK_SUBMIT,
+            // 第二十一轮 T21-5（REQ-83）：自动记账桥通道（autobook.*，4 条）
+            BridgeCommands.AUTOBOOK_GET_STATUS,
+            BridgeCommands.AUTOBOOK_SET_ENABLED,
+            BridgeCommands.AUTOBOOK_LIST_CAPTURES,
+            BridgeCommands.AUTOBOOK_RESOLVE_CAPTURE,
         )
-        assertEquals(45, commands.size)
+        assertEquals(49, commands.size)
         // 无重复
         assertEquals(commands.size, commands.toSet().size)
     }

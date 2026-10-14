@@ -2,9 +2,17 @@ package com.aozora.app.bridge
 
 import android.webkit.JavascriptInterface
 import android.webkit.WebView
+import android.content.ComponentName
+import android.content.Context
+import android.view.accessibility.AccessibilityManager
+import android.accessibilityservice.AccessibilityServiceInfo
+import androidx.core.app.NotificationManagerCompat
 import com.aozora.app.ai.AiGatewayClient
+import com.aozora.app.autobook.AutoBookAccessibilityService
+import com.aozora.app.autobook.AutoBookRepository
 import com.aozora.app.consent.ConsentClient
 import com.aozora.app.consent.ConsentStore
+import com.aozora.app.db.AozoraDatabase
 import com.aozora.app.db.Repository
 import com.aozora.app.db.entity.*
 import com.aozora.app.export.ExportClient
@@ -29,6 +37,8 @@ import kotlinx.coroutines.cancelAndJoin
 import kotlinx.coroutines.suspendCancellableCoroutine
 import org.json.JSONObject
 import org.json.JSONTokener
+import org.json.JSONException
+import java.util.UUID
 import java.util.concurrent.atomic.AtomicBoolean
 import kotlin.coroutines.coroutineContext
 import kotlin.coroutines.resume
@@ -69,7 +79,12 @@ class AozoraBridge(
     // T-M5-05c: 应用内反馈。
     private val feedbackClient: FeedbackClient? = null,
     // 第十轮 T10-3（REQ-19）：登录/登出/资料（auth.* 四命令）。
-    private val authClient: com.aozora.app.auth.AuthClient? = null
+    private val authClient: com.aozora.app.auth.AuthClient? = null,
+    // 第二十一轮 T21-5（REQ-83）：自动记账桥通道（autobook.* 四命令）所需。
+    // `auto_captures` 的读写入口在 `AutoCaptureDao`（`db/` 簇归 T21-3 独占，
+    // 下游卡不得自加查询），只能经数据库拿到——`Repository` 未暴露其 `db`。
+    // AutoBookRepository（写路径 / 开关）在内部按需构造（无状态）。
+    private val autoBookDb: AozoraDatabase? = null
 ) {
     internal companion object {
         // T16-5（REQ-61 / 决策 #7）：全屏背景压缩参数 —— 独立于 icon.pick
@@ -86,6 +101,25 @@ class AozoraBridge(
         // 唯一一个被桥放行的 429 子码——与 T18-1 放行 `image_parsing_disabled` 同法：
         // 只放行已知值，未知一律回落各 handler 既有的笼统码。
         private const val CODE_AI_QUOTA_EXCEEDED = "ai_quota_exceeded"
+
+        // 第二十一轮 T21-5（REQ-83）：autobook.resolve_capture 的处置值。三种，
+        // 与待确认箱的三个按钮一一对应（T21-8 卡：确认 / 改分类后确认 / 忽略）。
+        private const val AUTOBOOK_RESOLVE_CONFIRM = "confirm"
+        private const val AUTOBOOK_RESOLVE_CONFIRM_MODIFIED = "confirm_modified"
+        private const val AUTOBOOK_RESOLVE_IGNORE = "ignore"
+        private const val AUTOBOOK_PAGE_SIZE_DEFAULT = 50
+        private const val AUTOBOOK_PAGE_SIZE_MAX = 200
+
+        // 自动记账生成的流水来源。**必须是服务端 TxSource 并集内的既有值**
+        // （`manual` / `nlu_local` / `nlu_ai` / `import` / `scheduled`，
+        // `Repository.insertTransaction` 与 server/models/ledger.py 同集）——库里
+        // 没有也不许加 `autobook` 这个值：那是跨端枚举的扩列，会把 push 变成 422 毒丸。
+        // 取 `nlu_ai`：REQ-83 的解析以服务端模型为主（ADR-016 决策 7），且流水详情
+        // 页据此打「AI 记的」徽标。本地规则命中时的 `nlu_local` 细分归 T21-6。
+        private const val AUTOBOOK_TX_SOURCE = "nlu_ai"
+
+        /** `bizDate` 形态（与 `Repository.insertTransaction` 的校验同式）。 */
+        private val ISO_DATE = Regex("\\d{4}-\\d{2}-\\d{2}")
     }
 
     // NEW-R6-2 fix: 追踪当前活跃的 parse Job，以便取消
@@ -281,6 +315,12 @@ class AozoraBridge(
             // T-M7-05f: 设备能力通道的客户端执行器（05e 的 device_request 帧的落地侧）
             BridgeCommands.DEVICE_EXECUTE -> handleDeviceExecute(requestId, payload)
             BridgeCommands.DEVICE_RESULT -> handleDeviceResult(requestId, payload)
+
+            // 第二十一轮 T21-5（REQ-83）：自动记账（autobook.* 四条）
+            BridgeCommands.AUTOBOOK_GET_STATUS -> handleAutoBookGetStatus(requestId)
+            BridgeCommands.AUTOBOOK_SET_ENABLED -> handleAutoBookSetEnabled(requestId, payload)
+            BridgeCommands.AUTOBOOK_LIST_CAPTURES -> handleAutoBookListCaptures(requestId, payload)
+            BridgeCommands.AUTOBOOK_RESOLVE_CAPTURE -> handleAutoBookResolveCapture(requestId, payload)
 
             else -> BridgeResponse.error(requestId, "unknown_command", "Unknown command: $command")
         }
@@ -2492,6 +2532,307 @@ class AozoraBridge(
             PermissionStatus.PERMANENTLY_DENIED -> DeviceStatus.UNAVAILABLE to null
             PermissionStatus.NOT_REQUESTED -> DeviceStatus.FAILED to null
         }
+    }
+
+    // ─── 第二十一轮 T21-5（REQ-83）：自动记账（autobook.* 四条） ───
+    //
+    // 这两条前端路径的数据源：get_status 供 T21-7 的设置页与 T21-8 的首页入口判定，
+    // list_captures / resolve_capture 供 T21-8 的待确认箱。**不新造卡片类型**——
+    // 确认一条捕获只是「组装一笔普通交易 + 走既有落账路径」（决策 #8 / #16），
+    // 自动记账只是新增了一个**提案来源**。
+
+    /**
+     * 总开关 + 两类授权态 + 今日捕获数 + 待确认数（决策 #10 / #12）。
+     *
+     * 待确认数按**未被合并**的口径计，与 [handleAutoBookListCaptures] 的可见集一致：
+     * L2 合并只留一条可见卡（保留行），被合并行（`mergedInto != null`）是留痕，
+     * 不进待确认箱，也就不该被计入角标——否则角标会比列表多。
+     */
+    private suspend fun handleAutoBookGetStatus(requestId: String): BridgeResponse {
+        val db = autoBookDb
+            ?: return BridgeResponse.error(requestId, "unavailable", "autobook database not injected")
+        val dao = db.autoCaptureDao()
+        val pending = dao.listByStatus(AutoCaptureEntity.STATUS_PENDING_CONFIRM, Int.MAX_VALUE, 0)
+        val data = JSONObject().apply {
+            put("enabled", AutoBookRepository(db).isEnabled())
+            // 两类授权各自独立（只授一个也应有可用的一半能力，决策 #10）。两条都是
+            // **系统设置页授权**、不是运行时权限：无障碍查已启用的无障碍服务，通知查
+            // 已启用的监听包名。查不到就是未授权，不猜。
+            // ★ T21-7 会把这两条判定收进 PermissionManager 的「设置页授权」形态
+            //   （含「已授权但服务被停用」的第三态）；届时此处改为调用它，避免两处实现。
+            put("accessibilityGranted", isAccessibilityServiceEnabled(syncContext))
+            put("notificationGranted", isNotificationListenerEnabled(syncContext))
+            put("todayCaptureCount", dao.countCapturedSince(startOfTodayMs()))
+            put("pendingConfirmCount", pending.count { it.mergedInto == null })
+        }
+        return BridgeResponse.success(requestId, data.toString())
+    }
+
+    /** 写总开关（设备本地自管 meta 键，**不进 `MetaWhitelist.KEYS`**，决策 #9）。 */
+    private suspend fun handleAutoBookSetEnabled(requestId: String, p: JSONObject): BridgeResponse {
+        val db = autoBookDb
+            ?: return BridgeResponse.error(requestId, "unavailable", "autobook database not injected")
+        if (!p.has("enabled")) {
+            return BridgeResponse.error(requestId, "invalid_input", "enabled is required")
+        }
+        val enabled = p.getBoolean("enabled")
+        AutoBookRepository(db).setEnabled(enabled)
+        return BridgeResponse.success(
+            requestId,
+            JSONObject().put("success", true).put("enabled", enabled).toString()
+        )
+    }
+
+    /**
+     * 待确认箱分页（决策 #12）。默认只看 `pending_confirm`；`status` 可查其余态。
+     *
+     * 被合并行（`mergedInto != null`）**虽仍留在原状态**，但不作为独立卡片返回——
+     * 两条通道抓到同一笔是合并成一卡（保留行带 `sourceCount`），不是两张卡。
+     */
+    private suspend fun handleAutoBookListCaptures(requestId: String, p: JSONObject): BridgeResponse {
+        val db = autoBookDb
+            ?: return BridgeResponse.error(requestId, "unavailable", "autobook database not injected")
+        val dao = db.autoCaptureDao()
+        val status = p.optString("status", AutoCaptureEntity.STATUS_PENDING_CONFIRM)
+        val limit = p.optInt("limit", AUTOBOOK_PAGE_SIZE_DEFAULT)
+            .coerceIn(1, AUTOBOOK_PAGE_SIZE_MAX)
+        val offset = p.optInt("offset", 0).coerceAtLeast(0)
+
+        val arr = org.json.JSONArray()
+        for (row in dao.listByStatus(status, limit, offset)) {
+            if (row.mergedInto != null) continue
+            // 来源数 = 本行 + 指向本行的留痕行（派生量，决策 #5 的 `multi_source`）
+            val merged = dao.countMergedSources(row.captureId)
+            arr.put(JSONObject().apply {
+                put("captureId", row.captureId)
+                put("sourceChannel", row.sourceChannel)
+                put("sourcePackage", row.sourcePackage)
+                put("sourceApp", row.sourceApp ?: JSONObject.NULL)
+                put("rawText", row.rawText)
+                put("postedAt", row.postedAt)
+                put("merchantKey", row.merchantKey ?: JSONObject.NULL)
+                put("status", row.status)
+                put("parsedJson", parseJsonOrNull(row.parsedJson) ?: JSONObject.NULL)
+                put("confidence", row.confidence ?: JSONObject.NULL)
+                put("transactionId", row.transactionId ?: JSONObject.NULL)
+                put("sourceCount", merged + 1)
+                put("multiSource", merged > 0)
+            })
+        }
+        return BridgeResponse.success(requestId, arr.toString())
+    }
+
+    /**
+     * 处置一条待确认捕获：确认 / 改后确认 / 忽略（决策 #12）。
+     *
+     * `confirm` 与 `confirm_modified` 都**组装一笔普通交易走 `Repository.insertTransaction`**
+     * ——它与 `pending_mutations` 同事务，是「写库一律走 `Repository.enqueueInsert`」
+     * 的兑现（决策 #16）；区别只在 `confirm_modified` 会用 `overrides` 覆盖解析字段。
+     * 幂等：已 `committed` 的行重复确认直接回既有 `transactionId`，不再写第二笔。
+     */
+    private suspend fun handleAutoBookResolveCapture(requestId: String, p: JSONObject): BridgeResponse {
+        val db = autoBookDb
+            ?: return BridgeResponse.error(requestId, "unavailable", "autobook database not injected")
+        val dao = db.autoCaptureDao()
+        val captureId = p.optString("captureId").takeIf { it.isNotBlank() }
+            ?: return BridgeResponse.error(requestId, "invalid_input", "captureId is required")
+        val resolution = p.optString("resolution").takeIf { it.isNotBlank() }
+            ?: return BridgeResponse.error(requestId, "invalid_input", "resolution is required")
+        val capture = dao.getById(captureId)
+            ?: return BridgeResponse.error(requestId, "not_found", "capture not found")
+
+        return when (resolution) {
+            AUTOBOOK_RESOLVE_IGNORE -> {
+                if (capture.status == AutoCaptureEntity.STATUS_COMMITTED) {
+                    // 已入账的不能改成忽略——那会让刚写下的账目变成孤儿
+                    return BridgeResponse.error(
+                        requestId, "invalid_input", "capture already committed"
+                    )
+                }
+                dao.applyResolution(
+                    captureId = captureId,
+                    status = AutoCaptureEntity.STATUS_IGNORED,
+                    parsedJson = capture.parsedJson,
+                    confidence = capture.confidence,
+                    merchantKey = capture.merchantKey,
+                    transactionId = null,
+                    error = null,
+                    now = System.currentTimeMillis(),
+                )
+                BridgeResponse.success(
+                    requestId,
+                    JSONObject().put("success", true)
+                        .put("status", AutoCaptureEntity.STATUS_IGNORED).toString()
+                )
+            }
+
+            AUTOBOOK_RESOLVE_CONFIRM, AUTOBOOK_RESOLVE_CONFIRM_MODIFIED -> {
+                if (capture.status == AutoCaptureEntity.STATUS_COMMITTED) {
+                    // 幂等：重复确认同一条 → 回既有账目，不再写一笔
+                    return BridgeResponse.success(
+                        requestId,
+                        JSONObject().put("success", true)
+                            .put("transactionId", capture.transactionId ?: JSONObject.NULL)
+                            .put("alreadyResolved", true).toString()
+                    )
+                }
+                val overrides = p.optJSONObject("overrides")
+                val tx = try {
+                    buildConfirmedTransaction(capture, overrides)
+                } catch (e: IllegalArgumentException) {
+                    // 解析结果不足以落账（缺方向 / 缺金额 / 分类解析不出 / 本就不是消费）：
+                    // 明确拒，不猜字段（宁缺毋滥）
+                    return BridgeResponse.error(
+                        requestId, "invalid_input", e.message ?: "invalid capture"
+                    )
+                }
+                repository.insertTransaction(tx, UUID.randomUUID().toString())
+                dao.applyResolution(
+                    captureId = captureId,
+                    status = AutoCaptureEntity.STATUS_COMMITTED,
+                    parsedJson = capture.parsedJson,
+                    confidence = capture.confidence,
+                    merchantKey = capture.merchantKey,
+                    transactionId = tx.id,
+                    error = null,
+                    now = System.currentTimeMillis(),
+                )
+                notifyWidgetUpdate()
+                BridgeResponse.success(
+                    requestId,
+                    JSONObject().put("success", true)
+                        .put("transactionId", tx.id)
+                        .put("status", AutoCaptureEntity.STATUS_COMMITTED).toString()
+                )
+            }
+
+            else -> BridgeResponse.error(
+                requestId, "invalid_input", "unknown resolution: $resolution"
+            )
+        }
+    }
+
+    /**
+     * 把一条捕获的**解析结果**组装成待入账的交易（确认路径的唯一落点）。
+     *
+     * 字段来源：靶向在 `parsedJson`（服务端 `/ai/parse-notification` 的消毒形状或
+     * 本地规则的同形输出），[overrides] 非空时逐字段覆盖（改后确认）。任何不足以
+     * 落账的输入都抛 `IllegalArgumentException` → 桥统一转 `invalid_input`，**不猜字段**
+     * （宁缺毋滥：缺方向 / 缺金额 / 分类解析不出，都不许编一个出来）。
+     */
+    private suspend fun buildConfirmedTransaction(
+        capture: AutoCaptureEntity,
+        overrides: JSONObject?,
+    ): TransactionEntity {
+        val draft = parseJsonOrNull(capture.parsedJson)
+            ?: throw IllegalArgumentException("capture has no parse result")
+
+        // 四类「不是消费」（退款 / 转账 / 理财 / 红包）由解析层判成 not_transaction，
+        // 本就不该走到确认——真走到了说明前端放了不该放的卡。
+        if (draft.optString("kind") == "not_transaction") {
+            throw IllegalArgumentException("parse result is not a transaction")
+        }
+
+        val type = overrides?.optString("type")?.takeIf { it.isNotBlank() }
+            ?: draft.optString("type")
+        require(type == "expense" || type == "income") { "transaction type is required" }
+
+        val amountCents = overrides?.takeIf { it.has("amountCents") }?.optLong("amountCents")
+            ?: draft.optLong("amountCents")
+        require(amountCents >= 1) { "amountCents must be positive" }
+
+        val categoryId = overrides?.optString("categoryId")?.takeIf { it.isNotBlank() }
+            ?: resolveCategoryId(draft.optString("category"), type)
+            ?: throw IllegalArgumentException("category not resolved")
+
+        val bookId = repository.getDefaultBookId()
+            ?: throw IllegalArgumentException("no default book")
+
+        val bizDate = overrides?.optString("bizDate")?.takeIf { it.isNotBlank() }
+            ?: draft.optString("bizDate").takeIf { ISO_DATE.matches(it) }
+            ?: bizDateOf(capture.postedAt)
+
+        val note = overrides?.optString("note")?.takeIf { it.isNotBlank() }
+            ?: draft.optString("note")
+
+        return TransactionEntity(
+            id = UUID.randomUUID().toString(),
+            bookId = bookId,
+            type = type,
+            amountCents = amountCents,
+            categoryId = categoryId,
+            // 兜底默认账户，与聊天记账同口径（未点名账户 → 默认账户；无账户则 null）
+            accountId = repository.getDefaultAccount()?.id,
+            note = note,
+            bizDate = bizDate,
+            // 事件时间取采集时间（通知 postTime / 页面事件时间），比"现在"更准
+            occurredAt = capture.postedAt,
+            source = AUTOBOOK_TX_SOURCE,
+            includeInBudget = true,
+            version = 1,
+            deletedAt = null,
+        )
+    }
+
+    /** 分类名 → 活跃分类 id：先按收支方向精确匹配，再退一步只按名字。取不到返回 null。 */
+    private suspend fun resolveCategoryId(name: String, kind: String): String? {
+        if (name.isBlank()) return null
+        val categories = repository.listCategories()
+        return categories.firstOrNull { it.kind == kind && it.name == name }?.id
+            ?: categories.firstOrNull { it.name == name }?.id
+    }
+
+    private fun parseJsonOrNull(raw: String?): JSONObject? {
+        if (raw.isNullOrBlank()) return null
+        return try {
+            JSONObject(raw)
+        } catch (_: JSONException) {
+            null
+        }
+    }
+
+    /** 今天的本地零点（`countCapturedSince` 的起点）。 */
+    private fun startOfTodayMs(): Long = java.util.Calendar.getInstance().apply {
+        set(java.util.Calendar.HOUR_OF_DAY, 0)
+        set(java.util.Calendar.MINUTE, 0)
+        set(java.util.Calendar.SECOND, 0)
+        set(java.util.Calendar.MILLISECOND, 0)
+    }.timeInMillis
+
+    /** UTC ms → 该时刻本地日期的 YYYY-MM-DD（`bizDate` 是用户时区的日子）。 */
+    private fun bizDateOf(epochMs: Long): String {
+        val cal = java.util.Calendar.getInstance().apply { timeInMillis = epochMs }
+        return String.format(
+            java.util.Locale.US, "%04d-%02d-%02d",
+            cal.get(java.util.Calendar.YEAR),
+            cal.get(java.util.Calendar.MONTH) + 1,
+            cal.get(java.util.Calendar.DAY_OF_MONTH),
+        )
+    }
+
+    /**
+     * 无障碍授权态：本应用的无障碍服务在系统的「已启用服务」列表里（决策 #10）。
+     * 与运行时权限无关——`checkSelfPermission` 查不到，只能这样判定。
+     */
+    private fun isAccessibilityServiceEnabled(ctx: Context?): Boolean {
+        if (ctx == null) return false
+        val am = ctx.getSystemService(Context.ACCESSIBILITY_SERVICE) as? AccessibilityManager
+            ?: return false
+        val expected = ComponentName(ctx.packageName, AutoBookAccessibilityService::class.java.name)
+        return am.getEnabledAccessibilityServiceList(AccessibilityServiceInfo.FEEDBACK_ALL_MASK)
+            .any { info ->
+                val si = info.resolveInfo?.serviceInfo ?: return@any false
+                ComponentName(si.packageName, si.name) == expected
+            }
+    }
+
+    /**
+     * 通知使用权态：本应用在系统的「已启用通知监听」包名集合里（决策 #10）。
+     * 同无障碍——是设置页授权，不是运行时权限。
+     */
+    private fun isNotificationListenerEnabled(ctx: Context?): Boolean {
+        if (ctx == null) return false
+        return NotificationManagerCompat.getEnabledListenerPackages(ctx).contains(ctx.packageName)
     }
 
     // ─── JSON 序列化 ───
