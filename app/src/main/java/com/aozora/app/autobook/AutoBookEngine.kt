@@ -73,6 +73,9 @@ class AutoBookEngine(
         /** 已进待确认箱（低置信 / 缺字段 / 分类对不上）。 */
         data object PendingConfirm : Outcome
 
+        /** 解析成功但**落账写不进去** → `failed`（保留原文与解析结果，等收口排障）。 */
+        data object Failed : Outcome
+
         /** 判定为「不是一笔账」（四类「不是消费」或其余非交易文本）→ `ignored`。 */
         data object NotTransaction : Outcome
 
@@ -148,7 +151,7 @@ class AutoBookEngine(
             val rows = db.autoCaptureDao().listByStatus(AutoCaptureEntity.STATUS_CAPTURED, limit, 0)
             for (row in rows) {
                 when (processCapture(row.captureId, allowRemote)) {
-                    is Outcome.Committed, Outcome.PendingConfirm,
+                    is Outcome.Committed, Outcome.PendingConfirm, Outcome.Failed,
                     Outcome.NotTransaction, Outcome.MergedAway -> advanced++
                     Outcome.RemoteFailed -> return advanced
                     Outcome.Deferred, Outcome.Skipped -> Unit
@@ -291,7 +294,7 @@ class AutoBookEngine(
             // 解析成功但落账写不进去（分类被并发删掉等）：落 failed 并**保留原文与解析结果**，
             // 等收口排障——绝不静默丢（决策 #14）
             apply(row, AutoCaptureEntity.STATUS_FAILED, json, resolved.confidence, resolved.merchantKey, null, e.message ?: ERROR_COMMIT_FAILED)
-            Outcome.PendingConfirm
+            Outcome.Failed
         }
     }
 
