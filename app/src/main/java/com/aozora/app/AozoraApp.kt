@@ -5,6 +5,8 @@ import androidx.work.Configuration
 import com.aozora.app.ai.AiGatewayClient
 import com.aozora.app.auth.AuthClient
 import com.aozora.app.auth.TokenStore
+import com.aozora.app.autobook.AiCaptureRemoteParser
+import com.aozora.app.autobook.AutoBookEngine
 import com.aozora.app.consent.ConsentClient
 import com.aozora.app.consent.ConsentStore
 import com.aozora.app.crashlytics.CrashReportDatabase
@@ -120,6 +122,21 @@ class AozoraApp : Application(), Configuration.Provider {
             baseUrl = BuildConfig.SYNC_BASE_URL,
             httpClient = httpClient,
             authClient = authClient
+        )
+    }
+
+    /**
+     * T21-6（REQ-83）: 自动记账的解析与编排。
+     *
+     * 两个触发面共用**同一个实例**（同一个 `drainMutex`）：采集侧落行后跑本地档
+     * （`allowRemote = false`，离线也能入账），既有同步任务里跑在线档
+     * （`allowRemote = true`，未命中/不完整的行上行服务端）。
+     */
+    val autoBookEngine: AutoBookEngine by lazy {
+        AutoBookEngine(
+            db = database,
+            repository = repository,
+            remote = AiCaptureRemoteParser(aiGatewayClient),
         )
     }
 

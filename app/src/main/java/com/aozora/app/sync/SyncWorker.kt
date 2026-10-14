@@ -33,6 +33,14 @@ class SyncWorker(
         if (!app.consentStore.hasConsented()) {
             return Result.success()
         }
+        // T21-6（REQ-83）: 自动记账的**在线档**编排——本地规则先行，未命中 / 字段不完整
+        // 的行才上行（ADR-016 决策 7）。**复用本 worker 的调度形态**（`SyncScheduler`
+        // 的联网约束 + 唯一任务 + 指数退避），不新造调度器；采集侧落行后
+        // `SyncScheduler.enqueue` 即把这一步带起来。放在同步之前：本轮自动入账的账目
+        // 随即被同一轮同步推给服务端。
+        // 行级失败已在 `auto_captures.error` 留痕，故这里只兜底意外异常——**绝不让
+        // 自动记账把同步本身带崩**。
+        runCatching { app.autoBookEngine.processPendingCaptures(allowRemote = true) }
         val engine = app.syncEngine ?: return Result.failure()
         return when (engine.runOnce()) {
             SyncEngine.SyncOutcome.OK -> {

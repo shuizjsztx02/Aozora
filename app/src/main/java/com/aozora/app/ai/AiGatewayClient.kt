@@ -143,6 +143,28 @@ class AiGatewayClient(
         )
 
     /**
+     * T21-6（REQ-83）: POST /ai/parse-notification — 设备捕获的支付凭证文本 →
+     * 交易草稿中间表示。
+     *
+     * 与 [interpret] 同口径（同一套 token 注入、同样的 25 s 预算、同样的错误映射）；
+     * 降级契约也与它逐字相同：503 `ai_unavailable` / 429 `ai_quota_exceeded` /
+     * `ai_rate_limited` 都表示「**回退本地规则解析**」（ADR-016 决策 7：本地规则是
+     * 离线兜底）。因此调用侧（`AutoBookEngine`）把**任何** [AiError] 都当「这次上行
+     * 没成，捕获留在待解析」，下次再试——不区分对错。
+     *
+     * [contextJson] 与 [interpret] 的 `context` 同键同口径（`today` / `categories`
+     * 两段注入面）：分类名单来自**本地真实分类**，否则模型会挑出本地不存在的分类名。
+     */
+    suspend fun parseNotification(
+        text: String,
+        sourceChannel: String,
+        contextJson: String? = null,
+    ): String = executeAuthorized(
+        "$baseUrl/ai/parse-notification",
+        buildParseNotificationRequest(text, sourceChannel, contextJson),
+    )
+
+    /**
      * T-M7-03d: `GET /ai/conversations` —— 本人的会话索引（按活跃时间倒序）。
      *
      * 返回体原样透传（`{conversations:[{id,title,book_id,created_at,last_active_at}]}`），
@@ -270,6 +292,17 @@ class AiGatewayClient(
             .put("book_id", bookId)
             .put("period", period)
             .toString()
+
+    /** T21-6: 捕获解析的请求体（服务端 `AICaptureParseRequest`：text ≤2000 + 通道 + context）。 */
+    private fun buildParseNotificationRequest(
+        text: String,
+        sourceChannel: String,
+        contextJson: String?,
+    ): String {
+        val body = JSONObject().put("text", text).put("source_channel", sourceChannel)
+        if (contextJson != null) body.put("context", JSONObject(contextJson))
+        return body.toString()
+    }
 
     private fun buildParseImageRequest(attachmentId: String, bookId: String): String =
         JSONObject()

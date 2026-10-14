@@ -5,6 +5,8 @@ import android.content.pm.PackageManager
 import android.view.accessibility.AccessibilityEvent
 import com.aozora.app.AozoraApp
 import com.aozora.app.db.entity.AutoCaptureEntity
+import com.aozora.app.sync.SyncScheduler
+import com.aozora.app.widget.AozoraWidgetProvider
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
@@ -109,7 +111,7 @@ class AutoBookAccessibilityService : AccessibilityService() {
             )
             // 非支付类当场丢弃：不落库、不上行（决策 #13 的隐私兑现点）
             if (!decision.accepted) return@launch
-            repository.recordCapture(
+            val outcome = repository.recordCapture(
                 AutoBookRepository.CaptureDraft(
                     sourceChannel = AutoCaptureEntity.CHANNEL_ACCESSIBILITY,
                     sourcePackage = pkg,
@@ -120,7 +122,28 @@ class AutoBookAccessibilityService : AccessibilityService() {
                     eventIdentity = pageKey,
                 )
             )
+            if (outcome is AutoBookRepository.CaptureOutcome.Stored) advancePipeline()
         }
+    }
+
+    /**
+     * 落行后的推进（T21-6）：先跑一次**本地档**编排，再入队既有的同步任务。
+     *
+     * ★ **本地档不做网络**（`allowRemote = false`）——采集层不做网络是 ADR-016
+     * 决策 4 的既有口径；这里只是让本地规则认得出的那一笔**离线也能入账**（PR-3），
+     * 未命中 / 字段不完整的行留在 `captured`，由同步任务在联网时跑在线档上行。
+     * **不新造调度器**：入队的就是 `SyncScheduler` 那份唯一任务。
+     *
+     * ★ **只读不写不受影响**：本方法只读本地库、只写本地库与 WorkManager 队列，
+     * **没有任何 `performAction`**（见类注释的三处守护）。
+     */
+    private suspend fun advancePipeline() {
+        val app = application as? AozoraApp ?: return
+        // 本地入账会改变今日 / 本月聚合，桌面组件跟着刷新（与桥的记账路径同口径）
+        if (app.autoBookEngine.processPendingCaptures(allowRemote = false) > 0) {
+            AozoraWidgetProvider.requestUpdate(applicationContext)
+        }
+        SyncScheduler.enqueue(applicationContext)
     }
 
     /**
