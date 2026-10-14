@@ -95,8 +95,7 @@
         <!-- 第二十一轮 REQ-83（T21-3）：自动记账 · 通知通道。
              授权在系统的「通知使用权」页 —— BIND_NOTIFICATION_LISTENER_SERVICE 是
              系统持有的 signature 级权限，故本通道 **不新增任何 <uses-permission>**
-             （决策 #3，由 SecurityConfigTest 的反向断言钉住）。
-             无障碍通道的 <service> 由 T21-4 追加（同文件两卡严格串行）。 -->
+             （决策 #3，由 SecurityConfigTest 的反向断言钉住）。 -->
         <service
             android:name=".autobook.AutoBookNotificationListener"
             android:exported="true"
@@ -105,6 +104,25 @@
             <intent-filter>
                 <action android:name="android.service.notification.NotificationListenerService" />
             </intent-filter>
+        </service>
+
+        <!-- 第二十一轮 REQ-83（T21-4）：自动记账 · 无障碍通道。
+             与通知通道同形态 —— 靠 <service> + android:permission 声明、授权在系统
+             「无障碍」页，不新增 <uses-permission>（决策 #3）。配置 XML 不声明
+             canPerformGestures（决策 #5：只读不写，禁止任何 performAction），
+             packageNames 也不写（用户的来源集合会变化，XML 是静态的）——两条都交给
+             AutoBookAccessibilityService 运行时判定。 -->
+        <service
+            android:name=".autobook.AutoBookAccessibilityService"
+            android:exported="true"
+            android:label="@string/autobook_accessibility_service_label"
+            android:permission="android.permission.BIND_ACCESSIBILITY_SERVICE">
+            <intent-filter>
+                <action android:name="android.accessibilityservice.AccessibilityService" />
+            </intent-filter>
+            <meta-data
+                android:name="android.accessibilityservice"
+                android:resource="@xml/accessibility_service_config" />
         </service>
 
         <!-- T-M4-04d: FileProvider for camera capture (content:// URI for temp image) -->

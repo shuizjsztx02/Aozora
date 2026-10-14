@@ -1,0 +1,23 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  第二十一轮 REQ-83（T21-4）：自动记账 · 无障碍通道的服务配置。
+
+  三条红线（ADR-016 决策 3 / 决策 5）：
+    1. ★ **不声明 canPerformGestures**：本服务只读不写，不调用任何 performAction。
+       一旦加上这个属性，"读屏记账"与"AI 智能体操作第三方 App"的分界线就消失了。
+    2. ★ **事件类型只订阅窗口类**：typeWindowStateChanged + typeWindowContentChanged，
+       不订阅按键、不订阅触摸、不订阅通知 —— 那些是其他类别的无障碍服务才会关心的。
+    3. ★ **不写 packageNames**：用户的来源集合会变化（T21-7 的「从已安装应用添加」），
+       XML 是静态的写不了动态集合。包名判定在 AutoBookAccessibilityService 内按
+       AutoBookRepository.sourcePackages() 运行时过滤，与通知通道形态一致。
+
+  notificationTimeout：500ms 节流。TYPE_WINDOW_CONTENT_CHANGED 在一个页面上会
+  高频抖动（每次 UI 刷新都回调一次），靠内存签名 + L1 去重共同兜底（详见服务注释）。
+-->
+<accessibility-service xmlns:android="http://schemas.android.com/apk/res/android"
+    android:accessibilityEventTypes="typeWindowStateChanged|typeWindowContentChanged"
+    android:accessibilityFeedbackType="feedbackGeneric"
+    android:canRetrieveWindowContent="true"
+    android:description="@string/autobook_accessibility_service_desc"
+    android:notificationTimeout="500"
+    android:settingsActivity="com.aozora.app.MainActivity" />

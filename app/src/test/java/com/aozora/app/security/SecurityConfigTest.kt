@@ -243,4 +243,67 @@ class SecurityConfigTest {
             content.contains("android.service.notification.NotificationListenerService")
         )
     }
+
+    // ------------------------------------------------------------------
+    // 第二十一轮 REQ-83（T21-4）：无障碍通道的三道反向守护
+    //
+    // 与通知通道同形态（<service> + android:permission 授权、不动 <uses-permission>），
+    // 但多一道"只读不写"——这是"读屏记账"与"AI 智能体操作第三方 App"的分界线
+    // （ADR-016 决策 3）。守护三道：manifest 声明 / 配置 XML 不声明 canPerformGestures
+    // / 服务源码不含 performAction 调用。
+    // ------------------------------------------------------------------
+
+    @Test
+    fun manifest_declaresAccessibilityServiceWithBindPermission() {
+        val manifest = java.io.File("src/main/AndroidManifest.xml")
+        if (!manifest.exists()) return
+        val content = manifest.readText()
+        assertTrue(
+            "无障碍服务必须以 BIND_ACCESSIBILITY_SERVICE 声明（ADR-016 决策 2）",
+            content.contains("android.permission.BIND_ACCESSIBILITY_SERVICE")
+        )
+        assertTrue(
+            "无障碍服务必须声明 .autobook.AutoBookAccessibilityService",
+            content.contains(".autobook.AutoBookAccessibilityService")
+        )
+        assertTrue(
+            "无障碍服务必须带 AccessibilityService 的 intent-filter action",
+            content.contains("android.accessibilityservice.AccessibilityService")
+        )
+        assertTrue(
+            "无障碍服务必须引用 accessibility_service_config 配置 XML",
+            content.contains("@xml/accessibility_service_config")
+        )
+    }
+
+    @Test
+    fun accessibilityServiceConfig_doesNotDeclareCanPerformGestures() {
+        val config = java.io.File("src/main/res/xml/accessibility_service_config.xml")
+        if (!config.exists()) return
+        val content = config.readText()
+        // 用 `android:canPerformGestures`（属性形式）匹配 —— 避免注释里提到这个字面时被误命中。
+        // 真正要守的是**属性声明**（无论是 true 还是 false 都意味着服务在声明手势能力），
+        // 注释里提到"不声明 xxx"是文档，不是事实。
+        assertFalse(
+            "无障碍配置 XML 不得声明 android:canPerformGestures 属性 —— 本服务只读不写（ADR-016 决策 3）",
+            content.contains("android:canPerformGestures")
+        )
+    }
+
+    @Test
+    fun accessibilityServiceSource_doesNotCallPerformAction() {
+        val source = java.io.File(
+            "src/main/java/com/aozora/app/autobook/AutoBookAccessibilityService.kt"
+        )
+        if (!source.exists()) return
+        val content = source.readText()
+        // grep 式守护：服务源码里任何 `performAction(` 调用（无论是直接 this.performAction
+        // 还是 AccessibilityNodeInfo.performAction）都是"写"的起点，一律禁止。
+        // 这条守护用例是 ADR-016 决策 3 的最终兜底 —— 即便配置 XML 漏声明，
+        // 源码层这道闸门也得拦住。
+        assertFalse(
+            "AutoBookAccessibilityService 不得调用任何 performAction（ADR-016 决策 3）",
+            content.contains("performAction(")
+        )
+    }
 }

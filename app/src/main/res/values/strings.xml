@@ -12,6 +12,13 @@
          口径以 docs/legal/privacy-policy-v1.md §2.4（「通知监听」那一行）为准 —— 只读支付类通知。 -->
     <string name="autobook_notification_listener_label">自动记账（只读支付类通知）</string>
 
+    <!-- 第二十一轮 REQ-83（T21-4）：自动记账 · 无障碍通道在系统「无障碍」页的条目名与说明。
+         显著披露四句话，对齐 docs/legal/accessibility-disclosure.md —— 用户在系统无障碍页
+         看到的就是这几句，必须把"读什么 / 不读什么 / 不操作什么 / 能撤销吗"一次讲清楚。
+         想清楚再改：这是本 App 在无障碍授权链路里唯一能说的话。 -->
+    <string name="autobook_accessibility_service_label">自动记账（只读支付页）</string>
+    <string name="autobook_accessibility_service_desc">Aozora 自动记账 · 仅在您选定的支付类应用（微信/支付宝/云闪付等）进入支付结果页或账单详情页时，**读取该页面的可见文字**用于识别金额与商户。\n\n**我们不**：读取其他页面、读取短信、点击或操作任何第三方应用、上传支付保护页内容。\n\n可随时在「无障碍」页关闭。默认关闭，需您在 App 内显式开启。原文只存本机，解析后才上行疑似交易文本。详见 Aozora 隐私政策 §2.4。</string>
+
     <!-- T-M4-05b: 桌面小组件 -->
     <string name="widget_description">今日支出与预算进度</string>
     <string name="widget_label">Aozora 记账</string>
