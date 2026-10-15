@@ -120,7 +120,9 @@ describe('AutoBookCapturePage — T21-8 / REQ-83', () => {
     expect(screen.getByText('餐饮')).toBeInTheDocument()
     // 金额：-¥32.00（符号与金额分两个 span 渲染）
     expect(screen.getByText(/32\.00/)).toBeInTheDocument()
-    expect(screen.getByText(/微信 · 14:32/)).toBeInTheDocument()
+    // 来源 App + 时间（时区无关：CI runner 是 UTC，本机是 Asia/Shanghai，只断言来源 App）
+    expect(screen.getByText(/微信/)).toBeInTheDocument()
+    expect(screen.getByText(/\d{2}:\d{2}/)).toBeInTheDocument()
     // 三按钮都在
     expect(screen.getByTestId('capture-confirm-cap1')).toBeInTheDocument()
     expect(screen.getByTestId('capture-edit-cap1')).toBeInTheDocument()
