@@ -350,3 +350,80 @@ describe('HomePage 同步重取（T18-2 / REQ-67①）', () => {
     await waitFor(() => expect(screen.getByText('-9.00')).toBeInTheDocument())
   })
 })
+
+// ─── T21-8 / REQ-83：待确认箱入口（仅当 pendingConfirmCount > 0 时出现）───
+
+describe('HomePage 待确认箱入口（T21-8 / REQ-83）', () => {
+  const today = todayBizDate('Asia/Shanghai')
+
+  beforeEach(() => {
+    vi.clearAllMocks()
+    mockBridge.getMeta.mockResolvedValue({})
+    mockBridge.listSavingsGoals.mockResolvedValue([])
+  })
+
+  function setupWithAutobook(pendingConfirmCount: number) {
+    mockBridge.call.mockImplementation((cmd: string) => {
+      if (cmd === 'book.list') return Promise.resolve([{ id: 'b1', name: '默认账本', version: 1 }])
+      if (cmd === 'category.list') return Promise.resolve([{ id: 'c1', kind: 'expense', name: '餐饮', parentId: null, version: 1 }])
+      if (cmd === 'budget.list') return Promise.resolve([])
+      if (cmd === 'transaction.listByBook') return Promise.resolve([mkTx({ id: 't1', bizDate: today })])
+      if (cmd === 'autobook.get_status') {
+        return Promise.resolve({
+          enabled: true,
+          accessibilityStatus: 'enabled',
+          notificationStatus: 'enabled',
+          accessibilityGranted: true,
+          notificationGranted: true,
+          todayCaptureCount: 2,
+          pendingConfirmCount,
+        })
+      }
+      return Promise.resolve([])
+    })
+  }
+
+  it('pendingConfirmCount > 0 → 显示待确认入口（带计数 + 文案）', async () => {
+    setupWithAutobook(3)
+    render(
+      <MemoryRouter>
+        <HomePage />
+      </MemoryRouter>,
+    )
+    const entry = await screen.findByTestId('home-autobook-entry')
+    expect(entry).toBeInTheDocument()
+    expect(entry).toHaveTextContent(/小贝发现了 3 笔待确认/)
+    expect(entry).toHaveTextContent(/点进去确认或修改/)
+  })
+
+  it('pendingConfirmCount = 0 → 不显示待确认入口', async () => {
+    setupWithAutobook(0)
+    render(
+      <MemoryRouter>
+        <HomePage />
+      </MemoryRouter>,
+    )
+    // 等今日流水渲染完成 = loadData 已落地
+    await waitFor(() => expect(screen.getByText('-10.00')).toBeInTheDocument())
+    expect(screen.queryByTestId('home-autobook-entry')).toBeNull()
+  })
+
+  it('autobook.get_status 失败 → 入口不显示（降级到 0，不挡主流程）', async () => {
+    mockBridge.call.mockImplementation((cmd: string) => {
+      if (cmd === 'book.list') return Promise.resolve([{ id: 'b1', name: '默认账本', version: 1 }])
+      if (cmd === 'category.list') return Promise.resolve([])
+      if (cmd === 'budget.list') return Promise.resolve([])
+      if (cmd === 'transaction.listByBook') return Promise.resolve([mkTx({ id: 't1', bizDate: today })])
+      if (cmd === 'autobook.get_status') return Promise.reject(new Error('unavailable'))
+      return Promise.resolve([])
+    })
+    render(
+      <MemoryRouter>
+        <HomePage />
+      </MemoryRouter>,
+    )
+    await waitFor(() => expect(screen.getByText('-10.00')).toBeInTheDocument())
+    // 不因为 autobook 失败而崩、不显示入口
+    expect(screen.queryByTestId('home-autobook-entry')).toBeNull()
+  })
+})

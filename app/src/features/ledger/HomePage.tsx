@@ -21,7 +21,7 @@ import { useRefreshOnSync } from '../../platform/hooks/use-refresh-on-sync'
 import { useTheme } from '../../design/theme'
 import { QuickEntrySheet } from './QuickEntrySheet'
 import { TxEditSheet } from './TxEditSheet'
-import type { TransactionData, CategoryData, SavingsGoalData } from '../../platform/bridge/bridge-types'
+import type { TransactionData, CategoryData, SavingsGoalData, AutoBookStatusData } from '../../platform/bridge/bridge-types'
 import * as Money from '../../domain/money'
 import { todayBizDate, localHHmm } from '../../domain/date'
 import { sumTransactions } from '../../domain/aggregator'
@@ -106,6 +106,8 @@ export function HomePage() {
   const [savingsGoals, setSavingsGoals] = useState<SavingsGoalData[]>([])
   const [nick, setNick] = useState('')
   const [loadError, setLoadError] = useState<string | null>(null)
+  // T21-8（REQ-83）：待确认箱入口——`pendingConfirmCount > 0` 时才出现
+  const [pendingConfirmCount, setPendingConfirmCount] = useState(0)
   // T12-10（REQ-36）：今日流水行点击开编辑弹层
   const [editTx, setEditTx] = useState<TransactionData | null>(null)
   const bridge = useBridge()
@@ -144,12 +146,14 @@ export function HomePage() {
       const month = today.slice(0, 7)
       const year = today.slice(0, 4)
 
-      const [allTxs, cats, budgets, goals] = await Promise.all([
+      const [allTxs, cats, budgets, goals, autobookStatus] = await Promise.all([
         bridge.call('transaction.listByBook', { bookId }) as Promise<TransactionData[]>,
         bridge.call('category.list', {}) as Promise<CategoryData[]>,
         bridge.call('budget.list', { bookId }) as Promise<{ amountCents: number; period: string; budgetType: 'monthly' | 'annual' }[]>,
         // 存钱目标加载失败不挡首页其余渲染（与 AssistantPage 同款回落）
         bridge.listSavingsGoals().catch(() => [] as SavingsGoalData[]),
+        // T21-8（REQ-83）：待确认箱角标。失败/不可用时归零，不挡主流程
+        bridge.call<AutoBookStatusData>('autobook.get_status').catch(() => ({ pendingConfirmCount: 0 } as AutoBookStatusData)),
       ])
 
       const todayExpenses = allTxs.filter(tx => tx.bizDate === today && tx.type === 'expense' && tx.deletedAt === null)
@@ -158,6 +162,7 @@ export function HomePage() {
       setTodayTxs(todayExpenses)
       setCategories(cats)
       setSavingsGoals(goals)
+      setPendingConfirmCount(autobookStatus.pendingConfirmCount ?? 0)
 
       // T15-1（REQ-50）：匹配口径对齐 BudgetPage——当月(monthly)优先，否则当年(annual)，一条命中即显
       const matched =
@@ -214,6 +219,30 @@ export function HomePage() {
         </div>
         <SyncBadge />
       </div>
+
+      {/* ─── T21-8（REQ-83）：待确认箱入口（仅当有待确认条目时出现） ─── */}
+      {pendingConfirmCount > 0 && (
+        <button
+          onClick={() => navigate('/autobook/captures')}
+          className="mx-5 mb-3 px-3 py-2.5 rounded-xl flex items-center gap-2.5 w-[calc(100%-2.5rem)] text-left active:opacity-70 transition-opacity"
+          style={{
+            background: 'linear-gradient(135deg, rgba(59,130,246,0.1), rgba(16,185,129,0.08))',
+            border: '1px solid rgba(59,130,246,0.2)',
+          }}
+          data-testid="home-autobook-entry"
+        >
+          <span className="text-xl">🔔</span>
+          <div className="flex-1 min-w-0">
+            <div className="text-sm font-medium truncate" style={{ color: 'var(--ink)' }}>
+              小贝发现了 {pendingConfirmCount} 笔待确认
+            </div>
+            <div className="text-[11px] truncate" style={{ color: 'var(--ink3)' }}>
+              点进去确认或修改，才会计入账本
+            </div>
+          </div>
+          <span className="text-xs" style={{ color: 'var(--accent)' }}>查看 ›</span>
+        </button>
+      )}
 
       {/* ─── 今日支出 ── */}
       <div className="px-5 pt-2 pb-4">
