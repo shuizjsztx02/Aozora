@@ -371,8 +371,6 @@ describe('HomePage 待确认箱入口（T21-8 / REQ-83）', () => {
       if (cmd === 'autobook.get_status') {
         return Promise.resolve({
           enabled: true,
-          accessibilityStatus: 'enabled',
-          notificationStatus: 'enabled',
           accessibilityGranted: true,
           notificationGranted: true,
           todayCaptureCount: 2,

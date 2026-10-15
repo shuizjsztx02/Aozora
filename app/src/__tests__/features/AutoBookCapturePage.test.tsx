@@ -67,10 +67,8 @@ const CATEGORIES: CategoryData[] = [
   { id: 'c3', kind: 'income', name: '工资', parentId: null, icon: '💰', version: 1 },
 ]
 
-const DEFAULT_STATUS: AutoBookStatusData = {
+const DEFAULT_STATUS = {
   enabled: true,
-  accessibilityStatus: 'enabled',
-  notificationStatus: 'enabled',
   accessibilityGranted: true,
   notificationGranted: true,
   todayCaptureCount: 3,
