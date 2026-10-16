@@ -188,6 +188,8 @@ export function MePage() {
             <MenuItem icon="📅" label="定时记账" onClick={() => navigate('/settings/scheduled')} />
             {/* 第十一轮 T11-6（REQ-27 / 决策 #9）：用户设定入口（画像 → AI context） */}
             <MenuItem icon="👤" label="用户设定" onClick={() => navigate('/settings/user-prefs')} />
+            {/* 第二十一轮 T21-7（REQ-83）：自动记账（开关 + 双授权引导） */}
+            <MenuItem icon="🤖" label="自动记账" onClick={() => navigate('/settings/autobook')} />
           </MenuSection>
         </div>
 

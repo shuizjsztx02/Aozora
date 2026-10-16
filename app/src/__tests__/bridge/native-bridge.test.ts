@@ -533,13 +533,21 @@ describe('NativeBridge — T-M4-04a 权限管理', () => {
     expect(result.pending).toBe(true)
   })
 
-  it('openPermissionSettings → permissions.openSettings', async () => {
-    mockNative.call.mockImplementation((_v: number, requestId: string, cmd: string) => {
+  it('openPermissionSettings → permissions.openSettings，target 缺省为 app、可指定 accessibility / notification_listener', async () => {
+    mockNative.call.mockImplementation((_v: number, requestId: string, cmd: string, payload: string) => {
       capturedCommand = cmd
+      capturedPayload = payload
       setTimeout(() => simulateResponse(requestId, { success: true }), 0)
     })
     await bridge.openPermissionSettings()
     expect(capturedCommand).toBe('permissions.openSettings')
+    expect(JSON.parse(capturedPayload).target).toBe('app')
+
+    await bridge.openPermissionSettings('accessibility')
+    expect(JSON.parse(capturedPayload).target).toBe('accessibility')
+
+    await bridge.openPermissionSettings('notification_listener')
+    expect(JSON.parse(capturedPayload).target).toBe('notification_listener')
   })
 
   it('onPermissionResult 监听并取消订阅', () => {
@@ -1159,11 +1167,13 @@ describe('NativeBridge — T21-5 自动记账', () => {
     mockNative = installMockBridge()
   })
 
-  it('getAutoBookStatus → autobook.get_status 并透出两类授权态与计数', async () => {
+  it('getAutoBookStatus → autobook.get_status 并透出两类授权态（三态）与计数', async () => {
     mockNative.call.mockImplementation((_v: number, requestId: string, cmd: string) => {
       capturedCommand = cmd
       setTimeout(() => simulateResponse(requestId, {
         enabled: true,
+        accessibilityStatus: 'enabled',
+        notificationStatus: 'enabled_but_disabled',
         accessibilityGranted: true,
         notificationGranted: false,
         todayCaptureCount: 3,
@@ -1173,6 +1183,10 @@ describe('NativeBridge — T21-5 自动记账', () => {
     const status = await bridge.getAutoBookStatus()
     expect(capturedCommand).toBe('autobook.get_status')
     expect(status.enabled).toBe(true)
+    // T21-7（决策 #10）：两类授权升级为三态
+    expect(status.accessibilityStatus).toBe('enabled')
+    expect(status.notificationStatus).toBe('enabled_but_disabled')
+    // 兼容字段
     expect(status.accessibilityGranted).toBe(true)
     expect(status.notificationGranted).toBe(false)
     expect(status.todayCaptureCount).toBe(3)

@@ -981,13 +981,29 @@ export type FeedbackSubmitErrorCode =
 
 // ─── 第二十一轮 T21-5（REQ-83）：自动记账 ───
 
+/**
+ * 「设置页授权」三态（T21-7 / 决策 #10）。无障碍 / 通知使用权两类授权都**不是运行时
+ * 权限**，只能靠系统 API 查询，并由用户在系统设置页手动启用。
+ * - `unauthorized`：用户从未启用过
+ * - `enabled`：当前系统显示启用
+ * - `enabled_but_disabled`：用户曾启用、但被系统或用户停用（UI 给「重新启用」引导）
+ */
+export type SettingsAuthStatus = 'unauthorized' | 'enabled' | 'enabled_but_disabled'
+
 /** `autobook.get_status`：总开关 + 两类授权态 + 今日捕获数 + 待确认数。 */
 export interface AutoBookStatusData {
   /** 总开关（设备本地自管键，默认关闭）。 */
   enabled: boolean
-  /** 无障碍服务授权态（系统设置页授权，非运行时权限）。 */
+  /**
+   * 无障碍服务授权态（三态，T21-7 升级）。前端据此分别渲染「未授权 / 已启用 /
+   * 已授权但停用」的引导文案。
+   */
+  accessibilityStatus: SettingsAuthStatus
+  /** 通知使用权授权态（三态，T21-7 升级）。 */
+  notificationStatus: SettingsAuthStatus
+  /** @deprecated T21-7 起由 `accessibilityStatus === 'enabled'` 取代，仅保留作兼容。 */
   accessibilityGranted: boolean
-  /** 通知使用权态（系统设置页授权，非运行时权限）。 */
+  /** @deprecated T21-7 起由 `notificationStatus === 'enabled'` 取代，仅保留作兼容。 */
   notificationGranted: boolean
   /** 今日捕获条数（本地日零点起）。 */
   todayCaptureCount: number

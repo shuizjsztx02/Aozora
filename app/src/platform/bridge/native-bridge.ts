@@ -652,9 +652,15 @@ export class NativeBridge {
     return this.call('permissions.request', { permission })
   }
 
-  /** 打开应用设置页（用于永久拒绝后的引导）。 */
-  async openPermissionSettings(): Promise<{ success: boolean }> {
-    return this.call('permissions.openSettings')
+  /**
+   * 打开系统设置页。`target` 缺省跳应用详情页（保持既有行为），'accessibility' /
+   * 'notification_listener' 跳对应的系统级页面（第二十一轮 T21-7 / REQ-83 决策 #10：
+   * 两类授权都是「设置页授权」，不是运行时权限）。
+   */
+  async openPermissionSettings(
+    target: 'app' | 'accessibility' | 'notification_listener' = 'app'
+  ): Promise<{ success: boolean }> {
+    return this.call('permissions.openSettings', { target })
   }
 
   /**

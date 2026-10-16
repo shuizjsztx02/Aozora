@@ -28,6 +28,7 @@ import { WidgetSettingsPage } from '../features/settings/WidgetSettingsPage'
 import { UserSettingsPage } from '../features/settings/UserSettingsPage'
 import { PersonasPage } from '../features/settings/PersonasPage'
 import { AboutPage } from '../features/settings/AboutPage'
+import { AutoBookSettingsPage } from '../features/settings/AutoBookSettingsPage'
 import { AutoBookCapturePage } from '../features/autobook/AutoBookCapturePage'
 import { AssistantPage } from '../features/assistant/AssistantPage'
 import { OnboardingPage, isOnboardingCompleted } from '../features/onboarding/OnboardingPage'
@@ -121,6 +122,8 @@ export function Router() {
         {/* 第十一轮 T11-7（REQ-28 / 决策 #8）：聊天角色管理（入口在聊天页 header） */}
         <Route path="/settings/personas" element={<ProtectedRoute><AppLayout><PersonasPage /></AppLayout></ProtectedRoute>} />
         <Route path="/settings/about" element={<ProtectedRoute><AppLayout><AboutPage /></AppLayout></ProtectedRoute>} />
+        {/* 第二十一轮 T21-7（REQ-83）：自动记账设置页（开关 + 双授权引导） */}
+        <Route path="/settings/autobook" element={<ProtectedRoute><AppLayout><AutoBookSettingsPage /></AppLayout></ProtectedRoute>} />
         {/* 第二十一轮 T21-8（REQ-83）：待确认箱（处置自动记账捕获的条目） */}
         <Route path="/autobook/captures" element={<ProtectedRoute><AppLayout><AutoBookCapturePage /></AppLayout></ProtectedRoute>} />
         <Route path="*" element={<DefaultRoute />} />

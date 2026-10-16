@@ -2,13 +2,8 @@ package com.aozora.app.bridge
 
 import android.webkit.JavascriptInterface
 import android.webkit.WebView
-import android.content.ComponentName
 import android.content.Context
-import android.view.accessibility.AccessibilityManager
-import android.accessibilityservice.AccessibilityServiceInfo
-import androidx.core.app.NotificationManagerCompat
 import com.aozora.app.ai.AiGatewayClient
-import com.aozora.app.autobook.AutoBookAccessibilityService
 import com.aozora.app.autobook.AutoBookRepository
 import com.aozora.app.consent.ConsentClient
 import com.aozora.app.consent.ConsentStore
@@ -21,6 +16,7 @@ import com.aozora.app.image.ImageClient
 import com.aozora.app.image.ImagePicker
 import com.aozora.app.permission.PermissionManager
 import com.aozora.app.permission.PermissionStatus
+import com.aozora.app.permission.SettingsAuthTarget
 import com.aozora.app.reminder.ReminderScheduler
 import com.aozora.app.scheduled.ScheduledTxReceiver
 import com.aozora.app.sync.SyncEngine
@@ -240,7 +236,7 @@ class AozoraBridge(
             // T-M4-04a: 权限管理
             BridgeCommands.PERMISSIONS_GET_STATUS -> handlePermissionsGetStatus(requestId)
             BridgeCommands.PERMISSIONS_REQUEST -> handlePermissionsRequest(requestId, payload)
-            BridgeCommands.PERMISSIONS_OPEN_SETTINGS -> handlePermissionsOpenSettings(requestId)
+            BridgeCommands.PERMISSIONS_OPEN_SETTINGS -> handlePermissionsOpenSettings(requestId, payload)
 
             // T-M4-04d: 图片链路
             BridgeCommands.IMAGE_PICK -> handleImagePick(requestId, payload)
@@ -1607,10 +1603,19 @@ class AozoraBridge(
         return BridgeResponse.success(requestId, JSONObject().put("pending", true).toString())
     }
 
-    private fun handlePermissionsOpenSettings(requestId: String): BridgeResponse {
+    private fun handlePermissionsOpenSettings(requestId: String, p: JSONObject): BridgeResponse {
         val manager = permissionManager
             ?: return BridgeResponse.error(requestId, "unavailable", "permission manager not injected")
-        manager.openAppSettings()
+        // 第二十一轮 T21-7（REQ-83，决策 #10）：`target` 参数缺省跳应用详情页（保持既有行为），
+        // 'accessibility' / 'notification_listener' 跳对应的系统级设置页。两类授权都是
+        // 「设置页授权」——`checkSelfPermission` 查不到，只能让用户在系统页手动授予。
+        val target = p.optString("target", "app")
+        when (target) {
+            "app", "" -> manager.openAppSettings()
+            "accessibility" -> manager.openSettingsAuthTarget(SettingsAuthTarget.ACCESSIBILITY)
+            "notification_listener" -> manager.openSettingsAuthTarget(SettingsAuthTarget.NOTIFICATION_LISTENER)
+            else -> return BridgeResponse.error(requestId, "invalid_input", "unknown target: $target")
+        }
         return BridgeResponse.success(requestId, JSONObject().put("success", true).toString())
     }
 
@@ -2553,15 +2558,21 @@ class AozoraBridge(
             ?: return BridgeResponse.error(requestId, "unavailable", "autobook database not injected")
         val dao = db.autoCaptureDao()
         val pending = dao.listByStatus(AutoCaptureEntity.STATUS_PENDING_CONFIRM, Int.MAX_VALUE, 0)
+        // 第二十一轮 T21-7（REQ-83，决策 #10）：两类授权态**升级为三态**
+        // （UNAUTHORIZED / ENABLED / ENABLED_BUT_DISABLED），由 PermissionManager 集中判定
+        // （本地「曾经启用」标记 + 系统 API 查询），避免 AozoraBridge 与 PermissionManager
+        // 各自一套实现、态漂移。`granted` 布尔字段保留作兼容（仅 `status == ENABLED` 时为 true）。
+        val manager = permissionManager
+        val accessibilityStatus = manager?.getSettingsAuthStatus(SettingsAuthTarget.ACCESSIBILITY)
+            ?.name?.lowercase() ?: "unauthorized"
+        val notificationStatus = manager?.getSettingsAuthStatus(SettingsAuthTarget.NOTIFICATION_LISTENER)
+            ?.name?.lowercase() ?: "unauthorized"
         val data = JSONObject().apply {
             put("enabled", AutoBookRepository(db).isEnabled())
-            // 两类授权各自独立（只授一个也应有可用的一半能力，决策 #10）。两条都是
-            // **系统设置页授权**、不是运行时权限：无障碍查已启用的无障碍服务，通知查
-            // 已启用的监听包名。查不到就是未授权，不猜。
-            // ★ T21-7 会把这两条判定收进 PermissionManager 的「设置页授权」形态
-            //   （含「已授权但服务被停用」的第三态）；届时此处改为调用它，避免两处实现。
-            put("accessibilityGranted", isAccessibilityServiceEnabled(syncContext))
-            put("notificationGranted", isNotificationListenerEnabled(syncContext))
+            put("accessibilityStatus", accessibilityStatus)
+            put("notificationStatus", notificationStatus)
+            put("accessibilityGranted", accessibilityStatus == "enabled")
+            put("notificationGranted", notificationStatus == "enabled")
             put("todayCaptureCount", dao.countCapturedSince(startOfTodayMs()))
             put("pendingConfirmCount", pending.count { it.mergedInto == null })
         }
@@ -2808,31 +2819,6 @@ class AozoraBridge(
             cal.get(java.util.Calendar.MONTH) + 1,
             cal.get(java.util.Calendar.DAY_OF_MONTH),
         )
-    }
-
-    /**
-     * 无障碍授权态：本应用的无障碍服务在系统的「已启用服务」列表里（决策 #10）。
-     * 与运行时权限无关——`checkSelfPermission` 查不到，只能这样判定。
-     */
-    private fun isAccessibilityServiceEnabled(ctx: Context?): Boolean {
-        if (ctx == null) return false
-        val am = ctx.getSystemService(Context.ACCESSIBILITY_SERVICE) as? AccessibilityManager
-            ?: return false
-        val expected = ComponentName(ctx.packageName, AutoBookAccessibilityService::class.java.name)
-        return am.getEnabledAccessibilityServiceList(AccessibilityServiceInfo.FEEDBACK_ALL_MASK)
-            .any { info ->
-                val si = info.resolveInfo?.serviceInfo ?: return@any false
-                ComponentName(si.packageName, si.name) == expected
-            }
-    }
-
-    /**
-     * 通知使用权态：本应用在系统的「已启用通知监听」包名集合里（决策 #10）。
-     * 同无障碍——是设置页授权，不是运行时权限。
-     */
-    private fun isNotificationListenerEnabled(ctx: Context?): Boolean {
-        if (ctx == null) return false
-        return NotificationManagerCompat.getEnabledListenerPackages(ctx).contains(ctx.packageName)
     }
 
     // ─── JSON 序列化 ───

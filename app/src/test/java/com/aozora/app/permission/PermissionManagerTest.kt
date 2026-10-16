@@ -130,6 +130,71 @@ class PermissionManagerTest {
         assertEquals(PermissionStatus.DENIED, secondResult)
     }
 
+    // ─── 第二十一轮 T21-7（REQ-83，决策 #10）：「设置页授权」形态 ───
+    //
+    // Robolectric 下系统 API `getEnabledAccessibilityServiceList` /
+    // `getEnabledListenerPackages` 始终返回空集——**无法模拟 ENABLED 态**。ENABLED 由
+    // 真机验收覆盖（决策 #19 ①⑦）。JVM 侧只验证：①默认 UNAUTHORIZED；②ever_enabled
+    // 标记被系统查不到时翻转为 ENABLED_BUT_DISABLED；③两个 target 的 ever_enabled 键
+    // 互不干扰（只授一个也应有可用的一半能力，决策 #10）。
+
+    @Test
+    fun settingsAuth_defaultStatus_isUnauthorized_forBothTargets() {
+        assertEquals(
+            SettingsAuthStatus.UNAUTHORIZED,
+            manager.getSettingsAuthStatus(SettingsAuthTarget.ACCESSIBILITY)
+        )
+        assertEquals(
+            SettingsAuthStatus.UNAUTHORIZED,
+            manager.getSettingsAuthStatus(SettingsAuthTarget.NOTIFICATION_LISTENER)
+        )
+    }
+
+    @Test
+    fun settingsAuth_everEnabled_butSystemDisabled_returnsEnabledButDisabled() {
+        // 模拟"用户曾经启用过"：写本地 ever_enabled 标记。Robolectric 下系统 API
+        // 返回空集，因此应落入第三态 ENABLED_BUT_DISABLED（"已授权但停用"）。
+        val prefs = context.getSharedPreferences("aozora_permissions", Context.MODE_PRIVATE)
+        prefs.edit()
+            .putBoolean("autobook_accessibility_ever_enabled", true)
+            .putBoolean("autobook_notification_ever_enabled", true)
+            .apply()
+        assertEquals(
+            SettingsAuthStatus.ENABLED_BUT_DISABLED,
+            manager.getSettingsAuthStatus(SettingsAuthTarget.ACCESSIBILITY)
+        )
+        assertEquals(
+            SettingsAuthStatus.ENABLED_BUT_DISABLED,
+            manager.getSettingsAuthStatus(SettingsAuthTarget.NOTIFICATION_LISTENER)
+        )
+    }
+
+    @Test
+    fun settingsAuth_twoTargets_areIndependent() {
+        // 两个授权各自的 ever_enabled 键互不干扰——只授一个也应有可用的一半能力。
+        val prefs = context.getSharedPreferences("aozora_permissions", Context.MODE_PRIVATE)
+        prefs.edit()
+            .putBoolean("autobook_accessibility_ever_enabled", true)
+            .apply()
+        assertEquals(
+            "无障碍：本地 ever=true，系统查不到 → 第三态",
+            SettingsAuthStatus.ENABLED_BUT_DISABLED,
+            manager.getSettingsAuthStatus(SettingsAuthTarget.ACCESSIBILITY)
+        )
+        assertEquals(
+            "通知：本地 ever=false，系统查不到 → UNAUTHORIZED",
+            SettingsAuthStatus.UNAUTHORIZED,
+            manager.getSettingsAuthStatus(SettingsAuthTarget.NOTIFICATION_LISTENER)
+        )
+    }
+
+    @Test
+    fun openSettingsAuthTarget_doesNotThrow() {
+        // Robolectric 下跳系统页不会真开 Activity，但不应抛异常。
+        manager.openSettingsAuthTarget(SettingsAuthTarget.ACCESSIBILITY)
+        manager.openSettingsAuthTarget(SettingsAuthTarget.NOTIFICATION_LISTENER)
+    }
+
     private fun grantPermission(permission: String) {
         val appContext = RuntimeEnvironment.getApplication()
         val shadowContext = org.robolectric.Shadows.shadowOf(appContext)
