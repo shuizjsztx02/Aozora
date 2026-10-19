@@ -3,6 +3,7 @@ package com.aozora.app.autobook
 import android.accessibilityservice.AccessibilityService
 import android.content.pm.PackageManager
 import android.view.accessibility.AccessibilityEvent
+import android.view.accessibility.AccessibilityNodeInfo
 import com.aozora.app.AozoraApp
 import com.aozora.app.db.entity.AutoCaptureEntity
 import com.aozora.app.sync.SyncScheduler
@@ -64,12 +65,48 @@ class AutoBookAccessibilityService : AccessibilityService() {
      */
     private val pageSignatures = ConcurrentHashMap<String, String>()
 
+    /**
+     * 来源集合的内存快照。
+     *
+     * ★ 存在的理由：决策 #13 要求**不在来源集合里的页面「连文本都不拼装」**，而拼文本
+     * 发生在系统回调（主线程、不能 suspend）里，权威集合却在 DB。故在回调里用这份快照
+     * 做**前置闸门**（默认只含内置三项，宁可保守），真正的权威判定仍在落库前那次
+     * suspend 读取里（见 [handleContentChanged]）——快照过期只会让「用户新加的来源」
+     * 晚一拍生效，不会让不该采的包被采。
+     */
+    @Volatile
+    private var cachedSources: Set<String> = NotificationFilter.DEFAULT_SOURCE_PACKAGES
+
+    /** 快照刷新节流：来源集合是低频变更，每 [SOURCE_REFRESH_INTERVAL_MS] 至多读一次。 */
+    @Volatile
+    private var lastSourceRefreshAt: Long = 0L
+
+    private fun refreshSourcesIfStale() {
+        val now = System.currentTimeMillis()
+        if (now - lastSourceRefreshAt < SOURCE_REFRESH_INTERVAL_MS) return
+        lastSourceRefreshAt = now
+        scope.launch {
+            cachedSources = runCatching { repository.sourcePackages() }
+                .getOrDefault(NotificationFilter.DEFAULT_SOURCE_PACKAGES)
+        }
+    }
+
+    override fun onServiceConnected() {
+        super.onServiceConnected()
+        refreshSourcesIfStale()
+    }
+
     override fun onAccessibilityEvent(event: AccessibilityEvent?) {
         val e = event ?: return
         // 自己 app 的事件绝不进采集面（设置页、首页等）
         val pkg = e.packageName?.toString().orEmpty()
         if (pkg.isEmpty() || pkg == packageName) return
-
+        // ★ 来源闸门**前移到拼文本之前**（决策 #13：不在来源集合里的页面「连文本都不拼装」）。
+        // 用内存快照判定，因为这里是系统回调、不能 suspend（见 [cachedSources]）。
+        if (pkg !in cachedSources) {
+            refreshSourcesIfStale()
+            return
+        }
         when (e.eventType) {
             AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED -> {
                 // 进入新窗口：记录 key，**清除**旧签名（避免不同页面共用同一 key）。
@@ -83,18 +120,21 @@ class AutoBookAccessibilityService : AccessibilityService() {
                 // STATE_CHANGED 事件**不落行**：文本往往不全（页面还没渲染完），
                 // 真正的文本来自后续 CONTENT_CHANGED 的几次回调
             }
-            AccessibilityEvent.TYPE_WINDOW_CONTENT_CHANGED -> handleContentChanged(e, pkg)
+            AccessibilityEvent.TYPE_WINDOW_CONTENT_CHANGED -> handleContentChanged(pkg)
             // 其他事件类型本服务不订阅，配置 XML 已限定；即便收到也直接忽略
         }
     }
 
-    private fun handleContentChanged(e: AccessibilityEvent, pkg: String) {
+    private fun handleContentChanged(pkg: String) {
         // 没有当前页面 key（服务刚启动，尚未收到 STATE_CHANGED）→ 跳过
         val pageKey = currentPageKey.ifEmpty { return }
 
-        // 拼文本：按行拼出页面所有可见文字。AccessibilityEvent.getText() 已经按节点
-        // 顺序给出列表；转 String 时空 CharSequence 跳过，避免"null"字符串污染
-        val composedText = composeText(e)
+        // 拼文本：★ **必须遍历窗口节点**，不能只读 `AccessibilityEvent.getText()`。
+        // 真机取证（T21-9 收口，Android 16 / Chrome）：`TYPE_WINDOW_CONTENT_CHANGED`
+        // 的事件文本**恒为空**（evtLen=0），而 `rootInActiveWindow` 能完整读到页面文字
+        // ——只用事件文本会让无障碍通道在真实第三方 App 上**一个字符都拿不到**，
+        // 看似"过滤器太严"，实则是通道整体失效。
+        val composedText = composeText()
         if (composedText.isEmpty()) return
 
         // 内存签名防抖：归一化文本 hash 与上次相同 → 同一页面抖动，跳过
@@ -104,6 +144,8 @@ class AutoBookAccessibilityService : AccessibilityService() {
         scope.launch {
             if (!repository.isEnabled()) return@launch
             val sources = repository.sourcePackages()
+            // ★ 来源闸门也在这里再判一次：节点遍历发生在主线程的判定之前，
+            // 而来源集合来自 DB（suspend），故这里用权威集合做最终裁决。
             val decision = AccessibilityFilter.evaluate(
                 sourcePackage = pkg,
                 composedText = composedText,
@@ -117,7 +159,11 @@ class AutoBookAccessibilityService : AccessibilityService() {
                     sourcePackage = pkg,
                     sourceApp = appLabel(pkg),
                     rawText = composedText,
-                    postedAt = e.eventTime.takeIf { it > 0 } ?: System.currentTimeMillis(),
+                    // ★ 必须用 epoch 毫秒，**不能**用 `e.eventTime`：后者是 `uptimeMillis`
+                    // 基准（开机以来的毫秒），与通知通道的 `postTime`（epoch）不同源 →
+                    // L2 的 mergeKey（含分钟桶）永远对不上，跨通道合并会**静默永不命中**。
+                    // 真机取证（T21-9 收口）：eventTime 落库后是 1970-01-01，通知是 2026-10-19。
+                    postedAt = System.currentTimeMillis(),
                     // eventIdentity = 当前页面 key：同一页面多次触发 → 同一 L1 键 → 自动丢弃
                     eventIdentity = pageKey,
                 )
@@ -147,15 +193,32 @@ class AutoBookAccessibilityService : AccessibilityService() {
     }
 
     /**
-     * 把 [AccessibilityEvent] 的文本列表按行拼成一段。**空段跳过**，与通知侧的
-     * [NotificationFilter.composeText] 同口径——重复段会让 L1 键跟着变，凭空造出两行。
+     * 遍历当前窗口的节点树，把可见文字**按行**拼成一段。
+     *
+     * **空段跳过 + 去重**，与通知侧的 [NotificationFilter.composeText] 同口径——重复段
+     * 会让 L1 键跟着变，凭空造出两行。
+     *
+     * ★ 这里**只读**：`rootInActiveWindow` / `getChild` / `text` 都是读操作，
+     * **没有任何 `performAction`**（ADR-016 决策 3，由 SecurityConfigTest 的反向
+     * 断言钉住）。
      */
-    private fun composeText(e: AccessibilityEvent): String {
-        val list = e.text ?: return ""
-        if (list.isEmpty()) return ""
-        val parts = list.mapNotNull { it?.trim()?.takeIf { s -> s.isNotEmpty() } }
-            .distinct()
+    private fun composeText(): String {
+        val root = rootInActiveWindow ?: return ""
+        val parts = LinkedHashSet<String>()
+        collectText(root, 0, parts)
         return parts.joinToString("\n")
+    }
+
+    /**
+     * 深度优先收集节点文本。[depth] 上限防病态树（真实页面的层级远小于此）。
+     * 用 [LinkedHashSet] 去重并保持页面顺序——顺序稳定是 L1 键稳定的前提。
+     */
+    private fun collectText(node: AccessibilityNodeInfo?, depth: Int, out: MutableSet<String>) {
+        if (node == null || depth > MAX_NODE_DEPTH) return
+        node.text?.toString()?.trim()?.takeIf { it.isNotEmpty() }?.let { out.add(it) }
+        for (i in 0 until node.childCount) {
+            collectText(node.getChild(i), depth + 1, out)
+        }
     }
 
     override fun onInterrupt() {
@@ -174,5 +237,13 @@ class AutoBookAccessibilityService : AccessibilityService() {
         pm.getApplicationLabel(pm.getApplicationInfo(pkg, 0)).toString()
     } catch (_: PackageManager.NameNotFoundException) {
         null
+    }
+
+    private companion object {
+        /** 节点树深度上限：真实页面远小于此，纯粹防御病态树。 */
+        const val MAX_NODE_DEPTH = 40
+
+        /** 来源集合快照的刷新间隔（低频变更，避免每个事件都读 DB）。 */
+        const val SOURCE_REFRESH_INTERVAL_MS = 60_000L
     }
 }

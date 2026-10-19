@@ -294,6 +294,22 @@ class SecurityConfigTest {
         )
     }
 
+    /**
+     * T21-9 收口：`isAccessibilityTool="false"` 是 Google Play 的政策要求
+     * （本服务不是残障辅助工具，冒充 `true` 属违规）。口径见
+     * `docs/legal/accessibility-play-declaration.md`。
+     */
+    @Test
+    fun accessibilityServiceConfig_declaresIsAccessibilityToolFalse() {
+        val config = java.io.File("src/main/res/xml/accessibility_service_config.xml")
+        if (!config.exists()) return
+        val content = config.readText()
+        assertTrue(
+            "无障碍配置必须声明 android:isAccessibilityTool=\"false\"（Google Play 政策）",
+            content.contains("android:isAccessibilityTool=\"false\"")
+        )
+    }
+
     @Test
     fun accessibilityServiceSource_doesNotCallPerformAction() {
         val source = java.io.File(
@@ -308,6 +324,31 @@ class SecurityConfigTest {
         assertFalse(
             "AutoBookAccessibilityService 不得调用任何 performAction（ADR-016 决策 3）",
             content.contains("performAction(")
+        )
+    }
+
+    /**
+     * T21-9 收口回归（真机取证查出的缺陷）：无障碍通道必须**遍历窗口节点**取文本。
+     *
+     * 原实现只读 `AccessibilityEvent.getText()`。Android 16 / Chrome 的真实取证显示：
+     * `TYPE_WINDOW_CONTENT_CHANGED` 的事件文本**恒为空**（evtLen=0），而
+     * `rootInActiveWindow` 能完整读到页面文字 —— 只用事件文本会让整条无障碍通道在
+     * 真实第三方 App 上收不到一个字符，表象却像"过滤器太严"。
+     */
+    @Test
+    fun accessibilityServiceSource_readsWindowNodesNotOnlyEventText() {
+        val source = java.io.File(
+            "src/main/java/com/aozora/app/autobook/AutoBookAccessibilityService.kt"
+        )
+        if (!source.exists()) return
+        val content = source.readText()
+        assertTrue(
+            "无障碍通道必须用 rootInActiveWindow 遍历节点取文本（事件文本在真机上恒为空）",
+            content.contains("rootInActiveWindow")
+        )
+        assertTrue(
+            "无障碍通道必须遍历子节点（只看根节点拿不到页面文字）",
+            content.contains("getChild(")
         )
     }
 }

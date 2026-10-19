@@ -11,6 +11,10 @@
        XML 是静态的写不了动态集合。包名判定在 AutoBookAccessibilityService 内按
        AutoBookRepository.sourcePackages() 运行时过滤，与通知通道形态一致。
 
+  ★ isAccessibilityTool="false"（T21-9 收口补）：本服务**不是**为残障用户提供的
+  辅助工具，而是面向普通用户的便利功能。按 Google Play 政策，非辅助用途必须声明
+  为 false，冒充 true 属政策违规（口径见 docs/legal/accessibility-play-declaration.md）。
+
   notificationTimeout：500ms 节流。TYPE_WINDOW_CONTENT_CHANGED 在一个页面上会
   高频抖动（每次 UI 刷新都回调一次），靠内存签名 + L1 去重共同兜底（详见服务注释）。
 -->
@@ -19,5 +23,6 @@
     android:accessibilityFeedbackType="feedbackGeneric"
     android:canRetrieveWindowContent="true"
     android:description="@string/autobook_accessibility_service_desc"
+    android:isAccessibilityTool="false"
     android:notificationTimeout="500"
     android:settingsActivity="com.aozora.app.MainActivity" />
