@@ -32,10 +32,10 @@ from starlette.testclient import TestClient
 from src.common.config import Settings, reset_config, set_config
 from src.common.database import get_db_session
 from src.models.ai import AIUsage
-from src.models.base import Base
 
 # Ensure models are registered with Base.metadata before tables are created
 from src.models.attachment import Attachment  # noqa: F401
+from src.models.base import Base
 from src.models.ledger import Account, Book, Category  # noqa: F401
 from src.modules.ai.prompts import CAPTURE_PARSE, CAPTURE_PARSE_TASK, REGISTRY
 from src.modules.ai.provider import (
