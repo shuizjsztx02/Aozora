@@ -20,8 +20,9 @@ package com.aozora.app.autobook
  * 2. 拼好的页面文本为空 → 丢弃；
  * 3. 验证码 / 动态码 → 丢弃；
  * 4. 广告 / 营销推送 → 丢弃（**但支付完成类强事件词可豁免**，与通知侧同逻辑）；
- * 5. 提取不到金额 → 丢弃（页面没金额形态 = 不是支付结果页 / 账单详情页）；
- * 6. 提取不到支付 / 收入事件词 → 丢弃。
+ * 5. **出现两个及以上不同金额 → 丢弃**（账单列表 / 首页汇总页，T21-10 真机回归补）；
+ * 6. 提取不到金额 → 丢弃（页面没金额形态 = 不是支付结果页 / 账单详情页）；
+ * 7. 提取不到支付 / 收入事件词 → 丢弃。
  *
  * **不做的事**：不解析（不抽商户、不判分类、不出交易草稿——那是 T21-6 的活），
  * 不做网络，不落库。本对象只回答"是不是疑似交易页面"，并给出方向与金额两个线索。
@@ -39,6 +40,9 @@ object AccessibilityFilter {
     const val REASON_AD_PUSH = "a11y_ad_push"
     const val REASON_NO_AMOUNT = "a11y_no_amount"
     const val REASON_NO_PAYMENT_KEYWORD = "a11y_no_payment_keyword"
+
+    /** 汇总页（账单列表 / 首页最近交易）：一次出现多个不同金额，不是单笔支付页。 */
+    const val REASON_MULTI_AMOUNT = "a11y_multi_amount"
 
     /** 判定结果。形态与 [NotificationFilter.Decision] 一致。 */
     data class Decision(
@@ -80,6 +84,16 @@ object AccessibilityFilter {
         // 是真交易（与 NotificationFilter 同逻辑，见 NotificationFilter 注释）。
         if (AD_PUSH.containsMatchIn(body) && !STRONG_PAYMENT_EVENT.containsMatchIn(body)) {
             return Decision.reject(REASON_AD_PUSH)
+        }
+
+        // ★ 汇总页守卫（T21-10 真机回归，2026-10-20）：**页面里出现两个及以上不同金额
+        // 的，不是单笔支付结果页**。真机取证：支付宝**账单列表页**（月度汇总 ¥576.53 +
+        // 十几行 -xx.xx元）与**首页**（"付款成功￥0.01 / ￥16.51"两条最近交易）都能通过
+        // 原有判据（有"支出/付款成功"+带货币标记的金额），落库后 rawText 带出整页历史
+        // 账单（含卡号后四位、手机号）——这违反决策 #13「非支付页面连文本都不落库」。
+        // 单笔交易页（支付结果页 / 账单详情页）只显示本笔金额，故用"金额种数"即可分辨。
+        if (NotificationFilter.extractAllAmountCents(body).size >= 2) {
+            return Decision.reject(REASON_MULTI_AMOUNT)
         }
 
         // 金额提取复用通知侧的公开纯函数——数学与货币标记是通道无关的

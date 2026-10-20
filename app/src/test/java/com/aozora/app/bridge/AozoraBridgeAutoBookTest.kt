@@ -232,7 +232,24 @@ class AozoraBridgeAutoBookTest {
         assertEquals(txId, row.transactionId)
     }
 
-    // ─── resolve_capture：改后确认 ───
+    /**
+ * T21-10 真机回归（2026-10-20）：设备**从未设置过「默认账本」**时（`default_book_id`
+ * 键缺失），确认按钮不能失败。原实现只读 `getDefaultBookId()`，真机上直接抛
+ * "no default book"，原始英文错误被渲染在待确认箱顶部。
+ * 修复后与聊天/手动记账同口径：走 `getEntryBook()` 的回退链（第一个非总账本的活跃账本）。
+ */
+@Test
+fun resolve_confirm_fallsBackToEntryBookWhenDefaultBookIdMissing(): Unit = runBlocking {
+    db.syncMetaDao().delete(SyncMetaEntity.KEY_DEFAULT_BOOK_ID)
+    insertCapture(captureRow("cap-a"))
+    val p = JSONObject().put("captureId", "cap-a").put("resolution", "confirm")
+    val resp = newBridge().dispatch("r1", BridgeCommands.AUTOBOOK_RESOLVE_CAPTURE, p)
+    assertTrue(resp.errorMessage ?: "", resp.success)
+    val tx = repository.getTransaction(JSONObject(resp.data!!).getString("transactionId"))!!
+    assertEquals("b1", tx.bookId)
+}
+
+// ─── resolve_capture：改后确认 ───
 
     @Test
     fun resolve_confirmModified_honoursOverrides(): Unit = runBlocking {

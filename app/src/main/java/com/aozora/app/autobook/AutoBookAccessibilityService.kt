@@ -10,8 +10,10 @@ import com.aozora.app.sync.SyncScheduler
 import com.aozora.app.widget.AozoraWidgetProvider
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import java.util.concurrent.ConcurrentHashMap
 
@@ -38,12 +40,20 @@ import java.util.concurrent.ConcurrentHashMap
  *   1. **总开关**：默认关闭（决策 #9）——未开启时连判定都不做；
  *   2. **来源集合**：内置三项 ∪ 用户勾选（[AutoBookRepository.sourcePackages]）。
  *
- * **两层防抖**（`TYPE_WINDOW_CONTENT_CHANGED` 在页面上高频触发，每次 UI 刷新都回调）：
+ * **三层抖动防线**（`TYPE_WINDOW_CONTENT_CHANGED` 在页面上高频触发，每次 UI 刷新都回调）：
  *   1. **内存签名**（本对象内）：`pkg + activityClass → hash(归一化文本)`，文本没变就
  *      直接跳过，**根本不走到 DB**；
- *   2. **L1 去重**（[DedupeKeys] + Room 唯一索引）：即使同一页面的文本**微变**
- *      （秒级刷新导致金额显示变化），L1 的分钟桶 + 归一化文本仍能把它合并为同一行。
- *   两层共同挡住抖动：内存层挡 99% 的重复，DB 层兜住跨进程重启的残差。
+ *   2. ★ **页面稳定窗口**（T21-10 真机回归，2026-10-20）：内容变化后**静置
+ *      [STABLE_WINDOW_MS] 才落行**，期间再有变化就重新计时——只落页面**渲染完成后
+ *      的最终形态**。真机取证（支付宝支付成功页）：页面先渲染出金额与收款方、约
+ *      200ms 后才补上评分卡与积分块，两次文本都通过过滤器、都被 L1 当成"不同事件"
+ *      （L1 键含归一化文本），**同一笔支付被入账两次**。稳定窗口让中间态在落行前
+ *      就被后续事件顶掉；
+ *   3. **L1 去重**（[DedupeKeys] + Room 唯一索引）：兜住跨进程重启与稳定窗口之外的残差。
+ *
+ * **页面切换即定型**：收到新窗口的 `TYPE_WINDOW_STATE_CHANGED` 时，上一页待落行的
+ * 快照**立即落行**（不再等满稳定窗口）——否则"支付完成立即跳回商户 App"这类快速
+ * 切页会把最终形态一起丢掉。
  *
  * 原文是**敏感数据**：只进 `auto_captures` 表，**不写任何日志**（`security.md`）。
  */
@@ -64,6 +74,24 @@ class AutoBookAccessibilityService : AccessibilityService() {
      * 不走到 DB。ConcurrentHashMap 因为系统可能从多线程回调（虽然实际单线程，防御性选择）。
      */
     private val pageSignatures = ConcurrentHashMap<String, String>()
+
+    /** 等待稳定窗口后落行的快照（一次只有一个：新快照顶掉旧的）。 */
+    private data class PendingSnapshot(
+        val pageKey: String,
+        val pkg: String,
+        val text: String,
+        val eventAt: Long,
+    )
+
+    @Volatile
+    private var pendingSnapshot: PendingSnapshot? = null
+
+    @Volatile
+    private var pendingJob: Job? = null
+
+    /** 本轮待定状态**最早**出现的时间——持续变化时的硬上限起点（见 [MAX_WAIT_MS]）。 */
+    @Volatile
+    private var pendingFirstSeenAt: Long = 0L
 
     /**
      * 来源集合的内存快照。
@@ -114,62 +142,118 @@ class AutoBookAccessibilityService : AccessibilityService() {
                 val className = e.className?.toString().orEmpty()
                 val newKey = "$pkg|$className"
                 if (newKey != currentPageKey) {
+                    // ★ 页面切换 = 上一页已定型：待落行的快照立即落行，不再等满稳定窗口
+                    // （T21-10）。否则"支付完成立即跳回商户 App"会把最终形态一起丢掉。
+                    flushPending()
                     pageSignatures.remove(currentPageKey)
                     currentPageKey = newKey
                 }
                 // STATE_CHANGED 事件**不落行**：文本往往不全（页面还没渲染完），
                 // 真正的文本来自后续 CONTENT_CHANGED 的几次回调
             }
-            AccessibilityEvent.TYPE_WINDOW_CONTENT_CHANGED -> handleContentChanged(pkg)
+            AccessibilityEvent.TYPE_WINDOW_CONTENT_CHANGED ->
+                handleContentChanged(pkg, e.className?.toString().orEmpty())
             // 其他事件类型本服务不订阅，配置 XML 已限定；即便收到也直接忽略
         }
     }
 
-    private fun handleContentChanged(pkg: String) {
-        // 没有当前页面 key（服务刚启动，尚未收到 STATE_CHANGED）→ 跳过
-        val pageKey = currentPageKey.ifEmpty { return }
-
+    private fun handleContentChanged(pkg: String, className: String) {
         // 拼文本：★ **必须遍历窗口节点**，不能只读 `AccessibilityEvent.getText()`。
         // 真机取证（T21-9 收口，Android 16 / Chrome）：`TYPE_WINDOW_CONTENT_CHANGED`
         // 的事件文本**恒为空**（evtLen=0），而 `rootInActiveWindow` 能完整读到页面文字
         // ——只用事件文本会让无障碍通道在真实第三方 App 上**一个字符都拿不到**，
         // 看似"过滤器太严"，实则是通道整体失效。
-        val composedText = composeText()
+        val composedText = composeText(pkg)
         if (composedText.isEmpty()) return
+
+        // ★ 页面 key 缺失时**用本次事件兜底建立**（T21-10 真机回归，2026-10-20）：
+        // 服务在用户**已经停留在某页面**时才绑定/重启时，收不到该页面的
+        // TYPE_WINDOW_STATE_CHANGED——原实现这里直接 return，导致该页面上此后所有
+        // CONTENT_CHANGED 被永久丢弃（真机现象：支付完成页零采集，切一次 App 后恢复）。
+        // 放在拼文本之后：只有真的读到了该包的页面文本才建立 key，避免给错配窗口建 key。
+        val pageKey = currentPageKey.ifEmpty {
+            "$pkg|$className".also { currentPageKey = it }
+        }
 
         // 内存签名防抖：归一化文本 hash 与上次相同 → 同一页面抖动，跳过
         val signature = DedupeKeys.sha256Hex(DedupeKeys.normalizeText(composedText))
         if (pageSignatures.put(pageKey, signature) == signature) return
 
-        scope.launch {
-            if (!repository.isEnabled()) return@launch
-            val sources = repository.sourcePackages()
-            // ★ 来源闸门也在这里再判一次：节点遍历发生在主线程的判定之前，
-            // 而来源集合来自 DB（suspend），故这里用权威集合做最终裁决。
-            val decision = AccessibilityFilter.evaluate(
-                sourcePackage = pkg,
-                composedText = composedText,
-                sourcePackages = sources,
-            )
-            // 非支付类当场丢弃：不落库、不上行（决策 #13 的隐私兑现点）
-            if (!decision.accepted) return@launch
-            val outcome = repository.recordCapture(
-                AutoBookRepository.CaptureDraft(
-                    sourceChannel = AutoCaptureEntity.CHANNEL_ACCESSIBILITY,
-                    sourcePackage = pkg,
-                    sourceApp = appLabel(pkg),
-                    rawText = composedText,
-                    // ★ 必须用 epoch 毫秒，**不能**用 `e.eventTime`：后者是 `uptimeMillis`
-                    // 基准（开机以来的毫秒），与通知通道的 `postTime`（epoch）不同源 →
-                    // L2 的 mergeKey（含分钟桶）永远对不上，跨通道合并会**静默永不命中**。
-                    // 真机取证（T21-9 收口）：eventTime 落库后是 1970-01-01，通知是 2026-10-19。
-                    postedAt = System.currentTimeMillis(),
-                    // eventIdentity = 当前页面 key：同一页面多次触发 → 同一 L1 键 → 自动丢弃
-                    eventIdentity = pageKey,
-                )
-            )
-            if (outcome is AutoBookRepository.CaptureOutcome.Stored) advancePipeline()
+        // ★ 稳定窗口（T21-10）：先把这一版文本记为**待落行**，静置 [STABLE_WINDOW_MS]
+        // 后才真正落库；期间页面再变（渐进渲染的下一帧）就顶掉它——只有最终形态会落。
+        // 事件时刻在**收到变化时**取而非落库时取：落库被推迟，时间戳不该跟着推迟
+        // （L1/L2 的分钟桶与真实交易时刻对齐）。
+        schedulePersist(PendingSnapshot(pageKey, pkg, composedText, System.currentTimeMillis()))
+    }
+
+    /**
+     * 排程落行：静置 [STABLE_WINDOW_MS] 后落最终形态，但**最多等 [MAX_WAIT_MS]**。
+     *
+     * ★ 硬上限是必需的（T21-10 复测发现）：H5 页面的时间戳、轮播、红点会让
+     * CONTENT_CHANGED 间隔**永远小于稳定窗口**——只有静置判据时定时器被无限重置，
+     * 页面上的任何交易都**永远不落行**（真机现象：修复前的旧包能落行，加了稳定窗口
+     * 后反而不落）。硬上限保证"持续变化"的页面也能在有限时间内定型。
+     */
+    private fun schedulePersist(snapshot: PendingSnapshot) {
+        val now = System.currentTimeMillis()
+        if (pendingFirstSeenAt == 0L) pendingFirstSeenAt = now
+        pendingSnapshot = snapshot
+        pendingJob?.cancel()
+        val wait = minOf(STABLE_WINDOW_MS, (pendingFirstSeenAt + MAX_WAIT_MS - now).coerceAtLeast(0))
+        pendingJob = scope.launch {
+            delay(wait)
+            if (pendingSnapshot === snapshot) {
+                pendingSnapshot = null
+                pendingFirstSeenAt = 0L
+            }
+            persist(snapshot)
         }
+    }
+
+    /**
+     * 立即定型待落行快照——页面切换（新的 `TYPE_WINDOW_STATE_CHANGED`）时调用。
+     *
+     * 不等满稳定窗口：页面已经离开，文本不会再变了。若不这么做，"支付完成立即跳回
+     * 商户 App"这类快速切页会在稳定窗口到期前把最终形态一起丢掉。
+     */
+    private fun flushPending() {
+        val snapshot = pendingSnapshot ?: return
+        pendingSnapshot = null
+        pendingFirstSeenAt = 0L
+        pendingJob?.cancel()
+        pendingJob = null
+        scope.launch { persist(snapshot) }
+    }
+
+    /** 落行一条已定型的快照：权威来源闸门 → 过滤器 → 落库 → 推进编排。 */
+    private suspend fun persist(snapshot: PendingSnapshot) {
+        if (!repository.isEnabled()) return
+        val sources = repository.sourcePackages()
+        // ★ 来源闸门也在这里再判一次：节点遍历发生在主线程的判定之前，
+        // 而来源集合来自 DB（suspend），故这里用权威集合做最终裁决。
+        val decision = AccessibilityFilter.evaluate(
+            sourcePackage = snapshot.pkg,
+            composedText = snapshot.text,
+            sourcePackages = sources,
+        )
+        // 非支付类当场丢弃：不落库、不上行（决策 #13 的隐私兑现点）
+        if (!decision.accepted) return
+        val outcome = repository.recordCapture(
+            AutoBookRepository.CaptureDraft(
+                sourceChannel = AutoCaptureEntity.CHANNEL_ACCESSIBILITY,
+                sourcePackage = snapshot.pkg,
+                sourceApp = appLabel(snapshot.pkg),
+                rawText = snapshot.text,
+                // ★ 必须用 epoch 毫秒，**不能**用 `e.eventTime`：后者是 `uptimeMillis`
+                // 基准（开机以来的毫秒），与通知通道的 `postTime`（epoch）不同源 →
+                // L2 的 mergeKey（含分钟桶）永远对不上，跨通道合并会**静默永不命中**。
+                // 真机取证（T21-9 收口）：eventTime 落库后是 1970-01-01，通知是 2026-10-19。
+                postedAt = snapshot.eventAt,
+                // eventIdentity = 当前页面 key：同一页面多次触发 → 同一 L1 键 → 自动丢弃
+                eventIdentity = snapshot.pageKey,
+            )
+        )
+        if (outcome is AutoBookRepository.CaptureOutcome.Stored) advancePipeline()
     }
 
     /**
@@ -202,8 +286,13 @@ class AutoBookAccessibilityService : AccessibilityService() {
      * **没有任何 `performAction`**（ADR-016 决策 3，由 SecurityConfigTest 的反向
      * 断言钉住）。
      */
-    private fun composeText(): String {
+    private fun composeText(pkg: String): String {
         val root = rootInActiveWindow ?: return ""
+        // ★ 事件来源包与**当前活动窗口**必须一致（T21-10 真机回归，2026-10-20）。
+        // 切换 App 的瞬间，系统可能送来上一条属于旧包的事件，而 `rootInActiveWindow`
+        // 已经是新 App 的窗口——不校验就会把 A 页面的文字记到 B 的包名下（现场证据：
+        // 一行 `sourcePackage=com.tencent.mm` 的记录，rawText 却是 Aozora 首页）。
+        if (root.packageName?.toString() != pkg) return ""
         val parts = LinkedHashSet<String>()
         collectText(root, 0, parts)
         return parts.joinToString("\n")
@@ -245,5 +334,20 @@ class AutoBookAccessibilityService : AccessibilityService() {
 
         /** 来源集合快照的刷新间隔（低频变更，避免每个事件都读 DB）。 */
         const val SOURCE_REFRESH_INTERVAL_MS = 60_000L
+
+        /**
+         * 页面稳定窗口（T21-10）：最后一次内容变化后静置这么久才落行。
+         * 取值权衡——太短挡不住渐进渲染（真机实测两帧间隔约 200ms），太长会让
+         * "支付后立刻切走"依赖页面切换定型兜底（[flushPending]）。
+         */
+        const val STABLE_WINDOW_MS = 1_500L
+
+        /**
+         * 持续变化页面的**硬上限**：首次进入待定后最多等这么久就落行。
+         * H5 页面的时间戳 / 轮播 / 红点让 CONTENT_CHANGED 间隔永远小于稳定窗口，
+         * 只靠静置判据会让定时器被无限重置、永远不落行（T21-10 复测实测）。
+         */
+        const val MAX_WAIT_MS = 3_000L
+
     }
 }

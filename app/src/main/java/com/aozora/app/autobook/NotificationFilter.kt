@@ -127,6 +127,25 @@ object NotificationFilter {
         return if (cents in 1..MAX_AMOUNT_CENTS) cents else null
     }
 
+    /**
+     * 文本中出现的**所有不同金额值**（整数分，去重）。
+     *
+     * 与 [extractAmountCents] 复用同一套货币标记与整数分数学（NFR-7），区别只是
+     * "全都要"而不是"取第一个"。消费者是**无障碍通道的汇总页守卫**（T21-10 真机回归）：
+     * 账单列表页 / 首页的"最近交易"会一次出现多个不同金额 —— 那是多笔交易的摘要页，
+     * 不是单笔支付结果页。通知通道不用它（通知文本短，一条通知就是一笔）。
+     */
+    fun extractAllAmountCents(text: String): Set<Long> {
+        val out = LinkedHashSet<Long>()
+        for (match in PREFIX_AMOUNT.findAll(text)) {
+            parseCents(match.groupValues[1])?.takeIf { it in 1..MAX_AMOUNT_CENTS }?.let(out::add)
+        }
+        for (match in SUFFIX_AMOUNT.findAll(text)) {
+            parseCents(match.groupValues[1])?.takeIf { it in 1..MAX_AMOUNT_CENTS }?.let(out::add)
+        }
+        return out
+    }
+
     /** "1,234.5" → 123450（整数分；小数位缺失按 0 补足，多于两位不认）。 */
     private fun parseCents(raw: String): Long? {
         val normalized = raw.replace(",", "")

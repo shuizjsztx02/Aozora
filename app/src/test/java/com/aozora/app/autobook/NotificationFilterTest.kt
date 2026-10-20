@@ -197,6 +197,22 @@ class NotificationFilterTest {
         assertNull(NotificationFilter.extractAmountCents("支付99999999999.99元"))
     }
 
+    /**
+     * T21-10（真机回归）：汇总页守卫要的是**全部不同金额**，不是第一个。
+     * 与 [NotificationFilter.extractAmountCents] 复用同一套货币标记与整数分数学。
+     */
+    @Test
+    fun extractAllAmountCents_returnsDistinctValuesInOrder() {
+        assertEquals(
+            setOf(1L, 3200L, 1651L),
+            NotificationFilter.extractAllAmountCents("付款成功￥0.01\n旧价 ¥32.00\n实付 16.51元"),
+        )
+        // 同一数值重复出现只算一个
+        assertEquals(setOf(3200L), NotificationFilter.extractAllAmountCents("支付成功 ¥32.00 付款金额 32.00元"))
+        // 无货币标记的裸数字不算（订单号 / 时间不进集合）
+        assertEquals(emptySet<Long>(), NotificationFilter.extractAllAmountCents("订单号 20261020152310"))
+    }
+
     // ─── 文本拼装 ───
 
     @Test

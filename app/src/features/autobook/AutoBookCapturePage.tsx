@@ -16,6 +16,7 @@
 
 import { useState, useEffect, useCallback, useMemo } from 'react'
 import { PageHeader } from '../../components/Layout'
+import { TxListRow } from '../../components/TxListRow'
 import { useBridge } from '../../platform/hooks/use-bridge'
 import * as Money from '../../domain/money'
 import type {
@@ -26,14 +27,6 @@ import type {
   CategoryData,
 } from '../../platform/bridge/bridge-types'
 
-function formatCents(cents: number): string {
-  return Money.formatDisplay(Money.cents(cents))
-}
-
-/** 通道图标：无障碍🔍 / 通知 🔔 */
-function channelIcon(ch: AutoBookCaptureChannel): string {
-  return ch === 'accessibility' ? '🔍' : '🔔'
-}
 function channelLabel(ch: AutoBookCaptureChannel): string {
   return ch === 'accessibility' ? '无障碍' : '通知'
 }
@@ -174,6 +167,11 @@ function CaptureCard({ capture, categories, onResolve, onIgnore }: CaptureCardPr
     || capture.merchantKey
     || capture.sourceApp
     || (capture.sourceChannel === 'accessibility' ? '页面捕获' : '通知捕获')
+  // 分类图标与明细页同源：按分类名在本地分类表里找 icon（找不到时 CategoryIcon 按名回退）
+  const categoryIcon = useMemo(
+    () => categories.find(c => c.name === title)?.icon,
+    [categories, title],
+  )
 
   const hint = duplicateHint(capture.parsedJson)
   const amount = parsedAmount(capture.parsedJson)
@@ -228,32 +226,17 @@ function CaptureCard({ capture, categories, onResolve, onIgnore }: CaptureCardPr
 
   return (
     <div className="glass-card p-3 space-y-2" data-testid={`capture-card-${capture.captureId}`}>
-      {/* 头部：通道图标 + 标题 + 金额 */}
-      <div className="flex items-center gap-2">
-        <div
-          className="flex items-center justify-center shrink-0 rounded-xl"
-          style={{ width: 36, height: 36, background: 'var(--glass)', border: '1px solid var(--glass-border)' }}
-        >
-          <span className="text-base">{channelIcon(capture.sourceChannel)}</span>
-        </div>
-        <div className="flex-1 min-w-0">
-          <div className="text-sm font-semibold truncate" style={{ color: 'var(--ink)' }}>
-            {title}
-          </div>
-          <div className="text-[11px] truncate" style={{ color: 'var(--ink3)' }}>
-            {capture.sourceApp ?? channelLabel(capture.sourceChannel)} · {formatTime(capture.postedAt)}
-          </div>
-        </div>
-        <div className="text-right shrink-0">
-          <div
-            className="money-num text-base font-bold"
-            style={{ color: direction === 'expense' ? 'var(--expense)' : 'var(--income)' }}
-            data-testid={`capture-amount-${capture.captureId}`}
-          >
-            {direction === 'expense' ? '-' : '+'}
-            {amount != null ? formatCents(amount) : '—'}
-          </div>
-        </div>
+      {/* 头部：与明细页流水行共用 TxListRow（T21-10 真机回归：卡片视觉曾与手动记账不一致） */}
+      <div data-testid={`capture-amount-${capture.captureId}`}>
+        <TxListRow
+          icon={categoryIcon}
+          iconName={title}
+          title={title}
+          sub={`${capture.sourceApp ?? channelLabel(capture.sourceChannel)} · ${formatTime(capture.postedAt)}`}
+          amountCents={amount ?? 0}
+          isExpense={direction === 'expense'}
+          amountLabel={amount == null ? '—' : undefined}
+        />
       </div>
 
       {/* 徽标行：低置信 / 多来源 / 疑似重复 */}

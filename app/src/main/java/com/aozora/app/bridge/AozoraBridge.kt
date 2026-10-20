@@ -2756,7 +2756,11 @@ class AozoraBridge(
             ?: resolveCategoryId(draft.optString("category"), type)
             ?: throw IllegalArgumentException("category not resolved")
 
-        val bookId = repository.getDefaultBookId()
+        // ★ 与聊天/手动记账同口径（T21-10 真机回归）：走 getEntryBook 的**回退链**
+        //（default_book_id → 第一个非总账本的活跃账本），不能只读 default_book_id——
+        // 该键只有用户显式设置过默认账本才存在，真机上缺键时确认按钮直接抛
+        // "no default book"（原始英文错误还会显示在待确认箱里）。
+        val bookId = repository.getEntryBook()?.id
             ?: throw IllegalArgumentException("no default book")
 
         val bizDate = overrides?.optString("bizDate")?.takeIf { it.isNotBlank() }

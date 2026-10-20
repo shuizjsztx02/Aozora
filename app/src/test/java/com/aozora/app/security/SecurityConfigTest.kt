@@ -351,4 +351,66 @@ class SecurityConfigTest {
             content.contains("getChild(")
         )
     }
+
+    /**
+     * T21-10 收口回归（真机取证查出的缺陷）：无障碍通道必须**延迟到页面稳定后再落行**。
+     *
+     * 真机取证（支付宝支付成功页）：页面先渲染金额与收款方、约 200ms 后才补上评分卡
+     * 与积分块；原实现收到 `TYPE_WINDOW_CONTENT_CHANGED` 就立即落行，两帧文本都通过
+     * 过滤器、都被 L1 当成"不同事件"（L1 键含归一化文本），**同一笔支付被入账两次**。
+     *
+     * 这是**结构守护**（常量与调度点在场），行为验证在真机复测（同一笔只落一行）；
+     * 时序逻辑依赖 Android 框架与真实节点树，JVM 侧无法构造（同 T21-4 的口径）。
+     */
+    @Test
+    fun accessibilityServiceSource_delaysPersistUntilPageIsStable() {
+        val source = java.io.File(
+            "src/main/java/com/aozora/app/autobook/AutoBookAccessibilityService.kt"
+        )
+        if (!source.exists()) return
+        val content = source.readText()
+        assertTrue(
+            "无障碍通道必须定义页面稳定窗口常量（STABLE_WINDOW_MS）",
+            content.contains("STABLE_WINDOW_MS =")
+        )
+        assertTrue(
+            "落行必须经过排程（schedulePersist）——禁止收到事件即落行",
+            content.contains("schedulePersist(")
+        )
+        assertTrue(
+            "持续变化页面必须有硬上限（MAX_WAIT_MS）——只靠静置判据会让定时器被无限重置",
+            content.contains("MAX_WAIT_MS =")
+        )
+        assertTrue(
+            "页面切换必须立即定型待落行快照（flushPending），否则快速切页会丢最终形态",
+            content.contains("flushPending()")
+        )
+    }
+
+    /**
+     * T21-10 真机回归：服务侧的另两处静默失效。
+     *
+     * 1. **页面 key 兜底**：服务在用户已停留在某页面时才绑定/重启，收不到该页面的
+     *    STATE_CHANGED；原实现在 key 为空时直接 return，该页面此后所有 CONTENT_CHANGED
+     *    被永久丢弃（真机现象：支付完成页零采集，切一次 App 后恢复）。
+     * 2. **跨包错配**：切换 App 的瞬间可能送来旧包事件，而 `rootInActiveWindow` 已是
+     *    新 App 窗口——不校验会把 A 页面的文字记到 B 的包名下（真机取证：一行
+     *    `sourcePackage=com.tencent.mm` 的记录，rawText 却是 Aozora 首页）。
+     */
+    @Test
+    fun accessibilityServiceSource_guardsStalePageKeyAndCrossPackageWindow() {
+        val source = java.io.File(
+            "src/main/java/com/aozora/app/autobook/AutoBookAccessibilityService.kt"
+        )
+        if (!source.exists()) return
+        val content = source.readText()
+        assertTrue(
+            "页面 key 缺失时必须用当前事件兜底建立（currentPageKey.ifEmpty）",
+            content.contains("currentPageKey.ifEmpty")
+        )
+        assertTrue(
+            "必须校验活动窗口属于事件来源包（root.packageName）",
+            content.contains("root.packageName")
+        )
+    }
 }

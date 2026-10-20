@@ -109,6 +109,53 @@ class AccessibilityFilterTest {
         assertEquals(3200L, d.amountCents)
     }
 
+    // ─── T21-10 真机回归（2026-10-20）：汇总页守卫 ───
+    //
+    // 两条用例的 composedText 都取自真机 `auto_captures.rawText` 的真实片段
+    // （支付宝账单列表页 / 支付宝首页）。修复前这两页都能通过过滤器并落库，
+    // rawText 带出整页历史账单（含卡号后四位、手机号）——违反决策 #13。
+
+    /** 账单列表页：月度汇总 + 十几行交易，显然不是"这一笔"的详情页。 */
+    @Test
+    fun billListPage_withMultipleAmounts_isRejected() {
+        val d = eval(
+            sourcePackage = "com.eg.android.AlipayGphone",
+            composedText = "搜索交易记录\n搜索\n全部\n支出\n转账\n退款\n订单\n筛选\n" +
+                "10月\n¥576.53\n收入\n¥0.00\n本月已省\n收支分析\n" +
+                "扫收钱码付款-给*松，-0.01元，，交通出行，，今天 15:23\n" +
+                "合肥市高新区可腾餐饮店，-16.51元，，餐饮美食，，今天 12:17",
+        )
+        assertFalse("账单列表页是多笔交易的汇总，不得当作单笔交易落库", d.accepted)
+        assertEquals(AccessibilityFilter.REASON_MULTI_AMOUNT, d.reason)
+    }
+
+    /**
+     * 支付宝首页的"最近消息"：两条付款提示 + 大量导航项。
+     * ★ 注意本用例的是 **2 个不同金额**——它同时钉住"≥2 即拒绝"的阈值：
+     * 若未来有人把判据放宽到 ≥3，本用例会变红。
+     */
+    @Test
+    fun homePage_withRecentTransactions_isRejected() {
+        val d = eval(
+            sourcePackage = "com.eg.android.AlipayGphone",
+            composedText = "松开刷新\n扫一扫\n收付款\n出行\n卡包\n生活缴费\n最近消息\n" +
+                "160条新消息\n*松\n付款成功￥0.01\n8分钟前\n" +
+                "合肥市高新区可腾餐饮店\n付款成功￥16.51\n3小时前\n为你推荐",
+        )
+        assertFalse("首页不是单笔交易页", d.accepted)
+        assertEquals(AccessibilityFilter.REASON_MULTI_AMOUNT, d.reason)
+    }
+
+    /** 反向验证：单笔支付页即使金额出现多次（同一数值）也放行——去重后只有 1 个金额。 */
+    @Test
+    fun singlePaymentPage_repeatedSameAmount_isStillAccepted() {
+        val d = eval(
+            composedText = "支付成功\n¥32.00\n付款金额 ¥32.00\n收款方：星巴克",
+        )
+        assertTrue("同一个金额重复显示不构成汇总页", d.accepted)
+        assertEquals(3200L, d.amountCents)
+    }
+
     // ─── 反例（隐私承诺的兑现点，每条都要断言具体 reason）───
 
     @Test

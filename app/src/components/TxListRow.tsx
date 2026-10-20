@@ -28,11 +28,16 @@ interface TxListRowProps {
   right?: ReactNode
   /** 是否画底部分割线 */
   borderBottom?: boolean
+  /**
+   * 金额展示文本覆盖（缺省按 amountCents 格式化）。T21-10：待确认卡在解析结果
+   * 缺金额时显示「—」，但仍要与流水行共用同一套排版与字号。
+   */
+  amountLabel?: string
 }
 
 export function TxListRow({
   icon, iconName, title, sub, amountCents, isExpense,
-  aiBadge, onClick, right, borderBottom,
+  aiBadge, onClick, right, borderBottom, amountLabel,
 }: TxListRowProps) {
   return (
     <div
@@ -61,7 +66,7 @@ export function TxListRow({
         <div className="text-xs truncate mt-0.5" style={{ color: 'var(--ink3)' }}>{sub}</div>
       </div>
       <span className="money-num text-[17px] font-bold shrink-0" style={{ color: 'var(--ink)' }}>
-        {isExpense ? '-' : '+'}{Money.formatYuan(Money.cents(amountCents))}
+        {amountLabel ?? `${isExpense ? '-' : '+'}${Money.formatYuan(Money.cents(amountCents))}`}
       </span>
       {right}
     </div>
