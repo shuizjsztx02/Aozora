@@ -168,7 +168,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from src.common.config import Settings, get_config
 from src.common.errors import AppException
-from src.models.ai import AIConversation, AIConversationEvent
+from src.models.ai import AIConversation, AIConversationEvent, AIProposalLink
 from src.models.ledger import Book
 from src.models.user import User
 
@@ -197,8 +197,8 @@ SURFACE_EVENT_TYPES = frozenset({EVENT_USER, EVENT_ASSISTANT, EVENT_TOOL})
 
 #: **结构性事件**——留档，只进投影 B（UI）与投影 C（审计），不占 token。
 #: 各类型的生产者状态见架构 §6.2 的表；方括号里是当前的真实生产者。
-EVENT_APPROVAL_REQUEST = "approval_request"  # [待接] 审批请求（确认卡留档）
-EVENT_APPROVAL_RESULT = "approval_result"    # [待接] 审批结果（写操作回执）
+EVENT_APPROVAL_REQUEST = "approval_request"  # [M8-02] 审批请求（确认卡留档）
+EVENT_APPROVAL_RESULT = "approval_result"    # [M8-02] 审批结果（四值 + 来源）
 EVENT_DEVICE_REQUEST = "device_request"      # [不接] 设备指令：由配对的 tool 结果留档（ADR-010 决策 5）
 EVENT_ERROR = "error"                        # [stream._record_failure] 04b
 EVENT_REPLACE = "replace"                    # [04c] 长历史被摘要替换（原文保留）
@@ -213,6 +213,19 @@ STRUCTURAL_EVENT_TYPES = frozenset({
     EVENT_QUOTA,
     EVENT_SECURITY,
 })
+
+#: 审批四值（M8-02，``docs/architecture/admin-console.md`` §4.1）。**不合并**：
+#: 服务端只能观测到 ``allowed-once``（``/ai/execute`` 成功），其余三值由客户端
+#: 上报——「没上报」是第四种展示态，不得推断成拒绝（本卡红线）。
+APPROVAL_ALLOWED_ONCE = "allowed-once"
+APPROVAL_RESULTS = frozenset({
+    APPROVAL_ALLOWED_ONCE, "rejected", "cancelled", "unavailable",
+})
+
+#: 审批结果的来源标记（M8-02）。UI 据此区分「服务端确认」与「客户端上报」
+#: （架构 §4.3 的三来源表）。
+APPROVAL_SOURCE_SERVER = "server"
+APPROVAL_SOURCE_CLIENT = "client"
 
 #: 类型全集。合法 ``type`` 只能是它里面的值（写入侧校验）。
 #: **列宽**：``type`` 是 ``varchar(32)``——实测量过 ``varchar(16)`` 正好是全集里
@@ -805,6 +818,7 @@ class ConversationService:
         events: Sequence[tuple[str, Mapping[str, Any]]],
         *,
         same_turn: bool = False,
+        turn: int | None = None,
         request_id: str | None = None,
     ) -> int:
         """追加一批**结构性事件**（配额 / 审批 / 设备 / 错误 / 安全 / 摘要替换）。
@@ -819,6 +833,11 @@ class ConversationService:
         事件，紧跟 :meth:`append_turn` 之后）时不占新轮号——另立轮号会在日志里
         留下「有轮号、没内容」的空轮。默认自成一轮（失败轮的用量、04b 的错误）。
 
+        ``turn``：**显式指定轮号**（M8-02 的 ``approval_result``）。它与
+        ``same_turn`` 互斥且优先——审批结果可能在提案之后**好几轮**才到（用户
+        看完卡先去聊了别的），挂到「当前最后一批」会把结论记到一轮无关的对话上；
+        而 ``ai_proposal_links`` 记着提案所属的轮号，那才是它该在的位置。
+
         返回写入的事件条数。
         """
         prepared = _prepare_structural_events(events)
@@ -826,12 +845,230 @@ class ConversationService:
             return 0
 
         written = await self._insert_events(
-            conversation, prepared, same_turn=same_turn, request_id=request_id,
+            conversation, prepared, same_turn=same_turn, turn=turn,
+            request_id=request_id,
         )
         # 结构性事件也是「写入事件」——列表按最后一次写入排序，它同样算数。
         conversation.last_active_at = datetime.now(UTC)
         await self._db.flush()
         return written
+
+    # -- 审批留档（M8-02）--------------------------------------------------
+
+    async def record_approval_request(
+        self,
+        user_id: uuid.UUID,
+        conversation: AIConversation,
+        *,
+        proposal_id: str,
+        data: Mapping[str, Any],
+        request_id: str | None = None,
+    ) -> bool:
+        """写一条 ``approval_request`` + 同事务落 ``ai_proposal_links``。
+
+        **两半必须一起**：事件是回放面（「谁在什么时候被问了什么」），关联表是
+        ``/ai/execute`` 的唯一入口——那个端点的请求体里没有 ``conversation_id``
+        （契约冻结），服务端确认只能按 ``(user_id, proposal_id)`` 反查会话。
+
+        ``same_turn=True``：审批请求属于**模型刚产出提案的那一轮**，不另起轮号
+        ——否则日志里会多出一个只有审批事件、没有对话内容的轮次。
+
+        关联表用**先查后写**而不是直接 insert：``(user_id, proposal_id)`` 是主键，
+        同一个提案重复走这条路（重试 / 未来别的生产者）时应当更新指向而不是撞键。
+
+        **不 commit**——事务边界归调用方（与 :meth:`append_events` 同口径）。
+        """
+        if not proposal_id:
+            # 没有幂等键就既反查不到、事件也没有指向，整条留档没有意义。
+            return False
+        await self.append_events(
+            conversation,
+            [(EVENT_APPROVAL_REQUEST, data)],
+            same_turn=True,
+            request_id=request_id,
+        )
+        turn = int(await self._db.scalar(
+            select(func.coalesce(func.max(AIConversationEvent.turn), 0)).where(
+                AIConversationEvent.conversation_id == conversation.id,
+            )
+        ) or 0)
+        await self._upsert_proposal_link(
+            user_id, proposal_id, conversation.id, turn,
+        )
+        return True
+
+    async def _upsert_proposal_link(
+        self,
+        user_id: uuid.UUID,
+        proposal_id: str,
+        conversation_id: uuid.UUID,
+        turn: int,
+    ) -> None:
+        """``(user_id, proposal_id)`` 幂等落关联表（主键冲突前先查）。"""
+        link = await self._db.scalar(
+            select(AIProposalLink).where(
+                AIProposalLink.user_id == user_id,
+                AIProposalLink.proposal_id == proposal_id,
+            )
+        )
+        if link is None:
+            self._db.add(AIProposalLink(
+                user_id=user_id,
+                proposal_id=proposal_id,
+                conversation_id=conversation_id,
+                turn=turn,
+            ))
+        else:
+            link.conversation_id = conversation_id
+            link.turn = turn
+        await self._db.flush()
+
+    async def record_server_approval_result(
+        self,
+        user_id: uuid.UUID,
+        *,
+        proposal_id: str,
+        request_id: str | None = None,
+    ) -> bool:
+        """``/ai/execute`` **成功后**的审批结果：``allowed-once`` / ``source="server"``。
+
+        会话与轮号都从 ``ai_proposal_links`` 反查——请求体里没有会话 id（契约
+        冻结），而结论必须落回**提案所在的那一轮**（用户可能在卡上放了几轮才点
+        确认）。没有关联行时什么都不写并返回 ``False``：那不是本卡能猜的事，
+        猜一个会话只会把结论挂到别人的对话上。
+
+        **幂等**：``/ai/execute`` 的重复调用命中提案幂等键后直接回缓存回执，那
+        时不该再追加一条同样的服务端结论（同一件事只记一次）。
+        """
+        link = await self._db.scalar(
+            select(AIProposalLink).where(
+                AIProposalLink.user_id == user_id,
+                AIProposalLink.proposal_id == proposal_id,
+            )
+        )
+        if link is None:
+            return False
+        conversation = await self._db.scalar(
+            select(AIConversation).where(
+                AIConversation.id == link.conversation_id,
+                # 已归档 = 用户删掉了这段对话（正文已清空），不该再往里写事件。
+                # 与客户端的 ``load_owned`` 同一口径：别人的 / 已删除的都不写。
+                AIConversation.archived_at.is_(None),
+            )
+        )
+        if conversation is None:
+            return False
+        if await self._approval_result_event(
+            conversation.id, proposal_id, APPROVAL_SOURCE_SERVER,
+        ) is not None:
+            return True
+        await self.append_events(
+            conversation,
+            [(
+                EVENT_APPROVAL_RESULT,
+                {
+                    "proposalId": proposal_id,
+                    "result": APPROVAL_ALLOWED_ONCE,
+                    "source": APPROVAL_SOURCE_SERVER,
+                },
+            )],
+            turn=link.turn,
+            request_id=request_id,
+        )
+        return True
+
+    async def record_client_approval_result(
+        self,
+        conversation: AIConversation,
+        *,
+        proposal_id: str,
+        result: str,
+        reason: str | None = None,
+        request_id: str | None = None,
+    ) -> bool:
+        """客户端四值上报（``POST /ai/approval-result``）：``source="client"``。
+
+        写进**请求指定的会话**（调用方已用 :meth:`load_owned` 校验归属）——客户端
+        手里本来就有会话 id，不必依赖关联表。
+
+        **幂等 ``(user_id, proposal_id)``**：同一提案重复上报**覆盖最后一次**，
+        不追加行。实现是就地改写已有的那条 ``source="client"`` 事件（事件日志在
+        别处是 append-only；这里允许覆盖是因为它记的本来就是「客户端最后说了
+        什么」，而重复上报意味着前一次是错的）。**服务端行不覆盖**——``allowed-once``
+        是执行成功的既成事实，客户端说什么都改不了它。
+        """
+        if result not in APPROVAL_RESULTS:
+            raise ValueError(f"unknown approval result: {result!r}")
+
+        data: dict[str, Any] = {
+            "proposalId": proposal_id,
+            "result": result,
+            "source": APPROVAL_SOURCE_CLIENT,
+        }
+        if reason:
+            data["reason"] = reason
+
+        existing = await self._approval_result_event(
+            conversation.id, proposal_id, APPROVAL_SOURCE_CLIENT,
+        )
+        if existing is not None:
+            await self._db.execute(
+                update(AIConversationEvent)
+                .where(AIConversationEvent.id == existing.id)
+                .values(data=data)
+            )
+            conversation.last_active_at = datetime.now(UTC)
+            await self._db.flush()
+            return True
+
+        # 轮号优先取关联表（结论属于提案那一轮）；关联行不在时挂到当前最后一轮
+        # ——那是「客户端上报了一个本服务端没留过档的提案」，此时能做的只有如实
+        # 记下它，不猜一个轮号。
+        link = await self._db.scalar(
+            select(AIProposalLink).where(
+                AIProposalLink.user_id == conversation.user_id,
+                AIProposalLink.proposal_id == proposal_id,
+                AIProposalLink.conversation_id == conversation.id,
+            )
+        )
+        await self.append_events(
+            conversation,
+            [(EVENT_APPROVAL_RESULT, data)],
+            same_turn=True,
+            turn=link.turn if link is not None else None,
+            request_id=request_id,
+        )
+        return True
+
+    async def _approval_result_event(
+        self,
+        conversation_id: uuid.UUID,
+        proposal_id: str,
+        source: str,
+    ) -> AIConversationEvent | None:
+        """会话里某个提案的某来源 ``approval_result`` 事件（没有则 ``None``）。
+
+        按 ``data`` 里的 ``proposalId`` / ``source`` 过滤而不是新开列：这两项是
+        事件的载荷字段，``data`` 就是它们的事实源。一个会话里的审批事件数量与
+        轮次数同阶，全量扫一遍没有代价。
+        """
+        rows = (await self._db.scalars(
+            select(AIConversationEvent)
+            .where(
+                AIConversationEvent.conversation_id == conversation_id,
+                AIConversationEvent.type == EVENT_APPROVAL_RESULT,
+            )
+            .order_by(AIConversationEvent.seq.desc())
+        )).all()
+        for row in rows:
+            data = row.data or {}
+            if (
+                isinstance(data, Mapping)
+                and data.get("proposalId") == proposal_id
+                and data.get("source") == source
+            ):
+                return row
+        return None
 
     async def _insert_events(
         self,
@@ -840,6 +1077,7 @@ class ConversationService:
         *,
         same_turn: bool = False,
         times: Sequence[datetime] | None = None,
+        turn: int | None = None,
         request_id: str | None = None,
     ) -> int:
         """把一批已校验的事件写进日志：分配 ``(seq, turn)``、撞车重试一次。
@@ -871,6 +1109,10 @@ class ConversationService:
             next_seq, next_turn = await self._next_position(
                 conversation, same_turn=same_turn,
             )
+            if turn is not None and turn > 0:
+                # M8-02：显式轮号（审批结果要落回提案所属的那一轮）优先于
+                # ``same_turn`` 的「挂到最后一批」。``seq`` 仍按会话单调递增。
+                next_turn = turn
             try:
                 async with self._db.begin_nested():
                     await self._db.execute(

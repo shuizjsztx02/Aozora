@@ -198,7 +198,14 @@ from .conversation import (
 from .devices import DEVICE_TOOLS, device_channel
 from .provider import ProviderError, ReasoningLevel, ToolCallingProvider
 from .service import AIService
-from .tools import PROPOSAL_CONTRACT_V1, ToolContext, ToolOutcome, load_tool_context
+from .tools import (
+    PROPOSAL_CONTRACT_V1,
+    TOOL_RISK_BY_OP,
+    ToolContext,
+    ToolOutcome,
+    load_tool_context,
+)
+from .validator import canonical_op
 
 logger = logging.getLogger(__name__)
 
@@ -399,6 +406,30 @@ def summarize_outcome(outcome: ToolOutcome) -> dict[str, Any]:
     return {"status": "ok"}
 
 
+def _approval_request_payload(
+    proposal: Mapping[str, Any], *, step: int, confirm_reason: str | None,
+) -> dict[str, Any]:
+    """``approval_request`` 事件的载荷（M8-02，架构 §4.2）。
+
+    只有 ``proposalId / op / risk / confirmReason / step`` 五项，**不带完整
+    proposal 信封**——那份与 ``done.proposals`` 是同一个东西，再存一遍只是把
+    同一段大 JSON 写两次。
+
+    ``op`` 取**规范 op**（``canonical_op``）而不是信封上的动作名：v1 车道的
+    ``add_tx`` / ``add_tx_batch`` 是 ``transaction_add`` 的别名，两条车道在后台
+    必须能按同一个键聚合。``risk`` 因此也从 ``TOOL_RISK_BY_OP`` 查得到同一个值。
+    """
+    action = str(proposal.get("action") or "")
+    op = canonical_op(action) or action or None
+    return {
+        "proposalId": str(proposal.get("proposalId") or ""),
+        "op": op,
+        "risk": TOOL_RISK_BY_OP.get(op) if op else None,
+        "confirmReason": confirm_reason,
+        "step": step,
+    }
+
+
 # ---------------------------------------------------------------------------
 # 队列观察者
 # ---------------------------------------------------------------------------
@@ -419,6 +450,13 @@ class QueueObserver:
         #: 用量行（快路径的 ``_record_failure_usage`` 是同一口径）。
         self.prompt_tokens = 0
         self.completion_tokens = 0
+        #: M8-02：本轮每个 ``confirm`` 帧对应的审批留档载荷。
+        #:
+        #: **为什么在这里攒而不是当场写库**：本类的方法全是同步的（观察者是
+        #: loop 关键路径上的旁路，见类 docstring），而落库要 ``await``。工作协程
+        #: 在 loop 收尾时一次性写它们（:func:`_persist_approval_requests`），
+        #: 与消息同轮、与 ``ai_proposal_links`` 同事务。
+        self.approval_requests: list[dict[str, Any]] = []
 
     def step_started(self, *, step: int, level: ReasoningLevel) -> None:
         self._queue.put_nowait((EventType.PHASE, {
@@ -468,6 +506,11 @@ class QueueObserver:
             if outcome.confirm_reason is not None:
                 payload["confirmReason"] = outcome.confirm_reason
             self._queue.put_nowait((EventType.CONFIRM, payload))
+            # M8-02：同一时刻记一条**结构性**留档（只这五个字段——完整 proposal
+            # 信封体积大且与 ``done.proposals`` 重复，见架构 §4.2）。
+            self.approval_requests.append(_approval_request_payload(
+                outcome.data, step=step, confirm_reason=outcome.confirm_reason,
+            ))
             return
         self._queue.put_nowait((EventType.TOOL_RESULT, {
             "tool": name, "step": step, **summarize_outcome(outcome),
@@ -723,12 +766,23 @@ async def _execute_turn(
             "agent turn failed",
             extra={"error": type(exc).__name__, "outcome": "agent_turn_failed"},
         )
+        # 失败轮也要留档：``confirm`` 帧可能已经发出去了（用户看到了卡），
+        # 「被问了什么」不该因为后面炸了而丢。
+        await _persist_approval_requests(
+            session, conversations, user, conversation, observer, request_id,
+        )
         await _record_failure(
             session, conversations, writer, user, conversation, provider, cfg,
             request_id, observer, exc,
         )
         queue.put_nowait((EventType.ERROR, _error_payload(exc, conversation_id)))
         return
+
+    # M8-02：确认卡的留档（``confirm`` 帧已随流发出，这里补事件 + 关联表）。
+    # 放在用量之前——两者都 ``same_turn=True``，先后只影响同一轮内的 ``seq``。
+    await _persist_approval_requests(
+        session, conversations, user, conversation, observer, request_id,
+    )
 
     try:
         # 消息已经在 loop 里逐事件落库了，这里只剩用量：一条 ``ai_usage`` 行
@@ -886,6 +940,56 @@ def _error_code(exc: BaseException) -> StreamErrorCode:
         if isinstance(exc, ProviderError)
         else StreamErrorCode.AGENT_FAILED
     )
+
+
+async def _persist_approval_requests(
+    session: AsyncSession,
+    conversations: ConversationService,
+    user: User,
+    conversation: AIConversation,
+    observer: QueueObserver,
+    request_id: str,
+) -> None:
+    """把本轮 ``confirm`` 帧对应的审批留档写进日志（M8-02）。
+
+    一次循环写完全部待写项后**统一提交**：``approval_request`` 事件与
+    ``ai_proposal_links`` 必须落在同一个事务里（前者是回放面，后者是
+    ``/ai/execute`` 反查会话的唯一入口，缺一半就等于没留档）。
+
+    **尽力而为**：这是审计留档，写不进去不该把一轮「用户已经拿到答案」的对话
+    变成失败。失败时回滚**本函数自己的**写入（loop 的落库批已经各自提交过，
+    回滚不到它们）并记日志。
+
+    写完后清空列表：调用点在**失败轮与成功轮各一次的可能路径**上，重复调用
+    不会写重复行。
+    """
+    pending = observer.approval_requests
+    if not pending:
+        return
+    try:
+        for payload in pending:
+            await conversations.record_approval_request(
+                user.id,
+                conversation,
+                proposal_id=str(payload.get("proposalId") or ""),
+                data=payload,
+                request_id=request_id,
+            )
+        await session.commit()
+    except Exception as exc:  # noqa: BLE001 — 见 docstring：留档失败不改变用户看到的结果
+        logger.warning(
+            "agent approval archive not recorded",
+            extra={
+                "conversation_id": str(conversation.id),
+                "pending": len(pending),
+                "error": type(exc).__name__,
+                "outcome": "approval_archive_failed",
+            },
+        )
+        with contextlib.suppress(Exception):
+            await session.rollback()
+    finally:
+        observer.approval_requests = []
 
 
 async def _record_failure(

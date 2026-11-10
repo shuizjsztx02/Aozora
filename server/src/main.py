@@ -20,6 +20,7 @@ from src.common.request_id import RequestIdMiddleware
 from src.common.security import RequestBodyLimitMiddleware, SecurityHeadersMiddleware
 from src.common.telemetry import record_request
 from src.modules.accounts.routes import router as accounts_router
+from src.modules.admin.routes import router as admin_router
 from src.modules.ai.routes import router as ai_router
 from src.modules.attachments.routes import router as attachments_router
 from src.modules.auth.routes import me_router
@@ -219,6 +220,8 @@ async def log_requests(request: Request, call_next):
 app.include_router(health_router, prefix=cfg.api_prefix)
 app.include_router(auth_router, prefix=cfg.api_prefix)
 app.include_router(me_router, prefix=cfg.api_prefix)
+# T-M8-04: 运营后台读端点。独立前缀（架构 §5）：``{API_PREFIX}/admin``。
+app.include_router(admin_router, prefix=cfg.api_prefix + "/admin")
 app.include_router(books_router, prefix=cfg.api_prefix)
 app.include_router(categories_router, prefix=cfg.api_prefix)
 app.include_router(accounts_router, prefix=cfg.api_prefix)

@@ -28,6 +28,8 @@ from .provider import (
 )
 from .schemas import (
     AIAgentRequest,
+    AIApprovalResultRequest,
+    AIApprovalResultResponse,
     AICaptureParseRequest,
     AICaptureParseResponse,
     AIConversationEventItem,
@@ -213,6 +215,19 @@ async def execute_proposal(
         proposal=body.proposal,
         book_id=book_uuid,
         confirmation_token=body.confirmation_token,
+    )
+
+    # M8-02：执行成功 = 审批四值里的 ``allowed-once``（``source="server"``）。
+    # 请求体一字不动（契约冻结）：会话与轮号从 ``ai_proposal_links`` 反查——
+    # 那条关联行是 ``confirm`` 帧发出时写的（见 ``stream._persist_approval_requests``）。
+    #
+    # **与执行同一个事务，且不吞异常**：留档写失败时宁可整笔回滚（客户端看到
+    # 失败、重试命中/重建幂等键），也不能出现「回执说执行成功、留档却断了」的
+    # 半截状态——这条事务由请求作用域的 session 在返回前统一提交。
+    await ConversationService(db).record_server_approval_result(
+        current_user.id,
+        proposal_id=result.get("proposal_id") or "",
+        request_id=request.state.request_id,
     )
 
     return AIExecuteProposalResponse(**result)
@@ -435,6 +450,41 @@ async def device_result(
             "No pending device request for this id",
         )
     return AIDeviceResultResponse()
+
+
+@router.post("/approval-result", response_model=AIApprovalResultResponse)
+async def approval_result(
+    body: AIApprovalResultRequest,
+    request: Request,
+    current_user: Annotated[User, Depends(get_current_user)] = ...,
+    db: Annotated[AsyncSession, Depends(get_db_session)] = ...,
+):
+    """M8-02: 客户端上报确认卡的处置（审批四值里服务端看不见的那三值）。
+
+    服务端只能观测到 ``allowed-once``（``/ai/execute`` 成功）；``rejected`` /
+    ``cancelled`` / ``unavailable`` 只有客户端知道。这条端点把它们写进会话事件
+    流（``approval_result``，``source="client"``），后台回放才答得上「用户怎么了
+    这张卡」。
+
+    **幂等 ``(user_id, proposal_id)``**：重复上报覆盖最后一次、不追加行（同一个
+    提案四值只可能有最后一个结论）。**归属校验**：``conversationId`` 必须是本人的
+    未归档会话，否则 404 ``conversation_not_found``——与其它会话端点同一个码，
+    别人的 / 已删除的 / 不存在的三者不可分辨。
+
+    **老客户端不调用它什么都不变**：没有上报就没有 ``approval_result`` 行，
+    后台显示「未上报」——**不得**推断成拒绝（架构 §4.3）。
+    """
+    _require_active(current_user)
+    service = ConversationService(db)
+    conversation = await service.load_owned(current_user, body.conversationId)
+    await service.record_client_approval_result(
+        conversation,
+        proposal_id=body.proposalId,
+        result=body.result,
+        reason=body.reason,
+        request_id=request.state.request_id,
+    )
+    return AIApprovalResultResponse()
 
 
 @router.post("/agent", response_class=StreamingResponse)

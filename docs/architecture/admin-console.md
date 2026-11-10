@@ -134,8 +134,10 @@ APP-CONTEXT §4.6 已按此口径修订。
 `stream.py` 发 `confirm` 帧时写结构性事件（`same_turn=True`）：
 
 ```json
-{ "proposalId": "…", "op": "add_tx", "risk": "medium", "confirmReason": "amount_over_threshold", "step": 2 }
+{ "proposalId": "…", "op": "transaction_add", "risk": "medium", "confirmReason": "amount_over_threshold", "step": 2 }
 ```
+
+`op` 取**规范 op**（v1 的 `add_tx` / `add_tx_batch` 经 `canonical_op()` 归一），两条车道在后台按同一个键聚合。
 
 不写完整 proposal 信封（体积大且与 `done.proposals` 重复）。
 
@@ -149,8 +151,8 @@ APP-CONTEXT §4.6 已按此口径修订。
 
 - 客户端在确认卡收敛到终态时调用一次（四值都发）。
 - 幂等键 `(user_id, proposal_id)`：重复上报覆盖最后一次，不追加行。
-- 服务端校验 `conversation_id` 属于当前用户；校验失败仍写入但标记 `unverified`。
-- **桥命令计数不变**：WebView 直接 `fetch`。
+- 服务端校验 `conversation_id` 属于当前用户；**校验失败硬拒绝（404 `conversation_not_found`），不写入**。2026-11-10 实施口径修正：原设计的 `unverified` 语义会让伪造上报污染审计，且没有任何消费方需要它。
+- **客户端上报必须走桥（2026-11-10 修正）**：WebView 侧没有任何 API base URL 与 access token——全部 HTTP 与凭据都在 Kotlin（`app/src/main/java/com/aozora/app/ai/AiGatewayClient.kt`），JS 的 `fetch` 既到不了服务端也带不上鉴权。因此需要新增桥命令 `ai.approval_result`（桥计数 **87 → 88**），由 Kotlin 带 token 调用 `POST /ai/approval-result`。**该桥命令不在 8-02 范围**（卡面禁止桥计数变动），另立 **8-02b**。
 - **`/ai/execute` 请求体一字不动**（`schemas.py:115-130`）。
 
 ### 4.4 `proposal_id → conversation_id`

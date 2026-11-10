@@ -426,3 +426,34 @@ class AIDeviceResultResponse(BaseModel):
     不是 200 + false（重试安全，见 ``routes.device_result``）。"""
 
     accepted: bool = True
+
+
+# ─── M8-02: 客户端审批结果上行 ────────────────────────────────────────────
+
+#: 审批四值（`docs/architecture/admin-console.md` §4.1）。**不合并**：服务端只能
+#: 观测到 ``allowed-once``，其余三值只有客户端知道——三者之间不得互相顶替，
+#: 也不得用「没上报」推断出任何一个。
+AIApprovalResultValue = Literal["allowed-once", "rejected", "cancelled", "unavailable"]
+
+
+class AIApprovalResultRequest(BaseModel):
+    """``POST /ai/approval-result`` 的入参：确认卡收敛到终态时的一次上报。
+
+    字段名是 **camelCase**（与 ``confirm`` 帧、``approval_request`` 载荷同一套
+    命名）：客户端手里的 ``proposalId`` 原样带回，不在这里再翻译一次。
+    ``conversationId`` 是**客户端自己的**会话 id，服务端会校验归属（别人的 /
+    已删除的 / 不存在的都按 404 处理，三者不可分辨）。
+    """
+
+    proposalId: str = Field(min_length=1, max_length=64)
+    conversationId: uuid.UUID
+    result: AIApprovalResultValue
+    #: 「为什么这么处置」的自由文本（如客户端给出的 `not_found` / 断连原因）。
+    #: **服务端不解析**，原样留档；上限对齐事件载荷的合理体积。
+    reason: str | None = Field(default=None, max_length=200)
+
+
+class AIApprovalResultResponse(BaseModel):
+    """上报的回执。``accepted`` 恒为 true——归属校验失败是 404，不是 200 + false。"""
+
+    accepted: bool = True

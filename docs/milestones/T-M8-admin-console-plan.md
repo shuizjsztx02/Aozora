@@ -12,9 +12,9 @@
 | 卡 | 内容 | 状态 | 完成日 | 提交 | 备注 |
 |---|---|---|---|---|---|
 | **8-01** | 文档与决策锁定 | ✅ 完成 | 2026-11-10 | `c9c8210` | 24 项决策落盘；架构 §9 + 本文件 + APP-CONTEXT + overview + AGENTS + v4 同步 |
-| **8-02** | 审批留档（硬需求 ①） | ⏳ 未开始 | | | `approval_request` / `approval_result` / `ai_proposal_links` |
+| **8-02** | 审批留档（硬需求 ①） | ⛔ 阻塞（仅客户端部分） | | 待提交 | **服务端全交付**：`approval_request` 同轮落库、`ai_proposal_links`、`/ai/execute` 写 `allowed-once(source=server)`、`POST /ai/approval-result` 接收 client 四值（幂等、越权 404）。**客户端上报阻塞**：WebView 无 base URL / token（全在 Kotlin），`fetch` 不可达；需桥命令 `ai.approval_result`（87→88），卡面禁止 → 另立 **8-02b**，待用户决策 |
 | **8-03** | **M8 数据面基线**（全部迁移 + 会话检索，硬需求 ②） | ✅ 完成 | 2026-11-10 | `b2d7e0b` | 迁移 `0024` 一次落六处；`search_text` 四路同寿（写入/删除/保留期/分叉）；`request_id` 进全部写入路径。验证：pytest **1777 passed / 37 skipped**、ruff 全绿、迁移 upgrade/downgrade 离线 SQL 正确；**本机 Docker 未运行，真实 PG 未实测** |
-| **8-04** | admin 鉴权与只读 API | ⏳ 未开始 | | | `admin_accounts` + 独立 JWT + 查询层 |
+| **8-04** | admin 鉴权与只读 API | ✅ 完成 | 2026-11-10 | （主会话统一提交） | `modules/admin/*` 5 文件 + `scripts/create_admin.py`；9 个读端点、独立 JWT（`ADMIN_JWT_SECRET` / `aud=aozora-admin`）、只读事务、默认脱敏与 reveal 审计。验证：`tests/test_m8_admin_api.py` **51 passed**、关联回归 90 passed、ruff 全绿；**本机 Docker 未运行，PG 的 `SET TRANSACTION READ ONLY` 未实测**（SQLite 后端无等价语句，机制由单测钉住）；生产必须设置 `ADMIN_JWT_SECRET`（M8-10） |
 | **8-05** | 管理写操作与写审计 | ⏳ 未开始 | | | 冻结/解冻、配额、强制登出；**不得复用 `FROZEN`** |
 | **8-06** | admin 前端壳 + 检索页 | ⏳ 未开始 | | | 独立 `admin/` 包 |
 | **8-07** | **会话回放页**（核心） | ⏳ 未开始 | | | 轮次 + 时间轴 + 配对渲染 + reveal |

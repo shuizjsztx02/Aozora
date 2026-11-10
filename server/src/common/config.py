@@ -11,6 +11,10 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 # Default value for ``secret_key`` — must be overridden in production.
 _DEV_SECRET_KEY = "dev-secret-do-not-use-in-production"
 
+# M8-04：运营后台的独立 JWT secret（admin-console.md §6）。**刻意不复用**
+# ``secret_key``——用户端 token 与管理员 token 必须互不通用。
+_DEV_ADMIN_JWT_SECRET = "dev-admin-secret-do-not-use-in-production"
+
 # Production CORS: only `https://[<subdomain>.]aozora.app` is permitted.
 # Rejects bare `*`, third-party origins, and http:// schemes at startup so
 # a misconfigured env-var cannot silently widen the origin allow-list.
@@ -353,6 +357,22 @@ class Settings(BaseSettings):
         gt=0,
         validation_alias=AliasChoices(
             "AI_DEVICE_TIMEOUT_SECONDS", "ai_device_timeout_seconds",
+        ),
+    )
+
+    # --- 运营可观测后台 (M8-04) ---
+    # 管理员 token 用独立 secret + 独立 audience（``aozora-admin``），
+    # 与用户端 token 的 ``secret_key`` 完全不同：任一侧的 token 拿到另一侧
+    # 都过不了签名校验。生产部署必须由部署侧覆盖（M8-10 的 nginx/环境配置）。
+    admin_jwt_secret: str = Field(
+        default=_DEV_ADMIN_JWT_SECRET,
+        validation_alias=AliasChoices("ADMIN_JWT_SECRET", "admin_jwt_secret"),
+    )
+    admin_token_expire_minutes: int = Field(
+        default=60,
+        gt=0,
+        validation_alias=AliasChoices(
+            "ADMIN_TOKEN_EXPIRE_MINUTES", "admin_token_expire_minutes",
         ),
     )
 
