@@ -33,7 +33,7 @@
  
  **当前阶段：** **M7（AI Agent 能力升级）优先推进，M6（生产发布）滞后**至 M7 收口之后（2026-09-18 决策——M7 是对 App 功能的重大新增，须在正式发布前完成）。M1–M5 已完成。M7 内部：**T-M7-01**（三实体上云）、**T-M7-02**（P1 服务端 Agent Loop 与 SSE 流式通道）、**T-M7-03**（P2 客户端瘦渲染与多会话管理）、**T-M7-04**（P3 会话事件日志与摘要压缩——04a–04e 五张子卡 + 批次 4 收口，含真实断连恢复走查）、**T-M7-05**（P4 全功能覆盖——05a–05j 十张子卡，批次 6 于 2026-09-20 收口）**均已交付并收口**；M7 唯一未闭合的出口面条目是一张尾卡，覆盖 R-PROD-31 / R-PROD-37 / R-PROD-38，边界与验收见 `docs/review/T-M7-ai-agent-issues-2026-09-20.md` §四。**并行需求线：第二十一轮 REQ-83（自动记账）T21-1…T21-9 已全部交付并收口**（2026-10-19 收口）——双通道采集（无障碍只读 + 通知监听）、Room v12 `auto_captures`、桥 83→87、设置页双授权、待确认箱均落地；收口时真机回归查出并修复两处缺陷（无障碍只读事件文本导致零采集、无障碍 `postedAt` 用 `uptimeMillis` 致 L2 跨通道合并永不命中）。残余挂账见 `docs/人工测试和需求变更-v3.md`〈第二十一轮修复说明〉§5 与 `docs/risk-register.md` R-PROD-58…63。任务边界与验收以 `docs/APP-CONTEXT.md` 第 9 节和 `docs/milestones/production-execution-plan.md` 为准，逐期进度看板见 `docs/milestones/T-M7-0*-implementation-plan.md`。
 
-**M8 已立项（2026-11-10，文档先行、实施未开始）：** 运营可观测后台（AI 交互回放台），需求来源第二十二轮 REQ-84。目标＝按「用户 → 会话 → 轮次 → 事件」检索回放 AI 交互全过程，并让审批过程进入事件流。架构见 `docs/architecture/admin-console.md`，九卡看板见 `docs/milestones/T-M8-admin-console-plan.md`。**不走 OTel/Prometheus/Grafana**，数据面为 PostgreSQL 事件日志。
+**M8 已立项（2026-11-10，文档与决策已锁定、实施未开始）：** 运营可观测后台（AI 交互回放台），需求来源第二十二轮 REQ-84。目标＝按「用户 → 会话 → 轮次 → 事件」检索回放 AI 交互全过程，并让审批过程进入事件流。**排序：M8 在 M6 之前。** 架构见 `docs/architecture/admin-console.md`（§9 为 24 项已锁定决策），十一卡看板见 `docs/milestones/T-M8-admin-console-plan.md`。**不走 OTel/Prometheus/Grafana**，数据面为 PostgreSQL 事件日志。关键硬约束：全部迁移集中在 8-03（Alembic 单链）；后台暂停**不得复用** `UserStatus.FROZEN`（删除任务会物理删除该状态用户）。
  
  **上下文加载指令：** 不要预加载所有项目文档。先读本文件和 `docs/APP-CONTEXT.md` 的相关章节，然后仅加载与当前任务相关的文档。修改涉及需求 → 读 `docs/product/`；涉及架构/数据 → 读 `docs/architecture/` 和 `docs/adr/`；涉及 UI → 读 `docs/design/`；涉及工程流程 → 读 `docs/engineering/`。
 

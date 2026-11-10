@@ -862,53 +862,65 @@ app/src/
 > 2026-11-10 立项（第二十二轮 REQ-84）。目标不是监控大屏——曲线与告警仍由既有 Grafana 栈负责且生产未启用；M8 做的是**按行检索**：让技术与运维看得到「每个用户每次与 AI 交互的完整过程」。架构事实源见 `docs/architecture/admin-console.md`。
 > **总目标：** 按「用户 → 会话 → 轮次 → 事件」四级下钻定位问题；支持按用户 ID + 会话关键词 + 时间检索会话；审批过程完整进入事件流。
 > **两条硬需求（用户 2026-11-10 原话）：** ① 审批过程需要增加到事件流；② 支持按用户 ID 以及会话关键词、时间等条件快速搜索定位。
-> **非目标：** 不替代 Grafana/Prometheus/OTel；不做业务数据 CRUD（P0 只读）；不做客户端客服工单。
+> **24 项决策已于 2026-11-10 由用户逐项锁定**（17 项主决策 + 7 项补充确认），清单见 `docs/architecture/admin-console.md` §9，实施中不重议。要点：**M8 排在 M6 之前**；多管理员账号；公网子域；含三项账户写操作（暂停/恢复、配额覆盖、强制登出）但**禁止改业务数据行**；检索只搜用户输入与助手回复；需要全局搜索；事件表加 `request_id` 列；超出保留期即空态；只记登录、普通浏览不记审计；PII 默认打码、查看明文与导出记审计；允许导出（三种范围 × 明文/打码，无需二次确认）；需更新隐私政策；北京时间；自建 Vite + React + TanStack。
+> **非目标：** 不替代 Grafana/Prometheus/OTel；不做业务数据 CRUD；不做客户端客服工单。
 
-#### T-M8-01 文档与口径裁决
+#### T-M8-01 文档与决策锁定
 
-- **目标：** 定稿架构与计划；裁决 `§4.6` 与事件日志正文保存的口径冲突；把开放项（管理员账号模型、M8 是否含写能力）显式列出。
-- **验收：** `docs/architecture/admin-console.md` 与 `docs/milestones/T-M8-admin-console-plan.md` 定稿；`§4.6` 裁决写入；`ai-agent-architecture.md` §6.2 审批事件生产者状态更新；overview 增加 M8 行。零代码改动。
+- **目标：** 把 24 项决策落盘并锁定；定稿架构与计划。
+- **验收：** `docs/architecture/admin-console.md` §9 与 `docs/milestones/T-M8-admin-console-plan.md` 一致；`§4.6` 裁决、`ai-agent-architecture.md` §6.2、overview 与 v4 登记同步。零代码改动。
 
 #### T-M8-02 审批留档（硬需求 ①）
 
-- **目标：** `approval_request` / `approval_result` 进入事件流，使回放能看到「问没问、为什么问、用户怎么答」。
-- **实施：** `stream.py` 发 `confirm` 帧时写 `approval_request`（同轮）；`ai_proposal_links` 建立 `proposal_id → conversation_id` 关联；`/ai/execute` 成功写 `allowed-once`；新增 `POST /ai/approval-result` 接收客户端四值上报（桥命令不变）。
-- **验收：** 四值可落档；老客户端未上报时显示「未上报」而非推断拒绝；`/ai/execute` 请求体契约一字不动；审批 zero-write 语义回归全绿。
+- **目标：** `approval_request` / `approval_result` 进入事件流，回放能看到「问没问、为什么问、用户怎么答」。
+- **实施：** `confirm` 帧写 `approval_request`；`ai_proposal_links` 关联 `proposal_id → conversation_id`；`/ai/execute` 写 `allowed-once(source=server)`；新增 `POST /ai/approval-result` 接客户端四值（`source=client`，桥命令不变）。
+- **验收：** 四值可落档并区分来源；老客户端显示「未上报」；`/ai/execute` 契约不动；zero-write 回归全绿。
 
-#### T-M8-03 会话检索数据面（硬需求 ②）
+#### T-M8-03 M8 数据面基线（硬需求 ②）
 
-- **目标：** 会话可按关键词命中，且候选集由 `user_id` + 时间先收窄。
-- **实施：** `ai_conversations.search_text` 冗余列（Surface 事件的 user/assistant 文本）；写入维护、上限截断、保留期清理重算、历史回填。
-- **验收：** 关键词命中正确；删事件后检索文本同步消失（反向验证）；P0 不引入 `pg_trgm`；SQLite 测试后端可跑。
+- **目标：** **全部迁移集中一次落**（`search_text`、`request_id`、`admin_accounts`、`admin_audit_log`、`users.admin_suspended_at/reason`、`users.ai_daily_quota_override`、`ai_proposal_links`），并完成会话检索写入维护。
+- **验收：** PG 18 迁移成功可回滚；SQLite 测试通过；`search_text` 不含 tool/推理；删事件后检索文本同步消失（反向验证）；`request_id` 新事件非空。
+- **说明：** 迁移集中是为了避免 Alembic 单链分叉；后续卡不得新增 revision。
 
 #### T-M8-04 admin 鉴权与只读 API
 
-- **目标：** 管理端独立鉴权与只读查询面。
-- **验收：** 用户 token 进不了 admin API，反之亦然；全部只读事务；列表不返回事件正文；keyset 分页无重复遗漏。
+- **目标：** 多管理员账号 + 独立 JWT（`aud=aozora-admin`）+ 只读查询面 + `reveal` 脱敏。
+- **验收：** 双向 401；只读事务；keyset 分页；`reveal=true` 记审计。
 
-#### T-M8-05 admin 前端壳与检索页
+#### T-M8-05 管理写操作与写审计
 
-- **目标：** 独立 `admin/` 包；登录、用户检索、会话检索、用户详情。
-- **验收：** 手机号 → 用户 → 会话列表全链走通；不进入 `app/` 与 APK 构建。
+- **目标：** 暂停/恢复、guest 日配额覆盖、强制登出；写审计同事务。
+- **硬约束：** **不得复用 `UserStatus.FROZEN`**——删除任务会物理删除该状态用户（`infra/cleanup/account-deletion.py:168-175`）；用 `admin_suspended_at`。
+- **验收：** 暂停后写与同步被拒、数据保留；**暂停 8 天后跑删除任务数据仍在**（反向验证）；配额对 guest 生效、ACTIVE 不受影响；强制登出后 refresh token 失效。
 
-#### T-M8-06 会话回放页
+#### T-M8-06 admin 前端壳与检索页
 
-- **目标：** 本轮核心。轮次列表 + 事件时间轴；`tool_calls` 与结果配对；推理折叠；结构性事件语义化。
-- **验收：** 真实会话逐轮走查与 PG 直查一致；保留期空态与「审批结果未上报」空态齐备。
+- **目标：** 独立 `admin/` 包（Vite + React + TanStack）；用户检索、会话检索、用户详情；北京时间。
+- **验收：** 手机号 → 用户 → 会话全链；组合筛选正确；不进 APK。
 
-#### T-M8-07 聚合统计与 request_id 反查
+#### T-M8-07 会话回放页（核心）
 
-- **目标：** token/成本/成功率按 user、model、day 聚合；`request_id` 反查会话与轮次。
-- **验收：** 数字与 PG 同口径一致；反查误差如实标注。
+- **目标：** 轮次列表 + 事件时间轴；工具调用配对；推理折叠；审批事件标来源；默认脱敏 + 查看明文审计。
+- **验收：** 与 PG 直查逐事件一致；错误轮与保留期空态齐备；审批显示「服务端确认/客户端上报/未上报」。
 
-#### T-M8-08 部署、访问审计与 PII
+#### T-M8-08 聚合统计与反查页
 
-- **目标：** 上线可用且可审计。
-- **验收：** nginx 配置通过 `nginx -t`；未登录/越权 401；每次正文访问落 `admin_access_log`；手机号默认打码。
+- **目标：** token/成本/成功率按 user、model、day 聚合；`request_id` 精确反查。
+- **验收：** 数字与 PG 同口径；反查在并发下命中正确。
 
-#### T-M8-09 收口
+#### T-M8-09 导出
 
-- **验收：** 四板全绿；真实数据走查覆盖「检索 → 定位 → 回放 → 归因」；风险册新增条目连续。
+- **目标：** 三种范围 × 明文/打码，流式 JSONL，每次记审计。
+- **验收：** 六种组合走通；审计字段完整；单次上限 100,000 事件并有分批提示。
+
+#### T-M8-10 部署、PII 与隐私政策
+
+- **目标：** 公网子域 + TLS + 独立限流；脱敏回归；审计查询页；隐私政策新增条款并同步客户端 `LegalPage`（R-PROD-63），`POLICY_VERSION` 不动。
+- **验收：** `nginx -t`；未登录/越权 401；脱敏覆盖四类 PII；条款与客户端文案一致。
+
+#### T-M8-11 收口
+
+- **验收：** 四板全绿；真实数据走查覆盖两条硬需求；风险册新增条目连续。
 
 ---
 
