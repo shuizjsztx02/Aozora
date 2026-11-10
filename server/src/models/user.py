@@ -10,7 +10,7 @@ import enum
 import uuid
 from datetime import datetime
 
-from sqlalchemy import DateTime, ForeignKey, Index, String, UniqueConstraint
+from sqlalchemy import DateTime, ForeignKey, Index, Integer, String, UniqueConstraint
 from sqlalchemy.dialects.postgresql import UUID
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
@@ -67,6 +67,21 @@ class User(Base, AuditMixin):
     )
     deletion_requested_at: Mapped[datetime | None] = mapped_column(
         DateTime(timezone=True), nullable=True,
+    )
+    # M8-05：管理后台的「暂停账户」。**刻意不复用 ``status = FROZEN``**——
+    # ``infra/cleanup/account-deletion.py`` 会物理删除
+    # ``status=FROZEN AND frozen_at <= now-7d`` 的用户；后台若借用该状态，
+    # 冻结 7 天后数据会被删除任务清掉。独立字段让「用户主动删号」与
+    # 「运营暂停」互不影响；暂停期间只拒绝写与同步，数据完整保留。
+    admin_suspended_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True,
+    )
+    admin_suspended_reason: Mapped[str | None] = mapped_column(
+        String(200), nullable=True,
+    )
+    # M8-05：guest 日配额的用户级覆盖。NULL = 回落 ``ai_daily_quota_guest``。
+    ai_daily_quota_override: Mapped[int | None] = mapped_column(
+        Integer, nullable=True,
     )
 
     # relationships

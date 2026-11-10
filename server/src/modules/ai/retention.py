@@ -48,7 +48,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from src.common.config import Settings, get_config
 from src.models.ai import AIConversation, AIConversationEvent
 
-from .conversation import EVENT_REPLACE, _upto_turn
+from .conversation import EVENT_REPLACE, _upto_turn, rebuild_search_text
 
 logger = logging.getLogger(__name__)
 
@@ -79,6 +79,17 @@ async def purge_expired_events(db: AsyncSession, cutoff: datetime) -> int:
         .group_by(AIConversationEvent.conversation_id, AIConversationEvent.turn)
         .having(func.max(AIConversationEvent.time) < cutoff)
     )
+    # M8-03：删之前先记下受影响的会话——检索文本要在同一个事务里重算，
+    # 否则 ``search_text`` 会留下已被保留期删掉的正文（后台搜索的后门）。
+    affected = (await db.execute(
+        select(AIConversationEvent.conversation_id)
+        .where(
+            tuple_(
+                AIConversationEvent.conversation_id, AIConversationEvent.turn,
+            ).in_(expired_turns),
+        )
+        .distinct()
+    )).scalars().all()
     result = await db.execute(
         delete(AIConversationEvent).where(
             tuple_(
@@ -87,6 +98,8 @@ async def purge_expired_events(db: AsyncSession, cutoff: datetime) -> int:
         )
     )
     await db.flush()
+    if affected:
+        await rebuild_search_text(db, list(affected))
     return result.rowcount or 0
 
 

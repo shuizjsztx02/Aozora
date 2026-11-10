@@ -4,7 +4,8 @@ All models are re-exported here so Alembic can discover them via a
 single import in ``env.py``.
 """
 
-from src.models.ai import AIConversation, AIConversationEvent, AIUsage
+from src.models.admin import AdminAccount, AdminAuditLog
+from src.models.ai import AIConversation, AIConversationEvent, AIProposalLink, AIUsage
 from src.models.attachment import Attachment
 from src.models.base import AuditMixin, Base, SoftDeleteMixin, VersionedMixin
 from src.models.budget import Budget
@@ -28,7 +29,10 @@ from src.models.user_preference import SYNCABLE_KEYS, UserPreference
 __all__ = [
     "AIConversation",
     "AIConversationEvent",
+    "AIProposalLink",
     "AIUsage",
+    "AdminAccount",
+    "AdminAuditLog",
     "Account",
     "Attachment",
     "AuditMixin",

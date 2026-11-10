@@ -710,7 +710,8 @@ async def _execute_turn(
     conversation = await conversations.resolve(user, book_id, conversation_id)
     history = await conversations.history(conversation)
     ctx = await load_tool_context(session, user.id, book_id)
-    writer = TurnWriter(conversations, conversation)
+    # M8-03：事件带请求标识，后台按 ``request_id`` 精确反查一次交互。
+    writer = TurnWriter(conversations, conversation, request_id=request_id)
 
     try:
         result = await _build_loop(

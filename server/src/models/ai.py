@@ -96,6 +96,14 @@ class AIConversation(Base, AuditMixin):
     archived_at: Mapped[datetime | None] = mapped_column(
         DateTime(timezone=True), nullable=True,
     )
+    # M8-03（admin-console.md §3）：会话**检索面**。只累积该会话内
+    # ``user`` / ``assistant`` 的自然语言正文（``tool`` 结果与推理内容不进），
+    # 供管理后台按关键词定位会话。它是**派生数据**，与事件同寿——
+    # 事件被保留期删除、用户删除会话、分叉时都必须同步重算/清空，
+    # 否则等于给保留期开了一个后门（与摘要列的教训同源）。
+    search_text: Mapped[str] = mapped_column(
+        Text, default="", server_default="", nullable=False,
+    )
 
 
 class AIConversationEvent(Base):
@@ -148,6 +156,9 @@ class AIConversationEvent(Base):
             "conversation_id", "seq",
             unique=True,
         ),
+        # M8-03：按请求 ID 精确反查（后台排障入口）。历史行为 NULL——
+        # 列上线前的事件无法可靠追溯，不做近似回填。
+        Index("ix_ai_conversation_events_request", "request_id"),
     )
 
     id: Mapped[uuid.UUID] = mapped_column(
@@ -177,6 +188,41 @@ class AIConversationEvent(Base):
     ignorable: Mapped[bool] = mapped_column(
         Boolean, nullable=False, default=False, server_default="false",
     )
+    # M8-03：事件级请求标识，来自 ``request.state.request_id``（与 ``ai_usage``
+    # 同一来源）。后台按 ``request_id`` 精确反查一次交互。**历史行为 NULL**：
+    # 列上线前的事件没有这个信息，不按时间窗近似回填——那会制造「看起来精确
+    # 但可能张冠李戴」的假象。
+    request_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), nullable=False,
+    )
+
+
+class AIProposalLink(Base):
+    """M8-02：``proposal_id → conversation_id`` 关联。
+
+    ``/ai/execute`` 的请求体里没有 ``conversation_id``（契约冻结），而审批结果
+    必须写回对应会话的事件流。写 ``approval_request`` 时同事务落这张小表，
+    执行路径再按 ``(user_id, proposal_id)`` 反查。随会话删除级联清理。
+    """
+
+    __tablename__ = "ai_proposal_links"
+    __table_args__ = (
+        Index("ix_ai_proposal_links_conversation", "conversation_id"),
+    )
+
+    user_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("users.id", ondelete="CASCADE"),
+        primary_key=True,
+    )
+    proposal_id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    conversation_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("ai_conversations.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    turn: Mapped[int] = mapped_column(BigInteger, nullable=False)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), nullable=False,
     )

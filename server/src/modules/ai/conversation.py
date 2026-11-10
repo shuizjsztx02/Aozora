@@ -162,7 +162,7 @@ from collections.abc import Mapping, Sequence
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any
 
-from sqlalchemy import delete, func, insert, select
+from sqlalchemy import delete, func, insert, select, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -223,6 +223,12 @@ EVENT_TYPES = SURFACE_EVENT_TYPES | STRUCTURAL_EVENT_TYPES
 #: 抽屉里占一行，长了也只能截断显示。用户重命名不受这个数字约束（那是
 #: ``schemas.AIConversationRenameRequest`` 的事，上限对齐列宽）。
 TITLE_MAX_CHARS = 40
+
+#: M8-03：会话检索文本（``AIConversation.search_text``）的字符上限。
+#: 超出时保留**尾部**——最近说的话比开场白更可能被拿来检索；列首留一个
+#: 截断标记。初值 4096（容量与检索质量实测后调整）。
+SEARCH_TEXT_MAX_CHARS = 4096
+SEARCH_TEXT_TRUNCATED_MARK = "…"
 
 #: UUID 形状的内部 ID。摘要里出现任何一个都违反架构 §6.3 的反幻觉约束
 #: （「历史与摘要只含自然语言，不得出现 UUID / 内部 ID」）。口径与
@@ -381,6 +387,9 @@ class ConversationService:
             )
         )
         conversation.summary = ""
+        # M8-03：检索面是正文的派生副本。正文删了它还留着，等于把用户主动
+        # 删除的对话从后台的搜索入口里留了个后门（与摘要列同一口径）。
+        conversation.search_text = ""
         conversation.archived_at = datetime.now(UTC)
         await self._db.flush()
 
@@ -718,6 +727,9 @@ class ConversationService:
             # 带着一段「描述它没有的历史」的摘要。派生则天然一致——前缀里有
             # 哪条 ``replace``，摘要就停在哪一轮。
             summary=_replace_summary_in(prefix[:cut]),
+            # M8-03：检索面同样从**新会话自己的前缀**派生（与摘要同一条理由）——
+            # 复制父会话的列会让新会话带着一段它并不拥有的历史。
+            search_text=_compose_events_search_text(prefix[:cut]),
         )
         self._db.add(forked)
         await self._db.flush()
@@ -735,6 +747,7 @@ class ConversationService:
                     "data": event.data,
                     "time": event.time,
                     "ignorable": event.ignorable,
+                    "request_id": event.request_id,
                 }
                 for event in prefix[:cut]
             ],
@@ -750,6 +763,7 @@ class ConversationService:
     async def append_turn(
         self, conversation: AIConversation, messages: Sequence[Mapping[str, Any]],
         *, times: Sequence[datetime] | None = None, same_turn: bool = False,
+        request_id: str | None = None,
     ) -> int:
         """把一批消息追加进日志（整轮 = 一次 ``AgentResult.messages``，或 04b 的
         一个**落库批**）。
@@ -779,6 +793,7 @@ class ConversationService:
 
         written = await self._insert_events(
             conversation, prepared, same_turn=same_turn, times=times,
+            request_id=request_id,
         )
         self._note_activity(conversation, messages)
         await self._db.flush()
@@ -790,6 +805,7 @@ class ConversationService:
         events: Sequence[tuple[str, Mapping[str, Any]]],
         *,
         same_turn: bool = False,
+        request_id: str | None = None,
     ) -> int:
         """追加一批**结构性事件**（配额 / 审批 / 设备 / 错误 / 安全 / 摘要替换）。
 
@@ -809,7 +825,9 @@ class ConversationService:
         if not prepared:
             return 0
 
-        written = await self._insert_events(conversation, prepared, same_turn=same_turn)
+        written = await self._insert_events(
+            conversation, prepared, same_turn=same_turn, request_id=request_id,
+        )
         # 结构性事件也是「写入事件」——列表按最后一次写入排序，它同样算数。
         conversation.last_active_at = datetime.now(UTC)
         await self._db.flush()
@@ -822,6 +840,7 @@ class ConversationService:
         *,
         same_turn: bool = False,
         times: Sequence[datetime] | None = None,
+        request_id: str | None = None,
     ) -> int:
         """把一批已校验的事件写进日志：分配 ``(seq, turn)``、撞车重试一次。
 
@@ -866,6 +885,9 @@ class ConversationService:
                                 "data": data,
                                 "time": event_time,
                                 "ignorable": event_type not in SURFACE_EVENT_TYPES,
+                                # M8-03：同一轮的每一批都带同一个 request_id；
+                                # 历史行由列默认值 NULL 兜（不做近似回填）。
+                                "request_id": request_id,
                             }
                             for offset, ((event_type, data), event_time) in enumerate(
                                 zip(prepared, times, strict=True)
@@ -898,6 +920,9 @@ class ConversationService:
         if not conversation.title:
             conversation.title = _derive_title(messages)
         conversation.last_active_at = datetime.now(UTC)
+        # M8-03：检索面与正文同寿。只在 Surface 写入路径累积；结构性事件
+        # （quota / error / 审批）不进检索面。
+        _append_search_text(conversation, messages)
 
     async def _next_position(
         self, conversation: AIConversation, *, same_turn: bool = False,
@@ -970,6 +995,7 @@ class ConversationService:
                 },
             )],
             same_turn=same_turn,
+            request_id=request_id,
         )
 
     # -- 清理 -------------------------------------------------------------
@@ -1018,9 +1044,12 @@ class TurnWriter:
 
     def __init__(
         self, service: ConversationService, conversation: AIConversation,
+        *, request_id: str | None = None,
     ) -> None:
         self._service = service
         self._conversation = conversation
+        #: M8-03：本轮请求标识，随每一批事件落库（后台按它精确反查）。
+        self._request_id = request_id
 
     async def __call__(
         self, messages: Sequence[MessageStamp], *, opens_turn: bool = False,
@@ -1036,6 +1065,7 @@ class TurnWriter:
             [message for message, _ in messages],
             times=[stamp for _, stamp in messages],
             same_turn=not opens_turn,
+            request_id=self._request_id,
         )
         if written:
             await self._service.commit()
@@ -1046,6 +1076,7 @@ class TurnWriter:
         """写一条结构性事件并提交（失败轮的 ``error``、成功轮的 ``quota`` 等）。"""
         written = await self._service.append_events(
             self._conversation, [(event_type, data)], same_turn=same_turn,
+            request_id=self._request_id,
         )
         if written:
             await self._service.commit()
@@ -1152,6 +1183,93 @@ def _prepare_structural_events(
             )
         prepared.append((event_type, dict(data)))
     return prepared
+
+
+def _compose_search_text(messages: Sequence[Mapping[str, Any]]) -> str:
+    """从消息序列派生检索文本：**只收 user / assistant 的自然语言**（M8-03）。
+
+    ``tool`` 结果是 JSON 结构、``reasoning_content`` 是模型内部推理，两者都不该
+    让「按关键词找会话」命中——用户从没在对话里说过那些词。
+    """
+    parts: list[str] = []
+    for message in messages:
+        role = str(message.get("role", ""))
+        if role not in (EVENT_USER, EVENT_ASSISTANT):
+            continue
+        content = message.get("content")
+        if isinstance(content, str) and content.strip():
+            parts.append(content)
+    return _truncate_search_text("\n".join(parts))
+
+
+def _compose_events_search_text(
+    events: Sequence[AIConversationEvent],
+) -> str:
+    """同 :func:`_compose_search_text`，输入是已落库的事件行（分叉用）。"""
+    parts: list[str] = []
+    for event in events:
+        if event.type not in (EVENT_USER, EVENT_ASSISTANT):
+            continue
+        content = (event.data or {}).get("content")
+        if isinstance(content, str) and content.strip():
+            parts.append(content)
+    return _truncate_search_text("\n".join(parts))
+
+
+def _truncate_search_text(text: str) -> str:
+    """上限截断，**保留尾部**：最近说的话比开场白更可能被检索。"""
+    if len(text) <= SEARCH_TEXT_MAX_CHARS:
+        return text
+    keep = SEARCH_TEXT_MAX_CHARS - len(SEARCH_TEXT_TRUNCATED_MARK)
+    return SEARCH_TEXT_TRUNCATED_MARK + text[-keep:]
+
+
+def _append_search_text(
+    conversation: AIConversation, messages: Sequence[Mapping[str, Any]],
+) -> None:
+    """把这一批 Surface 消息追加进会话检索面（与事件同事务）。"""
+    chunk = _compose_search_text(messages)
+    if not chunk:
+        return
+    current = conversation.search_text or ""
+    combined = f"{current}\n{chunk}" if current else chunk
+    conversation.search_text = _truncate_search_text(combined)
+
+
+async def rebuild_search_text(
+    db: AsyncSession, conversation_ids: Sequence[uuid.UUID],
+) -> int:
+    """按当前事件日志**重算**这些会话的检索文本，返回更新行数（M8-03）。
+
+    保留期清理删掉事件之后必须调用：``search_text`` 是正文的派生副本，正文没了
+    它也不能留——否则保留期从后台搜索入口被绕过去（与
+    ``retention.purge_expired_summaries`` 的摘要同一口径）。与写入路径共用
+    :func:`_truncate_search_text`，两处口径不漂移。
+    """
+    if not conversation_ids:
+        return 0
+    updated = 0
+    for conversation_id in conversation_ids:
+        rows = (await db.execute(
+            select(AIConversationEvent.type, AIConversationEvent.data)
+            .where(AIConversationEvent.conversation_id == conversation_id)
+            .order_by(AIConversationEvent.seq)
+        )).all()
+        parts: list[str] = []
+        for event_type, data in rows:
+            if event_type not in (EVENT_USER, EVENT_ASSISTANT):
+                continue
+            content = (data or {}).get("content")
+            if isinstance(content, str) and content.strip():
+                parts.append(content)
+        result = await db.execute(
+            update(AIConversation)
+            .where(AIConversation.id == conversation_id)
+            .values(search_text=_truncate_search_text("\n".join(parts)))
+        )
+        updated += result.rowcount or 0
+    await db.flush()
+    return updated
 
 
 def _window_chars(window: Sequence[Sequence[dict[str, Any]]]) -> int:

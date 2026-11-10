@@ -36,6 +36,9 @@ class TestMigrationConsistency:
             "0019_conversation_index",
             "0020_conversation_event_log",
             "0021_user_preferences",
+            "0022_account_balance_type",
+            "0023_category_icon",
+            "0024_m8_admin_console",
         ):
             try:
                 m = importlib.import_module(f"src.migrations.versions.{rev}")
@@ -80,6 +83,9 @@ class TestMigrationConsistency:
             "0019_conversation_index",
             "0020_conversation_event_log",
             "0021_user_preferences",
+            "0022_account_balance_type",
+            "0023_category_icon",
+            "0024_m8_admin_console",
         ):
             try:
                 m = importlib.import_module(f"src.migrations.versions.{rev}")
@@ -160,8 +166,11 @@ class TestMigrationConsistency:
         T-M7-05j added ``user_preferences`` (migration 0021), 23 → 24 — the
         user-level preference keys (default_book / default_account / widget /
         profile) that migrate from device-local ``sync_meta`` to cloud.
+        M8-03 added ``admin_accounts`` + ``admin_audit_log`` + ``ai_proposal_links``
+        (migration 0024), 24 → 27 — the admin console's identity, audit and
+        proposal→conversation link.
         """
-        assert len(Base.metadata.tables) == 24
+        assert len(Base.metadata.tables) == 27
 
     def test_transaction_note_column_bounded(self):
         """N-13: transactions.note must be bounded at the DB layer too.
