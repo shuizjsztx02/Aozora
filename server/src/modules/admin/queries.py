@@ -20,7 +20,7 @@ from sqlalchemy import and_, func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from src.common.errors import AppException
-from src.models.admin import AdminAccount
+from src.models.admin import AdminAccount, AdminAuditLog
 from src.models.ai import AIConversation, AIConversationEvent, AIUsage
 from src.models.user import DeviceSession, User, UserStatus
 
@@ -573,3 +573,50 @@ async def export_conversation_batch(
         stmt = stmt.where(AIConversation.id > after_id)
     stmt = stmt.order_by(AIConversation.id).limit(limit)
     return list((await db.scalars(stmt)).all())
+
+
+async def list_audit_logs(
+    db: AsyncSession,
+    *,
+    action: str | None,
+    admin_id: uuid.UUID | None,
+    target_user_id: uuid.UUID | None,
+    cursor: str | None,
+    limit: int,
+) -> tuple[list[AdminAuditLog], str | None]:
+    """审计记录查询（M8-10）。keyset ``(created_at, id)`` 倒序。
+
+    只读：``AdminAuditLog`` 的写入点在 ``routes.py``（登录 / reveal / export / write），
+    本函数只构造 ``select``。
+    """
+    conditions = []
+    if action:
+        conditions.append(AdminAuditLog.action == action)
+    if admin_id is not None:
+        conditions.append(AdminAuditLog.admin_id == admin_id)
+    if target_user_id is not None:
+        conditions.append(AdminAuditLog.target_user_id == target_user_id)
+    if cursor:
+        data = _decode_cursor(cursor)
+        created_at, row_id = _cursor_time(data), _cursor_uuid(data)
+        conditions.append(or_(
+            AdminAuditLog.created_at < created_at,
+            and_(
+                AdminAuditLog.created_at == created_at,
+                AdminAuditLog.id < row_id,
+            ),
+        ))
+
+    rows = list((await db.scalars(
+        select(AdminAuditLog)
+        .where(*conditions)
+        .order_by(AdminAuditLog.created_at.desc(), AdminAuditLog.id.desc())
+        .limit(limit + 1)
+    )).all())
+
+    next_cursor = None
+    if len(rows) > limit:
+        rows = rows[:limit]
+        last = rows[-1]
+        next_cursor = encode_cursor(t=last.created_at.isoformat(), id=str(last.id))
+    return rows, next_cursor

@@ -4,6 +4,7 @@ import { ApiError } from './api/client'
 import { AuthProvider } from './auth/AuthContext'
 import { RequireAuth } from './auth/RequireAuth'
 import { Shell } from './components/Shell'
+import { AuditPage } from './pages/AuditPage'
 import { ConversationReplayPage } from './pages/ConversationReplayPage'
 import { ConversationsPage } from './pages/ConversationsPage'
 import { ExportPage } from './pages/ExportPage'
@@ -43,6 +44,7 @@ export default function App() {
                 <Route path="/usage" element={<UsagePage />} />
                 <Route path="/requests" element={<RequestLookupPage />} />
                 <Route path="/export" element={<ExportPage />} />
+                <Route path="/audit" element={<AuditPage />} />
                 <Route path="*" element={<Navigate to="/users" replace />} />
               </Route>
             </Route>

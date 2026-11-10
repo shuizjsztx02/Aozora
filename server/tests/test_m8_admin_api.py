@@ -1112,3 +1112,26 @@ class TestDayGrouping:
 
         sql = str(_day_key("sqlite").compile(dialect=sqlite.dialect()))
         assert "Asia/Shanghai" not in sql
+
+
+class TestAuditQuery:
+    async def test_lists_login_rows_and_filters_by_action(self, env):
+        admin_id = await env.seed_admin()
+        await env.login()
+        headers = env.admin_headers(admin_id)
+
+        response = await env.get("/admin/audit", headers)
+        assert response.status_code == 200, response.text
+        body = response.json()
+        assert len(body["items"]) == 1
+        assert body["items"][0]["action"] == "login"
+        assert body["next_cursor"] is None
+
+        filtered = await env.get("/admin/audit", headers, action="export")
+        assert filtered.status_code == 200
+        assert filtered.json()["items"] == []
+
+    async def test_user_token_is_rejected(self, env):
+        headers = env.user_headers(uuid.uuid4())
+        response = await env.get("/admin/audit", headers)
+        assert response.status_code == 401

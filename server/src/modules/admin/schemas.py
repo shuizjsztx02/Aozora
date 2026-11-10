@@ -273,3 +273,28 @@ class AdminExportRequest(BaseModel):
     time_to: datetime | None = None
     q: str | None = Field(default=None, max_length=256)
     include_archived: bool = False
+
+
+# ---------------------------------------------------------------------------
+# M8-10：审计记录查询
+# ---------------------------------------------------------------------------
+
+
+class AdminAuditItem(BaseModel):
+    """`admin_audit_log` 的一行。`detail` 原样返回（JSON）。"""
+
+    model_config = ConfigDict(from_attributes=True)
+
+    id: uuid.UUID
+    admin_id: uuid.UUID | None
+    action: str
+    target_user_id: uuid.UUID | None
+    conversation_id: uuid.UUID | None
+    detail: dict[str, Any]
+    ip: str | None
+    created_at: datetime
+
+
+class AdminAuditListResponse(BaseModel):
+    items: list[AdminAuditItem]
+    next_cursor: str | None = None

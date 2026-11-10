@@ -59,6 +59,11 @@ x-api-env: &api-env
   # security.md 的会话日志例外要求「保留期对齐 D-PROD-08」，那是隐私义务，
   # 不能被上面那个埋点开关顺带关掉。两个实例都开；窗口默认 30 天（config.py）。
   AI_CONVERSATION_RETENTION_ENABLED: "true"
+  # M8：运营后台的管理员 JWT secret（**与 C 端 SECRET_KEY 必须不同**）。
+  # 未设置时 config 回落到 dev 默认值——只允许本机开发；部署侧必须在 .env
+  # 写入 `openssl rand -hex 32` 生成的值（见 deploy.env.example / RUNBOOK）。
+  ADMIN_JWT_SECRET: ${ADMIN_JWT_SECRET:-}
+  ADMIN_TOKEN_EXPIRE_MINUTES: ${ADMIN_TOKEN_EXPIRE_MINUTES:-60}
 
 services:
   api-test:

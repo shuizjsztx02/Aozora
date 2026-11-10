@@ -27,6 +27,7 @@ const NAV_GROUPS: { title: string; items: NavItem[] }[] = [
       { to: '/usage', label: '用量统计' },
       { to: '/requests', label: '请求反查' },
       { to: '/export', label: '导出' },
+      { to: '/audit', label: '审计记录' },
     ],
   },
 ]

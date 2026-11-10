@@ -46,6 +46,8 @@ from .dependencies import (
     verify_admin_password,
 )
 from .schemas import (
+    AdminAuditItem,
+    AdminAuditListResponse,
     AdminConversationDetail,
     AdminConversationItem,
     AdminConversationListResponse,
@@ -974,4 +976,32 @@ async def export_data(
         stream(),
         media_type="application/x-ndjson",
         headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+    )
+
+
+@router.get("/audit", response_model=AdminAuditListResponse)
+async def list_audit(
+    admin: Annotated[AdminAccount, Depends(require_admin)],
+    db: Annotated[AsyncSession, Depends(get_admin_read_session)],
+    action: Annotated[str | None, Query(max_length=32)] = None,
+    admin_id: uuid.UUID | None = None,
+    target_user_id: uuid.UUID | None = None,
+    cursor: str | None = None,
+    limit: Annotated[int, Query(ge=1, le=200)] = 50,
+):
+    """审计记录查询（M8-10）：登录 / reveal / export / write。
+
+    只读；keyset ``(created_at, id)`` 倒序。普通浏览不产生记录（用户决策 12）。
+    """
+    rows, next_cursor = await queries.list_audit_logs(
+        db,
+        action=action,
+        admin_id=admin_id,
+        target_user_id=target_user_id,
+        cursor=cursor,
+        limit=limit,
+    )
+    return AdminAuditListResponse(
+        items=[AdminAuditItem.model_validate(row) for row in rows],
+        next_cursor=next_cursor,
     )
