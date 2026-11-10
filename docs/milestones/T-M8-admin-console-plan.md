@@ -13,7 +13,7 @@
 |---|---|---|---|---|---|
 | **8-01** | 文档与决策锁定 | ✅ 完成 | 2026-11-10 | `c9c8210` | 24 项决策落盘；架构 §9 + 本文件 + APP-CONTEXT + overview + AGENTS + v4 同步 |
 | **8-02** | 审批留档（硬需求 ①） | ⏳ 未开始 | | | `approval_request` / `approval_result` / `ai_proposal_links` |
-| **8-03** | **M8 数据面基线**（全部迁移 + 会话检索，硬需求 ②） | ✅ 完成 | 2026-11-10 | 待回填 | 迁移 `0024` 一次落六处；`search_text` 四路同寿（写入/删除/保留期/分叉）；`request_id` 进全部写入路径。验证：pytest **1777 passed / 37 skipped**、ruff 全绿、迁移 upgrade/downgrade 离线 SQL 正确；**本机 Docker 未运行，真实 PG 未实测** |
+| **8-03** | **M8 数据面基线**（全部迁移 + 会话检索，硬需求 ②） | ✅ 完成 | 2026-11-10 | `b2d7e0b` | 迁移 `0024` 一次落六处；`search_text` 四路同寿（写入/删除/保留期/分叉）；`request_id` 进全部写入路径。验证：pytest **1777 passed / 37 skipped**、ruff 全绿、迁移 upgrade/downgrade 离线 SQL 正确；**本机 Docker 未运行，真实 PG 未实测** |
 | **8-04** | admin 鉴权与只读 API | ⏳ 未开始 | | | `admin_accounts` + 独立 JWT + 查询层 |
 | **8-05** | 管理写操作与写审计 | ⏳ 未开始 | | | 冻结/解冻、配额、强制登出；**不得复用 `FROZEN`** |
 | **8-06** | admin 前端壳 + 检索页 | ⏳ 未开始 | | | 独立 `admin/` 包 |
