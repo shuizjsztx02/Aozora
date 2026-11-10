@@ -262,6 +262,27 @@ class AiGatewayClient(
         return executeAuthorized("$baseUrl/ai/device-result", body.toString())
     }
 
+    /**
+     * M8-02b：审批结果上报（`POST /ai/approval-result`）。
+     *
+     * 字段是 camelCase——与 `confirm` 帧、`approval_request` 事件同一套命名，
+     * 客户端手里的 `proposalId` 原样带回。`allowed-once` 已由执行路径在服务端
+     * 留档，服务端识别到 server 行时忽略这条，因此四值统一上报是安全的。
+     */
+    suspend fun submitApprovalResult(
+        proposalId: String,
+        conversationId: String,
+        result: String,
+        reason: String? = null,
+    ): String {
+        val body = JSONObject()
+            .put("proposalId", proposalId)
+            .put("conversationId", conversationId)
+            .put("result", result)
+        if (reason != null) body.put("reason", reason)
+        return executeAuthorized("$baseUrl/ai/approval-result", body.toString())
+    }
+
     // ─── internal ────────────────────────────────────────────────────────
 
     private fun buildInterpretRequest(input: String, contextJson: String?): String {

@@ -90,6 +90,7 @@ describe('Bridge types — 命令完整性', () => {
     // T-M7-02h: agent 流式通道
     'ai.agent',
     'ai.cancel',
+    'ai.approval_result',
     // T-M7-03d / T-M7-04b: 会话索引 + 事件增量读取
     'conversation.list',
     'conversation.rename',
@@ -153,7 +154,7 @@ describe('Bridge types — 命令完整性', () => {
     'autobook.resolve_capture',
   ]
 
-  it('BridgeCommands 包含所有 87 个命令（含 AI 6 个 + 权限 3 个 + 图片 4 个 + 同意 2 个 + 导出 4 个 + 账号删除 2 个 + 反馈 1 个 + FIX 4 个 + T7-2 账户更新 1 个 + 第八轮分类/图标/存钱 7 个 + T9-5a meta 2 个 + T10-3 auth 4 个 + T11-2 widget 1 个 + T11-4 scheduled 4 个 + T11-7 persona 4 个 + T12-7 交易更新 1 个 + T14-2 账本更新 1 个 + T16-5 主题背景 1 个 + T-M7-02h agent 2 个 + T-M7-03d 会话索引 3 个 + T-M7-04b 会话事件 1 个 + T-M7-05f 设备通道 2 个 + T21-5 自动记账 4 个）', () => {
+  it('BridgeCommands 包含所有 88 个命令（含 AI 7 个 + 权限 3 个 + 图片 4 个 + 同意 2 个 + 导出 4 个 + 账号删除 2 个 + 反馈 1 个 + FIX 4 个 + T7-2 账户更新 1 个 + 第八轮分类/图标/存钱 7 个 + T9-5a meta 2 个 + T10-3 auth 4 个 + T11-2 widget 1 个 + T11-4 scheduled 4 个 + T11-7 persona 4 个 + T12-7 交易更新 1 个 + T14-2 账本更新 1 个 + T16-5 主题背景 1 个 + T-M7-02h agent 2 个 + T-M7-03d 会话索引 3 个 + T-M7-04b 会话事件 1 个 + T-M7-05f 设备通道 2 个 + T21-5 自动记账 4 个 + M8-02b 审批上报 1 个）', () => {
     const actualCommands = Object.values(BridgeCommands)
     expect(actualCommands).toHaveLength(expectedCommands.length)
     for (const cmd of expectedCommands) {
@@ -1084,6 +1085,28 @@ describe('NativeBridge — agent 流式通道（T-M7-02h）', () => {
 
     expect(mockNative.call.mock.calls[0][2]).toBe('ai.cancel')
     expect(result).toEqual({ cancelled: true })
+  })
+
+  it('reportApprovalResult 发送 ai.approval_result 与 camelCase 载荷（M8-02b）', async () => {
+    mockNative.call.mockImplementation((_v: number, requestId: string) => {
+      ackAgent(requestId, { accepted: true })
+    })
+    const result = await bridge.reportApprovalResult({
+      proposalId: 'p-1',
+      conversationId: 'c-1',
+      result: 'rejected',
+      reason: 'not_now',
+    })
+
+    const [, , command, payload] = mockNative.call.mock.calls[0]
+    expect(command).toBe('ai.approval_result')
+    expect(JSON.parse(payload as string)).toEqual({
+      proposalId: 'p-1',
+      conversationId: 'c-1',
+      result: 'rejected',
+      reason: 'not_now',
+    })
+    expect(result).toEqual({ accepted: true })
   })
 
   it('onAiStream 收到事件（JSON 字符串解析为对象）', () => {

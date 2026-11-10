@@ -1000,6 +1000,13 @@ class ConversationService:
         if result not in APPROVAL_RESULTS:
             raise ValueError(f"unknown approval result: {result!r}")
 
+        # M8-02b：``allowed-once`` 已由执行路径记过 server 行时，客户端这条是
+        # 冗余——既成事实不需要第二份留档，也不该让回放页看到两条结果。
+        if result == "allowed-once" and await self._approval_result_event(
+            conversation.id, proposal_id, APPROVAL_SOURCE_SERVER,
+        ) is not None:
+            return False
+
         data: dict[str, Any] = {
             "proposalId": proposal_id,
             "result": result,

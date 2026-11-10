@@ -225,6 +225,8 @@ class AozoraBridge(
             // T-M7-02h: agent 流式通道（事件经 window.__aozoraAiStream__ 推送）
             BridgeCommands.AI_AGENT -> handleAiAgent(requestId, payload)
             BridgeCommands.AI_CANCEL -> handleAiCancel(requestId)
+            // M8-02b: 审批四值上报（服务端只有 allowed-once 可观测）
+            BridgeCommands.AI_APPROVAL_RESULT -> handleAiApprovalResult(requestId, payload)
 
             // T-M7-03d: 会话索引（ADR-003 通道，请求-响应）
             BridgeCommands.CONVERSATION_LIST -> handleConversationList(requestId)
@@ -1359,6 +1361,36 @@ class AozoraBridge(
             requestId,
             JSONObject().put("cancelled", job != null).toString(),
         )
+    }
+
+    /**
+     * M8-02b：审批结果上报。
+     *
+     * 四值里 `allowed-once` 已由 `/ai/execute` 在服务端留档；服务端识别到 server
+     * 行后会忽略客户端这条，因此四值统一上报不会产生重复结果。归属校验在服务端
+     * （越权 404），桥层只做字段完整性检查。
+     */
+    private suspend fun handleAiApprovalResult(
+        requestId: String, p: JSONObject?,
+    ): BridgeResponse {
+        val client = aiGatewayClient
+            ?: return BridgeResponse.error(requestId, "unavailable", "AI gateway client not injected")
+        val proposalId = p?.optString("proposalId").orEmpty()
+        val conversationId = p?.optString("conversationId").orEmpty()
+        val result = p?.optString("result").orEmpty()
+        if (proposalId.isEmpty() || conversationId.isEmpty() || result.isEmpty()) {
+            return BridgeResponse.error(
+                requestId, "invalid_input",
+                "proposalId, conversationId and result are required",
+            )
+        }
+        val body = client.submitApprovalResult(
+            proposalId = proposalId,
+            conversationId = conversationId,
+            result = result,
+            reason = p?.optString("reason")?.takeIf { it.isNotEmpty() },
+        )
+        return BridgeResponse.success(requestId, body)
     }
 
     /**

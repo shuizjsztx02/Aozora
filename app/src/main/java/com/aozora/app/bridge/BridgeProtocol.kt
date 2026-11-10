@@ -110,6 +110,10 @@ object BridgeCommands {
     // 单独的取消端点（02g 交接）。
     const val AI_AGENT = "ai.agent"
     const val AI_CANCEL = "ai.cancel"
+    // M8-02b（桥计数 87→88）：审批四值上报。服务端只对 /ai/execute 成功可观测
+    // allowed-once；rejected / cancelled / unavailable 是纯客户端处置，经这条
+    // 命令带 token 上行（WebView 侧没有 base URL 与 token，fetch 不可达）。
+    const val AI_APPROVAL_RESULT = "ai.approval_result"
 
     // T-M7-03d（决策 #1：桥计数本轮唯一变更点 79→82）：会话索引三命令，对接
     // T-M7-03a 的 `/ai/conversations` 端点。三个都是**请求-响应**（走 25 s 单发
@@ -229,7 +233,7 @@ object BridgeCommands {
         REMINDER_GET_STATUS, REMINDER_SET, REMINDER_CHECK_PERMISSION,
         AI_REPORT,
         AI_INTERPRET, AI_VALIDATE, AI_EXECUTE,
-        AI_AGENT, AI_CANCEL,
+        AI_AGENT, AI_CANCEL, AI_APPROVAL_RESULT,
         CONVERSATION_LIST, CONVERSATION_RENAME, CONVERSATION_DELETE, CONVERSATION_EVENTS,
         PERMISSIONS_GET_STATUS, PERMISSIONS_REQUEST, PERMISSIONS_OPEN_SETTINGS,
         IMAGE_PICK, IMAGE_DELETE,

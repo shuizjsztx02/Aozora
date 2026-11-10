@@ -319,6 +319,39 @@ class TestClientResult:
             if event.type == "approval_result"
         ] == []
 
+    async def test_allowed_once_upload_is_ignored_when_server_row_exists(
+        self, stream_env: StreamEnv,
+    ):
+        """M8-02b：客户端四值统一上报时，``allowed-once`` 与 server 行冗余。
+
+        执行路径已经记过既成事实；客户端这条既不改写它，也不追加第二行——
+        回放页不该看到两条结论。
+        """
+        proposal, conversation_id = await _hung_turn(stream_env)
+        executed = await stream_env.client.post(
+            "/ai/execute",
+            json={
+                "proposal": proposal,
+                "book_id": stream_env.book_id,
+                "confirmation_token": "allowed-once",
+            },
+            headers=stream_env.auth_headers,
+        )
+        assert executed.status_code == 200
+
+        response = await _post_result(
+            stream_env, conversation_id=conversation_id,
+            proposal_id=proposal["proposalId"], result="allowed-once",
+        )
+        assert response.status_code == 200
+
+        results = [
+            event for event in await _events(stream_env, conversation_id)
+            if event.type == "approval_result"
+        ]
+        assert len(results) == 1
+        assert results[0].data["source"] == "server"
+
     async def test_unknown_result_value_is_a_schema_error(
         self, stream_env: StreamEnv,
     ):

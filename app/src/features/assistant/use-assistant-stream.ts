@@ -45,6 +45,8 @@
 
 import { useCallback, useEffect, useRef, useState } from 'react'
 import type {
+  AiApprovalResultAck,
+  AiApprovalResultParams,
   AiConversationEventItem,
   AiConversationEventsResponse,
   AiStreamDoneData,
@@ -72,6 +74,11 @@ export interface AgentStreamBridge {
   fetchConversationEvents?(
     id: string, afterSeq?: number | null,
   ): Promise<AiConversationEventsResponse>
+  /** M8-02b：审批四值上报（审计留档）。
+   *  可选：能力探测不要求它——旧桥缺席时只少了审计，四值的 UI 行为不变。 */
+  reportApprovalResult?(
+    params: AiApprovalResultParams,
+  ): Promise<AiApprovalResultAck>
 }
 
 /** agent 流的下行事件——**契约源在 `bridge-types.ts`**（T-M7-02h 已提交）。 */

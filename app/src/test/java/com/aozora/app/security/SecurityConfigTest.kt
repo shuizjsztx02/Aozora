@@ -58,10 +58,13 @@ class SecurityConfigTest {
         //   LIST_CAPTURES/RESOLVE_CAPTURE（autobook.*，4 条）→ 87。
         //   自动记账桥通道（开关 + 两类授权态 + 待确认箱 + 处置）。方法段用下划线，
         //   与 T21-5 卡面及各下游卡（T21-7 / T21-8）的引用逐字一致。
+        // M8-02b: +AI_APPROVAL_RESULT（ai.approval_result）→ 88。
+        //   审批四值上报：服务端只有 allowed-once 可观测，其余三值必须由客户端
+        //   上行；WebView 无 base URL/token，只能走桥。
         val kotlinCommands = BridgeCommands.ALL
         assertEquals(
-            "Bridge command count must be 87 (sync with bridge-types.ts)",
-            87,
+            "Bridge command count must be 88 (sync with bridge-types.ts)",
+            88,
             kotlinCommands.size
         )
         assertEquals(

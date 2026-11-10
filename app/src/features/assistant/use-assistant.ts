@@ -740,6 +740,41 @@ export function useAssistant({
     return dropped.length
   }, [clearApprovalCard])
 
+  /**
+   * M8-02b：把审批处置上报给服务端留档。
+   *
+   * 四值里只有 `allowed-once` 是服务端可自行观测的（`/ai/execute` 成功）；
+   * `rejected` / `cancelled` / `unavailable` 是纯客户端状态，不报就永远看不到。
+   * **尽力而为**：失败静默——留档失败不该改变用户看到的结果（与服务端
+   * `_record_failure` 同一口径）。本地会话（`local:` 前缀）在服务端不存在，
+   * 没有可写的事件流，直接跳过。
+   */
+  const reportApprovalIds = useCallback((
+    outcome: ApprovalOutcome,
+    proposalIds: readonly (string | null | undefined)[],
+  ) => {
+    const conversationId = useAssistantChatStore.getState().activeConversationId
+    if (!conversationId || conversationId.startsWith('local:')) return
+    const report = bridge.reportApprovalResult
+    if (!report) return // 旧桥没有这条命令：只少审计，UI 行为不变
+    for (const proposalId of proposalIds) {
+      if (!proposalId) continue
+      void report.call(bridge, {
+        proposalId, conversationId, result: outcome,
+      }).catch(() => { /* 审计留档尽力而为 */ })
+    }
+  }, [bridge])
+
+  const reportApprovalOutcome = useCallback((
+    outcome: ApprovalOutcome,
+    pred: (a: PendingApproval) => boolean = () => true,
+  ) => {
+    reportApprovalIds(
+      outcome,
+      approvalsRef.current.filter(pred).map(a => a.proposal.proposalId),
+    )
+  }, [reportApprovalIds])
+
   const buildParseContext = useCallback((): ParseContext => {
     const cats: Category[] = categories.map(c => ({
       id: c.id,
@@ -1159,6 +1194,8 @@ export function useAssistant({
       // T-M7-03e：审批四值的 `cancelled`——用户主动中止整个任务。挂着的确认卡是
       // 「用户没来得及回答」的提案，按下停止就不该再留一张卡等他（架构 §4.4
       // 不变式 3：取消必须收敛到一致状态，不留悬挂的确认卡）。**零写。**
+      // M8-02b：先把四值里的 `cancelled` 上报（丢弃之后就取不到这些提案了）。
+      reportApprovalOutcome('cancelled')
       dropApprovals(() => true)
       setInterrupted(null)
       // T-M7-04e：**取消把游标抹成未知**——服务端在断连取消时**不写任何日志事件**
@@ -1194,6 +1231,8 @@ export function useAssistant({
       // 落在中断提示**之前**，读起来就是「做到哪 → 然后断了」。空数组是常态
       // （本地半截气泡已经包含那些正文，见 `recoveredMessages` 的规则 ③）。
       for (const item of p.recovered) appendAssistantMessage(item.text)
+      // M8-02b：被动中断 → 未回答的提案按 `unavailable` 上报（视为拒绝、零写）。
+      reportApprovalOutcome('unavailable')
       const dropped = dropApprovals(() => true)
       // T20-9（REQ-82）：**服务端明确拒绝**（配额用尽 / 请求过密）有如实文案——
       // 气泡与提示条两处共用它，两处都不再落「连接中断」（那句只对真断连成立）。
@@ -1227,6 +1266,8 @@ export function useAssistant({
       const id = (pr as { proposalId?: unknown }).proposalId
       if (typeof id === 'string') authoritative.add(id)
     }
+    // M8-02b：权威清单没列出的提案 → `unavailable`（视为拒绝、零写）。
+    reportApprovalOutcome('unavailable', a => !authoritative.has(a.proposal.proposalId))
     const stranded = dropApprovals(a => !authoritative.has(a.proposal.proposalId))
     if (stranded > 0) {
       appendAssistantMessage(`⚠️ 有 ${stranded} 项改动未取得确认，没有记录`)
@@ -1317,7 +1358,7 @@ export function useAssistant({
   }, [
     adoptConversation, appendAssistantMessage, bridge, dropApprovals, enqueueApproval,
     finishProcessing, forgetConversation, forgetCursor, setCursor, setMessages,
-    showPendingApproval, syncAfterWrite,
+    showPendingApproval, syncAfterWrite, reportApprovalOutcome,
   ])
 
   /**
@@ -1383,6 +1424,7 @@ export function useAssistant({
   const cancelStream = useCallback(async () => {
     // T-M7-03e：未决的确认门一并收敛（审批四值的 `cancelled`）——用户按下停止，
     // 就不该再留一张待确认的卡等着他（架构 §4.4 不变式 3）。
+    reportApprovalOutcome('cancelled')
     dropApprovals(() => true)
     setInterrupted(null)
     setActiveProposal(null)
@@ -1394,7 +1436,7 @@ export function useAssistant({
     shownApprovalIdRef.current = null
     // 撤销窗（activeTxIdsRef）不动：那是**上一轮已落库**那笔的入口，与取消本轮无关
     await cancelAgentStream()
-  }, [cancelAgentStream, dropApprovals])
+  }, [cancelAgentStream, dropApprovals, reportApprovalOutcome])
 
   /**
    * T-M7-03e：确认门上的「拒绝」（审批四值 `rejected`）——**零写**，任务不中止。
@@ -1406,10 +1448,12 @@ export function useAssistant({
   const rejectApproval = useCallback(() => {
     const shown = shownApprovalIdRef.current
     if (!shown) return
+    // M8-02b：四值里的 `rejected`（零写，任务继续）。
+    reportApprovalOutcome('rejected', a => a.proposal.proposalId === shown)
     dropApprovals(a => a.proposal.proposalId === shown)
     appendAssistantMessage('已拒绝这次改动，没有记录')
     showPendingApproval() // 队列里还有下一张就顶上（没有则卡保持在撤下的状态）
-  }, [appendAssistantMessage, dropApprovals, showPendingApproval])
+  }, [appendAssistantMessage, dropApprovals, showPendingApproval, reportApprovalOutcome])
 
   /** T-M7-03b：气泡视图——页面渲染读它（03c 的步骤卡片流读 `projection` 的 `steps`）。 */
   const streaming = useMemo<StreamingBubble | null>(
@@ -1680,6 +1724,9 @@ export function useAssistant({
         m.proposal?.proposalId === edited.proposalId ? { ...m, proposal: edited } : m
       ))
       const written = await commitProposalInternal(edited, overrides)
+      // M8-02b：唯一放行值 `allowed-once` 的留档。服务端 `/ai/execute` 已经记过
+      // server 行时会忽略这条冗余上报（不回放出两条结果）。
+      if (written) reportApprovalIds('allowed-once', [edited.proposalId])
       // 写入成功且队列里还有下一张 → 顶上（多步任务一轮可以挂起多个写提案）。
       // 失败时**不顶**：error 卡要留在屏幕上给重试入口。
       if (written) showPendingApproval()
@@ -1723,7 +1770,8 @@ export function useAssistant({
       setPhase('idle')
     }
   }, [bridge, bookId, pushBookMissingError, writeTransactions, commitProposalInternal,
-      dropApprovals, showPendingApproval, streamActive, appendAssistantMessage, syncAfterWrite])
+      dropApprovals, showPendingApproval, streamActive, appendAssistantMessage, syncAfterWrite,
+      reportApprovalIds])
 
   const undoExecution = useCallback(async () => {
     const ids = activeTxIdsRef.current

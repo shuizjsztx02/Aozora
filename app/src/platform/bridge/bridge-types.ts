@@ -83,6 +83,10 @@ export const BridgeCommands = {
   // ai.cancel 关掉 SSE 长连接（服务端把断连当取消）。
   AI_AGENT: 'ai.agent',
   AI_CANCEL: 'ai.cancel',
+  // M8-02b（桥计数 87→88）：审批四值上报。服务端只对 `/ai/execute` 成功可观测
+  // `allowed-once`；`rejected` / `cancelled` / `unavailable` 是纯客户端处置。
+  // WebView 侧没有 base URL 与 token（全在 Kotlin），因此必须走桥。
+  AI_APPROVAL_RESULT: 'ai.approval_result',
 
   // T-M7-03d（桥计数 79→82）：会话索引三命令，对接 /ai/conversations。
   // 请求-响应形态（走 25 s 单发预算）。「新建会话」不需要命令——服务端在首轮
@@ -598,6 +602,26 @@ export interface AiAgentAck {
   pending: true
   /** = 本轮 ai.agent 的 requestId；事件里的 streamId 与之相等。 */
   streamId: string
+}
+
+/** M8-02b：审批四值（与 `use-assistant.ts` 的 `ApprovalOutcome` 同形）。 */
+export type AiApprovalOutcome =
+  | 'allowed-once'
+  | 'rejected'
+  | 'cancelled'
+  | 'unavailable'
+
+/** ai.approval_result 参数。字段为 camelCase，与 `confirm` 帧同源。 */
+export interface AiApprovalResultParams {
+  proposalId: string
+  conversationId: string
+  result: AiApprovalOutcome
+  reason?: string | null
+}
+
+/** ai.approval_result 的回执。归属校验失败是桥错误，不是 `accepted: false`。 */
+export interface AiApprovalResultAck {
+  accepted: boolean
 }
 
 /**

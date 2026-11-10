@@ -43,6 +43,8 @@ import {
   type AiValidateResponse,
   type AiExecuteResponse,
   type AiAgentAck,
+  type AiApprovalResultAck,
+  type AiApprovalResultParams,
   type AiStreamEvent,
   type AiConversationSummary,
   type AiConversationListResponse,
@@ -527,6 +529,23 @@ export class NativeBridge {
    */
   async cancelAgent(): Promise<{ cancelled: boolean }> {
     return this.call('ai.cancel')
+  }
+
+  /**
+   * M8-02b：把确认卡的终态处置上报给服务端（四值）。
+   *
+   * `allowed-once` 由 `/ai/execute` 在服务端留档，这条上报是冗余但被服务端忽略；
+   * 其余三值只有客户端知道。失败**不上抛**——审计留档失败不该改变用户看到的
+   * 结果（服务端同一口径：`_record_failure` 尽力而为）。
+   */
+  async reportApprovalResult(params: AiApprovalResultParams): Promise<AiApprovalResultAck> {
+    const payload: Record<string, unknown> = {
+      proposalId: params.proposalId,
+      conversationId: params.conversationId,
+      result: params.result,
+    }
+    if (params.reason) payload.reason = params.reason
+    return this.call<AiApprovalResultAck>('ai.approval_result', payload)
   }
 
   /**
