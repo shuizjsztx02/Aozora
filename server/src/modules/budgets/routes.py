@@ -11,6 +11,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from src.common.database import get_db_session
 from src.models.user import User
 from src.modules.auth.dependencies import get_current_user
+from src.modules.auth.suspended import require_not_suspended as _require_not_suspended
 
 from .schemas import BudgetResponse, BudgetUpsert
 from .service import BudgetService
@@ -44,6 +45,7 @@ async def upsert_budget(
     db: Annotated[AsyncSession, Depends(get_db_session)] = ...,
 ):
     """Create or update an overall budget for a period (category_id=null)."""
+    _require_not_suspended(current_user)
     service = BudgetService(db)
     budget = await service.upsert_budget(current_user.id, period, body)
     return BudgetResponse.model_validate(budget)
@@ -64,6 +66,7 @@ async def upsert_category_budget(
     db: Annotated[AsyncSession, Depends(get_db_session)] = ...,
 ):
     """Create or update a category-specific budget for a period."""
+    _require_not_suspended(current_user)
     # Override category_id in body
     body.category_id = category_id
     service = BudgetService(db)

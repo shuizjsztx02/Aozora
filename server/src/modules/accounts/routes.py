@@ -12,6 +12,7 @@ from src.common.database import get_db_session
 from src.common.pagination import PaginatedResponse
 from src.models.user import User
 from src.modules.auth.dependencies import get_current_user
+from src.modules.auth.suspended import require_not_suspended as _require_not_suspended
 
 from .schemas import AccountCreate, AccountResponse, AccountUpdate
 from .service import AccountService
@@ -43,6 +44,7 @@ async def create_account(
     current_user: Annotated[User, Depends(get_current_user)] = ...,
     db: Annotated[AsyncSession, Depends(get_db_session)] = ...,
 ):
+    _require_not_suspended(current_user)
     service = AccountService(db)
     account = await service.create_account(current_user.id, body)
     return AccountResponse.model_validate(account)
@@ -66,6 +68,7 @@ async def update_account(
     current_user: Annotated[User, Depends(get_current_user)] = ...,
     db: Annotated[AsyncSession, Depends(get_db_session)] = ...,
 ):
+    _require_not_suspended(current_user)
     service = AccountService(db)
     account = await service.update_account(account_id, current_user.id, body)
     return AccountResponse.model_validate(account)
@@ -77,5 +80,6 @@ async def delete_account(
     current_user: Annotated[User, Depends(get_current_user)] = ...,
     db: Annotated[AsyncSession, Depends(get_db_session)] = ...,
 ):
+    _require_not_suspended(current_user)
     service = AccountService(db)
     await service.archive_account(account_id, current_user.id)

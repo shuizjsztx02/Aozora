@@ -14,6 +14,7 @@ from src.common.telemetry import record_export
 from src.models.user import User
 from src.modules.auth.dependencies import get_current_user
 from src.modules.auth.frozen import require_active as _require_active
+from src.modules.auth.suspended import require_not_suspended as _require_not_suspended
 
 from .schemas import ExportCreate, ExportResponse
 from .service import ExportService
@@ -28,6 +29,7 @@ async def create_export(
     db: Annotated[AsyncSession, Depends(get_db_session)] = ...,
 ):
     _require_active(current_user)
+    _require_not_suspended(current_user)
     service = ExportService(db)
     export = await service.create_export(body.book_id, current_user.id, body.format)
     record_export()

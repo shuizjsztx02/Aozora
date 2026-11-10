@@ -15,6 +15,7 @@ from src.common.errors import AppException
 from src.models.user import User
 from src.modules.auth.dependencies import get_current_user
 from src.modules.auth.frozen import require_active as _require_active
+from src.modules.auth.suspended import require_not_suspended as _require_not_suspended
 
 from .authorization import authorize_payload
 from .context import load_validation_context
@@ -86,6 +87,7 @@ async def interpret(
     client to fall back to its local rule NLU (APP-CONTEXT §6.4).
     """
     _require_active(current_user)
+    _require_not_suspended(current_user)
     service = AIService(db, provider)
     return await service.interpret(current_user, request.state.request_id, body)
 
@@ -117,6 +119,7 @@ async def parse_notification(
     表示「回退本地规则解析」（ADR-016 决策 7：本地规则是离线兜底）。
     """
     _require_active(current_user)
+    _require_not_suspended(current_user)
     service = AIService(db, provider)
     return await service.parse_capture(current_user, request.state.request_id, body)
 
@@ -202,6 +205,7 @@ async def execute_proposal(
     The client should show an "Undo" toast during this window.
     """
     _require_active(current_user)
+    _require_not_suspended(current_user)
     try:
         book_uuid = uuid.UUID(body.book_id)
     except ValueError:
@@ -252,6 +256,7 @@ async def report(
     only the fact pack is returned (no narrative).
     """
     _require_active(current_user)
+    _require_not_suspended(current_user)
     service = AIService(db, provider)
     return await service.generate_report(current_user, request.state.request_id, body)
 
@@ -276,6 +281,7 @@ async def parse_image(
     preserves the draft and prompts retry when connectivity resumes.
     """
     _require_active(current_user)
+    _require_not_suspended(current_user)
     try:
         book_uuid = uuid.UUID(body.book_id)
     except ValueError:
@@ -329,6 +335,7 @@ async def rename_conversation(
     三者不可分辨。标题长度由 schema 校验（对齐列宽）。
     """
     _require_active(current_user)
+    _require_not_suspended(current_user)
     service = ConversationService(db)
     conversation = await service.load_owned(current_user, conversation_id)
     await service.rename(conversation, body.title)
@@ -350,6 +357,7 @@ async def delete_conversation(
     「这个 id 不是我的会话了」即可，不该当作错误弹给用户（P2 挂账 1 的降级契约）。
     """
     _require_active(current_user)
+    _require_not_suspended(current_user)
     service = ConversationService(db)
     conversation = await service.load_owned(current_user, conversation_id)
     await service.delete(conversation)
@@ -408,6 +416,7 @@ async def fork_conversation(
     ``conversation_not_found``，三者不可分辨。
     """
     _require_active(current_user)
+    _require_not_suspended(current_user)
     service = ConversationService(db)
     conversation = await service.load_owned(current_user, conversation_id)
     forked, cut = await service.fork(conversation, body.seq)
@@ -439,6 +448,7 @@ async def device_result(
     （``devices.DeviceChannel``，单 worker 前提，见 ADR-010 决策 2）。
     """
     _require_active(current_user)
+    _require_not_suspended(current_user)
     accepted = device_channel().deliver(
         body.request_id,
         user_id=current_user.id,
@@ -475,6 +485,7 @@ async def approval_result(
     后台显示「未上报」——**不得**推断成拒绝（架构 §4.3）。
     """
     _require_active(current_user)
+    _require_not_suspended(current_user)
     service = ConversationService(db)
     conversation = await service.load_owned(current_user, body.conversationId)
     await service.record_client_approval_result(
@@ -516,6 +527,7 @@ async def agent(
     it, so nothing changes for them.
     """
     _require_active(current_user)
+    _require_not_suspended(current_user)
     cfg = get_config()
     if not cfg.ai_agent_enabled:
         raise AppException(

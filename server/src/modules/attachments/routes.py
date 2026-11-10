@@ -13,6 +13,7 @@ from src.common.database import get_db_session
 from src.models.user import User
 from src.modules.auth.dependencies import get_current_user
 from src.modules.auth.frozen import require_active as _require_active
+from src.modules.auth.suspended import require_not_suspended as _require_not_suspended
 
 from .schemas import AttachmentLinkRequest, AttachmentResponse
 from .service import AttachmentService
@@ -27,6 +28,7 @@ async def upload_attachment(
     db: Annotated[AsyncSession, Depends(get_db_session)] = ...,
 ):
     _require_active(current_user)
+    _require_not_suspended(current_user)
     service = AttachmentService(db)
     attachment = await service.upload(current_user.id, file)
     return AttachmentResponse.model_validate(attachment)
@@ -80,6 +82,7 @@ async def delete_attachment(
     db: Annotated[AsyncSession, Depends(get_db_session)] = ...,
 ):
     _require_active(current_user)
+    _require_not_suspended(current_user)
     service = AttachmentService(db)
     await service.delete_attachment(attachment_id, current_user.id)
 
@@ -95,6 +98,7 @@ async def link_attachment(
     db: Annotated[AsyncSession, Depends(get_db_session)] = ...,
 ):
     _require_active(current_user)
+    _require_not_suspended(current_user)
     service = AttachmentService(db)
     attachment = await service.link_attachment(
         attachment_id, current_user.id, body.transaction_id,

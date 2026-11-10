@@ -13,6 +13,7 @@ from src.common.database import get_db_session
 from src.common.pagination import PaginatedResponse
 from src.models.user import User
 from src.modules.auth.dependencies import get_current_user
+from src.modules.auth.suspended import require_not_suspended as _require_not_suspended
 
 from .schemas import TransactionCreate, TransactionResponse, TransactionUpdate
 from .service import TransactionService
@@ -49,6 +50,7 @@ async def create_transaction(
     current_user: Annotated[User, Depends(get_current_user)] = ...,
     db: Annotated[AsyncSession, Depends(get_db_session)] = ...,
 ):
+    _require_not_suspended(current_user)
     service = TransactionService(db)
     tx = await service.create_transaction(current_user.id, body)
     return TransactionResponse.model_validate(tx)
@@ -72,6 +74,7 @@ async def update_transaction(
     current_user: Annotated[User, Depends(get_current_user)] = ...,
     db: Annotated[AsyncSession, Depends(get_db_session)] = ...,
 ):
+    _require_not_suspended(current_user)
     service = TransactionService(db)
     tx = await service.update_transaction(transaction_id, current_user.id, body)
     return TransactionResponse.model_validate(tx)
@@ -83,6 +86,7 @@ async def delete_transaction(
     current_user: Annotated[User, Depends(get_current_user)] = ...,
     db: Annotated[AsyncSession, Depends(get_db_session)] = ...,
 ):
+    _require_not_suspended(current_user)
     service = TransactionService(db)
     await service.delete_transaction(transaction_id, current_user.id)
 
@@ -94,6 +98,7 @@ async def undo_delete_transaction(
     db: Annotated[AsyncSession, Depends(get_db_session)] = ...,
 ):
     """Restore a soft-deleted transaction."""
+    _require_not_suspended(current_user)
     service = TransactionService(db)
     tx = await service.undo_delete_transaction(transaction_id, current_user.id)
     return TransactionResponse.model_validate(tx)

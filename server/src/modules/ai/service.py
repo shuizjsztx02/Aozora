@@ -230,16 +230,23 @@ async def check_daily_quota(db: AsyncSession, user: User, cfg: Settings) -> None
     **模块级函数而不是 ``AIService`` 的方法**：agent 路径（02g 的端点）同样要吃
     这道限，但它不需要构造 ``AIService``（那要一个 provider）。两条路径共用同一
     份实现，端点因此不必手抄 SQL——抄一份的结果只会是两边慢慢漂开。
+
+    M8-05：先看 ``users.ai_daily_quota_override``（后台设的用户级覆盖），为空才
+    回落 ``cfg.ai_daily_quota_guest``。覆盖只对 GUEST 生效——ACTIVE 用户照旧不设
+    日上限（此处第一个分支先返回）。
     """
     if user.status != UserStatus.GUEST:
         return
+    quota = user.ai_daily_quota_override
+    if quota is None:
+        quota = cfg.ai_daily_quota_guest
     day_start = local_day_start_utc(user.timezone)
     count = await db.scalar(
         select(func.count())
         .select_from(AIUsage)
         .where(AIUsage.user_id == user.id, AIUsage.created_at >= day_start)
     )
-    if count is not None and count >= cfg.ai_daily_quota_guest:
+    if count is not None and count >= quota:
         raise AppException(
             429, "ai_quota_exceeded", "Daily AI quota used up, please try again tomorrow",
         )

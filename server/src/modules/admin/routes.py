@@ -1,10 +1,13 @@
-"""T-M8-04：运营后台鉴权与只读 API（`docs/architecture/admin-console.md` §5.1）。
+"""T-M8-04 / T-M8-05：运营后台 API（`docs/architecture/admin-console.md` §5）。
 
 红线：
 
-- **只读**：读端点走 :func:`get_admin_read_session`（PG 上 ``SET TRANSACTION
-  READ ONLY``），查询层只构造 ``select``。本模块唯一的写是登录审计、``reveal``
-  审计与登录时的 ``last_login_at``——写操作（暂停 / 配额 / 强制登出）属 T-M8-05。
+- **读端点是只读的**：走 :func:`get_admin_read_session`（PG 上 ``SET
+  TRANSACTION READ ONLY``），查询层只构造 ``select``。本模块的写有：登录审计、
+  ``reveal`` 审计、登录时的 ``last_login_at``，以及 §8 / T-M8-05 的三项账户
+  写操作（暂停 / 恢复、guest 日配额覆盖、强制登出）——后者各写一条
+  ``admin_audit_log(action="write")``，**与业务写入同事务**（共用一个可写
+  session，随请求结束统一提交）。**不改任何业务数据行**。
 - **列表不返回事件正文**：正文只在 ``/admin/conversations/{id}/events``。
 - **默认脱敏**：``reveal=true`` 才返回原文，并**必须**落一条 ``admin_audit_log``。
 - 不复用 C 端限流器；独立限流在部署侧（架构 §6）。
@@ -17,13 +20,14 @@ from datetime import UTC, datetime
 from typing import Annotated, Literal
 
 from fastapi import APIRouter, Depends, Query, Request
+from sqlalchemy import delete
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from src.common.config import get_config
 from src.common.database import get_db_session, get_session_factory
 from src.common.errors import AppException
 from src.models.admin import AdminAccount, AdminAuditLog
-from src.models.user import User, UserStatus
+from src.models.user import DeviceSession, User, UserStatus
 
 from . import queries
 from .dependencies import (
@@ -40,9 +44,13 @@ from .schemas import (
     AdminEventItem,
     AdminEventListResponse,
     AdminLoginRequest,
+    AdminQuotaResponse,
+    AdminQuotaUpdateRequest,
     AdminRequestConversation,
     AdminRequestResponse,
     AdminRequestUsageItem,
+    AdminSessionsRevokedResponse,
+    AdminSuspendRequest,
     AdminTokenResponse,
     AdminTurnItem,
     AdminTurnListResponse,
@@ -51,6 +59,7 @@ from .schemas import (
     AdminUserDetail,
     AdminUserItem,
     AdminUserListResponse,
+    AdminUserWriteResponse,
     mask_payload,
     mask_text,
 )
@@ -505,3 +514,182 @@ async def lookup_request(
             for row in usage
         ],
     )
+
+
+# ---------------------------------------------------------------------------
+# 写操作（T-M8-05，架构 §8）
+#
+# 三项账户操作，各写一条 ``admin_audit_log(action="write")``。**读写分离**：
+# 这些端点用 :func:`get_db_session`（可写，请求结束统一提交），审计行
+# ``db.add`` 在同一个 session 上——业务写入与审计同事务，要么都成功要么都回滚。
+# 不触碰任何业务数据行（流水 / 账本 / 分类 / 预算）。
+# ---------------------------------------------------------------------------
+
+def _iso(value: datetime | None) -> str | None:
+    return value.isoformat() if value is not None else None
+
+
+def _write_user_response(user: User) -> AdminUserWriteResponse:
+    return AdminUserWriteResponse(
+        **_user_item(user).model_dump(),
+        admin_suspended_reason=user.admin_suspended_reason,
+    )
+
+
+def _add_write_audit(
+    db: AsyncSession,
+    *,
+    admin: AdminAccount,
+    request: Request,
+    target_user_id: uuid.UUID,
+    operation: str,
+    before: dict,
+    after: dict,
+) -> None:
+    """把写审计挂到调用方的事务上（**不提交**——随请求统一提交）。"""
+    db.add(AdminAuditLog(
+        admin_id=admin.id,
+        action="write",
+        target_user_id=target_user_id,
+        ip=client_ip(request),
+        detail={
+            "operation": operation,
+            "target_user_id": str(target_user_id),
+            "before": before,
+            "after": after,
+        },
+    ))
+
+
+async def _get_user_or_404(db: AsyncSession, user_id: uuid.UUID) -> User:
+    user = await queries.get_user(db, user_id)
+    if user is None:
+        raise AppException(404, "user_not_found", "User not found")
+    return user
+
+
+@router.post("/users/{user_id}/suspend", response_model=AdminUserWriteResponse)
+async def suspend_user(
+    user_id: uuid.UUID,
+    request: Request,
+    admin: Annotated[AdminAccount, Depends(require_admin)],
+    db: Annotated[AsyncSession, Depends(get_db_session)],
+    body: AdminSuspendRequest | None = None,
+):
+    """暂停账户（架构 §8.1）：只设 ``admin_suspended_at / reason``，**不动
+    ``status``**——``FROZEN`` 会在 7 天后触发删除任务。暂停期间的写与同步
+    push 由 :func:`src.modules.auth.suspended.require_not_suspended` 拒绝。
+    """
+    user = await _get_user_or_404(db, user_id)
+    before = {
+        "admin_suspended_at": _iso(user.admin_suspended_at),
+        "admin_suspended_reason": user.admin_suspended_reason,
+    }
+    user.admin_suspended_at = datetime.now(UTC)
+    user.admin_suspended_reason = body.reason if body is not None else None
+    _add_write_audit(
+        db,
+        admin=admin,
+        request=request,
+        target_user_id=user.id,
+        operation="suspend",
+        before=before,
+        after={
+            "admin_suspended_at": _iso(user.admin_suspended_at),
+            "admin_suspended_reason": user.admin_suspended_reason,
+        },
+    )
+    await db.flush()
+    return _write_user_response(user)
+
+
+@router.post("/users/{user_id}/resume", response_model=AdminUserWriteResponse)
+async def resume_user(
+    user_id: uuid.UUID,
+    request: Request,
+    admin: Annotated[AdminAccount, Depends(require_admin)],
+    db: Annotated[AsyncSession, Depends(get_db_session)],
+):
+    """解除暂停：清空两列。对未暂停的用户是幂等的 no-op（仍记审计）。"""
+    user = await _get_user_or_404(db, user_id)
+    before = {
+        "admin_suspended_at": _iso(user.admin_suspended_at),
+        "admin_suspended_reason": user.admin_suspended_reason,
+    }
+    user.admin_suspended_at = None
+    user.admin_suspended_reason = None
+    _add_write_audit(
+        db,
+        admin=admin,
+        request=request,
+        target_user_id=user.id,
+        operation="resume",
+        before=before,
+        after={"admin_suspended_at": None, "admin_suspended_reason": None},
+    )
+    await db.flush()
+    return _write_user_response(user)
+
+
+@router.put("/users/{user_id}/ai-quota", response_model=AdminQuotaResponse)
+async def set_ai_quota(
+    user_id: uuid.UUID,
+    body: AdminQuotaUpdateRequest,
+    request: Request,
+    admin: Annotated[AdminAccount, Depends(require_admin)],
+    db: Annotated[AsyncSession, Depends(get_db_session)],
+):
+    """设置 guest 日配额的用户级覆盖；``quota=null`` 清除覆盖（架构 §8.2）。
+
+    只影响 ``UserStatus.GUEST``——ACTIVE 用户不受日配额限制，覆盖值存着也不生效
+    （``check_daily_quota`` 的第一个分支先返回）。
+    """
+    user = await _get_user_or_404(db, user_id)
+    before = {"ai_daily_quota_override": user.ai_daily_quota_override}
+    user.ai_daily_quota_override = body.quota
+    _add_write_audit(
+        db,
+        admin=admin,
+        request=request,
+        target_user_id=user.id,
+        operation="set_ai_quota",
+        before=before,
+        after={"ai_daily_quota_override": body.quota},
+    )
+    await db.flush()
+    return AdminQuotaResponse(
+        user_id=user.id,
+        ai_daily_quota_override=user.ai_daily_quota_override,
+    )
+
+
+@router.delete("/users/{user_id}/sessions", response_model=AdminSessionsRevokedResponse)
+async def revoke_user_sessions(
+    user_id: uuid.UUID,
+    request: Request,
+    admin: Annotated[AdminAccount, Depends(require_admin)],
+    db: Annotated[AsyncSession, Depends(get_db_session)],
+):
+    """强制登出：删除该用户全部 ``device_sessions``（架构 §8.3）。
+
+    refresh token **立即失效**（下一次 ``/auth/refresh`` 查不到会话行）；已签发
+    的 access token 仍活到过期——这是 JWT 的固有边界，不做服务端吊销表。用户
+    可重新登录（登录不在暂停的阻断面上）。
+    """
+    user = await _get_user_or_404(db, user_id)
+    before_count = await queries.count_user_devices(db, user.id)
+    result = await db.execute(
+        delete(DeviceSession).where(DeviceSession.user_id == user.id)
+    )
+    deleted = result.rowcount or 0
+    _add_write_audit(
+        db,
+        admin=admin,
+        request=request,
+        target_user_id=user.id,
+        operation="revoke_sessions",
+        before={"device_sessions": before_count},
+        after={"device_sessions": 0},
+    )
+    await db.flush()
+    return AdminSessionsRevokedResponse(user_id=user.id, deleted_sessions=deleted)

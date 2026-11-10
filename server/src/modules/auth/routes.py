@@ -23,6 +23,7 @@ from .schemas import (
     UpdateProfileRequest,
 )
 from .service import AuthService
+from .suspended import require_not_suspended
 
 router = APIRouter(prefix="/auth", tags=["auth"])
 
@@ -132,6 +133,7 @@ async def patch_me(
     鉴权与 GET /me 一致（get_current_user）；session 由 get_db_session 依赖
     在同一请求内复用，get_current_user 返回的 user 即挂在该 session 上。
     """
+    require_not_suspended(current_user)
     service = AuthService(db)
     user = await service.update_profile(current_user, body.nickname)
     return MeResponse.model_validate(user)

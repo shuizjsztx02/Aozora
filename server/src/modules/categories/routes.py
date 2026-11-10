@@ -12,6 +12,7 @@ from src.common.database import get_db_session
 from src.common.pagination import PaginatedResponse
 from src.models.user import User
 from src.modules.auth.dependencies import get_current_user
+from src.modules.auth.suspended import require_not_suspended as _require_not_suspended
 
 from .schemas import CategoryCreate, CategoryResponse, CategoryUpdate
 from .service import CategoryService
@@ -44,6 +45,7 @@ async def create_category(
     current_user: Annotated[User, Depends(get_current_user)] = ...,
     db: Annotated[AsyncSession, Depends(get_db_session)] = ...,
 ):
+    _require_not_suspended(current_user)
     service = CategoryService(db)
     category = await service.create_category(current_user.id, body)
     return CategoryResponse.model_validate(category)
@@ -67,6 +69,7 @@ async def update_category(
     current_user: Annotated[User, Depends(get_current_user)] = ...,
     db: Annotated[AsyncSession, Depends(get_db_session)] = ...,
 ):
+    _require_not_suspended(current_user)
     service = CategoryService(db)
     category = await service.update_category(category_id, current_user.id, body)
     return CategoryResponse.model_validate(category)
@@ -78,5 +81,6 @@ async def delete_category(
     current_user: Annotated[User, Depends(get_current_user)] = ...,
     db: Annotated[AsyncSession, Depends(get_db_session)] = ...,
 ):
+    _require_not_suspended(current_user)
     service = CategoryService(db)
     await service.archive_category(category_id, current_user.id)

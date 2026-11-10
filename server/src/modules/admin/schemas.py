@@ -105,6 +105,34 @@ class AdminUserDetail(AdminUserItem):
 
 
 # ---------------------------------------------------------------------------
+# 写操作（T-M8-05）
+# ---------------------------------------------------------------------------
+
+class AdminSuspendRequest(BaseModel):
+    #: 与 ``users.admin_suspended_reason`` 的列宽一致。
+    reason: str | None = Field(default=None, max_length=200)
+
+
+class AdminQuotaUpdateRequest(BaseModel):
+    #: ``null`` = 清除覆盖，回落到 ``cfg.ai_daily_quota_guest``。
+    quota: int | None = Field(ge=0)
+
+
+class AdminUserWriteResponse(AdminUserItem):
+    admin_suspended_reason: str | None = None
+
+
+class AdminQuotaResponse(BaseModel):
+    user_id: uuid.UUID
+    ai_daily_quota_override: int | None
+
+
+class AdminSessionsRevokedResponse(BaseModel):
+    user_id: uuid.UUID
+    deleted_sessions: int
+
+
+# ---------------------------------------------------------------------------
 # 会话
 # ---------------------------------------------------------------------------
 

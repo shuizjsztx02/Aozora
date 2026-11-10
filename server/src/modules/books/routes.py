@@ -12,6 +12,7 @@ from src.common.database import get_db_session
 from src.common.pagination import PaginatedResponse
 from src.models.user import User
 from src.modules.auth.dependencies import get_current_user
+from src.modules.auth.suspended import require_not_suspended as _require_not_suspended
 
 from .schemas import BookCreate, BookResponse, BookUpdate
 from .service import BookService
@@ -43,6 +44,7 @@ async def create_book(
     current_user: Annotated[User, Depends(get_current_user)] = ...,
     db: Annotated[AsyncSession, Depends(get_db_session)] = ...,
 ):
+    _require_not_suspended(current_user)
     service = BookService(db)
     book = await service.create_book(current_user.id, body)
     return BookResponse.model_validate(book)
@@ -66,6 +68,7 @@ async def update_book(
     current_user: Annotated[User, Depends(get_current_user)] = ...,
     db: Annotated[AsyncSession, Depends(get_db_session)] = ...,
 ):
+    _require_not_suspended(current_user)
     service = BookService(db)
     book = await service.update_book(book_id, current_user.id, body)
     return BookResponse.model_validate(book)
@@ -77,5 +80,6 @@ async def delete_book(
     current_user: Annotated[User, Depends(get_current_user)] = ...,
     db: Annotated[AsyncSession, Depends(get_db_session)] = ...,
 ):
+    _require_not_suspended(current_user)
     service = BookService(db)
     await service.delete_book(book_id, current_user.id)

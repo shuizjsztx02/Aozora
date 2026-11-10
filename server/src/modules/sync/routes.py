@@ -23,6 +23,7 @@ from src.models.user import User
 from src.modules.auth.dependencies import get_current_user
 from src.modules.auth.frozen import is_frozen as _is_frozen
 from src.modules.auth.frozen import require_active as _require_active
+from src.modules.auth.suspended import require_not_suspended as _require_not_suspended
 from src.modules.consent.service import ConsentService
 
 from .schemas import (
@@ -60,8 +61,13 @@ async def sync_push(
     current_user: Annotated[User, Depends(get_current_user)] = ...,
     db: Annotated[AsyncSession, Depends(get_db_session)] = ...,
 ):
-    """Submit a batch of client mutations to be applied by the server."""
+    """Submit a batch of client mutations to be applied by the server.
+
+    M8-05: 后台暂停的账户拒绝 push（403 ``account_suspended``），pull 与
+    bootstrap 等读路径照常。
+    """
     _require_active(current_user)
+    _require_not_suspended(current_user)
     await _require_consented(current_user, db)
     # T-M5-05ab fix (S1-5): forward client-reported queue depth to the
     # sync_queue_depth Gauge (no-op if the client didn't send pending_count).
