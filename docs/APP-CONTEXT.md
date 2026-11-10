@@ -253,6 +253,7 @@ aozora/
 首发采用自建、Docker 可部署的 Grafana 可观测栈：
 
 - 服务端输出带 `requestId`、`userIdHash`、module、latency 和 errorCode 的结构化 JSON 日志，禁止记录 token、原始票据、完整对话和账本明细。
+  - **2026-11-10 口径裁决（M8）：** 本条约束的是**应用日志与日志系统**（`logger` / Loki / OTLP），不是会话事件日志。会话正文本就按 ADR-006 存于 `ai_conversation_events`（断连恢复、分叉、跨设备重建的功能依赖），**仅存于该表、不导出到任何日志系统**，并受保留期与访问审计约束；管理后台可按权限读取原文，细则见 `docs/architecture/admin-console.md` §2.3。
 - OpenTelemetry Collector 统一接收 traces、metrics 和 logs，避免业务代码绑定具体存储。
 - Prometheus 保存 API、数据库连接池、同步队列、AI 延迟/错误率/用量等指标。
 - Loki 保存脱敏日志，Tempo 保存分布式 trace，Grafana 提供统一查询和仪表盘。
@@ -853,6 +854,61 @@ app/src/
 - **实施推进计划：** `docs/milestones/T-M7-05-P4-implementation-plan.md`——已拆为 **05a–05i 九张子卡 + 收口**，含现状基线（15 个工具 / 3 域，`device_request` 与 `routing` **均无生产者**，ActionProposal 仍是 v1）、批次与并行切分点，以及**跨期提前开工的切分点**（05a 契约与 05e 协议部分不依赖 P2/P3，可提前开工）。逐卡细则与验收以 `production-execution-plan.md` T-M7-05 为准。
 - **验收：** 功能覆盖清单（架构 §3.2）逐项可用；设备类能力（提醒/权限/分享/小组件/图片/图标）在对话内可达（**REQ-75 后原列的「语音」已下架，服务端设备能力目录 6 → 5 条，见 `ADR-015`**）；新增一个表单能力不改 prompt 主体的验证用例；ActionProposal v2 三方一致性通过；v1 契约与旧客户端兼容。
 - **子任务：** 已拆分，见生产执行规划（05a v2 契约 → 05b 记账/账户账本工具 ∥ 05e 设备通道服务端 → 05c 预算存钱/定时/角色工具 ∥ 05f 设备通道客户端 → 05d 分析与其余域 ∥ 05h Skill 封装 → 05g 域路由 ∥ 05i 帮助检索（可选）→ 收口）。
+
+---
+
+### M8：运营可观测后台（AI 交互回放台）
+
+> 2026-11-10 立项（第二十二轮 REQ-84）。目标不是监控大屏——曲线与告警仍由既有 Grafana 栈负责且生产未启用；M8 做的是**按行检索**：让技术与运维看得到「每个用户每次与 AI 交互的完整过程」。架构事实源见 `docs/architecture/admin-console.md`。
+> **总目标：** 按「用户 → 会话 → 轮次 → 事件」四级下钻定位问题；支持按用户 ID + 会话关键词 + 时间检索会话；审批过程完整进入事件流。
+> **两条硬需求（用户 2026-11-10 原话）：** ① 审批过程需要增加到事件流；② 支持按用户 ID 以及会话关键词、时间等条件快速搜索定位。
+> **非目标：** 不替代 Grafana/Prometheus/OTel；不做业务数据 CRUD（P0 只读）；不做客户端客服工单。
+
+#### T-M8-01 文档与口径裁决
+
+- **目标：** 定稿架构与计划；裁决 `§4.6` 与事件日志正文保存的口径冲突；把开放项（管理员账号模型、M8 是否含写能力）显式列出。
+- **验收：** `docs/architecture/admin-console.md` 与 `docs/milestones/T-M8-admin-console-plan.md` 定稿；`§4.6` 裁决写入；`ai-agent-architecture.md` §6.2 审批事件生产者状态更新；overview 增加 M8 行。零代码改动。
+
+#### T-M8-02 审批留档（硬需求 ①）
+
+- **目标：** `approval_request` / `approval_result` 进入事件流，使回放能看到「问没问、为什么问、用户怎么答」。
+- **实施：** `stream.py` 发 `confirm` 帧时写 `approval_request`（同轮）；`ai_proposal_links` 建立 `proposal_id → conversation_id` 关联；`/ai/execute` 成功写 `allowed-once`；新增 `POST /ai/approval-result` 接收客户端四值上报（桥命令不变）。
+- **验收：** 四值可落档；老客户端未上报时显示「未上报」而非推断拒绝；`/ai/execute` 请求体契约一字不动；审批 zero-write 语义回归全绿。
+
+#### T-M8-03 会话检索数据面（硬需求 ②）
+
+- **目标：** 会话可按关键词命中，且候选集由 `user_id` + 时间先收窄。
+- **实施：** `ai_conversations.search_text` 冗余列（Surface 事件的 user/assistant 文本）；写入维护、上限截断、保留期清理重算、历史回填。
+- **验收：** 关键词命中正确；删事件后检索文本同步消失（反向验证）；P0 不引入 `pg_trgm`；SQLite 测试后端可跑。
+
+#### T-M8-04 admin 鉴权与只读 API
+
+- **目标：** 管理端独立鉴权与只读查询面。
+- **验收：** 用户 token 进不了 admin API，反之亦然；全部只读事务；列表不返回事件正文；keyset 分页无重复遗漏。
+
+#### T-M8-05 admin 前端壳与检索页
+
+- **目标：** 独立 `admin/` 包；登录、用户检索、会话检索、用户详情。
+- **验收：** 手机号 → 用户 → 会话列表全链走通；不进入 `app/` 与 APK 构建。
+
+#### T-M8-06 会话回放页
+
+- **目标：** 本轮核心。轮次列表 + 事件时间轴；`tool_calls` 与结果配对；推理折叠；结构性事件语义化。
+- **验收：** 真实会话逐轮走查与 PG 直查一致；保留期空态与「审批结果未上报」空态齐备。
+
+#### T-M8-07 聚合统计与 request_id 反查
+
+- **目标：** token/成本/成功率按 user、model、day 聚合；`request_id` 反查会话与轮次。
+- **验收：** 数字与 PG 同口径一致；反查误差如实标注。
+
+#### T-M8-08 部署、访问审计与 PII
+
+- **目标：** 上线可用且可审计。
+- **验收：** nginx 配置通过 `nginx -t`；未登录/越权 401；每次正文访问落 `admin_access_log`；手机号默认打码。
+
+#### T-M8-09 收口
+
+- **验收：** 四板全绿；真实数据走查覆盖「检索 → 定位 → 回放 → 归因」；风险册新增条目连续。
 
 ---
 

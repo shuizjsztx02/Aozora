@@ -323,7 +323,7 @@ SessionEvent 日志（事实来源，append-only）
 | 恢复与分叉 | 同一事件流支持断连恢复、会话分叉、回放（支撑 §4.4 不变式 3、4）。T-M7-04b 落地：恢复＝带同一个 `conversation_id` 再跑一轮（`history()` 即入口，尾部保证干净）+ 客户端按 `after_seq` 增量续读；分叉＝`POST /ai/conversations/{id}/fork`，切点向下取整到完整配对组 |
 | **保留期** | 事件正文**30 天**到期物理删除（T-M7-04d），**按整轮删**以保住不变式 1；只删事件行，**不动会话索引行与 `ai_usage`**（配额基座）。口径见 `security.md`「会话事件日志的保留期」 |
 | 存储位置 | 服务端（`AIConversation` 扩展）；客户端只缓存投影 B |
-| **投影 B 的跨设备重建** | 客户端投影是**派生数据**，因此**按需重建**而不是同步实体（T-M7-04e，`ADR-008`）：无投影 → 全量重建；有投影且**日志游标**已知 → 增量补齐尾部（本地消息一条不动）；游标未知 → 原样保留。客户端**从不把投影写回**服务端，冲突策略这一议题因此不存在。重建只认得正文——历史只读记账卡不在其中（`approval_request` 生产者未接），规则二/三使本机看过的卡片不被抹掉 |
+| **投影 B 的跨设备重建** | 客户端投影是**派生数据**，因此**按需重建**而不是同步实体（T-M7-04e，`ADR-008`）：无投影 → 全量重建；有投影且**日志游标**已知 → 增量补齐尾部（本地消息一条不动）；游标未知 → 原样保留。客户端**从不把投影写回**服务端，冲突策略这一议题因此不存在。重建只认得正文——历史只读记账卡不在其中（`approval_request` 生产者原未接，**M8-02 起接入**；ADR-008 的重建口径本身不因此改变），规则二/三使本机看过的卡片不被抹掉 |
 
 **为什么这个模型优于「存聊天记录」：**
 
@@ -339,8 +339,8 @@ SessionEvent 日志（事实来源，append-only）
 | 用户输入 | `user` | ✅ | `TurnWriter`（loop 的落库批，04b 起逐事件） |
 | 模型回复 / 工具调用 | `assistant` | ✅ | 同上。**`tool_calls` 挂在同一条消息的 `data` 里，不另立事件**——一条事件＝一条消息，重组回 API 载荷零歧义；§4.4 不变式 1（调用与结果配对）也因此绑在同一条消息上 |
 | 工具结果 | `tool` | ✅ | 同上。**与它对应的那条 `assistant` 同批落库**（批＝配对组） |
-| 审批请求 | `approval_request` | ❌ | 待接（04a 只给写入口） |
-| 审批结果 | `approval_result` | ❌ | 待接 |
+| 审批请求 | `approval_request` | ❌ | **M8-02 规划**（2026-11-10）：`stream` 发 `confirm` 帧时写入，载荷 `proposalId / op / risk / confirmReason / step`，不写完整 proposal 信封 |
+| 审批结果 | `approval_result` | ❌ | **M8-02 规划**（2026-11-10）：`/ai/execute` 成功写 `allowed-once`；`rejected` / `cancelled` / `unavailable` 服务端不可观测，经新增 `POST /ai/approval-result` 由客户端四值上报。详见 `docs/architecture/admin-console.md` §4 |
 | 设备指令 | `device_request` | ❌ | **不接生产者（05e 决策，`ADR-010` 决策 5）**：设备指令的下发与结果由 Surface 事件留档——模型的那次 `tool_call` 与配对的 tool 结果消息（`{"status":"sent"}` / `{"status":"ok",…}` / 错误码）都在日志里，再写一条结构性事件是把同一件事记两遍，且没有任何消费方 |
 | 错误 | `error` | ❌ | `stream._record_failure`（04b）——失败轮收尾：一条事件说明这一轮为什么停在半路，载荷只有安全枚举码与固定文案 |
 | 摘要替换 | `replace` | ❌ | `ConversationService.summarize_overflow`（04c）——窗口之外那段历史的压缩；载荷 `summary` / `upto_turn` / `turns`，**原文一行不删** |
