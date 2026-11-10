@@ -9,7 +9,8 @@
  *    `reveal=true` 重新拉取（服务端写 reveal 审计）。
  *
  * 路由：入口由主会话统一接线；本组件兼容 `/replay/:conversationId` 与
- * `/replay?conversationId=` 两种取参方式。只读，无导出入口（8-09）。
+ * `/replay?conversationId=` 两种取参方式。只读；导出入口见 T-M8-09
+ * （「导出本会话」跟随当前脱敏/原文模式）。
  */
 
 import { useEffect, useState } from 'react'
@@ -23,6 +24,7 @@ import {
 } from '../api/replay'
 import { DetailRow } from '../components/DetailDrawer'
 import { EventTimeline } from '../components/EventTimeline'
+import { ExportButton } from '../components/ExportButton'
 import { Pagination } from '../components/Pagination'
 import { TurnList } from '../components/TurnList'
 import { cn } from '../lib/cn'
@@ -112,7 +114,7 @@ export function ConversationReplayPage() {
     <section className="space-y-3">
       <div className="flex flex-wrap items-center justify-between gap-2">
         <h1 className="text-lg font-semibold text-gray-900">会话回放</h1>
-        <div className="flex flex-wrap gap-3">
+        <div className="flex flex-wrap items-center gap-3">
           <Link to="/conversations" className={linkClass}>
             ← 返回会话检索
           </Link>
@@ -121,6 +123,16 @@ export function ConversationReplayPage() {
               查看用户
             </Link>
           ) : null}
+          {/* T-M8-09：导出本会话；内容模式跟随页面当前的脱敏/原文切换。 */}
+          <ExportButton
+            label="导出本会话"
+            request={() => ({
+              scope: 'filtered',
+              format: revealState ? 'plain' : 'masked',
+              content: 'events',
+              conversation_id: conversationId,
+            })}
+          />
         </div>
       </div>
 

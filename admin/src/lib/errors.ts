@@ -22,6 +22,10 @@ export function describeError(error: unknown): string {
         return '用户不存在'
       case 'conversation_not_found':
         return '会话不存在'
+      case 'export_too_large':
+        return '导出量超过单次上限（100,000 条），请缩小时间范围或选择单个用户后分批导出'
+      case 'user_required':
+        return '按用户导出需要提供用户 ID'
       default:
         return error.requestId
           ? `${error.message}（request_id: ${error.requestId}）`

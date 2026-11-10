@@ -10,7 +10,7 @@ from __future__ import annotations
 import re
 import uuid
 from datetime import datetime
-from typing import Any
+from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -248,3 +248,28 @@ class AdminRequestResponse(BaseModel):
     request_id: str
     conversations: list[AdminRequestConversation]
     usage: list[AdminRequestUsageItem]
+
+
+# ---------------------------------------------------------------------------
+# 导出（T-M8-09）
+# ---------------------------------------------------------------------------
+
+class AdminExportRequest(BaseModel):
+    """导出请求（`docs/architecture/admin-console.md` §7.3 / 用户决策 14）。
+
+    - ``scope``：``filtered``（当前筛选结果）/ ``all``（全库）/ ``user``（单用户全部会话）。
+      ``scope=user`` 必须给 ``user_id``；``scope=all`` 忽略其余筛选参数。
+    - ``format``：``plain`` 原文 / ``masked`` 打码（复用 :func:`mask_text`）。
+    - ``content``：``events`` 事件流（默认）/ ``conversations`` 会话元信息。
+    - 筛选参数与 ``GET /admin/conversations`` 同口径（``q`` 只搜用户输入 + 助手回复）。
+    """
+
+    scope: Literal["filtered", "all", "user"] = "filtered"
+    format: Literal["plain", "masked"] = "masked"
+    content: Literal["events", "conversations"] = "events"
+    user_id: uuid.UUID | None = None
+    conversation_id: uuid.UUID | None = None
+    time_from: datetime | None = None
+    time_to: datetime | None = None
+    q: str | None = Field(default=None, max_length=256)
+    include_archived: bool = False

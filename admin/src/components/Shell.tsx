@@ -26,7 +26,7 @@ const NAV_GROUPS: { title: string; items: NavItem[] }[] = [
     items: [
       { to: '/usage', label: '用量统计' },
       { to: '/requests', label: '请求反查' },
-      { to: '/export', label: '导出', pendingTask: '8-09' },
+      { to: '/export', label: '导出' },
     ],
   },
 ]

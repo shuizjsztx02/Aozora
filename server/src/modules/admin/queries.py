@@ -456,3 +456,120 @@ async def conversations_by_ids(
     return list((await db.scalars(
         select(AIConversation).where(AIConversation.id.in_(conversation_ids))
     )).all())
+
+
+# ---------------------------------------------------------------------------
+# 导出（T-M8-09）
+#
+# 导出走**独立 session 的只读事务**（见 ``routes._stream_export``），查询层只
+# 构造 ``select``。事件按 ``(conversation_id, seq)`` keyset 分批取，每批只保留
+# 一个批次的行——不把结果集整体读进内存（架构 §7.3「流式 JSONL」）。
+# ---------------------------------------------------------------------------
+
+def export_scope_conditions(
+    *,
+    scope: str,
+    user_id: uuid.UUID | None,
+    conversation_id: uuid.UUID | None,
+    time_from: datetime | None,
+    time_to: datetime | None,
+    q: str | None,
+    include_archived: bool,
+) -> list[Any]:
+    """把导出的范围/筛选参数翻译成 ``ai_conversations`` 的条件列表。
+
+    - ``all``：不做任何收窄（含已归档）。
+    - ``user``：只按 ``user_id`` 收窄（"该用户全部会话"），忽略其余筛选。
+    - ``filtered``：与 ``GET /admin/conversations`` 同口径；给了具体
+      ``conversation_id`` 时只导出该会话，且**不受** ``include_archived`` 限制
+      —— 回放页可以对任一打开着的会话发起导出。
+    """
+    if scope == "all":
+        return []
+    if scope == "user":
+        return [AIConversation.user_id == user_id]
+    if conversation_id is not None:
+        return [AIConversation.id == conversation_id]
+
+    conditions: list[Any] = []
+    if not include_archived:
+        conditions.append(AIConversation.archived_at.is_(None))
+    if user_id is not None:
+        conditions.append(AIConversation.user_id == user_id)
+    if q:
+        pattern = f"%{_escape_like(q)}%"
+        conditions.append(AIConversation.search_text.ilike(pattern, escape="\\"))
+    if time_from is not None:
+        conditions.append(_ACTIVE_KEY >= time_from)
+    if time_to is not None:
+        conditions.append(_ACTIVE_KEY < time_to)
+    return conditions
+
+
+async def count_export_events(
+    db: AsyncSession, *, conditions: list[Any],
+) -> tuple[int, int]:
+    """范围内的事件数与涉及会话数（用于上限判定与审计 detail）。"""
+    scope_ids = select(AIConversation.id).where(*conditions)
+    row = (await db.execute(
+        select(
+            func.count(AIConversationEvent.id),
+            func.count(func.distinct(AIConversationEvent.conversation_id)),
+        ).where(AIConversationEvent.conversation_id.in_(scope_ids))
+    )).one()
+    return int(row[0] or 0), int(row[1] or 0)
+
+
+async def count_export_conversations(
+    db: AsyncSession, *, conditions: list[Any],
+) -> int:
+    return int(await db.scalar(
+        select(func.count(AIConversation.id)).where(*conditions)
+    ) or 0)
+
+
+async def export_event_batch(
+    db: AsyncSession,
+    *,
+    conditions: list[Any],
+    after: tuple[uuid.UUID, int] | None,
+    limit: int,
+) -> list[Any]:
+    """按 ``(conversation_id, seq)`` 取下一批事件（keyset，无 offset）。"""
+    scope_ids = select(AIConversation.id).where(*conditions)
+    stmt = select(
+        AIConversationEvent.conversation_id,
+        AIConversationEvent.seq,
+        AIConversationEvent.turn,
+        AIConversationEvent.type,
+        AIConversationEvent.time,
+        AIConversationEvent.request_id,
+        AIConversationEvent.data,
+    ).where(AIConversationEvent.conversation_id.in_(scope_ids))
+    if after is not None:
+        conversation_id, seq = after
+        stmt = stmt.where(or_(
+            AIConversationEvent.conversation_id > conversation_id,
+            and_(
+                AIConversationEvent.conversation_id == conversation_id,
+                AIConversationEvent.seq > seq,
+            ),
+        ))
+    stmt = stmt.order_by(
+        AIConversationEvent.conversation_id, AIConversationEvent.seq,
+    ).limit(limit)
+    return list((await db.execute(stmt)).all())
+
+
+async def export_conversation_batch(
+    db: AsyncSession,
+    *,
+    conditions: list[Any],
+    after_id: uuid.UUID | None,
+    limit: int,
+) -> list[AIConversation]:
+    stmt = select(AIConversation).where(*conditions)
+    if after_id is not None:
+        stmt = stmt.where(AIConversation.id > after_id)
+    stmt = stmt.order_by(AIConversation.id).limit(limit)
+    return list((await db.scalars(stmt)).all())

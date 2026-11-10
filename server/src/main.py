@@ -168,6 +168,8 @@ app.add_middleware(
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["Authorization", "Content-Type", "X-Request-Id"],
+    # T-M8-09：导出前端要读附件文件名（跨源 dev 下不暴露该头时浏览器读不到）。
+    expose_headers=["Content-Disposition"],
 )
 # T-M5-02b: request-body size cap (inner).
 app.add_middleware(

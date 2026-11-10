@@ -6,8 +6,8 @@ import { RequireAuth } from './auth/RequireAuth'
 import { Shell } from './components/Shell'
 import { ConversationReplayPage } from './pages/ConversationReplayPage'
 import { ConversationsPage } from './pages/ConversationsPage'
+import { ExportPage } from './pages/ExportPage'
 import { LoginPage } from './pages/LoginPage'
-import { PlaceholderPage } from './pages/PlaceholderPage'
 import { RequestLookupPage } from './pages/RequestLookupPage'
 import { UsagePage } from './pages/UsagePage'
 import { UserDetailPage } from './pages/UserDetailPage'
@@ -42,16 +42,7 @@ export default function App() {
                 <Route path="/replay/:conversationId" element={<ConversationReplayPage />} />
                 <Route path="/usage" element={<UsagePage />} />
                 <Route path="/requests" element={<RequestLookupPage />} />
-                <Route
-                  path="/export"
-                  element={
-                    <PlaceholderPage
-                      title="导出"
-                      task="8-09"
-                      description="三种范围 × 明文/打码两种内容的流式 JSONL 导出与审计。"
-                    />
-                  }
-                />
+                <Route path="/export" element={<ExportPage />} />
                 <Route path="*" element={<Navigate to="/users" replace />} />
               </Route>
             </Route>

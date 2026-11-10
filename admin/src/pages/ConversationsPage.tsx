@@ -2,6 +2,7 @@ import { useMemo, useState } from 'react'
 import { QUERY_MIN_CHARS, type ConversationFilters } from '../api/admin'
 import { useConversationsQuery } from '../api/hooks'
 import { DataTable } from '../components/DataTable'
+import { ExportButton } from '../components/ExportButton'
 import { FilterBar, FilterField } from '../components/FilterBar'
 import { Pagination } from '../components/Pagination'
 import { conversationColumns } from '../components/conversationColumns'
@@ -80,7 +81,23 @@ export function ConversationsPage() {
 
   return (
     <section className="space-y-3">
-      <h1 className="text-lg font-semibold text-gray-900">会话检索</h1>
+      <div className="flex flex-wrap items-center justify-between gap-2">
+        <h1 className="text-lg font-semibold text-gray-900">会话检索</h1>
+        {/* T-M8-09：导出当前已应用的筛选结果（打码版；明文请在导出页选）。 */}
+        <ExportButton
+          label="导出当前筛选"
+          request={() => ({
+            scope: 'filtered',
+            format: 'masked',
+            content: 'events',
+            q: filters.q,
+            user_id: filters.user_id,
+            time_from: filters.time_from,
+            time_to: filters.time_to,
+            include_archived: filters.include_archived,
+          })}
+        />
+      </div>
 
       <FilterBar onSubmit={apply} onReset={reset} busy={conversationsQuery.isFetching} hint={hint}>
         <FilterField label={`关键词（≥ ${QUERY_MIN_CHARS} 字符）`}>

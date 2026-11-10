@@ -43,6 +43,11 @@ export function setUnauthorizedHandler(handler: (() => void) | null): void {
   unauthorizedHandler = handler
 }
 
+/** 不走 `apiRequest` 的通道（如导出下载）遇到 401 时调用，与常规请求同一处理。 */
+export function notifyUnauthorized(): void {
+  unauthorizedHandler?.()
+}
+
 interface RequestOptions {
   method?: 'GET' | 'POST' | 'PUT' | 'DELETE'
   query?: Record<string, QueryValue>
@@ -60,7 +65,7 @@ function buildUrl(path: string, query?: Record<string, QueryValue>): string {
   return url.toString()
 }
 
-async function parseError(response: Response): Promise<ApiError> {
+export async function parseError(response: Response): Promise<ApiError> {
   let code = `http_${response.status}`
   let message = `请求失败（HTTP ${response.status}）`
   let requestId: string | null = null

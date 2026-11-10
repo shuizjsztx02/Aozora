@@ -15,11 +15,18 @@
 
 from __future__ import annotations
 
+import asyncio
+import json
+import logging
+import time
 import uuid
+from collections.abc import AsyncIterator
+from dataclasses import dataclass
 from datetime import UTC, datetime
-from typing import Annotated, Literal
+from typing import Annotated, Any, Literal
 
 from fastapi import APIRouter, Depends, Query, Request
+from fastapi.responses import StreamingResponse
 from sqlalchemy import delete
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -31,6 +38,7 @@ from src.models.user import DeviceSession, User, UserStatus
 
 from . import queries
 from .dependencies import (
+    begin_read_only,
     client_ip,
     create_admin_token,
     get_admin_read_session,
@@ -43,6 +51,7 @@ from .schemas import (
     AdminConversationListResponse,
     AdminEventItem,
     AdminEventListResponse,
+    AdminExportRequest,
     AdminLoginRequest,
     AdminQuotaResponse,
     AdminQuotaUpdateRequest,
@@ -66,8 +75,16 @@ from .schemas import (
 
 router = APIRouter(tags=["admin"])
 
+logger = logging.getLogger(__name__)
+
 #: 会话关键词检索的最短长度（架构 §3.3：``q`` 长度 < 2 拒答）。
 QUERY_MIN_CHARS = 2
+
+#: 单次导出的上限（用户决策 14 / 架构 §7.3）：超出提示缩小范围后分批。
+MAX_EXPORT_EVENTS = 100_000
+
+#: 流式分批的批大小——每批只把这么多行留在内存里。
+EXPORT_BATCH_SIZE = 500
 
 
 # ---------------------------------------------------------------------------
@@ -693,3 +710,268 @@ async def revoke_user_sessions(
     )
     await db.flush()
     return AdminSessionsRevokedResponse(user_id=user.id, deleted_sessions=deleted)
+
+
+# ---------------------------------------------------------------------------
+# 导出（T-M8-09，架构 §7.3）
+#
+# 三种范围（筛选结果 / 全库 / 单用户）× 两种内容（明文 / 打码），流式 JSONL。
+# 红线：
+#
+# - **只读**：查询走独立 session 的只读事务，只构造 ``select``，不写业务表。
+# - **不整体读进内存**：事件按 ``(conversation_id, seq)`` keyset 分批取，每批
+#   :data:`EXPORT_BATCH_SIZE` 行，序列化后立刻 yield。
+# - **每次导出写一条** ``admin_audit_log(action="export")``（独立 session，与
+#   ``reveal`` 审计同范式）；流中途断开时在 ``finally`` 里尽力而为记一条。
+# - **上限 100,000 事件**：在流开始前用 COUNT 判定，超限直接 422
+#   ``export_too_large``（一旦开始流式就无法再改状态码）。
+# ---------------------------------------------------------------------------
+
+@dataclass(frozen=True)
+class _ExportPlan:
+    scope: str
+    format: str
+    content: str
+    #: ``ai_conversations`` 的筛选条件（与 ``GET /admin/conversations`` 同口径）。
+    conditions: list[Any]
+    target_user_id: uuid.UUID | None
+    conversation_id: uuid.UUID | None
+    filters: dict[str, Any]
+
+
+def _export_filters(body: AdminExportRequest, q: str | None) -> dict[str, Any]:
+    """审计 detail 里的 ``filters``：只记**实际生效**的筛选（``scope=all`` 为空）。"""
+    if body.scope == "all":
+        return {
+            "user_id": None, "conversation_id": None, "time_from": None,
+            "time_to": None, "q": None, "include_archived": False,
+        }
+    if body.scope == "user":
+        return {
+            "user_id": str(body.user_id) if body.user_id else None,
+            "conversation_id": None, "time_from": None, "time_to": None,
+            "q": None, "include_archived": False,
+        }
+    return {
+        "user_id": str(body.user_id) if body.user_id else None,
+        "conversation_id": str(body.conversation_id) if body.conversation_id else None,
+        "time_from": _iso(body.time_from),
+        "time_to": _iso(body.time_to),
+        "q": q,
+        "include_archived": body.include_archived,
+    }
+
+
+def _event_line(row: Any, *, reveal: bool) -> str:
+    return json.dumps(
+        {
+            "kind": "event",
+            "conversation_id": str(row.conversation_id),
+            "seq": row.seq,
+            "turn": row.turn,
+            "type": row.type,
+            "time": row.time.isoformat() if row.time is not None else None,
+            "request_id": row.request_id,
+            "data": mask_payload(row.data, reveal=reveal),
+        },
+        ensure_ascii=False,
+        separators=(",", ":"),
+    )
+
+
+def _conversation_line(conversation: Any, *, reveal: bool) -> str:
+    return json.dumps(
+        {
+            "kind": "conversation",
+            "id": str(conversation.id),
+            "user_id": str(conversation.user_id),
+            "book_id": str(conversation.book_id) if conversation.book_id else None,
+            "title": conversation.title if reveal else mask_text(conversation.title),
+            "last_active_at": _iso(conversation.last_active_at),
+            "created_at": _iso(conversation.created_at),
+            "archived_at": _iso(conversation.archived_at),
+        },
+        ensure_ascii=False,
+        separators=(",", ":"),
+    )
+
+
+async def _iter_export_events(
+    session: AsyncSession, plan: _ExportPlan, counters: dict[str, int],
+) -> AsyncIterator[str]:
+    """按批拉取事件并逐行 yield；``counters`` 记录实际写出的条数。"""
+    reveal = plan.format == "plain"
+    after: tuple[uuid.UUID, int] | None = None
+    last_conversation: uuid.UUID | None = None
+    while True:
+        rows = await queries.export_event_batch(
+            session, conditions=plan.conditions, after=after,
+            limit=EXPORT_BATCH_SIZE,
+        )
+        if not rows:
+            return
+        for row in rows:
+            # 事件按 conversation_id 有序，只需记住上一个 id——不建集合（内存随会话数增长）。
+            if row.conversation_id != last_conversation:
+                last_conversation = row.conversation_id
+                counters["conversations"] += 1
+            counters["events"] += 1
+            yield _event_line(row, reveal=reveal) + "\n"
+        after = (rows[-1].conversation_id, rows[-1].seq)
+        if len(rows) < EXPORT_BATCH_SIZE:
+            return
+
+
+async def _iter_export_conversations(
+    session: AsyncSession, plan: _ExportPlan, counters: dict[str, int],
+) -> AsyncIterator[str]:
+    reveal = plan.format == "plain"
+    after_id: uuid.UUID | None = None
+    while True:
+        rows = await queries.export_conversation_batch(
+            session, conditions=plan.conditions, after_id=after_id,
+            limit=EXPORT_BATCH_SIZE,
+        )
+        if not rows:
+            return
+        for conversation in rows:
+            counters["conversations"] += 1
+            yield _conversation_line(conversation, reveal=reveal) + "\n"
+        after_id = rows[-1].id
+        if len(rows) < EXPORT_BATCH_SIZE:
+            return
+
+
+async def _record_export_audit(**kwargs: Any) -> None:
+    """写导出审计；失败只记日志，不影响已发出的流（与 ``_record_failure`` 同口径）。"""
+    try:
+        await _write_audit(**kwargs)
+    except Exception:  # noqa: BLE001 — 尽力而为
+        logger.warning(
+            "admin export audit not recorded",
+            extra={"outcome": "admin_export_audit_failed"},
+        )
+
+
+@router.post("/export", response_class=StreamingResponse)
+async def export_data(
+    body: AdminExportRequest,
+    request: Request,
+    admin: Annotated[AdminAccount, Depends(require_admin)],
+    db: Annotated[AsyncSession, Depends(get_admin_read_session)],
+):
+    """导出（架构 §7.3）：``Content-Type: application/x-ndjson``，逐行 JSON。
+
+    请求体见 :class:`AdminExportRequest`。响应是附件
+    ``aozora-export-<UTC 时间戳>.jsonl``；每行一个对象（``kind`` 区分事件与会话）。
+    ``format=plain`` 返回原文，``masked``（默认）复用 :func:`mask_text` 的 PII 打码。
+
+    超限（> :data:`MAX_EXPORT_EVENTS`）在**开始流之前**返回 422
+    ``export_too_large``——流一旦开始，状态码已不可改。
+    """
+    q = body.q.strip() if body.q else None
+    if q is not None and q and len(q) < QUERY_MIN_CHARS:
+        raise AppException(
+            422, "query_too_short",
+            f"q must be at least {QUERY_MIN_CHARS} characters",
+        )
+    q = q or None
+    if body.scope == "user" and body.user_id is None:
+        raise AppException(422, "user_required", "scope=user requires user_id")
+
+    conditions = queries.export_scope_conditions(
+        scope=body.scope,
+        user_id=body.user_id,
+        conversation_id=body.conversation_id,
+        time_from=body.time_from,
+        time_to=body.time_to,
+        q=q,
+        include_archived=body.include_archived,
+    )
+
+    if body.content == "conversations":
+        total = await queries.count_export_conversations(db, conditions=conditions)
+        unit = "conversations"
+    else:
+        total, _ = await queries.count_export_events(db, conditions=conditions)
+        unit = "events"
+    if total > MAX_EXPORT_EVENTS:
+        raise AppException(
+            422, "export_too_large",
+            f"Export would include {total} {unit}, exceeding the "
+            f"{MAX_EXPORT_EVENTS} limit. Narrow the time range or pick a single "
+            "user and export in batches.",
+        )
+
+    plan = _ExportPlan(
+        scope=body.scope,
+        format=body.format,
+        content=body.content,
+        conditions=conditions,
+        # 范围是「单用户」或筛选里指定了用户时，审计挂到该用户上。
+        target_user_id=body.user_id if body.scope != "all" else None,
+        conversation_id=(
+            body.conversation_id if body.scope == "filtered" else None
+        ),
+        filters=_export_filters(body, q),
+    )
+
+    # 审计需要的事实先取出：流式生成器里不再访问 ``admin`` 的 ORM 属性
+    # （请求结束/回滚后 lazy load 会炸 MissingGreenlet）。
+    audit_admin_id = admin.id
+    audit_ip = client_ip(request)
+    started = time.monotonic()
+    stamp = datetime.now(UTC).strftime("%Y%m%dT%H%M%SZ")
+    filename = f"aozora-export-{stamp}.jsonl"
+
+    async def stream() -> AsyncIterator[str]:
+        counters = {"events": 0, "conversations": 0}
+        completed = False
+        try:
+            # 独立 session：依赖里的只读 session 的生命周期与 StreamingResponse
+            # 不保证重叠；导出全程用自己的一条只读事务。
+            factory = get_session_factory()
+            async with factory() as session:
+                await begin_read_only(session)
+                if plan.content == "events":
+                    async for line in _iter_export_events(session, plan, counters):
+                        yield line
+                else:
+                    async for line in _iter_export_conversations(session, plan, counters):
+                        yield line
+            completed = True
+        finally:
+            detail = {
+                "scope": plan.scope,
+                "format": plan.format,
+                "content": plan.content,
+                "events": counters["events"],
+                "conversations": counters["conversations"],
+                "duration_ms": int((time.monotonic() - started) * 1000),
+                "filters": plan.filters,
+                # 流中途断开（客户端取消）时为 False——尽力而为留一条痕迹。
+                "completed": completed,
+            }
+            # ``shield``：客户端断开时生成器被取消，审计写入仍作为一个独立任务
+            # 跑完；失败只记日志，不改变已经发出的数据。
+            task = asyncio.ensure_future(_record_export_audit(
+                admin_id=audit_admin_id,
+                action="export",
+                ip=audit_ip,
+                target_user_id=plan.target_user_id,
+                conversation_id=plan.conversation_id,
+                detail=detail,
+            ))
+            try:
+                await asyncio.shield(task)
+            except Exception:  # noqa: BLE001 — 见 _record_export_audit
+                logger.warning(
+                    "admin export audit task failed",
+                    extra={"outcome": "admin_export_audit_failed"},
+                )
+
+    return StreamingResponse(
+        stream(),
+        media_type="application/x-ndjson",
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+    )
