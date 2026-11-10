@@ -18,8 +18,8 @@
 | **8-04** | admin 鉴权与只读 API | ✅ 完成 | 2026-11-10 | `7e4c27e` | `modules/admin/*` 5 文件 + `scripts/create_admin.py`；9 个读端点、独立 JWT（`ADMIN_JWT_SECRET` / `aud=aozora-admin`）、只读事务、默认脱敏与 reveal 审计。验证：`tests/test_m8_admin_api.py` **51 passed**、关联回归 90 passed、ruff 全绿；**本机 Docker 未运行，PG 的 `SET TRANSACTION READ ONLY` 未实测**（SQLite 后端无等价语句，机制由单测钉住）；生产必须设置 `ADMIN_JWT_SECRET`（M8-10） |
 | **8-05** | 管理写操作与写审计 | ✅ 完成 | 2026-11-10 | `98dab26` | 4 个写端点（suspend / resume / ai-quota / sessions）+ 写审计同事务；`auth/suspended.py` 守卫覆盖 12 个模块的数据面写路径；**不复用 `FROZEN`**（反向用例：暂停 8 天后删除任务不动数据）；配额覆盖仅 guest。验证：新增 13 条、服务端全量 **1853 passed**、ruff 全绿。残余 R-PROD-70（新增写端点须显式挂守卫） |
 | **8-06** | admin 前端壳 + 检索页 | ✅ 完成 | 2026-11-10 | `5c12f8f` | 独立 `admin/` 包（36 文件）：登录、用户检索、全局会话检索、用户详情；React 19 + Vite 8 + Tailwind 4 + TanStack Query/Table；HashRouter、北京时间、客户端游标栈、表格容器内横滚。验证：`npm install` / `tsc` / `vite build` 全过 + mock 浏览器冒烟 9/9 |
-| **8-07** | **会话回放页**（核心） | ⏳ 未开始 | | | 轮次 + 时间轴 + 配对渲染 + reveal |
-| **8-08** | 聚合统计与反查页 | ⏳ 未开始 | | | token / 成本 / `request_id` |
+| **8-07** | **会话回放页**（核心） | ✅ 完成 | 2026-11-10 | 待提交 | 轮次列表 + 事件时间轴 + `tool_calls` 配对 + 推理折叠 + 结构性事件语义化；审批三态（服务端确认 / 客户端上报 / 未上报）；默认脱敏 + 「查看原文」触发 reveal 审计；保留期空态。路由 `/replay/:conversationId`，会话列表加「回放」入口 |
+| **8-08** | 聚合统计与反查页 | ✅ 完成 | 2026-11-10 | 待提交 | 用量聚合（user/model/day 三组 + 合计行 + CSS 条形）与 `request_id` 反查（事件精确命中 / 仅 usage / 404 三态）；**按天日界已改为北京时间**（`queries._day_key`，PG `timezone('Asia/Shanghai', …)`）。**成功率与 P95 后端接口无字段，未展示**（记入已知限制） |
 | **8-09** | 导出 | ⏳ 未开始 | | | 3 范围 × 2 内容 + 导出审计 |
 | **8-10** | 部署、PII 与隐私政策 | ⏳ 未开始 | | | nginx + 脱敏 + LegalPage 同步 |
 | **8-11** | 收口 | ⏳ 未开始 | | | 四板 + 真实数据走查 |

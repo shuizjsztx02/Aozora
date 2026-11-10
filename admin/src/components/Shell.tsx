@@ -19,11 +19,15 @@ const NAV_GROUPS: { title: string; items: NavItem[] }[] = [
   },
   {
     title: '回放',
-    items: [{ to: '/replay', label: '会话回放', pendingTask: '8-07' }],
+    items: [{ to: '/replay', label: '会话回放' }],
   },
   {
     title: '数据',
-    items: [{ to: '/export', label: '导出', pendingTask: '8-09' }],
+    items: [
+      { to: '/usage', label: '用量统计' },
+      { to: '/requests', label: '请求反查' },
+      { to: '/export', label: '导出', pendingTask: '8-09' },
+    ],
   },
 ]
 

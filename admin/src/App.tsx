@@ -4,9 +4,12 @@ import { ApiError } from './api/client'
 import { AuthProvider } from './auth/AuthContext'
 import { RequireAuth } from './auth/RequireAuth'
 import { Shell } from './components/Shell'
+import { ConversationReplayPage } from './pages/ConversationReplayPage'
 import { ConversationsPage } from './pages/ConversationsPage'
 import { LoginPage } from './pages/LoginPage'
 import { PlaceholderPage } from './pages/PlaceholderPage'
+import { RequestLookupPage } from './pages/RequestLookupPage'
+import { UsagePage } from './pages/UsagePage'
 import { UserDetailPage } from './pages/UserDetailPage'
 import { UsersPage } from './pages/UsersPage'
 
@@ -35,16 +38,10 @@ export default function App() {
                 <Route path="/users" element={<UsersPage />} />
                 <Route path="/users/:userId" element={<UserDetailPage />} />
                 <Route path="/conversations" element={<ConversationsPage />} />
-                <Route
-                  path="/replay"
-                  element={
-                    <PlaceholderPage
-                      title="会话回放"
-                      task="8-07"
-                      description="左侧轮次列表 + 右侧事件时间轴、工具调用配对、审批来源标签。"
-                    />
-                  }
-                />
+                <Route path="/replay" element={<ConversationReplayPage />} />
+                <Route path="/replay/:conversationId" element={<ConversationReplayPage />} />
+                <Route path="/usage" element={<UsagePage />} />
+                <Route path="/requests" element={<RequestLookupPage />} />
                 <Route
                   path="/export"
                   element={

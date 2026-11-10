@@ -367,6 +367,19 @@ async def list_events(
 # 聚合统计
 # ---------------------------------------------------------------------------
 
+def _day_key(dialect_name: str):
+    """按天分组的 key。
+
+    用户决策 16（北京时间）：PG 下日界必须是 ``Asia/Shanghai``，而不是会话时区
+    （默认 UTC）——否则「今天」会从北京时间 08:00 才算起。SQLite 测试后端没有
+    ``timezone()``，退化为它的 ``date()``；日界精确性由 PG 承担，SQLite 用例只验
+    分组结构。
+    """
+    if dialect_name == "postgresql":
+        return func.date(func.timezone("Asia/Shanghai", AIUsage.created_at))
+    return func.date(AIUsage.created_at)
+
+
 async def usage_summary(
     db: AsyncSession,
     *,
@@ -385,7 +398,8 @@ async def usage_summary(
     elif group_by == "model":
         key = AIUsage.model
     else:
-        key = func.date(AIUsage.created_at)
+        bind = db.get_bind()
+        key = _day_key(bind.dialect.name if bind is not None else "")
 
     rows = (await db.execute(
         select(

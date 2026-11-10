@@ -1090,3 +1090,25 @@ class TestReadOnlyTransaction:
         session = _FakeSession("sqlite")
         await begin_read_only(session)  # type: ignore[arg-type]
         assert session.statements == []
+
+
+class TestDayGrouping:
+    """用户决策 16：按天分组的日界是北京时间，不是 PG 会话时区（UTC）。"""
+
+    def test_postgres_day_key_uses_beijing_timezone(self):
+        from sqlalchemy.dialects import postgresql
+
+        from src.modules.admin.queries import _day_key
+
+        compiled = _day_key("postgresql").compile(dialect=postgresql.dialect())
+        # 时区是绑定参数（`timezone(%(timezone_1)s, created_at)`），不在 SQL 文本里。
+        assert "timezone" in str(compiled)
+        assert "Asia/Shanghai" in compiled.params.values()
+
+    def test_sqlite_day_key_falls_back_to_plain_date(self):
+        from sqlalchemy.dialects import sqlite
+
+        from src.modules.admin.queries import _day_key
+
+        sql = str(_day_key("sqlite").compile(dialect=sqlite.dialect()))
+        assert "Asia/Shanghai" not in sql

@@ -1,4 +1,5 @@
 import type { ColumnDef } from '@tanstack/react-table'
+import { Link } from 'react-router'
 import type { AdminConversationItem } from '../api/types'
 import { formatBeijing } from '../lib/time'
 import { MonoId } from './MonoId'
@@ -53,5 +54,18 @@ export const conversationColumns: ColumnDef<AdminConversationItem, unknown>[] = 
         <span className="text-xs text-gray-400">否</span>
       )
     },
+  },
+  {
+    id: 'actions',
+    header: '操作',
+    enableSorting: false,
+    cell: ({ row }) => (
+      <Link
+        to={`/replay/${row.original.id}`}
+        className="text-blue-600 hover:underline"
+      >
+        回放
+      </Link>
+    ),
   },
 ]
