@@ -39,7 +39,7 @@ import pytest_asyncio
 from src.common.config import Settings, reset_config, set_config
 from src.modules.ai import devices as D
 from src.modules.ai import stream as S
-from src.modules.ai.agent import AgentLoop
+from src.modules.ai.agent import DETERMINISTIC_DEVICE_TOOLS, AgentLoop
 from src.modules.ai.devices import (
     NEEDS_RESULT,
     ONE_WAY,
@@ -178,12 +178,18 @@ def _loop(
     ctx: ToolContext | None = None,
     device: DeviceChannel | None = None,
     observer: _RecordingObserver | None = None,
+    tools: Any = None,
 ) -> tuple[AgentLoop, _RecordingObserver]:
-    """``(loop, observer)``——观察者与 loop 同建同取，用例断言的就是它。"""
+    """``(loop, observer)``——观察者与 loop 同建同取，用例断言的就是它。
+
+    ``tools`` 是注入面的显式覆盖（M8 之后默认注入面不再含
+    ``device_haptic`` / ``device_widget_refresh``——它们改由服务端确定性下发；
+    通道语义的用例在这里显式传回它们，测的仍是通道本身）。
+    """
     observer = observer or _RecordingObserver()
     loop = AgentLoop(
         provider, ctx or _ctx(), model=MODEL, timeout=10.0, today=TODAY,
-        observer=observer, device=device,
+        observer=observer, device=device, tools=tools,
     )
     return loop, observer
 
@@ -328,7 +334,10 @@ class TestOneWay:
             _tool_turn(_call("device_haptic", {"kind": "success"})),
             _text("已经记好了，给你个提示。"),
         ])
-        loop, observer = _loop(provider, device=channel)
+        # 显式注入：测的是通道语义，不是默认注入面（M8 起 haptic 不再默认注入）
+        loop, observer = _loop(
+            provider, device=channel, tools=[D.get_device_tool("device_haptic")],
+        )
         result = await loop.run("记一笔午饭 12 块")
 
         frames = observer.device_requests
@@ -352,7 +361,11 @@ class TestOneWay:
             _tool_turn(_call("device_haptic"), _call("device_widget_refresh")),
             _text("好了。"),
         ])
-        loop, _ = _loop(provider, device=channel)
+        loop, _ = _loop(
+            provider, device=channel,
+            tools=[D.get_device_tool("device_haptic"),
+                   D.get_device_tool("device_widget_refresh")],
+        )
         result = await loop.run("记好了没")
 
         assert result.writes == 0
@@ -666,14 +679,24 @@ class TestGating:
         ]
 
     def test_with_channel_device_tools_are_injected(self):
+        """设备能力随通道注入，但 **M8 的两个确定性能力除外**。
+
+        它们不是用户意图（一次震动 / 一次小组件刷新），留在工具集里会让模型为
+        它们各多花一个完整 Step；改由 ``stream`` 在成功轮确定性下发。
+        """
         loop, _ = _loop(
             ScriptedProvider([_text("hi")]),
             device=DeviceChannel(timeout_seconds=5.0),
         )
-        assert [t["function"]["name"] for t in loop._openai_tools] == [
+        expected = [
             *[t.name for t in tools_for_domains(DOMAINS)],
-            *[t.name for t in D.DEVICE_TOOLS],
+            *[t.name for t in D.DEVICE_TOOLS
+              if t.name not in DETERMINISTIC_DEVICE_TOOLS],
         ]
+        assert [t["function"]["name"] for t in loop._openai_tools] == expected
+        assert set(DETERMINISTIC_DEVICE_TOOLS).isdisjoint(
+            t["function"]["name"] for t in loop._openai_tools
+        )
 
     async def test_hallucinated_device_tool_is_unavailable_without_channel(self):
         provider = ScriptedProvider([

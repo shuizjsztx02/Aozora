@@ -396,6 +396,11 @@ def classify_reasoning(text: str) -> ReasoningLevel:
 _MAX_PROMPT_OBJECTS = 40
 _MAX_PROMPT_NAME_CHARS = 16
 
+#: M8-成本：**由服务端确定性下发的设备能力**，不进模型工具集。
+#: 它们不是用户意图（一次震动 / 一次小组件刷新），让模型为此各花一个完整 Step
+#: 是纯粹的浪费；成功轮在 ``stream`` 里统一下发（渠道关闭时不发）。
+DETERMINISTIC_DEVICE_TOOLS = frozenset({"device_haptic", "device_widget_refresh"})
+
 #: Agent 的系统提示。**模型可见的唯一行为说明**，与工具 description（工具可见
 #: 的唯一语义来源）配套。措辞按「模型读了会怎么做」写，不按「系统实现了什么」写。
 _AGENT_SYSTEM_PROMPT = """\
@@ -1175,10 +1180,17 @@ class AgentLoop:
     # -- 注入面 ---------------------------------------------------------
 
     def _default_tools(self, domains: Iterable[str]) -> list[Tool | DeviceTool]:
-        """给定域上的服务端工具（已按契约车道过滤）+ 通道在位时的设备能力。"""
+        """给定域上的服务端工具（已按契约车道过滤）+ 通道在位时的设备能力。
+
+        M8-成本：``device_haptic`` / ``device_widget_refresh`` **不进模型工具集**
+        ——它们不是「用户意图」，由服务端在成功轮确定性下发（``stream``）。留在
+        工具集里意味着模型为一次震动/刷新各多花一个完整 Step（实测一轮 29k token
+        里约三分之二花在这两个调用上）。
+        """
         return [
             *tools_for_domains(domains, contract_version=self._contract_version),
-            *self._device_tools,
+            *(tool for tool in self._device_tools
+              if tool.name not in DETERMINISTIC_DEVICE_TOOLS),
         ]
 
     def _inject(self, tools: Sequence[Tool | DeviceTool]) -> None:

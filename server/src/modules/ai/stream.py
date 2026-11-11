@@ -195,7 +195,7 @@ from .conversation import (
     ConversationService,
     TurnWriter,
 )
-from .devices import DEVICE_TOOLS, device_channel
+from .devices import DEVICE_TOOLS, ONE_WAY, device_channel, new_request_id
 from .provider import ProviderError, ReasoningLevel, ToolCallingProvider
 from .service import AIService
 from .tools import (
@@ -715,6 +715,30 @@ async def _run_turn(
         queue.put_nowait(_TERMINAL)
 
 
+def _emit_deterministic_device_frames(
+    queue: asyncio.Queue[Any], cfg: Settings,
+) -> None:
+    """M8-成本：成功轮统一补发一次触感与小组件刷新（渠道关闭时不发）。
+
+    这两个能力已从模型工具集移除（``agent.DETERMINISTIC_DEVICE_TOOLS``）——
+    它们不是用户意图，让模型为一次震动多花一个完整 Step 是纯粹的浪费。
+    帧形状与 loop 的设备帧一致（见 ``QueueObserver.device_request``）。
+    """
+    if not cfg.ai_device_channel_enabled:
+        return
+    for capability, payload in (
+        ("haptic.feedback", {"kind": "success"}),
+        ("widget.refresh", {}),
+    ):
+        queue.put_nowait((EventType.DEVICE_REQUEST, {
+            "step": 1,
+            "request_id": new_request_id(),
+            "kind": ONE_WAY,
+            "capability": capability,
+            "payload": payload,
+        }))
+
+
 async def _execute_turn(
     *,
     queue: asyncio.Queue[Any],
@@ -806,6 +830,13 @@ async def _execute_turn(
         )
         queue.put_nowait((EventType.ERROR, _error_payload(exc, conversation_id)))
         return
+
+    # M8-成本：成功轮**确定性**下发一次触感与小组件刷新。两者已从模型工具集
+    # 移除（``agent.DETERMINISTIC_DEVICE_TOOLS``）——它们不是用户意图，不该让
+    # 模型为一次震动多花一个完整 Step。放在 ``done`` 之前：客户端收到即执行，
+    # 与本轮收尾无关。单向指令的回传会得到 404（没有挂起条目），按既有
+    # 「回不去」契约忽略。
+    _emit_deterministic_device_frames(queue, cfg)
 
     queue.put_nowait((EventType.DONE, _done_payload(
         result, conversation, await conversations.max_seq(conversation),

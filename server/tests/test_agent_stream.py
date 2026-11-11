@@ -892,19 +892,25 @@ class TestDeviceChannel:
         assert "image/jpeg" in stream_env.provider.sent(1)
         assert "attachmentId" not in stream_env.provider.sent(1)
 
-    async def test_one_way_does_not_wait_for_anything(self, stream_env: StreamEnv):
-        """单向指令：发出即继续，**不产生任何上行**（没有回传凭据要用）。"""
-        stream_env.provider.reset([
-            _tool_turn(_call("device_haptic", {"kind": "success"})),
-            _text("记好了。"),
-        ])
-        _, body = await stream_env.turn("记一笔午饭 12 块")
+    async def test_one_way_frames_are_emitted_deterministically(
+        self, stream_env: StreamEnv,
+    ):
+        """M8-成本：触感 / 小组件刷新由服务端在成功轮确定性下发。
 
-        frame = payload_of(body, "device_request")
-        assert frame["kind"] == "one_way"
-        assert "timeout_seconds" not in frame
+        它们不再是模型工具（``agent.DETERMINISTIC_DEVICE_TOOLS``）——模型这轮
+        只回文本，仍应收到两个 one-way 帧；单向指令不等待任何上行。
+        """
+        stream_env.provider.reset([_text("记好了。")])
+        _, body = await stream_env.turn("你好")
+
+        frames = [p for name, p in parse_frames(body) if name == "device_request"]
+        assert [f["capability"] for f in frames] == [
+            "haptic.feedback", "widget.refresh",
+        ]
+        assert all(
+            f["kind"] == "one_way" and "timeout_seconds" not in f for f in frames
+        )
         assert event_names(body)[-1] == "done"
-        # 同一个 step 上：先在东西下发，随后工具结果把卡片标成完成
         assert payload_of(body, "done")["stop_reason"] == "completed"
 
     async def test_device_frame_is_gated_off_by_default(self, stream_env: StreamEnv):

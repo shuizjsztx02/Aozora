@@ -1231,11 +1231,8 @@
       ],
       "kind": "write",
       "landing": "landed",
-      "also": [
-        "device_widget_refresh",
-        "device_haptic"
-      ],
-      "note": "★ 副作用断言：记账写库后应调用 device_widget_refresh 刷新小组件（device_haptic 是模型自发的确认反馈，属观察项）"
+      "also": [],
+      "note": "★ M8 起 device_widget_refresh / device_haptic 由服务端在成功轮确定性下发，不再是模型工具——本条只断言记账本身落库。"
     },
     {
       "id": "CMP-01",

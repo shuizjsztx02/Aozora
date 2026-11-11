@@ -439,7 +439,10 @@ class TestInjection:
 
         names = _injected(loop)
         assert "budget_list" in names
-        assert "device_haptic" in names
+        # M8：haptic/widget 改由服务端确定性下发，不再出现在注入面；
+        # 通道仍注入它真正需要模型选择的设备能力（如分享）。
+        assert "device_share_text" in names
+        assert "device_haptic" not in names
         assert "stats_monthly" not in names, "域外的服务端工具仍被收窄"
 
 
