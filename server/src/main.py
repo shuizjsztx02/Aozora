@@ -5,12 +5,14 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import logging
+import os
 import time
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.staticfiles import StaticFiles
 
 from src.common.config import get_config
 from src.common.errors import register_exception_handlers
@@ -237,6 +239,18 @@ app.include_router(attachments_router, prefix=cfg.api_prefix)
 app.include_router(consent_router, prefix=cfg.api_prefix)
 app.include_router(deletion_router, prefix=cfg.api_prefix)
 app.include_router(telemetry_router, prefix=cfg.api_prefix)
+
+# M8-10：运营后台静态站点。**不依赖任何 nginx 改动**——复用现有 /aozora-api/
+# 反代：nginx 原样透传 → SharedProxyPrefixMiddleware 剥离前缀 → /aozora-admin/。
+# 目录由 compose 以只读 volume 挂到 ADMIN_STATIC_DIR；不存在时不挂载（本机开发、
+# 未构建前端时都走这条分支，不影响 API 启动）。
+_admin_static_dir = os.getenv("ADMIN_STATIC_DIR", "/app/admin-dist")
+if os.path.isdir(_admin_static_dir):
+    app.mount(
+        "/aozora-admin",
+        StaticFiles(directory=_admin_static_dir, html=True),
+        name="aozora-admin",
+    )
 
 
 @app.get("/", tags=["meta"])

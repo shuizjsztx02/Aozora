@@ -74,6 +74,9 @@ services:
       - "0.0.0.0:18080:8000"
     volumes:
       - api-test-data:/data
+      # M8-10：后台静态产物（只读）。不改 nginx，由 FastAPI StaticFiles 托管，
+      # 经现有 /aozora-api/ 反代访问。
+      - /root/Aozora/admin/dist:/app/admin-dist:ro
     environment:
       <<: *api-env
       # 测试实例跑 staging：保留 DEV_AUTH_CODE=000000 全功能可测
@@ -102,6 +105,8 @@ services:
       - "127.0.0.1:8080:8000"
     volumes:
       - api-prod-data:/data
+      # M8-10：同 api-test，后台静态产物只读挂载。
+      - /root/Aozora/admin/dist:/app/admin-dist:ro
     environment:
       <<: *api-env
       ENV: production
