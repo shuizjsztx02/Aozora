@@ -204,8 +204,11 @@ APP-CONTEXT §4.6 已按此口径修订。
 
 - **多管理员账号**：`admin_accounts(id, username, password_hash, status, created_at, last_login_at)`。P0 不引入角色分级（所有管理员权限相同）。
 - **独立 JWT**：单独 secret（`ADMIN_JWT_SECRET`）与 `aud=aozora-admin`。用户 token 进不了 admin API，反之亦然。
-- **公网子域**：`admin.xxx`，TLS + 独立限流 + 建议 IP 白名单（部署侧可选）。
-- **前端**：独立 `admin/` 包，Vite + React 19 + Tailwind + TanStack Query/Table。不进 `app/`、不进 APK。
+- **入口：零 nginx 变更（2026-11-10 用户约束）**。A 机 nginx 属服务器管理员，本项目不得改动；也不新增端口。后台复用现有 `/aozora-api/` 反代，静态产物由 FastAPI `StaticFiles` 托管：
+  - 链路：`/aozora-api/aozora-admin/*` → nginx 原样透传 → `SharedProxyPrefixMiddleware` 剥离 → `/aozora-admin/*` 命中挂载。
+  - `ADMIN_STATIC_DIR`（默认 `/app/admin-dist`）存在才挂载，不存在时 API 照常启动；compose 把 `/root/Aozora/admin/dist` 只读挂入。
+  - 访问：`http://<A机IP>/aozora-api/aozora-admin/`（HashRouter，刷新不 404）。
+- **前端**：独立 `admin/` 包，Vite + React 19 + Tailwind + TanStack Query/Table。不进 `app/`、不进 APK；`base = /aozora-api/aozora-admin/`，API 同源 `/aozora-api/api/v1`。
 - **时间显示**：统一北京时间（`Asia/Shanghai`）；存储仍 UTC。
 
 ---
@@ -293,7 +296,7 @@ users.admin_suspended_reason  varchar(200) NULL
 |---|---|
 | 1 | **M8 排在 M6 之前** |
 | 2 | 多管理员账号（`admin_accounts`） |
-| 3 | 公网子域 |
+| 3 | 公网子域 → **实际改为复用 `/aozora-api/` 反代（零 nginx 变更，2026-11-10 用户约束）** |
 | 4 | 含少量写：冻结/解冻、AI 配额、强制登出设备；禁止改业务数据行 |
 | 5 | 接受客户端增加一次四值上报 |
 | 6 | 接受客户端自报，UI 标注「客户端上报」 |

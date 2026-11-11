@@ -384,3 +384,28 @@ docker compose -f docker-compose.prod.yml --profile test down
 | 测试 APK 报 CLEARTEXT not permitted | 装的是旧包（NSC 未含服务器 IP）或 release 包 | 重新 `assembleDebug` 出包安装 |
 | AI 全 503 | `.env` 未填 `AI_PROVIDER_API_KEY` | 补 key 后重跑 a-deploy.sh test；或接受本地 NLU 降级 |
 | 游客连测第 21 句 429 | 生产配额语义（测试已设 100000，若见 20 说明 .env 覆盖没生效） | 检查 `.env` `TEST_AI_QUOTA` 与容器内 `docker compose exec api-test printenv AI_DAILY_QUOTA_GUEST` |
+
+---
+
+## M8 运营后台（2026-11-10 上线）
+
+**入口**：`http://116.62.196.255/aozora-api/aozora-admin/`
+
+**零 nginx 变更、不新增端口**：后台静态产物由 FastAPI `StaticFiles` 托管，经现有
+`/aozora-api/` 反代访问（链路与边界见 `nginx/DEPLOYED.md` 同节）。nginx 属服务器
+管理员，本项目不得改动。
+
+| 操作 | 命令 |
+|---|---|
+| 更新前端 | 本地 `cd admin && npm run build` → `scp -r admin/dist/* aozora-a:/root/Aozora/admin/dist/`；静态文件即时生效，无需重建容器 |
+| 更新后端 | 照常 `./infra/deploy/prod/a-deploy.sh test`（含 `alembic upgrade head`；`0024_m8_admin_console` 已于 2026-11-10 执行） |
+| 创建管理员 | `docker cp server/scripts/create_admin.py aozora-api-test:/app/scripts/` → `docker exec aozora-api-test python /app/scripts/create_admin.py <用户名> <密码>` |
+| 管理员密钥 | `/root/Aozora/.env` 的 `ADMIN_JWT_SECRET`（必须与 `TEST_SECRET_KEY` 不同；已配置） |
+| 审计查询 | 后台「审计记录」页，或 `GET /aozora-api/api/v1/admin/audit` |
+
+**验证基线（2026-11-10 实测）**：容器直连 `/aozora-admin/` 200；经 nginx
+`/aozora-api/aozora-admin/` 200；静态资源 200；`/aozora-api/api/v1/health` 200；
+管理员登录 200。
+
+**已知约束**：镜像只 COPY `server/src/`，`scripts/create_admin.py` 不在镜像内，
+需按上表 `docker cp` 临时拷入（容器重建后需重拷，账号本身在数据库里不受影响）。

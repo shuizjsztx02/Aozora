@@ -107,3 +107,25 @@
 - [ ] 消除服务器磁盘 `api.conf` 的尾斜杠漂移（见「磁盘配置与运行态不一致」）
 - [ ] 是否修复上述风险点（尤其 `location /` 敞开、upstream 走 DHCP IP、无访问日志）
 - [x] `RUNBOOK.md` 中按 `/etc/nginx` + 8081 描述的步骤需相应修正 —— 2026-09-18 已修正
+---
+
+## M8 运营后台（2026-11-10）：**不改 nginx**
+
+用户明确约束：**A 机 nginx 属服务器管理员，本项目不得改动**。此前一次部署尝试曾临时加入
+`location /aozora-admin/` 并改过 `proxy_pass` 尾斜杠，**已全部回滚**（备份
+`api.conf.bak.m8` 仍留在服务器，可删除）。
+
+后台改为**复用现有 `/aozora-api/` 反代**，由 FastAPI 托管静态页：
+
+```
+浏览器 /aozora-api/aozora-admin/  ──nginx 原样透传──▶  18080
+                                  ──应用剥离 /aozora-api──▶  /aozora-admin/
+                                  ──StaticFiles 挂载──▶  index.html
+```
+
+- 代码：`server/src/main.py` 在 `ADMIN_STATIC_DIR`（默认 `/app/admin-dist`）存在时
+  挂载 `StaticFiles`；compose 将 `/root/Aozora/admin/dist` 只读挂入。
+- 访问：`http://116.62.196.255/aozora-api/aozora-admin/`。
+- **nginx 现状**：`location /aozora-api/` 的 `proxy_pass` 为**无尾斜杠**形态，且已
+  reload 生效——与 2026-09-18 记录的「运行态原样透传」语义一致，没有引入
+  「nginx 剥离前缀」的漂移。今后任何 reload 前请保持这一形态。

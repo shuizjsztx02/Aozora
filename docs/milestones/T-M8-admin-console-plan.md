@@ -21,8 +21,8 @@
 | **8-07** | **会话回放页**（核心） | ✅ 完成 | 2026-11-10 | `e853465` | 轮次列表 + 事件时间轴 + `tool_calls` 配对 + 推理折叠 + 结构性事件语义化；审批三态（服务端确认 / 客户端上报 / 未上报）；默认脱敏 + 「查看原文」触发 reveal 审计；保留期空态。路由 `/replay/:conversationId`，会话列表加「回放」入口 |
 | **8-08** | 聚合统计与反查页 | ✅ 完成 | 2026-11-10 | `e853465` | 用量聚合（user/model/day 三组 + 合计行 + CSS 条形）与 `request_id` 反查（事件精确命中 / 仅 usage / 404 三态）；**按天日界已改为北京时间**（`queries._day_key`，PG `timezone('Asia/Shanghai', …)`）。**成功率与 P95 后端接口无字段，未展示**（记入已知限制） |
 | **8-09** | 导出 | ✅ 完成 | 2026-11-10 | `4086edc` | `POST /admin/export`：3 范围 × 2 内容、流式 NDJSON、keyset 分批（500/批）、上限 100,000 事件 → 422；结束时独立 session 写 `action="export"` 审计（范围/模式/条数/耗时）。前端 `ExportPage` + 会话列表「导出当前筛选」+ 回放页「导出本会话」。验证：新增 21 条（6 组合全绿）、服务端全量 **1876 passed**、ruff 全绿、tsc/build 通过 |
-| **8-10** | 部署、PII 与隐私政策 | ⏳ 未开始 | | | nginx + 脱敏 + LegalPage 同步 |
-| **8-11** | 收口 | ⏳ 未开始 | | | 四板 + 真实数据走查 |
+| **8-10** | 部署、PII 与隐私政策 | ✅ 完成 | 2026-11-10 | 待提交 | **已上线 A 机**：`http://116.62.196.255/aozora-api/aozora-admin/`。**零 nginx 变更**（用户约束）——FastAPI `StaticFiles` 挂载 + 复用 `/aozora-api/` 反代；新增审计查询 `GET /admin/audit` + 前端页；隐私政策 §2.5 + `LegalPage` 同步（R-PROD-63 的「麦克风」一并移除）；`ADMIN_JWT_SECRET` 已在服务器 .env 配置；迁移 0024 已在 aozora_test 执行 |
+| **8-11** | 收口 | ✅ 完成 | 2026-11-10 | 待提交 | 四板：pytest **1878 passed / 37 skipped**、ruff 全绿、vitest **91 files / 1509 passed**、tsc 0 错、JVM **BUILD SUCCESSFUL**；admin build 通过；**线上真实数据走查**（会话「你好」→ 轮次 → 事件，`seq`/`turn` 与 PG 一致）。**M8 十一卡全部交付** |
 
 **状态取值：** ⏳ 未开始 / 🔄 进行中 / ✅ 完成 / ⛔ 阻塞
 
