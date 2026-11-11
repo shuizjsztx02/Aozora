@@ -265,6 +265,18 @@ class SyncService:
             _validate_name(payload["name"], 128, "name")
             if payload.get("icon") is not None:
                 _validate_name(payload["icon"], 64, "icon")
+            # M8 去重：客户端的播种幂等只看本机 Room——新设备/重装后本地为空，
+            # 会再种一遍并 push，而服务端没有名字唯一约束。这里兜底：同名账本
+            # 已存在时幂等返回已有行（不新建）。
+            existing = await self.db.scalar(
+                select(Book).where(
+                    Book.owner_id == user_id,
+                    Book.name == payload["name"],
+                    Book.deleted_at.is_(None),
+                )
+            )
+            if existing is not None:
+                return existing.id, existing.version
             book = Book(
                 id=entity_id,
                 owner_id=user_id,
@@ -292,6 +304,26 @@ class SyncService:
             # REQ-73（T19-1，ADR-014）：icon 两端化，照 book/account 的写法。
             if payload.get("icon") is not None:
                 _validate_name(payload["icon"], 64, "icon")
+            # M8 去重（R-PROD-52 的根治）：**全局分类**（``book_id IS NULL``）在
+            # PG 上不受 ``uq_categories_scope_name`` 约束（NULL 不参与唯一性），
+            # 新设备重播种会产生同名行。这里按 (owner, kind, parent, name) 幂等
+            # 返回已有行。账本范围内的同名分类不受影响（那是用户自己的命名空间）。
+            if book_id is None:
+                existing = await self.db.scalar(
+                    select(Category).where(
+                        Category.owner_id == user_id,
+                        Category.book_id.is_(None),
+                        Category.kind == CategoryKind(payload["kind"]),
+                        Category.name == payload["name"],
+                        Category.archived_at.is_(None),
+                        (
+                            Category.parent_id.is_(None) if parent_id is None
+                            else Category.parent_id == parent_id
+                        ),
+                    )
+                )
+                if existing is not None:
+                    return existing.id, existing.version
             cat = Category(
                 id=entity_id,
                 owner_id=user_id,
@@ -463,6 +495,16 @@ class SyncService:
             if payload.get("avatar") is not None:
                 _validate_name(payload["avatar"], 64, "avatar")
             _validate_note(payload.get("persona", ""), field="persona")
+            # M8 去重：同 book 的道理——新设备会重播种内置角色。同名幂等返回。
+            existing = await self.db.scalar(
+                select(ChatPersona).where(
+                    ChatPersona.owner_id == user_id,
+                    ChatPersona.name == payload["name"],
+                    ChatPersona.archived_at.is_(None),
+                )
+            )
+            if existing is not None:
+                return existing.id, existing.version
             persona = ChatPersona(
                 id=entity_id,
                 owner_id=user_id,

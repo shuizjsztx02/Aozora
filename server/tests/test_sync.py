@@ -7,11 +7,13 @@ from datetime import UTC, datetime
 
 import pytest
 import pytest_asyncio
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
 from src.models.base import Base
 from src.models.consent import UserConsent
 from src.models.ledger import Account, Book, Category, CategoryKind
+from src.models.persona import ChatPersona
 from src.models.user import DeviceSession, User
 
 # ---------------------------------------------------------------------------
@@ -3027,3 +3029,93 @@ class TestBudgetCategoryOwnership:
         )
         assert resp.status_code == 404
 
+
+
+# ---------------------------------------------------------------------------
+# Push: 同名播种实体幂等（M8，R-PROD-52 的根治）
+# ---------------------------------------------------------------------------
+
+class TestPushDedupeBySeedName:
+    """客户端的播种幂等只看本机 Room——新设备/重装后本地为空，会再种一遍并
+    push。服务端对「同名全局分类 / 账本 / 角色」幂等返回已有行，防止重复落库。
+    """
+
+    @staticmethod
+    def _push(ctx, entity_type: str, entity_id: uuid.UUID, payload: dict):
+        return ctx["client"].post(
+            "/sync/push",
+            json={"mutations": [{
+                "mutation_id": str(uuid.uuid4()),
+                "entity_type": entity_type,
+                "operation": "insert",
+                "entity_id": str(entity_id),
+                "payload": payload,
+            }]},
+            headers=_auth_header(ctx["user_a"].id),
+        )
+
+    @pytest.mark.asyncio
+    async def test_duplicate_global_category_is_idempotent(self, auth_client, db_session):
+        ctx = auth_client
+        payload = {"kind": "expense", "name": "去重测试分类", "book_id": None}
+
+        first = self._push(ctx, "category", uuid.uuid4(), payload)
+        second = self._push(ctx, "category", uuid.uuid4(), payload)
+        assert first.status_code == 200, first.text
+        assert second.status_code == 200, second.text
+
+        rows = (await db_session.execute(
+            select(Category).where(
+                Category.owner_id == ctx["user_a"].id,
+                Category.name == "去重测试分类",
+                Category.book_id.is_(None),
+            )
+        )).scalars().all()
+        assert len(rows) == 1, "同名全局分类只落一行"
+
+    @pytest.mark.asyncio
+    async def test_book_scoped_duplicates_are_allowed(self, auth_client, db_session):
+        """账本内的同名分类是用户自己的命名空间，不受去重影响。"""
+        ctx = auth_client
+        payload = {
+            "kind": "expense", "name": "账本内同名",
+            "book_id": str(ctx["book_a"].id),
+        }
+
+        assert self._push(ctx, "category", uuid.uuid4(), payload).status_code == 200
+        assert self._push(ctx, "category", uuid.uuid4(), payload).status_code == 200
+
+        rows = (await db_session.execute(
+            select(Category).where(
+                Category.owner_id == ctx["user_a"].id,
+                Category.name == "账本内同名",
+            )
+        )).scalars().all()
+        assert len(rows) == 2
+
+    @pytest.mark.asyncio
+    async def test_duplicate_book_and_persona_are_idempotent(self, auth_client, db_session):
+        ctx = auth_client
+
+        assert self._push(ctx, "book", uuid.uuid4(), {"name": "播种账本"}).status_code == 200
+        assert self._push(ctx, "book", uuid.uuid4(), {"name": "播种账本"}).status_code == 200
+        books = (await db_session.execute(
+            select(Book).where(
+                Book.owner_id == ctx["user_a"].id,
+                Book.name == "播种账本",
+                Book.deleted_at.is_(None),
+            )
+        )).scalars().all()
+        assert len(books) == 1
+
+        persona = {"name": "播种角色", "avatar": "🐚", "persona": "测试"}
+        assert self._push(ctx, "chat_persona", uuid.uuid4(), persona).status_code == 200
+        assert self._push(ctx, "chat_persona", uuid.uuid4(), persona).status_code == 200
+        personas = (await db_session.execute(
+            select(ChatPersona).where(
+                ChatPersona.owner_id == ctx["user_a"].id,
+                ChatPersona.name == "播种角色",
+                ChatPersona.archived_at.is_(None),
+            )
+        )).scalars().all()
+        assert len(personas) == 1
