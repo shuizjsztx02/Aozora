@@ -393,14 +393,18 @@ class TestInjection:
             _injected(loop)
         )
 
-    async def test_an_unmatched_input_keeps_the_full_injection(self):
-        """无信号 → 与 P1 逐字相同的注入面（这是「兜底不退化成能力缺失」的证据）。"""
+    async def test_an_unmatched_input_falls_back_to_the_core_four_domains(self):
+        """无信号 → **记账核心四域**（M8 成本决策；原先是全量注入）。
+
+        「吃饭78」这类短句原先每个 Step 注入 56 个工具（≈12–15k tokens），
+        两 Step 约 3 万；收窄后约 1.5 万。低频域靠词表命中，不靠全量兜底。
+        """
         provider = _Provider([_text()])
         loop, _ = _loop(provider)
 
         await loop.run(_NO_SIGNAL)
 
-        assert _injected(loop) == _lane_names(T.DOMAINS)
+        assert set(_injected(loop)) == set(_lane_names(routing.FALLBACK_DOMAINS))
 
     async def test_a_tool_outside_the_route_is_not_executable(self):
         """**隔离边界**：路由收窄了注入面，模型若报出域外的工具名（幻觉或

@@ -243,11 +243,14 @@ class Settings(BaseSettings):
     )
 
     # --- AI agent 会话窗口与配额 (T-M7-02f) ---
-    # 上下文窗口「最近 N 轮」（架构 §6.3；§12.2 未决 #2：初始 8，需实测调优）。
+    # 上下文窗口「最近 N 轮」（架构 §6.3；§12.2 未决 #2）。
     # 「轮」= 一次用户输入跑完整个 loop，不是一次模型请求——工具任务的
     # 第 2 步起恒为深档（02d 实测），按请求数计窗口会让上下文忽长忽短。
+    # **M8 成本决策（2026-11-11）：8 → 4。** 历史里保留的是完整工具结果
+    # （交易 JSON 很长），8 轮在长会话里每 Step 多出 2–3k tokens；简单记账
+    # 任务几乎用不到 4 轮以前的内容。追问指代变弱的代价由用户明确接受。
     ai_agent_history_turns: int = Field(
-        default=8,
+        default=4,
         gt=0,
         validation_alias=AliasChoices(
             "AI_AGENT_HISTORY_TURNS", "ai_agent_history_turns",
@@ -256,7 +259,7 @@ class Settings(BaseSettings):
     # 与轮数并行的字符双限（架构 §6.4「按 N 轮 + 字符双限」）。工具结果会留在
     # 历史里被每个后续 Step 重发，轮数够小也可能撑爆单步预算。
     ai_agent_history_chars: int = Field(
-        default=8000,
+        default=4000,
         gt=0,
         validation_alias=AliasChoices(
             "AI_AGENT_HISTORY_CHARS", "ai_agent_history_chars",

@@ -50,6 +50,7 @@ from sqlalchemy import select
 from src.common.config import Settings, reset_config, set_config
 from src.models.ai import AIConversation, AIConversationEvent, AIUsage
 from src.models.ledger import Category, CategoryKind
+from src.modules.ai import routing
 from src.modules.ai import stream as S
 from src.modules.ai.provider import (
     ProviderError,
@@ -689,7 +690,9 @@ class TestStreamEvents:
         assert routing_frame["domains"] == list(DOMAINS)
         # 兜底 = P1 的注入面：旧客户端看到的工具清单一个不少
         assert [t["function"]["name"] for t in stream_env.provider.calls[0]["tools"]] == [
-            tool.name for tool in tools_for_domains(DOMAINS, contract_version=1)
+            tool.name for tool in tools_for_domains(
+                routing.FALLBACK_DOMAINS, contract_version=1,
+            )
         ]
 
     async def test_headers_disable_buffering(self, stream_env: StreamEnv):
@@ -1694,25 +1697,29 @@ class TestContractLane:
     """
 
     async def test_a_v1_client_keeps_the_p1_tool_set(self, stream_env: StreamEnv):
-        stream_env.provider.reset([_text("你好")])
-        # 不声明版本 = 旧 APK
-        await stream_env.turn("你好")
+        stream_env.provider.reset([_text("好")])
+        # 不声明版本 = 旧 APK；输入命中 book 域（M8 起未命中不再全量注入）
+        await stream_env.turn("账本")
 
         names = [t["function"]["name"] for t in stream_env.provider.calls[0]["tools"]]
         assert names == [
             tool.name for tool in tools_for_domains(
-                DOMAINS, contract_version=1,
+                ["book"], contract_version=1,
             )
         ]
-        assert "book_delete" not in names and "meta_set" not in names
+        assert "book_delete" not in names
 
-    async def test_a_v2_client_gets_the_full_tool_set(self, stream_env: StreamEnv):
-        stream_env.provider.reset([_text("你好")])
-        await stream_env.turn("你好", contract_version=2)
+    async def test_a_v2_client_gets_the_v2_tool_set_for_the_same_domain(
+        self, stream_env: StreamEnv,
+    ):
+        stream_env.provider.reset([_text("好")])
+        await stream_env.turn("账本", contract_version=2)
 
         names = [t["function"]["name"] for t in stream_env.provider.calls[0]["tools"]]
-        assert names == [tool.name for tool in tools_for_domains(DOMAINS, contract_version=2)]
-        assert "book_delete" in names and "meta_set" in names
+        assert names == [
+            tool.name for tool in tools_for_domains(["book"], contract_version=2)
+        ]
+        assert "book_delete" in names
 
     async def test_a_v1_client_cannot_call_a_v2_only_tool(self, stream_env: StreamEnv):
         """装不进 v1 车道的工具**模型看不见**——即便它硬报出这个名字，也只拿到

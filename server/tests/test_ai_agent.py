@@ -947,18 +947,18 @@ class TestFastTierThinking:
             "sk-test", "https://api.deepseek.com", transport=httpx.MockTransport(handler),
         )
         try:
-            await _loop(provider).run("你好")
+            await _loop(provider).run("账本")
         finally:
             await provider.aclose()
 
         names = [t["function"]["name"] for t in seen["body"]["tools"]]
-        # 缺省车道是 v1（05b）：注入面就是 P1 的那 15 个工具
+        # 缺省车道是 v1（05b）；输入命中 book 域（M8 起未命中不再全量注入）
         assert names == [
             t.name for t in T.tools_for_domains(
-                T.DOMAINS, contract_version=T.PROPOSAL_CONTRACT_V1,
+                ["book"], contract_version=T.PROPOSAL_CONTRACT_V1,
             )
         ]
-        assert "transaction_add" in names and "budget_status" in names
+        assert "book_list" in names
         assert "book_delete" not in names, "v2-only 的写工具不进 v1 车道"
         assert seen["body"]["tool_choice"] == "auto"
         assert seen["body"]["max_tokens"] == DEFAULT_MAX_TOKENS
@@ -1261,19 +1261,21 @@ class TestTurnTermination:
         """05b：车道决定注入面。缺省（没声明版本）＝ v1 ＝ P1 的 15 个工具；
         声明 2 才拿到全量 27 个。**这条是「旧客户端行为不变」的注入面证据。**"""
         v1_provider = ScriptedProvider([_text("好")])
-        await _loop(v1_provider).run("你好")
+        await _loop(v1_provider).run("账本")
         v1_names = [t["function"]["name"] for t in v1_provider.calls[0]["tools"]]
 
         v2_provider = ScriptedProvider([_text("好")])
-        await _loop(v2_provider, contract_version=2).run("你好")
+        await _loop(v2_provider, contract_version=2).run("账本")
         v2_names = [t["function"]["name"] for t in v2_provider.calls[0]["tools"]]
 
-        assert v1_names == [tool.name for tool in T.TOOLS if tool.name in {
+        assert v1_names == [
             t.name for t in T.tools_for_domains(
-                T.DOMAINS, contract_version=T.PROPOSAL_CONTRACT_V1,
+                ["book"], contract_version=T.PROPOSAL_CONTRACT_V1,
             )
-        }]
-        assert v2_names == [tool.name for tool in T.TOOLS]
+        ]
+        assert v2_names == [
+            t.name for t in T.tools_for_domains(["book"], contract_version=2)
+        ]
         assert len(v2_names) > len(v1_names)
 
 

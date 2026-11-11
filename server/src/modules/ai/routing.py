@@ -31,8 +31,14 @@
   全量注入）首调仍有 71%、两步内 90%，多注入的代价是**准确率**而非可用性。
 
 因此凡是不确定的输入——闲聊、指代（「那改成 6000 吧」）、词表没覆盖的新说法
-——一律退回全量。**这条不是保守，是把「不确定」与「确定不用」分开**：只有明确
+——一律退回兜底。**这条不是保守，是把「不确定」与「确定不用」分开**：只有明确
 认出域时才收窄。
+
+**兜底面本身在 2026-11-11 从「全部域」收窄为记账核心四域**（``FALLBACK_DOMAINS``，
+M8 成本决策）：实测「吃饭78」这类短句未命中时，全量 56 工具 ≈ 12–15k tokens/Step，
+简单记账一轮两 Step 约 3 万；收窄后约 1.5 万。低频域的覆盖改由词表承担（同批补充了
+「吃/喝/买/打车/再存/切换到/怎么」等口语信号）——**代价是词表没覆盖的新说法会
+少几个域**，这是用「每轮上万 token」换来的，方向由用户明确要求。
 
 词表的维护面（下一步的债，已登记 R-PROD-17）
 ------------------------------------------
@@ -99,6 +105,18 @@ _SIGNALS: tuple[tuple[str, tuple[str, ...]], ...] = (
     ("那笔", (DOMAIN_TRANSACTION,)),
     ("流水", (DOMAIN_TRANSACTION,)),
     ("报销", (DOMAIN_TRANSACTION,)),
+    # M8-成本：口语里**直接描述消费动作**的短句（「吃饭78」「吃粉丝69」「买咖啡」
+    # 「打车 20」）原先一条信号都不命中 → 退回全量注入（56 工具 ≈ 12–15k
+    # tokens/Step，两 Step 约 3 万）。这些单字有误命中面（「吃了吗」闲聊），但
+    # 误差方向是**多注入记账域**（选择面宽一点），与模块头的取向一致；漏注入的
+    # 代价则是每轮上万 token。
+    ("吃", (DOMAIN_TRANSACTION,)),
+    ("喝", (DOMAIN_TRANSACTION,)),
+    ("买", (DOMAIN_TRANSACTION,)),
+    ("打车", (DOMAIN_TRANSACTION,)),
+    ("加油", (DOMAIN_TRANSACTION,)),
+    ("缴费", (DOMAIN_TRANSACTION,)),
+    ("充值", (DOMAIN_TRANSACTION,)),
     # ── 记账 × 分析（近义工具分属两域，指一域就是漏注入）──
     ("花了", (DOMAIN_TRANSACTION, DOMAIN_ANALYSIS)),
     ("花销", (DOMAIN_TRANSACTION, DOMAIN_ANALYSIS)),
@@ -132,6 +150,8 @@ _SIGNALS: tuple[tuple[str, tuple[str, ...]], ...] = (
     ("储蓄", (DOMAIN_SAVINGS,)),
     ("攒", (DOMAIN_SAVINGS,)),
     ("基金", (DOMAIN_SAVINGS,)),
+    # 「再存 500」这类增量存入（语料 SAV-UPD-02）；单看「存」会误伤「存到哪」。
+    ("再存", (DOMAIN_SAVINGS,)),
     # ── 定时（scheduled）──
     ("定时", (DOMAIN_SCHEDULED,)),
     ("自动记", (DOMAIN_SCHEDULED,)),
@@ -156,6 +176,8 @@ _SIGNALS: tuple[tuple[str, tuple[str, ...]], ...] = (
     ("跟我聊", (DOMAIN_PERSONA,)),
     ("陪我聊", (DOMAIN_PERSONA,)),
     ("聊天风格", (DOMAIN_PERSONA,)),
+    # 「切换到米粒」（语料 PER-SWITCH-01）——「换成」不收：误伤面太大。
+    ("切换到", (DOMAIN_PERSONA,)),
     # ── 默认项与用户画像（meta）──
     # T19-3（REQ-74 决策 #7）：「用户设定」这一整类措辞原先**一个信号都没有**
     # ——画像 / 称呼 / 习惯 / 偏好全不认。实测：「我的说话偏好是温柔一点」退回
@@ -227,6 +249,9 @@ _SIGNALS: tuple[tuple[str, tuple[str, ...]], ...] = (
     # help 域带进「能不能把这一笔删了」这种纯操作请求。这笔交换是按模块头
     # 「宁可多注入」的误差方向做的——help 域只有 1 个**无数据访问**的工具，
     # 误注入的代价是选择面宽一点；而漏注入的代价是模型对产品能力**编答案**。
+    # 「怎么」覆盖「怎么导出数据」「怎么导入数据」这类——下面的「怎么用/怎么设置」
+    # 是它的子集，保留是为了不依赖这一条单独成立。
+    ("怎么", (DOMAIN_HELP,)),
     ("怎么用", (DOMAIN_HELP,)),
     ("怎么设置", (DOMAIN_HELP,)),
     ("怎么弄", (DOMAIN_HELP,)),
@@ -252,6 +277,16 @@ _LATIN_SIGNALS: tuple[tuple[str, tuple[str, ...]], ...] = (
 )
 
 _ALL_SIGNALS: tuple[tuple[str, tuple[str, ...]], ...] = _SIGNALS + _LATIN_SIGNALS
+
+#: 未命中任何信号时的**兜底注入面**（M8 成本决策，2026-11-11）。
+#:
+#: 原先是「全部域」——实测短句（「吃饭78」）命不中信号，于是每个 Step 注入 56
+#: 个工具（35,791 字符 ≈ 12–15k tokens），简单记账一轮两 Step 就要 3 万。收窄为
+#: **记账核心四域**（15,646 字符）后，简单任务约 1.5 万；低频域（savings /
+#: persona / help 等）靠词表命中，而不是靠全量兜底——词表的 M8 补充见上面各组。
+FALLBACK_DOMAINS: frozenset[str] = frozenset({
+    DOMAIN_TRANSACTION, DOMAIN_ACCOUNT, DOMAIN_CATEGORY, DOMAIN_BOOK,
+})
 
 
 def unrouteable_domains() -> frozenset[str]:

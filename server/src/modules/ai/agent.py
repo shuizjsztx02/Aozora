@@ -174,7 +174,7 @@ from .provider import (
     ToolCall,
     ToolCallingProvider,
 )
-from .routing import RoutingDecision, route_domains
+from .routing import FALLBACK_DOMAINS, RoutingDecision, route_domains
 from .service import AIService
 from .skills import render_skill_section, skills_for_domains
 from .tools import (
@@ -1259,7 +1259,12 @@ class AgentLoop:
             # 「易混淆点」）——它决定注入哪些工具，不影响推理档位，两份判据也各写
             # 各的。没命中任何信号时退回全量注入（routing 模块头的「兜底」）。
             self._route = route_domains(user_input)
-            self._inject(self._default_tools(self._route.domains))
+            # M8-成本：未命中信号时注入**核心四域**（不再全量）——见 routing 模块头。
+            # 事件仍报原始路由决策（``domains``/``matched``），注入面用兜底面。
+            injected_domains = (
+                self._route.domains if self._route.matched else FALLBACK_DOMAINS
+            )
+            self._inject(self._default_tools(injected_domains))
         # 本轮输入**先落库**再发第一次请求（04b）：断在模型请求里时，日志里至少
         # 有用户的这句话——恢复后的下一轮因此知道刚才在问什么，而不是从零开始。
         # 它是本轮的**第一次**写入，轮号在这里分配（后面各批挂在同一个轮号上）。
@@ -1416,6 +1421,13 @@ class AgentLoop:
         一个工具都没有（它只有 ``meta_set`` 一个写工具，车道过滤后为空），拿
         ``DOMAINS`` 比会把每一轮都误判成「收窄了」，域知识于是又变回常驻。
         """
+        # M8：**兜底轮不注入域知识**。未命中路由时注入的是核心四域（不是全量），
+        # 若按「注入面 < 全量 ⇒ 算命中」推断，闲聊也会带上这四域的 Skill——既违背
+        # 05h「全量不算命中」的本意，又反过来增加 token。词表已覆盖常见说法，
+        # 真正命中的轮次照常注入。
+        # 只对**默认注入面**生效；显式 ``tools``（用例/探针的精确复现）保持原语义。
+        if self._fixed_tools is None and not self._route.matched:
+            return set()
         injected = {t.domain for t in self._tools if isinstance(t, Tool)}
         full = {
             t.domain
