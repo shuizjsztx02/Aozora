@@ -90,6 +90,7 @@ APP-CONTEXT §4.6 已按此口径修订。
 | `provider` / `model` | 该次调用的服务商与模型 |
 | `prompt_tokens` / `completion_tokens` / `tokens` | 该次调用的用量 |
 | `cache_hit_tokens` | 该次调用**命中 prompt cache** 的输入 token（M8-14，2026-11-12）：取 DeepSeek `usage.prompt_cache_hit_tokens`，缺失为 0。它是 `prompt_tokens` 的**子集**，不改变计费与配额口径——只让「账面 token」与「缓存命中部分」可比，用于评估重复前缀（system + 工具定义 + 历史）的缓存收益 |
+| `cost_micro_usd` / `price_peak` | 该次调用的**官方三档价成本**（M8-18，2026-11-12）：1e-6 美元整数；`hit×$0.003 + miss×$0.15 + output×$0.6` per 1M（off-peak），峰时（工作日 UTC 01–04、06–10）×2。`price_peak` 标记当次是否峰时计价。价格走配置（`AI_PRICE_*`），换模型/调价只改环境变量；配额与 `ai_usage` 的混合价口径不变 |
 | `tool_calls` | `[{id, name}]`：该次调用产出的工具调用；`id` 与 assistant 事件 `data.tool_calls[].id` 同源；`wrap_up` / `summary` 为空数组 |
 | `call` | 轮内第几次模型调用（1 起）——`request` 链式重建的引用键（M8-13） |
 | `request` | 该次调用的**模型输入快照**（M8-13）：`base_call / system / append / tools / tools_chars / tools_def?`，见下 |
