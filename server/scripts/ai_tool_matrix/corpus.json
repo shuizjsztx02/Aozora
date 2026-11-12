@@ -244,6 +244,126 @@
       "note": "M8-16 形态规则：小数金额 + 空格。"
     },
     {
+      "id": "TX-ADD-08",
+      "domain": "transaction",
+      "layer": "core",
+      "text": "喜茶二十四",
+      "expect": [
+        "transaction_add"
+      ],
+      "kind": "write",
+      "landing": "produced",
+      "note": "M8-17 中文数字金额（词表与阿拉伯形态都够不着）"
+    },
+    {
+      "id": "TX-ADD-09",
+      "domain": "transaction",
+      "layer": "core",
+      "text": "¥30 的咖啡",
+      "expect": [
+        "transaction_add"
+      ],
+      "kind": "write",
+      "landing": "produced",
+      "note": "M8-17 货币符号前缀"
+    },
+    {
+      "id": "TX-ADD-10",
+      "domain": "transaction",
+      "layer": "core",
+      "text": "AA 了 50",
+      "expect": [
+        "transaction_add"
+      ],
+      "kind": "write",
+      "landing": "produced",
+      "note": "M8-17 动作变体：AA 分摊"
+    },
+    {
+      "id": "TX-ADD-11",
+      "domain": "transaction",
+      "layer": "core",
+      "text": "工资到账 12000",
+      "expect": [
+        "transaction_add"
+      ],
+      "kind": "write",
+      "landing": "produced",
+      "note": "M8-17 收入 + 口语动词（到账）"
+    },
+    {
+      "id": "TX-ADD-12",
+      "domain": "transaction",
+      "layer": "core",
+      "text": "外卖 25",
+      "expect": [
+        "transaction_add"
+      ],
+      "kind": "write",
+      "landing": "produced",
+      "note": "M8-17 品类名词 + 金额"
+    },
+    {
+      "id": "TX-ADD-13",
+      "domain": "transaction",
+      "layer": "core",
+      "text": "会员续费 15",
+      "expect": [
+        "transaction_add"
+      ],
+      "kind": "write",
+      "landing": "produced",
+      "note": "M8-17 订阅动作 + 金额"
+    },
+    {
+      "id": "TX-ADD-14",
+      "domain": "transaction",
+      "layer": "core",
+      "text": "两百五十块的衣服",
+      "expect": [
+        "transaction_add"
+      ],
+      "kind": "write",
+      "landing": "produced",
+      "note": "M8-17 中文数字 + 单位 + 品类"
+    },
+    {
+      "id": "TX-ADD-15",
+      "domain": "transaction",
+      "layer": "core",
+      "text": "团购了 128",
+      "expect": [
+        "transaction_add"
+      ],
+      "kind": "write",
+      "landing": "produced",
+      "note": "M8-17 动作变体：团购"
+    },
+    {
+      "id": "TX-ADD-16",
+      "domain": "transaction",
+      "layer": "core",
+      "text": "地铁 5 块",
+      "expect": [
+        "transaction_add"
+      ],
+      "kind": "write",
+      "landing": "produced",
+      "note": "M8-17 交通品类 + 金额"
+    },
+    {
+      "id": "TX-ADD-17",
+      "domain": "transaction",
+      "layer": "core",
+      "text": "退款 99",
+      "expect": [
+        "transaction_add"
+      ],
+      "kind": "write",
+      "landing": "produced",
+      "note": "M8-17 退款（income）"
+    },
+    {
       "id": "NEG-04",
       "domain": "none",
       "layer": "boundary",

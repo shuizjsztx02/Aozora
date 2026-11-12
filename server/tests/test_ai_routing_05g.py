@@ -374,7 +374,7 @@ class TestFallback:
 
         assert decision.matched is True
         assert decision.domains == (T.DOMAIN_TRANSACTION,)
-        assert decision.signals == (routing.AMOUNT_FORM_SIGNAL,)
+        assert decision.signals == (routing.BOOKKEEPING_FORM_SIGNAL,)
 
     @pytest.mark.parametrize("text", ["这个月24号", "花了多少", "24 元吗？"])
     def test_amount_like_questions_do_not_use_the_form_rule(self, text: str):
@@ -384,7 +384,7 @@ class TestFallback:
         # 「花了多少」由词表命中（``花了`` → transaction × analysis），其余兜底。
         if text == "花了多少":
             assert decision.matched is True
-            assert routing.AMOUNT_FORM_SIGNAL not in decision.signals
+            assert routing.BOOKKEEPING_FORM_SIGNAL not in decision.signals
         else:
             assert decision.matched is False
 
@@ -404,6 +404,55 @@ class TestFallback:
         # 前者是兜底、后者是命中——组装的域集合可以相同，标志位必须不同。
         assert miss.matched is False
         assert wide.matched is True
+
+
+# ── 2b. 记账意图判定器（M8-17）：口语记账的「形式」覆盖 ───────────────────
+
+
+class TestBookkeepingForm:
+    """词表是关键词枚举，口语记账的多样性在**形式**：中文数字、货币符号、
+    动作变体、品类名词。这些输入词表够不着，判定器把它们收窄到 transaction。"""
+
+    @pytest.mark.parametrize("text", [
+        "喜茶二十四", "两百五十块的衣服", "八十八的奶茶",
+        "¥30 的咖啡", "30r 的奶茶",
+        "付了 45", "支付 88 元", "AA 了 50", "团购了 128", "点了份外卖",
+        "下单了一本书", "会员续费 15",
+        "外卖 25", "奶茶 18", "咖啡 32", "地铁 5 块", "水电费 120", "话费 39",
+        "工资到账 12000", "收到红包 200", "退款 99", "入账 500",
+        "帮我记一下 早餐 8 块",
+    ])
+    def test_spoken_bookkeeping_variants_narrow_to_transaction(self, text: str):
+        decision = routing.route_domains(text)
+
+        assert decision.matched is True
+        assert decision.domains == (T.DOMAIN_TRANSACTION,)
+        assert decision.signals == (routing.BOOKKEEPING_FORM_SIGNAL,)
+
+    @pytest.mark.parametrize("text", [
+        "帮我订一张明天去北京的机票",   # 数词是量词短语，不是金额
+        "今天天气不错",
+        "我习惯月底结账",              # 说的是定时记账习惯，不是记一笔
+    ])
+    def test_non_bookkeeping_sentences_still_fall_back(self, text: str):
+        """判定器只收「像记账」的输入；数词量词、闲聊、习惯描述仍走兜底。"""
+        decision = routing.route_domains(text)
+
+        assert decision.matched is False
+        assert decision.domains == T.DOMAINS
+
+    @pytest.mark.parametrize(("text", "value"), [
+        ("十", 10), ("十五", 15), ("三十", 30), ("八十八", 88),
+        ("一百五", 150), ("两百五十", 250), ("两千五", 2500),
+        ("一千二", 1200), ("两百", 200), ("一万二", 12000),
+    ])
+    def test_chinese_numerals_parse(self, text: str, value: int):
+        """口语省略读法：一百五 = 150、两千五 = 2500。"""
+        assert routing.parse_cn_amount(text) == value
+
+    @pytest.mark.parametrize("text", ["", "你好", "abc"])
+    def test_non_numerals_parse_to_none(self, text: str):
+        assert routing.parse_cn_amount(text) is None
 
 
 # ── 3. loop 接线：注入面 ───────────────────────────────────────────────────

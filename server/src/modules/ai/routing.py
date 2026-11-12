@@ -291,21 +291,132 @@ FALLBACK_DOMAINS: frozenset[str] = frozenset({
     DOMAIN_TRANSACTION, DOMAIN_ACCOUNT, DOMAIN_CATEGORY, DOMAIN_BOOK,
 })
 
-#: M8-16：词表之外的**第一级**补充——「名词 + 金额」短句（「喜茶24」「瑞幸9.9」
-#: 「24」）。商品名是开放集合：词表没有、工具描述里也没有（文本检索同样够不着），
-#: 能识别的只有**形态**。命中即收窄到 transaction 单域（7 个工具）。
-AMOUNT_FORM_SIGNAL = "<金额短句>"
-_AMOUNT_FORM_RE = re.compile(r"^.{0,12}?\d+(?:\.\d+)?(?:元|块|块钱)?$")
-#: 问句/指代不收：这些输入要的是答案或改上一笔，不是新记一笔。
+# ---------------------------------------------------------------------------
+# 记账意图判定器（M8-16 起源，M8-17 全面覆盖）
+# ---------------------------------------------------------------------------
+#
+# 词表是「关键词 → 域」的枚举，而口语记账的多样性在**形式**而不是关键词：
+# 「喜茶二十四」「¥30」「AA 了 50」「外卖 25」都够不着任何一条信号，于是退回
+# 四域兜底（≈4,100 tokens/Step）。判定器只在**词表完全未命中**时接管——任何
+# 已有信号的输入行为不变——命中即收窄到 transaction 单域（7 个工具）。
+
+#: 命中判定器时的观测信号名（进 ``RoutingDecision.signals``，不进模型上下文）。
+BOOKKEEPING_FORM_SIGNAL = "<记账形态>"
+
+#: L1：动作 / 祈使。口语里「发生了什么」的动词与记账命令。
+#: 「结账」刻意不收：它在「我习惯月底结账」里指的是定时记账（scheduled 域），
+#: 收窄到 transaction 会丢掉用户真正要的域。
+_BOOKKEEPING_ACTIONS: tuple[str, ...] = (
+    "付了", "付掉", "支付", "消费", "下单", "点了", "买了", "充了", "交了",
+    "续费", "请客", "AA", "团购", "到账", "退款", "报销", "入账",
+    "帮我记", "记一下", "记个账",
+)
+
+#: L3：消费品类名词。**单独出现不判**（裸名词可能是询问），要另有金额或动作词。
+_SPENDING_NOUNS: tuple[str, ...] = (
+    "奶茶", "咖啡", "外卖", "早餐", "早饭", "午饭", "午餐", "晚饭", "晚餐",
+    "夜宵", "宵夜", "零食", "水果", "超市", "菜市场", "买菜", "地铁", "公交",
+    "高铁", "火车", "机票", "飞机", "打车", "酒店", "民宿", "房租", "水电",
+    "物业", "话费", "流量", "宽带", "会员", "购物", "衣服", "鞋", "化妆品",
+    "护肤", "理发", "电影", "游戏", "挂号", "药", "体检", "宠物", "学费", "书",
+)
+
+#: 排除项：这些词指向别的域（词表本就覆盖），双保险不让判定器接管。
+_BOOKKEEPING_EXCLUDE = re.compile(r"删除|删掉|清空|导出|备份|密码|注销")
+
+#: 问句不收：这些输入要的是答案或改上一笔，不是新记一笔。
 _AMOUNT_FORM_EXCLUDE = re.compile(r"[?？]|多少|几个|怎么|哪")
+
+_CN_DIGITS = {
+    "零": 0, "一": 1, "二": 2, "两": 2, "三": 3, "四": 4,
+    "五": 5, "六": 6, "七": 7, "八": 8, "九": 9,
+}
+_CN_UNITS = {"十": 10, "百": 100, "千": 1000, "万": 10000}
+_CN_NUM_CLASS = "零一二两三四五六七八九十百千万"
+#: 整句形态：前缀 + 金额（阿拉伯数字或中文数字），可带「元/块」。
+_AMOUNT_FORM_RE = re.compile(
+    rf"^.{{0,12}}?(\d+(?:\.\d+)?|[{_CN_NUM_CLASS}]{{1,8}})(?:元|块|块钱)?$",
+)
+
+
+def parse_cn_amount(text: str) -> int | None:
+    """常见口语中文数字 → 数值；不是合法中文数字时返回 ``None``。
+
+    支持省略读法（按口语惯例补零）：``一百五`` = 150、``两千五`` = 2500、
+    ``一千二`` = 1200；``十`` = 10、``十五`` = 15、``八十八`` = 88。
+    上限按万位处理（记账场景足够；超过返回 None 交给兜底）。
+    """
+    if not text:
+        return None
+    total = 0        # 已结算的万位以上部分
+    section = 0      # 当前万位以内的累计
+    number = 0       # 当前待结算的数字
+    last_unit = 0    # 最近用过的单位（用于末尾省略读法）
+    for char in text:
+        if char in _CN_DIGITS:
+            number = _CN_DIGITS[char]
+        elif char == "万":
+            total += (section + number) * 10000
+            section = 0
+            number = 0
+            last_unit = 10000
+        elif char in _CN_UNITS:
+            unit = _CN_UNITS[char]
+            if number == 0 and char == "十":
+                number = 1          # 「十五」「十八」的起始十
+            section += number * unit
+            number = 0
+            last_unit = unit
+        else:
+            return None
+    if number:
+        # 末尾裸数字：跟在百/千之后按省略读法补一个零位（一百五 → 150）。
+        number = number * (last_unit // 10) if last_unit >= 100 else number
+    value = total + section + number
+    return value if value > 0 else None
+
+
+#: 中文数字作为金额时的单位后缀。**裸中文数字不算**——「一张机票」「两杯」
+#: 里的数词是量词短语，不是钱（实测误判过「帮我订一张去北京的机票」）。
+#: 「的」是修饰连接（「八十八的奶茶」），与量词区分度足够。
+_CN_AMOUNT_RE = re.compile(rf"[{_CN_NUM_CLASS}]{{1,8}}(?:元|块|块钱|毛|角|分|的)")
+
+
+def _has_amount(text: str) -> bool:
+    """句子里是否存在一个**可识别**的金额（阿拉伯数字、货币符号或带单位的中文数字）。"""
+    if re.search(r"\d", text) or re.search(r"[¥￥]", text):
+        return True
+    return _CN_AMOUNT_RE.search(text) is not None
 
 
 def _matches_amount_form(text: str) -> bool:
-    """整句形如「≤12 个字符的前缀 + 金额」且不含疑问词（M8-16）。"""
+    """整句形如「≤12 个字符的前缀 + 金额」且不含疑问词（M8-16 形态规则）。"""
     compact = re.sub(r"\s+", "", text)
     if not compact or _AMOUNT_FORM_EXCLUDE.search(compact):
         return False
-    return _AMOUNT_FORM_RE.match(compact) is not None
+    match = _AMOUNT_FORM_RE.match(compact)
+    if match is None:
+        return False
+    token = match.group(1)
+    if token[0] in _CN_NUM_CLASS:
+        return parse_cn_amount(token) is not None
+    return True
+
+
+def _looks_like_bookkeeping(text: str) -> bool:
+    """M8-17：记账意图判定器——三层任一命中即为记账（词表未命中时才调用）。
+
+    L1 动作/祈使 → L2 整句金额形态 → L3 品类名词 + 金额。动作词分支已在 L1
+    返回，L3 的「品类 + 动作」重叠因此不需要重复判断。
+    """
+    compact = re.sub(r"\s+", "", text)
+    if not compact or _BOOKKEEPING_EXCLUDE.search(compact):
+        return False
+    if any(word in compact for word in _BOOKKEEPING_ACTIONS):
+        return True
+    if _matches_amount_form(compact):
+        return True
+    return any(noun in compact for noun in _SPENDING_NOUNS) and _has_amount(compact)
 
 
 def unrouteable_domains() -> frozenset[str]:
@@ -366,13 +477,14 @@ def route_domains(text: str) -> RoutingDecision:
             matched.update(targets)
 
     if not matched:
-        # M8-16：词表没覆盖时先看形态——「喜茶24」这类纯商品名 + 金额的短句，
-        # 用户的意图几乎必然是记一笔，收窄到 transaction 单域。
-        if _matches_amount_form(raw):
+        # M8-16 / M8-17：词表没覆盖时交给记账意图判定器——「喜茶二十四」「AA 了
+        # 50」「外卖 25」这类口语记账，用户的意图几乎必然是记一笔，收窄到
+        # transaction 单域。
+        if _looks_like_bookkeeping(raw):
             return RoutingDecision(
                 domains=(DOMAIN_TRANSACTION,),
                 matched=True,
-                signals=(AMOUNT_FORM_SIGNAL,),
+                signals=(BOOKKEEPING_FORM_SIGNAL,),
             )
         return RoutingDecision(domains=DOMAINS, matched=False, signals=())
 
