@@ -450,21 +450,33 @@ def device_channel() -> DeviceChannel:
     return _channel
 
 
-def to_openai_tools(tools: Sequence[DeviceTool]) -> list[dict[str, Any]]:
+def to_openai_tools(
+    tools: Sequence[DeviceTool], *, compact: bool = False, bare: bool = False,
+) -> list[dict[str, Any]]:
     """设备能力的 provider 载荷（与 ``tools.to_openai_tools`` 同形状）。
 
     形状必须一致——两处都是喂给同一个 provider 的 ``tools`` 字段。设备能力不是
     ``tools.Tool``（没有 handler、没有 proposal_action），因此各生成各的清单，
     一致性由用例钉住（``test_device_openai_payload_matches_tool_payload``）。
     """
-    return [
-        {
+    from .tools import _compact_parameters, _compact_text
+
+    out: list[dict[str, Any]] = []
+    for tool in tools:
+        description = tool.description
+        parameters = tool.parameters
+        if compact or bare:
+            description = _compact_text(description, 80)
+        if bare:
+            parameters = _compact_parameters(parameters, drop_descriptions=True)
+        elif compact:
+            parameters = _compact_parameters(parameters, drop_descriptions=False)
+        out.append({
             "type": "function",
             "function": {
                 "name": tool.name,
-                "description": tool.description,
-                "parameters": tool.parameters,
+                "description": description,
+                "parameters": parameters,
             },
-        }
-        for tool in tools
-    ]
+        })
+    return out

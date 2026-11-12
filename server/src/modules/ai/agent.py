@@ -1149,10 +1149,11 @@ class AgentLoop:
         #: 本轮的路由结果（05g）。``__init__`` 先摆成「全量兜底」——与 P1 的注入面
         #: 逐字相同；真正的决策在 :meth:`run`。
         self._route = RoutingDecision(domains=DOMAINS, matched=False, signals=())
-        self._inject(
-            self._fixed_tools if self._fixed_tools is not None
-            else self._default_tools(DOMAINS),
-        )
+        if self._fixed_tools is not None:
+            self._inject(self._fixed_tools)
+        else:
+            # M8-成本：默认路径打开描述压缩（全轮生效）。
+            self._inject(self._default_tools(DOMAINS), compact=True)
         self._limits = limits or AgentLimits()
         self._approver = approver
         self._executor = executor
@@ -1193,22 +1194,36 @@ class AgentLoop:
               if tool.name not in DETERMINISTIC_DEVICE_TOOLS),
         ]
 
-    def _inject(self, tools: Sequence[Tool | DeviceTool]) -> None:
+    def _inject(
+        self,
+        tools: Sequence[Tool | DeviceTool],
+        *,
+        compact: bool = False,
+        bare: bool = False,
+    ) -> None:
         """设定注入面：工具清单、可执行集合与 provider 载荷**三者同源**。
 
         ``_advertised`` 是隔离边界：模型报出一个存在于注册表、但本轮**没有注入**
         的工具名时必须拒绝（域路由一开启，漏注入的域就靠这一层拦住，见
         :meth:`_run_tools`）。三者分开赋值就会出现「载荷收窄了、可执行集合没收」
         这类只在真实链路上暴露的失配，因此只留这一个入口。
+
+        ``compact`` / ``bare`` 是 M8 成本的描述压缩（见
+        :func:`tools.to_openai_tools`）：**默认路径**打开 ``compact``；兜底轮再
+        加 ``bare``。显式 ``tools``（用例/探针）保持完整描述。
         """
         self._tools = list(tools)
         self._advertised = {tool.name for tool in self._tools}
         #: 两份清单各生成各的（设备能力不是 ``Tool``：没有 handler、没有
         #: proposal_action），形状由 ``devices.to_openai_tools`` 的用例钉住一致。
         self._openai_tools = [
-            *to_openai_tools([t for t in self._tools if not isinstance(t, DeviceTool)]),
+            *to_openai_tools(
+                [t for t in self._tools if not isinstance(t, DeviceTool)],
+                compact=compact, bare=bare,
+            ),
             *device_to_openai_tools(
-                [t for t in self._tools if isinstance(t, DeviceTool)]
+                [t for t in self._tools if isinstance(t, DeviceTool)],
+                compact=compact, bare=bare,
             ),
         ]
 
@@ -1264,7 +1279,11 @@ class AgentLoop:
             injected_domains = (
                 self._route.domains if self._route.matched else FALLBACK_DOMAINS
             )
-            self._inject(self._default_tools(injected_domains))
+            self._inject(
+                self._default_tools(injected_domains),
+                compact=True,
+                bare=not self._route.matched,
+            )
         # 本轮输入**先落库**再发第一次请求（04b）：断在模型请求里时，日志里至少
         # 有用户的这句话——恢复后的下一轮因此知道刚才在问什么，而不是从零开始。
         # 它是本轮的**第一次**写入，轮号在这里分配（后面各批挂在同一个轮号上）。

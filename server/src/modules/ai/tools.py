@@ -4826,19 +4826,75 @@ def get_tool(name: str) -> Tool | None:
     return TOOLS_BY_NAME.get(name)
 
 
-def to_openai_tools(tools: Sequence[Tool]) -> list[dict[str, Any]]:
-    """转成 OpenAI 兼容的 ``tools`` 载荷（架构 §7.1 的服务端工具清单）。"""
-    return [
-        {
+#: M8-成本：provider 载荷里的描述上限（字符）。工具描述截到**首句**、参数描述截
+#: 到一句——描述只占全量 schema 的 20%/13%，但仍是每个 Step 都要重发的纯文本；
+#: 参数名/类型/required/enum **一个不动**（模型选择靠它们）。
+_TOOL_DESC_LIMIT = 80
+_PARAM_DESC_LIMIT = 40
+
+
+def _compact_text(text: str, limit: int) -> str:
+    """截到首行首句，超过 ``limit`` 再硬截。保留语义、去掉示例与展开说明。"""
+    if not text:
+        return text
+    first = text.strip().split("\n", 1)[0]
+    for sep in ("。", "；"):
+        if sep in first:
+            first = first.split(sep, 1)[0] + sep
+            break
+    return first if len(first) <= limit else first[: limit - 1] + "…"
+
+
+def _compact_parameters(
+    params: dict[str, Any], *, drop_descriptions: bool,
+) -> dict[str, Any]:
+    """参数结构原样保留，只压缩/去掉 ``description`` 文本（递归到 items/properties）。"""
+
+    def walk(node: Any) -> Any:
+        if isinstance(node, dict):
+            out: dict[str, Any] = {}
+            for key, value in node.items():
+                if key == "description" and isinstance(value, str):
+                    if not drop_descriptions:
+                        out[key] = _compact_text(value, _PARAM_DESC_LIMIT)
+                else:
+                    out[key] = walk(value)
+            return out
+        if isinstance(node, list):
+            return [walk(item) for item in node]
+        return node
+
+    return walk(params)
+
+
+def to_openai_tools(
+    tools: Sequence[Tool], *, compact: bool = False, bare: bool = False,
+) -> list[dict[str, Any]]:
+    """转成 OpenAI 兼容的 ``tools`` 载荷（架构 §7.1 的服务端工具清单）。
+
+    ``compact``（M8-成本，默认由 agent 打开）：工具/参数描述截到首句；``bare``：
+    在 ``compact`` 之上**去掉参数描述**（兜底轮——工具少、模型对这四个域熟悉，
+    参数名足够）。两者都不改参数名、类型、required、enum。
+    """
+    out: list[dict[str, Any]] = []
+    for tool in tools:
+        description = tool.description
+        parameters = tool.parameters
+        if compact or bare:
+            description = _compact_text(description, _TOOL_DESC_LIMIT)
+        if bare:
+            parameters = _compact_parameters(parameters, drop_descriptions=True)
+        elif compact:
+            parameters = _compact_parameters(parameters, drop_descriptions=False)
+        out.append({
             "type": "function",
             "function": {
                 "name": tool.name,
-                "description": tool.description,
-                "parameters": tool.parameters,
+                "description": description,
+                "parameters": parameters,
             },
-        }
-        for tool in tools
-    ]
+        })
+    return out
 
 
 _PARAM_VALIDATORS: dict[str, Draft7Validator] = {
