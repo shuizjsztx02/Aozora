@@ -316,23 +316,30 @@ class TestSummaryUsage:
         service = ConversationService(db, _cfg(ai_agent_history_turns=2))
         conversation = await _seed(service, user, book, 3)
 
+        provider = _SummaryProvider()
         assert await service.summarize_overflow(
-            conversation, _SummaryProvider(), request_id="req-summary-1",
+            conversation, provider, request_id="req-summary-1",
         ) is True
 
         usage = [e for e in await _events(db, conversation) if e.type == EVENT_USAGE]
         assert len(usage) == 1
-        assert usage[0].data == {
-            "kind": "summary",
-            "step": None,
-            "level": None,
-            "provider": "scripted",
-            "model": MODEL,
-            "prompt_tokens": 3,
-            "completion_tokens": 5,
-            "tokens": 8,
-            "tool_calls": [],
-        }
+        data = usage[0].data
+        assert data["kind"] == "summary"
+        assert data["step"] is None
+        assert data["call"] is None
+        assert data["level"] is None
+        assert data["provider"] == "scripted"
+        assert data["model"] == MODEL
+        assert data["prompt_tokens"] == 3
+        assert data["completion_tokens"] == 5
+        assert data["tokens"] == 8
+        assert data["tool_calls"] == []
+        # M8-13：压缩是独立补全——输入全量记录，不参与 loop 的链式重建。
+        request = data["request"]
+        assert request["base_call"] is None
+        assert request["system"] == provider.calls[-1][0]["content"]
+        assert [m["role"] for m in request["append"]] == ["user"]
+        assert request["tools"] == [] and request["tools_chars"] == 0
         assert usage[0].turn == (await _replaces(db, conversation))[0].turn
         assert usage[0].request_id == "req-summary-1"
 

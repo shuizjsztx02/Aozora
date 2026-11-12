@@ -1520,6 +1520,118 @@ class TestStepUsage:
 
 
 
+# ── 7c. 模型输入快照（M8-13）──────────────────────────────────────────────
+
+
+def _rebuild_prompts(usage_events: list[Any]) -> dict[int, list[dict[str, Any]]]:
+    """模拟管理端：按 ``(turn, call)`` 把 ``request.append`` 链式拼回完整输入。
+
+    与前端 `EventTimeline` 的重建口径一致：``system`` 取**当前**调用那一条
+    （步间可能被域知识改写），消息体按 ``base_call`` 链从首条拼到当前条。
+    """
+    by_call = {
+        e.data["call"]: e for e in usage_events if e.data.get("call") is not None
+    }
+    rebuilt: dict[int, list[dict[str, Any]]] = {}
+    for call, event in by_call.items():
+        chain: list[Any] = []
+        current: Any = event
+        while current is not None:
+            chain.append(current)
+            base = current.data["request"]["base_call"]
+            current = by_call.get(base) if base is not None else None
+        messages: list[dict[str, Any]] = [{
+            "role": "system", "content": event.data["request"]["system"],
+        }]
+        for node in reversed(chain):
+            messages.extend(node.data["request"]["append"])
+        rebuilt[call] = messages
+    return rebuilt
+
+
+class TestPromptSnapshot:
+    async def test_rebuilt_prompts_equal_what_the_provider_received(
+        self, stream_env: StreamEnv,
+    ):
+        stream_env.provider.reset([
+            _tool_turn(_call("budget_list", _budget_args(), id="call_budget")),
+            _text("这个月还没有设置预算。", prompt=9, completion=3),
+        ])
+        _, body = await stream_env.turn("看看预算")
+        conversation_id = uuid.UUID(payload_of(body, "done")["conversation_id"])
+        usage = [
+            e for e in await _rows(stream_env, AIConversationEvent,
+                                   conversation_id=conversation_id)
+            if e.type == "usage"
+        ]
+
+        rebuilt = _rebuild_prompts(usage)
+        assert rebuilt[1] == stream_env.provider.calls[0]["messages"]
+        assert rebuilt[2] == stream_env.provider.calls[1]["messages"]
+
+    async def test_system_is_recorded_per_call_and_tools_def_only_once(
+        self, stream_env: StreamEnv,
+    ):
+        stream_env.provider.reset([
+            _tool_turn(_call("budget_list", _budget_args())),
+            _text("这个月还没有设置预算。"),
+        ])
+        _, body = await stream_env.turn("看看预算")
+        conversation_id = uuid.UUID(payload_of(body, "done")["conversation_id"])
+        usage = [
+            e for e in await _rows(stream_env, AIConversationEvent,
+                                   conversation_id=conversation_id)
+            if e.type == "usage"
+        ]
+
+        # system 逐调用记录（不是只在首步存一次）。
+        for event in usage:
+            assert event.data["request"]["system"] == (
+                stream_env.provider.calls[event.data["call"] - 1]["messages"][0]
+                ["content"]
+            )
+        # 完整 schema 只在本轮首次调用出现；后续调用只记名称与字符数。
+        first, second = usage
+        assert "tools_def" in first.data["request"]
+        assert "tools_def" not in second.data["request"]
+        sent_tools = stream_env.provider.calls[0]["tools"]
+        assert first.data["request"]["tools"] == [
+            tool["function"]["name"] for tool in sent_tools
+        ]
+        assert second.data["request"]["tools"] == first.data["request"]["tools"]
+        assert (
+            second.data["request"]["tools_chars"]
+            == first.data["request"]["tools_chars"]
+        )
+        # 增量语义：第 2 次请求只新增「上一步的 assistant + tool」两条。
+        assert [m["role"] for m in second.data["request"]["append"]] == [
+            "assistant", "tool",
+        ]
+        assert second.data["request"]["base_call"] == 1
+
+    async def test_wrap_up_request_carries_the_wrap_up_instruction(
+        self, stream_env: StreamEnv,
+    ):
+        stream_env.provider.reset([
+            _tool_turn(_call("no_such_tool")),
+            _tool_turn(_call("no_such_tool")),
+            _text("已完成部分，未完成其余。"),
+        ])
+        _, body = await stream_env.turn("随便干点什么")
+        conversation_id = uuid.UUID(payload_of(body, "done")["conversation_id"])
+        usage = [
+            e for e in await _rows(stream_env, AIConversationEvent,
+                                   conversation_id=conversation_id)
+            if e.type == "usage"
+        ]
+
+        wrap_up = usage[-1]
+        assert wrap_up.data["kind"] == "wrap_up"
+        assert "系统提示" in wrap_up.data["request"]["append"][-1]["content"]
+        rebuilt = _rebuild_prompts(usage)
+        assert rebuilt[3] == stream_env.provider.calls[2]["messages"]
+
+
 class TestWritePath:
     async def test_multi_step_write_hangs_and_emits_confirm(
         self, stream_env: StreamEnv,

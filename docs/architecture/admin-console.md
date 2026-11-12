@@ -50,7 +50,7 @@ User (users)
 | `assistant` | ✅ `TurnWriter` | 回复 + `reasoning_content` + `tool_calls` |
 | `tool` | ✅ `TurnWriter` | 工具结果，与 `tool_calls` 同批落库 |
 | `quota` | ✅ `record_turn` | provider / model / prompt_tokens / completion_tokens / tokens（**每轮合计一条**） |
-| `usage` | ✅ `AgentLoop.step` / `_wrap_up` / `summarize_overflow`（M8-12） | 每次模型调用一条：kind（step / wrap_up / summary）/ step / 档位 / 输入 / 输出 / 该步发起的工具调用（§2.5） |
+| `usage` | ✅ `AgentLoop.step` / `_wrap_up` / `summarize_overflow`（M8-12 / M8-13） | 每次模型调用一条：kind（step / wrap_up / summary）/ step / call / 档位 / 输入输出 / **模型输入快照**（system + 增量消息 + 工具定义）/ 该步发起的工具调用（§2.5） |
 | `error` | ✅ `stream._record_failure` | 安全错误码 + 固定文案（已脱敏） |
 | `replace` | ✅ `summarize_overflow` | 摘要替换位置 |
 | `approval_request` | **M8-02 新增** | 提问理由、提案标识、Step |
@@ -90,6 +90,10 @@ APP-CONTEXT §4.6 已按此口径修订。
 | `provider` / `model` | 该次调用的服务商与模型 |
 | `prompt_tokens` / `completion_tokens` / `tokens` | 该次调用的用量 |
 | `tool_calls` | `[{id, name}]`：该次调用产出的工具调用；`id` 与 assistant 事件 `data.tool_calls[].id` 同源；`wrap_up` / `summary` 为空数组 |
+| `call` | 轮内第几次模型调用（1 起）——`request` 链式重建的引用键（M8-13） |
+| `request` | 该次调用的**模型输入快照**（M8-13）：`base_call / system / append / tools / tools_chars / tools_def?`，见下 |
+
+**模型输入快照（M8-13）：** 用户要求看到「每次进模型的 prompt」，因此 `usage` 携带输入而不是只给 token 数。**增量编码**：`system` 逐调用记录（步间可能被域知识改写），`append` 只存自上一次调用以来新增的消息，`base_call` 指向前一次调用——管理端链式拼出的 messages 数组与实际发送**逐字节一致**。`tools` 只存名称与序列化字符数；完整 schema（`tools_def`）仅在该次调用工具集变化时存一次。不存 provider 原始 HTTP 请求体（头/密钥/流参数）。默认脱敏与 `reveal` 审计对快照同样生效。
 
 **写点与保证：**
 

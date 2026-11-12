@@ -1190,6 +1190,13 @@ class AgentLoop:
         self._prompt_tokens = 0
         self._completion_tokens = 0
         self._summary = ""
+        # M8-13：模型输入快照的轮内状态（每条 ``usage`` 一条 ``request``）。
+        #: 已写出的模型调用序号（``usage.call`` 从 1 起）。
+        self._call_index = 0
+        #: ``self._messages[1:]`` 中已快照的条数（system 逐调用单独记录）。
+        self._messages_snapshot = 0
+        #: 上一次写进 ``tools_def`` 的工具集（相同则后续调用只记名称与字符数）。
+        self._tools_snapshot: list[dict[str, Any]] | None = None
 
     # -- 注入面 ---------------------------------------------------------
 
@@ -1356,6 +1363,9 @@ class AgentLoop:
         # 域知识与**即将发出的这次请求**同步（T-M7-05h）：幂等，没有新的域命中就
         # 不改动系统提示。
         self._load_skills()
+        # M8-13：在发请求之前采下输入快照——此刻的 system 已含本步域知识，
+        # 消息数组也就是这次实际发出去的那一份。
+        request = self._request_payload(list(self._messages), self._openai_tools)
         result = await self._stream_step(
             list(self._messages), tools=self._openai_tools, reasoning=level,
         )
@@ -1374,7 +1384,7 @@ class AgentLoop:
         # 是「用量 → assistant」，断连/失败时这一步的账也已经留下。
         await self._emit_structural(EVENT_USAGE, self._usage_payload(
             kind=USAGE_KIND_STEP, step=self._steps, level=level, result=result,
-            calls=calls,
+            request=request, calls=calls,
         ))
         assistant = self._append(self._assistant_message(result, calls))
 
@@ -1429,6 +1439,10 @@ class AgentLoop:
         #: 本轮已加载的**域知识**的域集合（T-M7-05h）。每轮从空开始——上一轮用过
         #: 的域不该在这一轮继续占着系统提示。
         self._skill_domains: set[str] = set()
+        # M8-13：输入快照的游标每轮归零（``usage.call`` 是轮内序号）。
+        self._call_index = 0
+        self._messages_snapshot = 0
+        self._tools_snapshot = None
 
     def _system_message(self) -> dict[str, Any]:
         prompt = (
@@ -1566,17 +1580,23 @@ class AgentLoop:
         step: int,
         level: ReasoningLevel | None,
         result: ProviderResult,
+        request: Mapping[str, Any],
         calls: Sequence[tuple[str, ToolCall]] = (),
     ) -> dict[str, Any]:
-        """一次模型调用的 ``usage`` 事件载荷（M8-12，架构 §2.5 admin-console）。
+        """一次模型调用的 ``usage`` 事件载荷（M8-12 / M8-13，架构 §2.5）。
 
         ``tool_calls`` 里的 id 取自 :meth:`_assistant_tool_calls` 定格后的结果，
         与随后落库的 assistant 消息 ``data.tool_calls[].id`` **同源**——管理端
         因此能按 id 把「本步用量」贴到工具卡上，不靠顺序或名字去猜。
+
+        ``call`` / ``request`` 是 M8-13 的输入快照：``call`` 是轮内序号，
+        ``request`` 由 :meth:`_request_payload` 在**发请求之前**采下——两者一起
+        让管理端链式重建「这一次模型到底看到了什么」。
         """
-        return {
+        payload = {
             "kind": kind,
             "step": step,
+            "call": self._call_index + 1,
             "level": str(level) if level is not None else None,
             "provider": self._provider.name,
             "model": self._model,
@@ -1587,7 +1607,45 @@ class AgentLoop:
                 {"id": call_id, "name": call.name}
                 for call_id, call in calls
             ],
+            "request": dict(request),
         }
+        self._call_index += 1
+        return payload
+
+    def _request_payload(
+        self, messages: Sequence[dict[str, Any]], tools: Sequence[dict[str, Any]],
+    ) -> dict[str, Any]:
+        """一次模型调用的**输入快照**（M8-13）——增量编码，不回放整段历史。
+
+        ``system`` 逐调用记录：``_load_skills`` 会在步与步之间改写
+        ``self._messages[0]``，只存一次会失真。``append`` 只存自上一次调用以来
+        新增的消息，``base_call`` 指向上一次调用——管理端按 ``(turn, call)``
+        链式拼出的数组与实际发送逐字节相同（用例直接拿 provider 收到的载荷对比）。
+
+        ``tools`` 只记名称与序列化字符数；完整 schema 仅在该次调用的工具集与本轮
+        上一次**不同**时写进 ``tools_def``（首步一次）。这是体积与精确性的取舍：
+        每步重复存 10–35 KB 的 schema 没有信息增量。
+        """
+        system = ""
+        body = list(messages)
+        if body and body[0].get("role") == "system":
+            system = str(body[0].get("content", ""))
+            body = body[1:]
+        append = [copy.deepcopy(message) for message in body[self._messages_snapshot:]]
+        self._messages_snapshot = len(body)
+        payload: dict[str, Any] = {
+            "base_call": self._call_index or None,
+            "system": system,
+            "append": append,
+            "tools": [
+                str(tool.get("function", {}).get("name", "")) for tool in tools
+            ],
+            "tools_chars": len(json.dumps(list(tools), ensure_ascii=False)),
+        }
+        if tools and list(tools) != self._tools_snapshot:
+            payload["tools_def"] = copy.deepcopy(list(tools))
+            self._tools_snapshot = copy.deepcopy(list(tools))
+        return payload
 
     def _notify(self, hook: str, **kwargs: Any) -> None:
         """调用观察者的一个钩子，**异常一律吞掉**（见 ``AgentObserver``）。
@@ -2044,6 +2102,8 @@ class AgentLoop:
         ]
         content = ""
         reasoning = ""
+        # M8-13：收尾请求的输入快照（append 里是那条收尾指令）。
+        request = self._request_payload(messages, tools=[])
         try:
             result = await self._provider.complete_with_tools(
                 messages,
@@ -2062,7 +2122,7 @@ class AgentLoop:
             # 事件说明这笔钱花在了哪一步。
             await self._emit_structural(EVENT_USAGE, self._usage_payload(
                 kind=USAGE_KIND_WRAP_UP, step=self._steps,
-                level=ReasoningLevel.DEEP, result=result,
+                level=ReasoningLevel.DEEP, result=result, request=request,
             ))
             content = result.content.strip()
             reasoning = result.reasoning_content

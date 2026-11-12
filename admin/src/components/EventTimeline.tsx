@@ -163,6 +163,8 @@ export function EventTimeline({
   const approvalResults = collectApprovalResults(events)
   // M8-12：工具调用 id → 产出它的那次模型调用的 `usage` 事件。
   const usageByCall = collectUsageByCall(events)
+  // M8-13：轮内调用序号 → `usage` 事件（输入快照链式重建的索引）。
+  const usageByCallIndex = collectUsageByCallIndex(events)
 
   return (
     <div className={cn('space-y-2', isLoading && 'opacity-60')}>
@@ -185,6 +187,7 @@ export function EventTimeline({
               key={`event-${entry.event.seq}`}
               event={entry.event}
               approvalResults={approvalResults}
+              usageByCallIndex={usageByCallIndex}
               hasMore={hasMore}
             />
           ),
@@ -255,6 +258,64 @@ function collectUsageByCall(events: EventItem[]): Map<string, EventItem> {
   return byCall
 }
 
+/** 轮内调用序号 → `usage` 事件（M8-13 链式重建的索引）。 */
+function collectUsageByCallIndex(events: EventItem[]): Map<number, EventItem> {
+  const byCall = new Map<number, EventItem>()
+  for (const event of events) {
+    if (event.type !== 'usage') continue
+    const call = asNumber(event.data.call)
+    if (call !== null) byCall.set(call, event)
+  }
+  return byCall
+}
+
+/**
+ * M8-13：按 `request.base_call` 链式重建该次调用的**完整输入**。
+ *
+ * 与服务端写入口径一致：`system` 取当前调用那一条（步间可能被域知识改写），
+ * 消息体按链从首条拼到当前条；`tools_def` 取链上最近一条带完整 schema 的。
+ */
+function reconstructPrompt(
+  event: EventItem,
+  usageByCallIndex: Map<number, EventItem>,
+): { messages: Record<string, unknown>[]; toolsDef: unknown[] | null } | null {
+  if (!isRecord(event.data.request)) return null
+  const chain: EventItem[] = []
+  const seen = new Set<number>()
+  let current: EventItem | undefined = event
+  while (current) {
+    chain.unshift(current)
+    const request = isRecord(current.data.request) ? current.data.request : null
+    const base = request ? asNumber(request.base_call) : null
+    if (base === null || seen.has(base)) break
+    seen.add(base)
+    current = usageByCallIndex.get(base)
+  }
+
+  const messages: Record<string, unknown>[] = []
+  const system = asString(event.data.request.system)
+  if (system) messages.push({ role: 'system', content: system })
+  for (const node of chain) {
+    const request = isRecord(node.data.request) ? node.data.request : null
+    const append = request && Array.isArray(request.append) ? request.append : []
+    for (const message of append) {
+      if (isRecord(message)) messages.push(message)
+    }
+  }
+
+  let toolsDef: unknown[] | null = null
+  for (let index = chain.length - 1; index >= 0; index -= 1) {
+    const request = isRecord(chain[index]!.data.request)
+      ? (chain[index]!.data.request as Record<string, unknown>)
+      : null
+    if (request && Array.isArray(request.tools_def)) {
+      toolsDef = request.tools_def
+      break
+    }
+  }
+  return { messages, toolsDef }
+}
+
 function extractToolCalls(data: Record<string, unknown>): ToolCallInfo[] {
   const raw = data.tool_calls
   if (!Array.isArray(raw)) return []
@@ -277,10 +338,12 @@ function extractToolCalls(data: Record<string, unknown>): ToolCallInfo[] {
 function EventItemCard({
   event,
   approvalResults,
+  usageByCallIndex,
   hasMore,
 }: {
   event: EventItem
   approvalResults: Map<string, EventItem>
+  usageByCallIndex: Map<number, EventItem>
   hasMore: boolean
 }) {
   const meta = TYPE_META[event.type] ?? FALLBACK_META
@@ -292,7 +355,12 @@ function EventItemCard({
       />
       <div className="rounded-md border border-gray-200 bg-white px-3 py-2">
         <EventHeader event={event} meta={meta} />
-        <EventBody event={event} approvalResults={approvalResults} hasMore={hasMore} />
+        <EventBody
+          event={event}
+          approvalResults={approvalResults}
+          usageByCallIndex={usageByCallIndex}
+          hasMore={hasMore}
+        />
       </div>
     </li>
   )
@@ -327,10 +395,12 @@ function EventHeader({
 function EventBody({
   event,
   approvalResults,
+  usageByCallIndex,
   hasMore,
 }: {
   event: EventItem
   approvalResults: Map<string, EventItem>
+  usageByCallIndex: Map<number, EventItem>
   hasMore: boolean
 }) {
   switch (event.type) {
@@ -343,7 +413,7 @@ function EventBody({
     case 'quota':
       return <QuotaBody event={event} />
     case 'usage':
-      return <UsageBody event={event} />
+      return <UsageBody event={event} usageByCallIndex={usageByCallIndex} />
     case 'error':
       return <ErrorBody event={event} />
     case 'replace':
@@ -436,10 +506,17 @@ function QuotaBody({ event }: { event: EventItem }) {
   )
 }
 
-/** M8-12：一次模型调用的用量（Step / 收尾 / 摘要压缩）。 */
-function UsageBody({ event }: { event: EventItem }) {
+/** M8-12 / M8-13：一次模型调用的用量与**完整输入**（Step / 收尾 / 摘要压缩）。 */
+function UsageBody({
+  event,
+  usageByCallIndex,
+}: {
+  event: EventItem
+  usageByCallIndex: Map<number, EventItem>
+}) {
   const kind = asString(event.data.kind) ?? 'step'
   const step = asNumber(event.data.step)
+  const call = asNumber(event.data.call)
   const level = asString(event.data.level)
   const provider = asString(event.data.provider) ?? '—'
   const model = asString(event.data.model) ?? '—'
@@ -447,30 +524,88 @@ function UsageBody({ event }: { event: EventItem }) {
   const promptTokens = asNumber(event.data.prompt_tokens)
   const completionTokens = asNumber(event.data.completion_tokens)
   const tools = usageToolNames(event.data)
+  const toolsChars = asNumber(event.data.tools_chars)
+  const prompt = reconstructPrompt(event, usageByCallIndex)
   const headline =
     kind === 'step' && step !== null ? `Step ${step}` : (USAGE_KIND_LABELS[kind] ?? kind)
   return (
-    <div className="mt-1 flex flex-wrap items-center gap-2 text-xs">
-      <span className="rounded bg-teal-50 px-1.5 py-0.5 font-medium text-teal-700 ring-1 ring-inset ring-teal-200">
-        {headline}
-      </span>
-      {level ? <span className="text-gray-500">{REASONING_LABELS[level] ?? level}</span> : null}
-      <span className="rounded bg-emerald-50 px-1.5 py-0.5 font-medium text-emerald-700 ring-1 ring-inset ring-emerald-200">
-        {model}
-      </span>
-      <span className="text-gray-500">{provider}</span>
-      {tokens !== null ? (
-        <span className="rounded bg-gray-100 px-1.5 py-0.5 font-mono text-gray-700">
-          {tokens.toLocaleString()} tokens
+    <div className="mt-1 space-y-1 text-xs">
+      <div className="flex flex-wrap items-center gap-2">
+        <span className="rounded bg-teal-50 px-1.5 py-0.5 font-medium text-teal-700 ring-1 ring-inset ring-teal-200">
+          {headline}
         </span>
-      ) : null}
-      {promptTokens !== null || completionTokens !== null ? (
-        <span className="text-gray-400">
-          输入 {promptTokens ?? '—'} / 输出 {completionTokens ?? '—'}
+        {call !== null ? <span className="text-gray-400">call {call}</span> : null}
+        {level ? <span className="text-gray-500">{REASONING_LABELS[level] ?? level}</span> : null}
+        <span className="rounded bg-emerald-50 px-1.5 py-0.5 font-medium text-emerald-700 ring-1 ring-inset ring-emerald-200">
+          {model}
         </span>
+        <span className="text-gray-500">{provider}</span>
+        {tokens !== null ? (
+          <span className="rounded bg-gray-100 px-1.5 py-0.5 font-mono text-gray-700">
+            {tokens.toLocaleString()} tokens
+          </span>
+        ) : null}
+        {promptTokens !== null || completionTokens !== null ? (
+          <span className="text-gray-400">
+            输入 {promptTokens ?? '—'} / 输出 {completionTokens ?? '—'}
+          </span>
+        ) : null}
+        {tools.length > 0 ? (
+          <span className="text-gray-500">工具：{tools.join(' / ')}</span>
+        ) : null}
+      </div>
+      {prompt ? (
+        <details className="rounded-md border border-gray-200 bg-gray-50 px-2 py-1">
+          <summary className="cursor-pointer select-none text-xs text-gray-500">
+            模型输入：{prompt.messages.length} 条消息
+            {tools.length > 0
+              ? ` · 工具 ${tools.length} 个${toolsChars !== null ? `（${toolsChars.toLocaleString()} 字符）` : ''}`
+              : ''}
+          </summary>
+          <div className="mt-1 space-y-1">
+            {prompt.messages.map((message, index) => (
+              <PromptMessage key={index} message={message} />
+            ))}
+            {prompt.toolsDef ? (
+              <details className="rounded border border-gray-200 bg-white px-2 py-1">
+                <summary className="cursor-pointer select-none text-[11px] text-gray-500">
+                  工具定义（{prompt.toolsDef.length} 个）
+                </summary>
+                <JsonViewer value={prompt.toolsDef} label="tools" className="mt-1" />
+              </details>
+            ) : null}
+          </div>
+        </details>
       ) : null}
-      {tools.length > 0 ? (
-        <span className="text-gray-500">工具：{tools.join(' / ')}</span>
+    </div>
+  )
+}
+
+/** 重建后的一条 prompt 消息（M8-13）。 */
+function PromptMessage({ message }: { message: Record<string, unknown> }) {
+  const role = asString(message.role) ?? '?'
+  const content = asString(message.content) ?? ''
+  const toolCalls = message.tool_calls
+  return (
+    <div className="rounded border border-gray-200 bg-white px-2 py-1">
+      <div className="flex flex-wrap items-center gap-2 text-[11px] text-gray-500">
+        <span className="rounded bg-gray-200 px-1 py-0.5 font-mono font-medium text-gray-700">
+          {role}
+        </span>
+        {content ? <span>{content.length} 字符</span> : null}
+        {asString(message.tool_call_id) ? (
+          <span className="font-mono text-gray-400">
+            tool_call_id {asString(message.tool_call_id)}
+          </span>
+        ) : null}
+      </div>
+      {content ? (
+        <pre className="mt-1 max-h-48 overflow-auto whitespace-pre-wrap break-words text-xs leading-relaxed text-gray-700">
+          {content}
+        </pre>
+      ) : null}
+      {Array.isArray(toolCalls) && toolCalls.length > 0 ? (
+        <JsonViewer value={toolCalls} label="tool_calls" className="mt-1" />
       ) : null}
     </div>
   )

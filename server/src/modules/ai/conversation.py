@@ -603,7 +603,7 @@ class ConversationService:
             return False
 
         try:
-            summary, usage = await self._generate_summary(
+            summary, usage, request = await self._generate_summary(
                 provider, conversation.summary, overflow,
             )
         except Exception as exc:  # noqa: BLE001 — 摘要失败不阻塞本轮
@@ -619,12 +619,14 @@ class ConversationService:
         usage_event = (EVENT_USAGE, {
             "kind": USAGE_KIND_SUMMARY,
             "step": None,
+            "call": None,
             "level": None,
             "provider": getattr(provider, "name", ""),
             "model": self._cfg.ai_agent_provider_model,
             **usage,
             # 单发补全没有工具调用——键恒在，管理端不必按 kind 分支判空。
             "tool_calls": [],
+            "request": request,
         })
         if summary is None:
             logger.warning(
@@ -693,23 +695,35 @@ class ConversationService:
         超时用单步超时（``ai_agent_step_timeout_seconds``）：这是一次单发补全，
         与 loop 里的一次模型请求同类，没有理由另设一个数字。
         """
+        messages = [
+            {"role": "system", "content": CONVERSATION_SUMMARY.system_prompt},
+            {
+                "role": "user",
+                "content": _render_summary_input(previous, overflow),
+            },
+        ]
         result = await provider.complete(
-            [
-                {"role": "system", "content": CONVERSATION_SUMMARY.system_prompt},
-                {
-                    "role": "user",
-                    "content": _render_summary_input(previous, overflow),
-                },
-            ],
+            messages,
             model=self._cfg.ai_agent_provider_model,
             max_tokens=CONVERSATION_SUMMARY.max_tokens,
             timeout=self._cfg.ai_agent_step_timeout_seconds,
         )
-        return _usable_summary(result.content, self._cfg.ai_agent_summary_chars), {
-            "prompt_tokens": result.prompt_tokens,
-            "completion_tokens": result.completion_tokens,
-            "tokens": result.prompt_tokens + result.completion_tokens,
-        }
+        return (
+            _usable_summary(result.content, self._cfg.ai_agent_summary_chars),
+            {
+                "prompt_tokens": result.prompt_tokens,
+                "completion_tokens": result.completion_tokens,
+                "tokens": result.prompt_tokens + result.completion_tokens,
+            },
+            # M8-13：摘要是一次独立补全——输入全量记录，不参与 loop 的链式重建。
+            {
+                "base_call": None,
+                "system": messages[0]["content"],
+                "append": [dict(messages[1])],
+                "tools": [],
+                "tools_chars": 0,
+            },
+        )
 
     # -- 恢复与分叉（04b）-------------------------------------------------
 
