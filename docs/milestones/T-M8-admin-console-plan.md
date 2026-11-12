@@ -22,7 +22,8 @@
 | **8-08** | 聚合统计与反查页 | ✅ 完成 | 2026-11-10 | `e853465` | 用量聚合（user/model/day 三组 + 合计行 + CSS 条形）与 `request_id` 反查（事件精确命中 / 仅 usage / 404 三态）；**按天日界已改为北京时间**（`queries._day_key`，PG `timezone('Asia/Shanghai', …)`）。**成功率与 P95 后端接口无字段，未展示**（记入已知限制） |
 | **8-09** | 导出 | ✅ 完成 | 2026-11-10 | `4086edc` | `POST /admin/export`：3 范围 × 2 内容、流式 NDJSON、keyset 分批（500/批）、上限 100,000 事件 → 422；结束时独立 session 写 `action="export"` 审计（范围/模式/条数/耗时）。前端 `ExportPage` + 会话列表「导出当前筛选」+ 回放页「导出本会话」。验证：新增 21 条（6 组合全绿）、服务端全量 **1876 passed**、ruff 全绿、tsc/build 通过 |
 | **8-10** | 部署、PII 与隐私政策 | ✅ 完成 | 2026-11-10 | 待提交 | **已上线 A 机**：`http://116.62.196.255/aozora-api/aozora-admin/`。**零 nginx 变更**（用户约束）——FastAPI `StaticFiles` 挂载 + 复用 `/aozora-api/` 反代；新增审计查询 `GET /admin/audit` + 前端页；隐私政策 §2.5 + `LegalPage` 同步（R-PROD-63 的「麦克风」一并移除）；`ADMIN_JWT_SECRET` 已在服务器 .env 配置；迁移 0024 已在 aozora_test 执行 |
-| **8-11** | 收口 | ✅ 完成 | 2026-11-10 | 待提交 | 四板：pytest **1878 passed / 37 skipped**、ruff 全绿、vitest **91 files / 1509 passed**、tsc 0 错、JVM **BUILD SUCCESSFUL**；admin build 通过；**线上真实数据走查**（会话「你好」→ 轮次 → 事件，`seq`/`turn` 与 PG 一致）。**M8 十一卡全部交付** |
+| **8-11** | 收口 | ✅ 完成 | 2026-11-10 | 待提交 | 四板：pytest **1878 passed / 37 skipped**、ruff 全绿、vitest **91 files / 1509 passed**、tsc 0 错、JVM **BUILD SUCCESSFUL**；admin build 通过；**线上真实数据走查**（会话「你好」→ 轮次 → 事件，`seq`/`turn` 与 PG 一致）。**M8 首期十一卡全部交付**（8-12 为 2026-11-12 追加跟进卡） |
+| **8-12** | 分步 token 用量观测（REQ-85 追加） | ✅ 完成 | 2026-11-12 | 待填 | 新结构性事件 `usage`：**每次模型调用一条**（Step / 收尾 / 摘要压缩），随步写入（断连也留档）；回放台显示每步输入/输出 token、档位与该步发起的工具调用，工具卡按 `tool_call_id` 标注「本步用量」。轮合计仍以 `quota` 为准；不新增 `ai_usage` 行、无迁移、无桥变更。验证：新增 6 条专项用例（分步 / 收尾 / 失败轮 / 摘要用量 ×2）+ 结构性事件参数化用例随白名单扩面；服务端 **1888 passed / 37 skipped**、ruff 全绿；vitest **1509 passed**；admin tsc/build 通过。残余 R-PROD-72 |
 
 **状态取值：** ⏳ 未开始 / 🔄 进行中 / ✅ 完成 / ⛔ 阻塞
 
@@ -46,6 +47,8 @@
 批次7  8-10
           ↓
 批次8  8-11
+          ↓
+批次9  8-12（独立跟进，无前置）
 ```
 
 | 批次 | 卡 | 可并行 | 说明 |
@@ -58,6 +61,7 @@
 | 6 | 8-09 | — | 导出需要回放页的入口 |
 | 7 | 8-10 | — | 隐私政策涉及客户端 `LegalPage` |
 | 8 | 8-11 | — | 收口 |
+| 9 | 8-12 | — | 2026-11-12 追加（REQ-85）；独立跟进卡，无前置，可与其它线并行 |
 
 **为什么把迁移集中到 8-03：** Alembic 是单链（`down_revision`），四个卡各带迁移必然分叉。把「schema 先行」统一到一张卡，后续卡只写代码，并行度最高，且迁移失败只影响一处。
 
@@ -157,6 +161,42 @@
 - **内容：** 四板全量 + 真实数据走查（检索 → 定位 → 回放 → 归因）+ 文档回填 + 风险册登记。
 - **验收：** 四板全绿；走查覆盖两条硬需求；风险册新增条目编号连续（起点 R-PROD-69）。
 
+### 8-12 分步 token 用量观测（REQ-85，2026-11-12 追加）
+
+- **背景：** 回放台目前只有每轮一条 `quota`（合计）。每步用量在 loop 里其实拿得到（`AgentObserver.step_finished`，`agent.py:1019-1026`），但只被累加进轮合计（`agent.py:1349-1350`）；撞边界的收尾调用只进合计、无法归属；摘要压缩那次模型调用的用量被直接丢弃（`conversation.py:650-673`）。用户要求把观测细化到「每次模型推理 / 每次工具调用步骤」的输入输出 token。
+- **内容：**
+  1. **新结构性事件 `usage`**（`EVENT_USAGE`，加入 `STRUCTURAL_EVENT_TYPES` / `EVENT_TYPES`），**每次模型调用一条**：
+     `{kind: "step" | "wrap_up" | "summary", step, level, provider, model, prompt_tokens, completion_tokens, tokens, tool_calls: [{id, name}]}`。
+     - `step`：loop 的 Step 序号（1 起）；`summary` 为 `null`。
+     - `level`：该次调用的推理档（`fast` / `medium` / `deep`）；`wrap_up` 恒 `deep`。
+     - `tool_calls`：该次调用产出的工具调用，`id` 与 assistant 事件 `data.tool_calls[].id` **同源**（`_assistant_tool_calls` 定格之后取），管理端可直接配对；`wrap_up` / `summary` 为空数组。
+  2. **写点：**
+     - Step：`AgentLoop.step()` 在模型调用返回、id 定格之后，**先写 `usage` 再写该步的 assistant 落库批**——`seq` 顺序因此是「用量 → 它产出的消息」，且随批提交，断连/失败时已完成步骤的用量已留档。
+     - `_wrap_up`：收尾调用成功返回后写一条（`kind="wrap_up"`）。
+     - `summarize_overflow`：`_generate_summary` 改为返回用量；provider 调用成功即写 `kind="summary"`，**摘要被拒也写**（钱已经花掉），`request_id` 一并带上。
+     - `MessageSink` 增补 `structural()` 能力（`TurnWriter.structural` 已存在）；loop 对 sink 按「有该方法才写」调用，既有测试替身不改也能跑。
+     - 既有按「事件序列」断言的用例要同步纳入 `usage` 行；`_paired_prefix_len` / `history()` 等按 Surface 白名单工作的路径**不受影响**（结构性事件不改变配对与上下文判据）。
+  3. **口径不动：** `quota` 事件与 `ai_usage` 行一字不改，仍是每轮一条合计。`usage` 只做观测，**不参与配额**——guest 日配额按 `ai_usage` **行数**计数（`service.py:227-252`），新增行会改变配额语义。
+  4. **白名单同步点：** `conversation.py` 的三个常量 → `ai-agent-architecture.md` §6.2 事件表 → `admin/src/components/EventTimeline.tsx` 的 `TYPE_META`。`type` 列 `varchar(32)` 足够，**无迁移**。
+  5. **管理端：**
+     - 回放页时间轴把 `usage` 渲染为紧凑一行（Step / 档位 / 输入 / 输出 / 触发的工具），并按 `tool_calls[].id` 在工具卡上标注「本步用量」。
+     - 轮次合计、`/admin/ai-usage/summary` 聚合、`request_id` 反查口径**均不变**；反查页的事件类型列表自动多出 `usage`。
+     - 载荷不含正文，`reveal` 脱敏无新增面。
+- **职责边界：**
+  - **不新增 `ai_usage` 行**、不改 `quota` / `replace` 载荷形状、不改 `check_daily_quota`。
+  - 不改 `/admin` API 形状（`/events` 原样透传）；不做图表/告警；**不加桥命令、客户端零改动**（结构性事件不在重建白名单内）。
+  - 不采集 prompt cache hit/miss（provider 未解析）、不拆分 reasoning tokens、不做输入/输出差异定价（`ai_price_per_1m_tokens` 是混合价）。
+  - 不覆盖快路径（`/ai/interpret` 等非会话车道没有事件日志）。
+  - 摘要压缩用量进事件但**不进** `ai_usage` / 成本聚合——已知限制，交付时登记风险册（R-PROD-72 起）。
+- **验收：**
+  - 一轮 2 Step + 1 次工具调用：事件序列为 `user` → `usage(step1, 含工具 id)` → `assistant+tool` → `usage(step2)` → `assistant` → `quota`；不变量 `quota.tokens == Σ(kind=step).tokens + Σ(kind=wrap_up).tokens`。
+  - 撞硬边界轮：存在一条 `kind="wrap_up"` 且计入合计；失败轮：已完成步骤的 `usage` 在库，`quota` 合计与已写 `usage` 之和相等（`_record_failure` 的 observer 口径）。
+  - 摘要轮：`replace` 照旧 + `usage(kind="summary")` 一条；**反向验证** `ai_usage` 行数不因压缩增加。
+  - 客户端：历史重建遇到 `usage` 不产消息、不抛错（vitest）；`usage` 不出现在 `history()`（结构性不进上下文）。
+  - 管理端：回放页与 PG 直查一致；旧会话（无 `usage`）不回归；用量聚合页数字不变。
+- **依赖：** 无（8-02 / 8-03 / 8-07 / 8-08 均已收口），可独立开工。
+- **交付（2026-11-12）：** 服务端 `agent.py`（Step / 收尾写点）、`conversation.py`（事件常量 + 摘要用量）、`stream.py`（`request_id` 透传）；管理端 `EventTimeline.tsx`（`usage` 行 + 工具卡标注）；客户端仅补重建用例。**反向验证已做**：把 `_emit_structural` 改成空操作后，4 条分步用例全部变红。
+
 ---
 
 ## 四、领卡通用红线
@@ -168,3 +208,4 @@
 5. **审批四值不合并**；区分服务端确认与客户端上报，未上报不得推断为拒绝。
 6. **`search_text` 与事件同寿**；清理必须重算。
 7. **不碰 `app/` 的 Android 构建**；8-02 的 TS 改动与 8-10 的 `LegalPage` 文案除外。
+8. **分步用量只进事件日志**（8-12）：不得新增 `ai_usage` 行、不得改变 `quota` 的轮合计口径——配额按行计数，改口径等于改产品行为。

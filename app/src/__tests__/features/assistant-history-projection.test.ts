@@ -8,8 +8,8 @@
  *   · 用户 / 助手正文各产一条消息，**空正文的 `assistant` 不产**（带 `tool_calls`
  *     的中间步骤正文就是空的，产出空气泡只是噪音）；
  *   · `error` 事件产一条中断标注——丢掉的话，被中断那一轮在历史里凭空消失；
- *   · 其余事件（`tool` / `quota` / `approval_*` / `replace` / `device_request` /
- *     `security`）一律不产消息。
+ *   · 其余事件（`tool` / `quota` / `usage` / `approval_*` / `replace` /
+ *     `device_request` / `security`）一律不产消息。
  *
  * 集成面（切会话触发重建、增量补齐、游标写入）在 `assistant-conversations.test.tsx`。
  */
@@ -86,16 +86,22 @@ describe('投影 B 重建 — 事件 → 消息列表', () => {
     ])
   })
 
-  it('结构性事件（quota / replace / approval_* / device_request / security）一律不产消息', () => {
+  it('结构性事件（quota / usage / replace / approval_* / device_request / security）一律不产消息', () => {
     const out = projectHistoryFromEvents([
       user(1, '你好'),
       item(2, 'quota', { provider: 'deepseek', model: 'deepseek-flash', tokens: 120 }),
-      item(3, 'replace', { summary: '前面的对话讲的是餐饮记账' }),
-      item(4, 'approval_request', { proposalId: 'p-1' }),
-      item(5, 'approval_result', { proposalId: 'p-1', approved: true }),
-      item(6, 'device_request', { kind: 'camera' }),
-      item(7, 'security', { reason: 'cross_user_denied' }),
-      assistant(8, '好的'),
+      // M8-12：分步用量是观测留档，不是一条消息——重建必须原样跳过。
+      item(3, 'usage', {
+        kind: 'step', step: 1, level: 'fast', provider: 'deepseek',
+        model: 'deepseek-flash', prompt_tokens: 100, completion_tokens: 20,
+        tokens: 120, tool_calls: [],
+      }),
+      item(4, 'replace', { summary: '前面的对话讲的是餐饮记账' }),
+      item(5, 'approval_request', { proposalId: 'p-1' }),
+      item(6, 'approval_result', { proposalId: 'p-1', approved: true }),
+      item(7, 'device_request', { kind: 'camera' }),
+      item(8, 'security', { reason: 'cross_user_denied' }),
+      assistant(9, '好的'),
     ])
     expect(out.map(m => m.text)).toEqual(['你好', '好的'])
   })

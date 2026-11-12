@@ -150,6 +150,7 @@ from typing import TYPE_CHECKING, Any, Protocol
 
 from .authorization import authorize_payload
 from .context import ProposalValidationContext
+from .conversation import EVENT_USAGE, USAGE_KIND_STEP, USAGE_KIND_WRAP_UP
 from .devices import (
     NEEDS_RESULT,
     ONE_WAY,
@@ -983,6 +984,18 @@ class MessageSink(Protocol):
         self, messages: Sequence[MessageStamp], *, opens_turn: bool = False,
     ) -> None: ...
 
+    async def structural(
+        self, event_type: str, data: Mapping[str, Any], *, same_turn: bool = False,
+    ) -> None:
+        """写一条结构性事件并提交（M8-12：分步 ``usage``）。
+
+        与 :meth:`__call__` 同为落库通道，**异常同样不被吞**。协议里给出这个方法
+        是为了让 loop 的「每次模型调用一条用量」随步落库；实现方（
+        ``conversation.TurnWriter``）在 M8-12 之前就有同名方法，既有只实现
+        ``__call__`` 的测试替身因此不必改——:meth:`AgentLoop._emit_structural`
+        按「有该方法才写」调用。
+        """
+
 
 # ---------------------------------------------------------------------------
 # 进度观察者（02g 的 SSE 层实现）
@@ -1357,6 +1370,12 @@ class AgentLoop:
         self._last_content = result.content
 
         calls = self._assistant_tool_calls(result)
+        # M8-12：这次模型调用的用量先落库、再写它产出的消息——``seq`` 顺序因此
+        # 是「用量 → assistant」，断连/失败时这一步的账也已经留下。
+        await self._emit_structural(EVENT_USAGE, self._usage_payload(
+            kind=USAGE_KIND_STEP, step=self._steps, level=level, result=result,
+            calls=calls,
+        ))
         assistant = self._append(self._assistant_message(result, calls))
 
         if not calls:
@@ -1521,6 +1540,54 @@ class AgentLoop:
         if self._sink is None or not stamps:
             return
         await self._sink(stamps, opens_turn=opens_turn)
+
+    async def _emit_structural(
+        self, event_type: str, data: Mapping[str, Any],
+    ) -> None:
+        """写一条**结构性**事件（M8-12：分步用量），缺省不接 = 什么都不写。
+
+        与 :meth:`_emit` 同口径：**异常不吞**——用量落不上时必须让本轮以失败
+        收场，否则「这一轮花了多少」就成了半真半假的账。
+
+        sink 只实现 ``__call__``（M8-12 之前的测试替身）时跳过而不是报错：那
+        些替身本来就不落结构性事件，行为与改动前逐字相同。
+        """
+        if self._sink is None:
+            return
+        write = getattr(self._sink, "structural", None)
+        if write is None:
+            return
+        await write(event_type, data, same_turn=True)
+
+    def _usage_payload(
+        self,
+        *,
+        kind: str,
+        step: int,
+        level: ReasoningLevel | None,
+        result: ProviderResult,
+        calls: Sequence[tuple[str, ToolCall]] = (),
+    ) -> dict[str, Any]:
+        """一次模型调用的 ``usage`` 事件载荷（M8-12，架构 §2.5 admin-console）。
+
+        ``tool_calls`` 里的 id 取自 :meth:`_assistant_tool_calls` 定格后的结果，
+        与随后落库的 assistant 消息 ``data.tool_calls[].id`` **同源**——管理端
+        因此能按 id 把「本步用量」贴到工具卡上，不靠顺序或名字去猜。
+        """
+        return {
+            "kind": kind,
+            "step": step,
+            "level": str(level) if level is not None else None,
+            "provider": self._provider.name,
+            "model": self._model,
+            "prompt_tokens": result.prompt_tokens,
+            "completion_tokens": result.completion_tokens,
+            "tokens": result.prompt_tokens + result.completion_tokens,
+            "tool_calls": [
+                {"id": call_id, "name": call.name}
+                for call_id, call in calls
+            ],
+        }
 
     def _notify(self, hook: str, **kwargs: Any) -> None:
         """调用观察者的一个钩子，**异常一律吞掉**（见 ``AgentObserver``）。
@@ -1991,6 +2058,12 @@ class AgentLoop:
         else:
             self._prompt_tokens += result.prompt_tokens
             self._completion_tokens += result.completion_tokens
+            # M8-12：收尾请求的用量同样归属可查——它计入轮合计，但此前没有任何
+            # 事件说明这笔钱花在了哪一步。
+            await self._emit_structural(EVENT_USAGE, self._usage_payload(
+                kind=USAGE_KIND_WRAP_UP, step=self._steps,
+                level=ReasoningLevel.DEEP, result=result,
+            ))
             content = result.content.strip()
             reasoning = result.reasoning_content
 

@@ -43,6 +43,7 @@ from src.modules.ai.agent import (
 from src.modules.ai.conversation import (
     EVENT_ASSISTANT,
     EVENT_TOOL,
+    EVENT_USAGE,
     EVENT_USER,
     ConversationService,
     TurnWriter,
@@ -207,11 +208,24 @@ class TestPerEventPersistence:
         result = await loop.run("看看流水")
 
         assert result.stop_reason is StopReason.COMPLETED
-        # 三批：用户输入 / 第 1 步的配对组（assistant + tool）/ 收尾答案
+        # 每批落库前都提交：用户输入 / 第 1 步用量 / 第 1 步配对组（assistant + tool）
+        # / 第 2 步用量 / 收尾答案。M8-12 的 ``usage`` 走 ``structural`` 通道，
+        # 同样是「写完即提交」。
         assert writer.snapshots == [
             ((EVENT_USER,), True),
-            ((EVENT_USER, EVENT_ASSISTANT, EVENT_TOOL), True),
-            ((EVENT_USER, EVENT_ASSISTANT, EVENT_TOOL, EVENT_ASSISTANT), True),
+            ((EVENT_USER, EVENT_USAGE), True),
+            ((EVENT_USER, EVENT_USAGE, EVENT_ASSISTANT, EVENT_TOOL), True),
+            (
+                (EVENT_USER, EVENT_USAGE, EVENT_ASSISTANT, EVENT_TOOL, EVENT_USAGE),
+                True,
+            ),
+            (
+                (
+                    EVENT_USER, EVENT_USAGE, EVENT_ASSISTANT, EVENT_TOOL,
+                    EVENT_USAGE, EVENT_ASSISTANT,
+                ),
+                True,
+            ),
         ]
         # 每次写完都已提交（`in_transaction()` 为假）——不是攒到轮末一次提交
         assert all(committed for _, committed in writer.snapshots)
@@ -238,10 +252,11 @@ class TestPerEventPersistence:
 
         rows = await _rows(db, conversation)
         assert [row.type for row in rows] == [
-            EVENT_USER, EVENT_ASSISTANT, EVENT_TOOL, EVENT_ASSISTANT,
+            EVENT_USER, EVENT_USAGE, EVENT_ASSISTANT, EVENT_TOOL,
+            EVENT_USAGE, EVENT_ASSISTANT,
         ]
         assert {row.turn for row in rows} == {1}
-        assert [row.seq for row in rows] == [1, 2, 3, 4]
+        assert [row.seq for row in rows] == [1, 2, 3, 4, 5, 6]
 
     async def test_events_carry_the_moment_they_were_produced(
         self, db_session, sample_data,
@@ -332,12 +347,12 @@ class TestResume:
             ).run("看看流水")
 
         interrupted = await _rows(db, conversation)
-        # 已经完成的第 1 步留在日志里（含那条带 tool_calls 的 assistant）
+        # 已经完成的第 1 步留在日志里（含那条带 tool_calls 的 assistant 与它的用量）
         assert [row.type for row in interrupted] == [
-            EVENT_USER, EVENT_ASSISTANT, EVENT_TOOL,
+            EVENT_USER, EVENT_USAGE, EVENT_ASSISTANT, EVENT_TOOL,
         ]
         resume_point = await service.max_seq(conversation)
-        assert resume_point == 3
+        assert resume_point == 4
 
         # 第二轮：带同一个 conversation_id（服务端侧即「用同一个会话再跑一轮」）
         history = await service.history(conversation)
@@ -358,11 +373,11 @@ class TestResume:
         # 新一轮自占一个轮号（被打断那一轮已经占了 1）
         rows = await _rows(db, conversation)
         assert [(row.turn, row.type) for row in rows] == [
-            (1, EVENT_USER), (1, EVENT_ASSISTANT), (1, EVENT_TOOL),
-            (2, EVENT_USER), (2, EVENT_ASSISTANT),
+            (1, EVENT_USER), (1, EVENT_USAGE), (1, EVENT_ASSISTANT), (1, EVENT_TOOL),
+            (2, EVENT_USER), (2, EVENT_USAGE), (2, EVENT_ASSISTANT),
         ]
         assert result.stop_reason is StopReason.COMPLETED
-        assert await service.max_seq(conversation) == 5
+        assert await service.max_seq(conversation) == 7
 
     async def test_after_seq_hands_the_client_exactly_what_it_missed(
         self, db_session, sample_data,
@@ -427,7 +442,9 @@ class TestPairingInvariant:
             ).run("看看流水")
 
         rows = await _rows(db, conversation)
-        assert [row.type for row in rows] == [EVENT_USER]
+        # 第 1 步的用量已经写完，配对组在落库时被打断——尾巴仍是用户输入 + 用量，
+        # **没有**悬空的调用或结果。
+        assert [row.type for row in rows] == [EVENT_USER, EVENT_USAGE]
         assert _paired_prefix_len([(row.type, row.data) for row in rows]) == len(rows)
         # 恢复路径上模型拿到的历史同样是干净的（不变式 1 在恢复路径上成立）
         assert [m["role"] for m in await service.history(conversation)] == ["user"]
@@ -594,7 +611,8 @@ class TestCancelledReachability:
         # 配对完整：那条带 tool_calls 的 assistant 有对应的 tool 结果（不变式 1）
         rows = await _rows(db, conversation)
         assert [row.type for row in rows] == [
-            EVENT_USER, EVENT_ASSISTANT, EVENT_TOOL, EVENT_ASSISTANT, EVENT_TOOL,
+            EVENT_USER, EVENT_USAGE, EVENT_ASSISTANT, EVENT_TOOL,
+            EVENT_USAGE, EVENT_ASSISTANT, EVENT_TOOL,
         ]
         assert _paired_prefix_len([(row.type, row.data) for row in rows]) == len(rows)
         # 取消不回一次收尾请求（02d 决策 8）

@@ -26,7 +26,8 @@ Event         会话日志里的一行，带轮号 ``turn``。
 
 **Surface 事件**（``SURFACE_EVENT_TYPES``）一一对应 loop 消息流里的一条消息，
 ``data`` 就是那条 API 消息字典，**只有它们进模型上下文**（投影 A）。**结构性
-事件**（``STRUCTURAL_EVENT_TYPES``：审批 / 设备 / 错误 / 配额 / 安全 / 摘要替换）
+事件**（``STRUCTURAL_EVENT_TYPES``：审批 / 设备 / 错误 / 配额 / 分步用量 / 安全 /
+摘要替换）
 是「发生过什么」的留档，只进投影 B（UI）与投影 C（审计）。分档的**单一来源**是
 那两个常量：:meth:`ConversationService.history` 按前者过滤，写入时按前者派生
 ``ignorable`` 列——读侧信常量、不信数据列，两者的一致性由测试钉死。
@@ -203,6 +204,7 @@ EVENT_DEVICE_REQUEST = "device_request"      # [不接] 设备指令：由配对
 EVENT_ERROR = "error"                        # [stream._record_failure] 04b
 EVENT_REPLACE = "replace"                    # [04c] 长历史被摘要替换（原文保留）
 EVENT_QUOTA = "quota"                        # [record_turn] 每轮用量，与消息同轮
+EVENT_USAGE = "usage"                        # [M8-12] 每次模型调用一条用量（分步观测）
 EVENT_SECURITY = "security"                  # [不接] 访问面审计结论：见 security.md（04d）
 STRUCTURAL_EVENT_TYPES = frozenset({
     EVENT_APPROVAL_REQUEST,
@@ -211,8 +213,16 @@ STRUCTURAL_EVENT_TYPES = frozenset({
     EVENT_ERROR,
     EVENT_REPLACE,
     EVENT_QUOTA,
+    EVENT_USAGE,
     EVENT_SECURITY,
 })
+
+#: ``usage`` 事件的调用类型（M8-12，架构 §2.5）。一次模型调用一条，与每轮
+#: 合计口径的 ``quota`` 分工：``quota`` 回答「这一轮花了多少」，``usage`` 回答
+#: 「每次调用各花了多少、它产出了什么」。
+USAGE_KIND_STEP = "step"        # loop 的一个 Step（一次模型请求 + 其工具执行）
+USAGE_KIND_WRAP_UP = "wrap_up"  # 撞硬边界后的收尾请求（不带工具）
+USAGE_KIND_SUMMARY = "summary"  # 摘要压缩（``done`` 之后的单发补全）
 
 #: 审批四值（M8-02，``docs/architecture/admin-console.md`` §4.1）。**不合并**：
 #: 服务端只能观测到 ``allowed-once``（``/ai/execute`` 成功），其余三值由客户端
@@ -544,6 +554,7 @@ class ConversationService:
 
     async def summarize_overflow(
         self, conversation: AIConversation, provider: LLMProvider,
+        *, request_id: str | None = None,
     ) -> bool:
         """把**已经落在窗口之外**的轮次压缩进摘要，写一条 ``replace`` 事件。
 
@@ -571,6 +582,9 @@ class ConversationService:
 
         ``same_turn=True``：压缩是**本轮的收尾维护**，不占新轮号——另立一个只含
         ``replace`` 的轮次会在日志里留下一个没有对话内容的轮号。
+
+        ``request_id``（M8-12）由流式端点给出：压缩那次模型调用的 ``usage`` 事件
+        与 ``replace`` 同轮落库，管理端按请求反查时能看到它。
         """
         turns = await self._surface_turns(conversation)
         if not turns:
@@ -589,7 +603,7 @@ class ConversationService:
             return False
 
         try:
-            summary = await self._generate_summary(
+            summary, usage = await self._generate_summary(
                 provider, conversation.summary, overflow,
             )
         except Exception as exc:  # noqa: BLE001 — 摘要失败不阻塞本轮
@@ -602,6 +616,16 @@ class ConversationService:
                 },
             )
             return False
+        usage_event = (EVENT_USAGE, {
+            "kind": USAGE_KIND_SUMMARY,
+            "step": None,
+            "level": None,
+            "provider": getattr(provider, "name", ""),
+            "model": self._cfg.ai_agent_provider_model,
+            **usage,
+            # 单发补全没有工具调用——键恒在，管理端不必按 kind 分支判空。
+            "tool_calls": [],
+        })
         if summary is None:
             logger.warning(
                 "conversation summary rejected",
@@ -611,16 +635,24 @@ class ConversationService:
                     "outcome": "summary_rejected",
                 },
             )
+            # M8-12：摘要被拒也写用量——这次调用已经计费，账不能因为结果不合规
+            # 就消失；没有 ``replace`` 只说明这一版摘要不采用，不代表没花钱。
+            await self.append_events(
+                conversation, [usage_event], same_turn=True, request_id=request_id,
+            )
             return False
 
-        await self.append_events(conversation, [(
-            EVENT_REPLACE,
-            {
-                "summary": summary,
-                "upto_turn": overflow[-1][0],
-                "turns": len(overflow),
-            },
-        )], same_turn=True)
+        await self.append_events(conversation, [
+            usage_event,
+            (
+                EVENT_REPLACE,
+                {
+                    "summary": summary,
+                    "upto_turn": overflow[-1][0],
+                    "turns": len(overflow),
+                },
+            ),
+        ], same_turn=True, request_id=request_id)
         conversation.summary = summary
         await self._db.flush()
         logger.info(
@@ -652,8 +684,11 @@ class ConversationService:
         provider: LLMProvider,
         previous: str,
         overflow: Sequence[tuple[int, list[dict[str, Any]]]],
-    ) -> str | None:
-        """调一次 provider 产摘要；**不可用返回 None**（调用方什么都不写）。
+    ) -> tuple[str | None, dict[str, int]]:
+        """调一次 provider 产摘要；返回 ``(可用摘要或 None, 本次用量)``。
+
+        **不可用时摘要为 None，用量照样返回**（M8-12）：调用已经发生、已经计费，
+        调用方据此写 ``usage`` 事件，哪怕这一版摘要最终不采用。
 
         超时用单步超时（``ai_agent_step_timeout_seconds``）：这是一次单发补全，
         与 loop 里的一次模型请求同类，没有理由另设一个数字。
@@ -670,7 +705,11 @@ class ConversationService:
             max_tokens=CONVERSATION_SUMMARY.max_tokens,
             timeout=self._cfg.ai_agent_step_timeout_seconds,
         )
-        return _usable_summary(result.content, self._cfg.ai_agent_summary_chars)
+        return _usable_summary(result.content, self._cfg.ai_agent_summary_chars), {
+            "prompt_tokens": result.prompt_tokens,
+            "completion_tokens": result.completion_tokens,
+            "tokens": result.prompt_tokens + result.completion_tokens,
+        }
 
     # -- 恢复与分叉（04b）-------------------------------------------------
 
@@ -821,7 +860,7 @@ class ConversationService:
         turn: int | None = None,
         request_id: str | None = None,
     ) -> int:
-        """追加一批**结构性事件**（配额 / 审批 / 设备 / 错误 / 安全 / 摘要替换）。
+        """追加一批**结构性事件**（配额 / 分步用量 / 审批 / 设备 / 错误 / 安全 / 摘要替换）。
 
         ``events`` 是 ``(type, data)`` 序列，``type`` 必须在
         :data:`STRUCTURAL_EVENT_TYPES` 里——**Surface 类型禁止从这条通道写入**：

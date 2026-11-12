@@ -43,6 +43,7 @@ from src.modules.ai.conversation import (
     EVENT_SECURITY,
     EVENT_TOOL,
     EVENT_TYPES,
+    EVENT_USAGE,
     EVENT_USER,
     STRUCTURAL_EVENT_TYPES,
     SURFACE_EVENT_TYPES,
@@ -177,6 +178,10 @@ def _structural_sample(event_type: str) -> dict[str, Any]:
             EVENT_ERROR: {"code": "agent_failed"},
             EVENT_REPLACE: {"summary": "前面几轮聊的是记账"},
             EVENT_QUOTA: {"provider": "deepseek", "model": MODEL, "tokens": 24},
+            EVENT_USAGE: {"kind": "step", "step": 1, "level": "fast",
+                          "provider": "deepseek", "model": MODEL,
+                          "prompt_tokens": 11, "completion_tokens": 13, "tokens": 24,
+                          "tool_calls": []},
             EVENT_SECURITY: {"reason": "cross_user_access"}}[event_type]
 
 

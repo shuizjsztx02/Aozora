@@ -344,7 +344,8 @@ SessionEvent 日志（事实来源，append-only）
 | 设备指令 | `device_request` | ❌ | **不接生产者（05e 决策，`ADR-010` 决策 5）**：设备指令的下发与结果由 Surface 事件留档——模型的那次 `tool_call` 与配对的 tool 结果消息（`{"status":"sent"}` / `{"status":"ok",…}` / 错误码）都在日志里，再写一条结构性事件是把同一件事记两遍，且没有任何消费方 |
 | 错误 | `error` | ❌ | `stream._record_failure`（04b）——失败轮收尾：一条事件说明这一轮为什么停在半路，载荷只有安全枚举码与固定文案 |
 | 摘要替换 | `replace` | ❌ | `ConversationService.summarize_overflow`（04c）——窗口之外那段历史的压缩；载荷 `summary` / `upto_turn` / `turns`，**原文一行不删** |
-| 配额 | `quota` | ❌ | `record_turn`——每轮一条用量事件，**与消息同轮** |
+| 配额 | `quota` | ❌ | `record_turn`——每轮一条用量事件，**与消息同轮**（**轮合计**口径） |
+| 分步用量 | `usage` | ❌ | **M8-12 交付（2026-11-12）**：**每次模型调用一条**——`kind` = `step` / `wrap_up` / `summary`，含 `step` / 推理档 / 输入输出 token / 该步发起的工具调用（`id` 与 assistant 事件同源）。Step 事件随步写入，断连也留档；不新增 `ai_usage` 行。详见 `docs/architecture/admin-console.md` §2.5 |
 | 安全 | `security` | ❌ | **不接生产者**（04d 的访问面审计结论）——读取面按授权校验 + HTTP 层脱敏留痕覆盖，记录进会话日志只会让日志自我放大；理由见 `security.md`「读取面访问审计」 |
 
 **与 §8.1 的 SSE 八类是两套独立枚举。** 有同名值（`error` / `device_request`），但一个是下行协议帧、一个是日志行——**不得互相赋值或复用枚举类**；`confirm` 帧对应的日志类型是 `approval_request`，不是 `confirm`。

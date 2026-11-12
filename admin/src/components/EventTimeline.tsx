@@ -5,8 +5,10 @@
  * - `assistant.tool_calls` 与对应的 `tool` 结果按 `tool_call_id` 配对成组，
  *   结果事件不再单独重复渲染；配对不到时如实提示；
  * - `assistant.reasoning_content` 默认折叠；
- * - `quota` / `error` / `replace` / `approval_request` / `approval_result`
- *   语义化展示（审批四值 + 来源标签）。
+ * - `quota` / `usage` / `error` / `replace` / `approval_request` /
+ *   `approval_result` 语义化展示（审批四值 + 来源标签）。
+ * - M8-12：`usage` 是**每次模型调用**的用量；它按 `tool_calls[].id` 与工具卡
+ *   配对，工具卡上直接标出「这一步推理花了多少」。
  */
 
 import type { EventItem } from '../api/replay'
@@ -52,6 +54,11 @@ const TYPE_META: Record<string, { label: string; badge: string; dot: string }> =
     label: '用量',
     badge: 'bg-emerald-50 text-emerald-700 ring-emerald-200',
     dot: 'bg-emerald-400',
+  },
+  usage: {
+    label: '模型调用',
+    badge: 'bg-teal-50 text-teal-700 ring-teal-200',
+    dot: 'bg-teal-400',
   },
   error: { label: '错误', badge: 'bg-red-50 text-red-700 ring-red-200', dot: 'bg-red-500' },
   replace: {
@@ -103,6 +110,19 @@ const RISK_META: Record<string, string> = {
   high: 'bg-red-50 text-red-700 ring-red-200',
 }
 
+/** `usage.kind` → 人话（M8-12）。`step` 另外带上 Step 序号，不在这里。 */
+const USAGE_KIND_LABELS: Record<string, string> = {
+  step: '模型推理',
+  wrap_up: '收尾请求',
+  summary: '摘要压缩',
+}
+
+const REASONING_LABELS: Record<string, string> = {
+  fast: '快档',
+  medium: '中档',
+  deep: '深档',
+}
+
 export function EventTimeline({
   events,
   turn,
@@ -141,6 +161,8 @@ export function EventTimeline({
 
   const entries = buildEntries(events)
   const approvalResults = collectApprovalResults(events)
+  // M8-12：工具调用 id → 产出它的那次模型调用的 `usage` 事件。
+  const usageByCall = collectUsageByCall(events)
 
   return (
     <div className={cn('space-y-2', isLoading && 'opacity-60')}>
@@ -156,6 +178,7 @@ export function EventTimeline({
               key={`group-${entry.event.seq}`}
               entry={entry}
               hasMore={hasMore}
+              usageByCall={usageByCall}
             />
           ) : (
             <EventItemCard
@@ -214,6 +237,22 @@ function collectApprovalResults(events: EventItem[]): Map<string, EventItem> {
     if (proposalId) results.set(proposalId, event)
   }
   return results
+}
+
+/** `tool_call_id → usage`：payload 里的 id 与 assistant 事件同源（M8-12）。 */
+function collectUsageByCall(events: EventItem[]): Map<string, EventItem> {
+  const byCall = new Map<string, EventItem>()
+  for (const event of events) {
+    if (event.type !== 'usage') continue
+    const raw = event.data.tool_calls
+    if (!Array.isArray(raw)) continue
+    for (const entry of raw) {
+      const record = isRecord(entry) ? entry : {}
+      const id = asString(record.id)
+      if (id) byCall.set(id, event)
+    }
+  }
+  return byCall
 }
 
 function extractToolCalls(data: Record<string, unknown>): ToolCallInfo[] {
@@ -303,6 +342,8 @@ function EventBody({
       return <StandaloneToolBody event={event} />
     case 'quota':
       return <QuotaBody event={event} />
+    case 'usage':
+      return <UsageBody event={event} />
     case 'error':
       return <ErrorBody event={event} />
     case 'replace':
@@ -393,6 +434,55 @@ function QuotaBody({ event }: { event: EventItem }) {
       ) : null}
     </div>
   )
+}
+
+/** M8-12：一次模型调用的用量（Step / 收尾 / 摘要压缩）。 */
+function UsageBody({ event }: { event: EventItem }) {
+  const kind = asString(event.data.kind) ?? 'step'
+  const step = asNumber(event.data.step)
+  const level = asString(event.data.level)
+  const provider = asString(event.data.provider) ?? '—'
+  const model = asString(event.data.model) ?? '—'
+  const tokens = asNumber(event.data.tokens)
+  const promptTokens = asNumber(event.data.prompt_tokens)
+  const completionTokens = asNumber(event.data.completion_tokens)
+  const tools = usageToolNames(event.data)
+  const headline =
+    kind === 'step' && step !== null ? `Step ${step}` : (USAGE_KIND_LABELS[kind] ?? kind)
+  return (
+    <div className="mt-1 flex flex-wrap items-center gap-2 text-xs">
+      <span className="rounded bg-teal-50 px-1.5 py-0.5 font-medium text-teal-700 ring-1 ring-inset ring-teal-200">
+        {headline}
+      </span>
+      {level ? <span className="text-gray-500">{REASONING_LABELS[level] ?? level}</span> : null}
+      <span className="rounded bg-emerald-50 px-1.5 py-0.5 font-medium text-emerald-700 ring-1 ring-inset ring-emerald-200">
+        {model}
+      </span>
+      <span className="text-gray-500">{provider}</span>
+      {tokens !== null ? (
+        <span className="rounded bg-gray-100 px-1.5 py-0.5 font-mono text-gray-700">
+          {tokens.toLocaleString()} tokens
+        </span>
+      ) : null}
+      {promptTokens !== null || completionTokens !== null ? (
+        <span className="text-gray-400">
+          输入 {promptTokens ?? '—'} / 输出 {completionTokens ?? '—'}
+        </span>
+      ) : null}
+      {tools.length > 0 ? (
+        <span className="text-gray-500">工具：{tools.join(' / ')}</span>
+      ) : null}
+    </div>
+  )
+}
+
+function usageToolNames(data: Record<string, unknown>): string[] {
+  const raw = data.tool_calls
+  if (!Array.isArray(raw)) return []
+  return raw.map((entry) => {
+    const record = isRecord(entry) ? entry : {}
+    return asString(record.name) ?? '未知工具'
+  })
 }
 
 function ErrorBody({ event }: { event: EventItem }) {
@@ -515,9 +605,11 @@ function ApprovalResultBody({ event }: { event: EventItem }) {
 function ToolGroupItem({
   entry,
   hasMore,
+  usageByCall,
 }: {
   entry: Extract<TimelineEntry, { kind: 'toolGroup' }>
   hasMore: boolean
+  usageByCall: Map<string, EventItem>
 }) {
   return (
     <li className="relative border-l-2 border-slate-200 pl-4">
@@ -528,6 +620,7 @@ function ToolGroupItem({
         <div className="mt-2 space-y-2">
           {entry.calls.map((call) => {
             const result = entry.results.get(call.id)
+            const usage = usageByCall.get(call.id)
             return (
               <div
                 key={`${call.id}-${call.name}`}
@@ -539,6 +632,12 @@ function ToolGroupItem({
                   </span>
                   <span className="font-mono text-gray-400">{call.id}</span>
                 </div>
+                {usage ? (
+                  <div className="mt-1 text-[11px] text-teal-700">
+                    本步用量：输入 {asNumber(usage.data.prompt_tokens) ?? '—'} / 输出{' '}
+                    {asNumber(usage.data.completion_tokens) ?? '—'} tokens
+                  </div>
+                ) : null}
                 <JsonViewer
                   value={safeParse(call.argumentsText)}
                   label="调用参数"

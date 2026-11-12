@@ -29,6 +29,7 @@ from src.models.ai import AIConversation, AIConversationEvent
 from src.modules.ai.agent import AgentLoop
 from src.modules.ai.conversation import (
     EVENT_REPLACE,
+    EVENT_USAGE,
     EVENT_USER,
     ConversationService,
 )
@@ -302,6 +303,59 @@ class TestCompressionTrigger:
 
 
 # ---------------------------------------------------------------------------
+# M8-12：压缩调用的分步用量（usage 事件，与 replace 同轮）
+# ---------------------------------------------------------------------------
+
+
+class TestSummaryUsage:
+    async def test_compression_call_writes_a_usage_event(
+        self, db_session, sample_data,
+    ):
+        """压缩也是一次模型调用——用量必须留痕，且与 ``replace`` 同轮。"""
+        db, user, book = db_session, sample_data["user"], sample_data["book"]
+        service = ConversationService(db, _cfg(ai_agent_history_turns=2))
+        conversation = await _seed(service, user, book, 3)
+
+        assert await service.summarize_overflow(
+            conversation, _SummaryProvider(), request_id="req-summary-1",
+        ) is True
+
+        usage = [e for e in await _events(db, conversation) if e.type == EVENT_USAGE]
+        assert len(usage) == 1
+        assert usage[0].data == {
+            "kind": "summary",
+            "step": None,
+            "level": None,
+            "provider": "scripted",
+            "model": MODEL,
+            "prompt_tokens": 3,
+            "completion_tokens": 5,
+            "tokens": 8,
+            "tool_calls": [],
+        }
+        assert usage[0].turn == (await _replaces(db, conversation))[0].turn
+        assert usage[0].request_id == "req-summary-1"
+
+    async def test_rejected_summary_still_records_the_call(
+        self, db_session, sample_data,
+    ):
+        """摘要被拒 ≠ 没花钱：``usage`` 照写，``replace`` 不写（沿用上一版）。"""
+        db, user, book = db_session, sample_data["user"], sample_data["book"]
+        service = ConversationService(db, _cfg(ai_agent_history_turns=2))
+        conversation = await _seed(service, user, book, 3)
+
+        provider = _SummaryProvider(f"用户提到了 {uuid.uuid4()}，已经记好了。")
+        assert await service.summarize_overflow(conversation, provider) is False
+
+        usage = [e for e in await _events(db, conversation) if e.type == EVENT_USAGE]
+        assert len(usage) == 1
+        assert usage[0].data["kind"] == "summary"
+        assert usage[0].data["tokens"] == 8
+        assert await _replaces(db, conversation) == []
+        assert conversation.summary == ""
+
+
+# ---------------------------------------------------------------------------
 # replace 事件：原文一行不删（架构 §6.2「压缩无损」）
 # ---------------------------------------------------------------------------
 
@@ -321,7 +375,8 @@ class TestReplaceEvent:
 
         after = [(e.type, e.data.get("content")) for e in await _events(db, conversation)]
         assert after[:len(before)] == before
-        assert after[len(before):] == [(EVENT_REPLACE, None)]
+        # M8-12：压缩那次模型调用的 ``usage`` 与 ``replace`` 同轮追加在后。
+        assert after[len(before):] == [(EVENT_USAGE, None), (EVENT_REPLACE, None)]
         assert [e for e in await _events(db, conversation) if e.type == EVENT_USER]
 
     async def test_compressed_turns_are_still_readable_by_seq(self, db_session, sample_data):

@@ -3,7 +3,7 @@
 **当前里程碑：** M1–M5 ✅ 完成。**M7（AI Agent 能力升级）优先推进**；M6（生产发布）**滞后处理**——M6 属发布/推广/验证性质，而 M7 是对 App 功能的重大新增，须在正式发布前完成，故发布动作顺延至 M7 收口之后（2026-09-18 决策）。
 **当前任务：** M7 T-M7-02（P1：服务端 Agent Loop + SSE 流式通道）——拆为 02a–02i 九张子卡，另有插入卡 **02g-2**（token 级 delta，排在 02h 之前以避开客户端返工）。**服务端侧已全部交付并收口**（02a 实测闸门 / 02b Provider / 02c 工具注册表 / 02d Loop 核心 / 02e 写工具安全路径 / 02f 会话与配额 / 02g SSE 端点 / 02g-2 token 级 delta，2026-09-19）；下一批为 **02h（客户端桥通道）→ 02i（客户端消费）**。进度看板与逐卡细则见 `docs/milestones/T-M7-02-P1-implementation-plan.md`。
 **后续三期的子卡拆分已完成（2026-09-19）：** T-M7-03（P2）拆为 03a–03e、T-M7-04（P3）拆为 04a–04e、T-M7-05（P4）拆为 05a–05i，各有独立的实施推进计划（`docs/milestones/T-M7-03-P2-implementation-plan.md` / `T-M7-04-P3-...` / `T-M7-05-P4-...`），可逐卡独立领取与验收。**跨期唯一的安全切分点：** P4 的 05a（ActionProposal v2 契约）与 05e 的设备通道协议部分不依赖 P2 / P3，可提前开工。
-**M8 已交付并收口（2026-11-10）：** 运营可观测后台（AI 交互回放台），需求来源第二十二轮 REQ-84。**M8 在 M6（生产发布）之前**（用户确认）。十一卡全部完成并上线测试实例：`http://116.62.196.255/aozora-api/aozora-admin/`（零 nginx 变更，FastAPI 托管静态页）。架构与看板见 [`docs/architecture/admin-console.md`](../architecture/admin-console.md) 与 [`T-M8-admin-console-plan.md`](T-M8-admin-console-plan.md)；残余风险 R-PROD-69/70/71。
+**M8 已交付并收口（2026-11-10）：** 运营可观测后台（AI 交互回放台），需求来源第二十二轮 REQ-84。**M8 在 M6（生产发布）之前**（用户确认）。十一卡全部完成并上线测试实例：`http://116.62.196.255/aozora-api/aozora-admin/`（零 nginx 变更，FastAPI 托管静态页）。架构与看板见 [`docs/architecture/admin-console.md`](../architecture/admin-console.md) 与 [`T-M8-admin-console-plan.md`](T-M8-admin-console-plan.md)；残余风险 R-PROD-69/70/71。**2026-11-12 追加跟进卡 8-12（REQ-85，分步 token 用量观测）已交付。**
 
 **执行入口：** [生产执行规划](production-execution-plan.md)
 

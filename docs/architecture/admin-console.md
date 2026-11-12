@@ -49,7 +49,8 @@ User (users)
 | `user` | ✅ `TurnWriter` | 用户原话，含 loop 中途插入的输入 |
 | `assistant` | ✅ `TurnWriter` | 回复 + `reasoning_content` + `tool_calls` |
 | `tool` | ✅ `TurnWriter` | 工具结果，与 `tool_calls` 同批落库 |
-| `quota` | ✅ `record_turn` | provider / model / prompt_tokens / completion_tokens / tokens |
+| `quota` | ✅ `record_turn` | provider / model / prompt_tokens / completion_tokens / tokens（**每轮合计一条**） |
+| `usage` | ✅ `AgentLoop.step` / `_wrap_up` / `summarize_overflow`（M8-12） | 每次模型调用一条：kind（step / wrap_up / summary）/ step / 档位 / 输入 / 输出 / 该步发起的工具调用（§2.5） |
 | `error` | ✅ `stream._record_failure` | 安全错误码 + 固定文案（已脱敏） |
 | `replace` | ✅ `summarize_overflow` | 摘要替换位置 |
 | `approval_request` | **M8-02 新增** | 提问理由、提案标识、Step |
@@ -76,6 +77,32 @@ APP-CONTEXT §4.6 已按此口径修订。
 - 事件按 `AI_CONVERSATION_RETENTION_DAYS` 整轮清理（`server/src/modules/ai/retention.py`）。
 - 删除会话 = 归档行 + 删事件正文。
 - **决策：超出保留期即空态**（用户确认）。后台不保留副本，展示口径与事件一致。
+
+### 2.5 分步用量（`usage` 事件，M8-12，2026-11-12 交付）
+
+一轮 = 若干次模型调用。`quota` 回答「这一轮花了多少」，`usage` 回答「每次调用各花了多少、为什么花」：
+
+| 字段 | 说明 |
+|---|---|
+| `kind` | `step`（loop 的一步）/ `wrap_up`（撞硬边界后的收尾调用）/ `summary`（摘要压缩，`done` 之后） |
+| `step` | loop 的 Step 序号（1 起）；`summary` 为 `null` |
+| `level` | 该次调用的推理档 `fast` / `medium` / `deep`（`wrap_up` 恒 `deep`；`summary` 为 `null`——单发补全不带推理档）——同一轮内各步档位可以不同（入口判浅、第 2 步起升深） |
+| `provider` / `model` | 该次调用的服务商与模型 |
+| `prompt_tokens` / `completion_tokens` / `tokens` | 该次调用的用量 |
+| `tool_calls` | `[{id, name}]`：该次调用产出的工具调用；`id` 与 assistant 事件 `data.tool_calls[].id` 同源；`wrap_up` / `summary` 为空数组 |
+
+**写点与保证：**
+
+- Step 事件在模型调用返回、工具调用 id 定格之后写，**先于**该步的 assistant 落库批（`seq` 因此紧邻它产出的消息），并随批提交——断连或中途失败时，已完成步骤的用量已经留档。
+- `summary` 在 provider 调用成功即写，**摘要被拒也写**（调用已经计费）。
+- 服务端不变量：`quota.tokens == Σ(kind=step).tokens + Σ(kind=wrap_up).tokens`；`summary` 不计入（它发生在轮收尾之后）。
+- 工具执行本身不消耗 token——它的成本体现在调用该工具的那次推理的输出、以及下一次推理的输入里。
+
+**口径：**
+
+- **不新增 `ai_usage` 行**：guest 日配额按行计数（`check_daily_quota`），分步事件只做观测面。
+- 成本仍按 `AI_PRICE_PER_1M_TOKENS` 混合价计；输入/输出差价、prompt cache 价差、reasoning token 拆分均不在本卡。
+- 快路径（`/ai/interpret` 等非会话车道）没有事件日志，不在覆盖范围。
 
 ---
 
@@ -311,6 +338,8 @@ users.admin_suspended_reason  varchar(200) NULL
 | 15 | 需要更新隐私政策（新增内部人员查看会话正文条款） |
 | 16 | 时间显示北京时间 |
 | 17 | 自建 Vite + React + TanStack |
+
+> **2026-11-12 追加（M8-12，不在上表 24 项之内）：** 分步用量进入事件流——每次模型调用一条 `usage`；轮合计仍以 `quota` 为准；**不新增 `ai_usage` 行**（配额按行计数）；无迁移、无桥变更、客户端零改动。
 
 ---
 

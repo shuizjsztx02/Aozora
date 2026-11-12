@@ -499,17 +499,20 @@ class TestConversationEvents:
         payload = (await env.events(conversation_id)).json()
         assert payload["conversation_id"] == conversation_id
         events = payload["events"]
-        # 第三条是本轮的 ``quota`` 用量事件（T-M7-04a）：投影 B **不过滤**，
-        # 结构性事件与消息一样读得到；它与消息同轮（``same_turn``）。
-        assert [e["seq"] for e in events] == [1, 2, 3]
-        assert [e["type"] for e in events] == ["user", "assistant", "quota"]
-        assert [e["turn"] for e in events] == [1, 1, 1]
+        # 结构性事件与消息一样读得到（投影 B **不过滤**）：M8-12 起每次模型调用
+        # 一条 ``usage``（这一步的用量），轮末再加一条 ``quota``（轮合计）——
+        # 三者同轮（``same_turn``）。
+        assert [e["seq"] for e in events] == [1, 2, 3, 4]
+        assert [e["type"] for e in events] == ["user", "usage", "assistant", "quota"]
+        assert [e["turn"] for e in events] == [1, 1, 1, 1]
         assert events[0]["data"] == {"role": "user", "content": "午饭花了 12 块"}
-        assert events[1]["data"]["content"] == "好的，记下了。"
+        assert events[2]["data"]["content"] == "好的，记下了。"
+        assert events[1]["data"]["kind"] == "step"
+        assert events[1]["data"]["step"] == 1
         # 客户端拿这些事件**重建投影**，所以形状就是契约：assistant 消息一定带
         # ``reasoning_content`` 键（02f 的写入面硬约束在读取面上同样成立）——缺键
         # 的消息会让下一次 thinking 请求整轮 400，客户端靠这个键把推理分流进折叠区。
-        assert events[1]["data"]["reasoning_content"] == ""
+        assert events[2]["data"]["reasoning_content"] == ""
 
     async def test_after_seq_reads_incrementally(self, env: ConversationEnv):
         done = await env.turn("第一轮")
@@ -520,7 +523,9 @@ class TestConversationEvents:
         await env.turn("第二轮", conversation_id=conversation_id)
 
         delta = (await env.events(conversation_id, after_seq=last_seq)).json()["events"]
-        assert [e["seq"] for e in delta] == [last_seq + 1, last_seq + 2, last_seq + 3]
+        assert [e["seq"] for e in delta] == [
+            last_seq + 1, last_seq + 2, last_seq + 3, last_seq + 4,
+        ]
         assert all(e["turn"] == 2 for e in delta)
         # 严格大于：同一个 after_seq 再拉一次得到同一批，不重复
         assert (await env.events(conversation_id, after_seq=last_seq)).json()["events"] == delta
@@ -531,8 +536,8 @@ class TestConversationEvents:
         await env.turn("第二轮", conversation_id=conversation_id)
 
         events = (await env.events(conversation_id)).json()["events"]
-        # 两条消息 + 一条同轮用量事件，每轮三行（T-M7-04a）。
-        assert [e["turn"] for e in events] == [1, 1, 1, 2, 2, 2]
+        # 两条消息 + 一条分步用量 + 一条同轮合计用量，每轮四行（M8-12）。
+        assert [e["turn"] for e in events] == [1, 1, 1, 1, 2, 2, 2, 2]
 
     async def test_events_of_fresh_conversation_are_empty(self, env: ConversationEnv):
         conversation_id = await env.seed()
@@ -790,7 +795,7 @@ class TestForkConversation:
         # ② 新轮自占一个轮号（前缀的轮号原样保留，新的接在后面）
         forked_events = (await env.events(forked["id"])).json()["events"]
         assert [e["turn"] for e in forked_events] == [
-            *[e["turn"] for e in source_events], 2, 2, 2,
+            *[e["turn"] for e in source_events], 2, 2, 2, 2,
         ]
         assert done["conversation_id"] == forked["id"]
         assert done["seq"] == forked_events[-1]["seq"]

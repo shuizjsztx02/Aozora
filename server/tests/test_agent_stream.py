@@ -1339,14 +1339,15 @@ class TestPersistence:
 
         events = await _rows(stream_env, AIConversationEvent,
                              conversation_id=conversation_id)
-        # 末尾的 ``quota`` 是本轮的用量事件（T-M7-04a）——它与消息**同轮同批**，
+        # M8-12：每个 Step 的 ``usage`` 紧挨在它产出的 assistant 之前；末尾的
+        # ``quota`` 是本轮的**合计**用量事件（T-M7-04a）——它们都与消息**同轮**，
         # 是投影 C 的留痕（``ignorable``），不进模型上下文。
         assert [e.type for e in events] == [
-            "user", "assistant", "tool", "assistant", "quota",
+            "user", "usage", "assistant", "tool", "usage", "assistant", "quota",
         ]
-        assert [e.seq for e in events] == [1, 2, 3, 4, 5]
-        assert [e.turn for e in events] == [1, 1, 1, 1, 1]
-        assert [e.ignorable for e in events] == [False] * 4 + [True]
+        assert [e.seq for e in events] == [1, 2, 3, 4, 5, 6, 7]
+        assert [e.turn for e in events] == [1] * 7
+        assert [e.ignorable for e in events] == [False, True, False, False, True, False, True]
 
         usage = await _rows(stream_env, AIUsage, conversation_id=conversation_id)
         assert len(usage) == 1  # 一个 Turn 一条行
@@ -1388,7 +1389,135 @@ class TestPersistence:
         assert len(rows) == 1 and rows[0].conversation_id is not None
 
 
-# ── 8. 写路径 ─────────────────────────────────────────────────────────────
+# ── 7b. 分步用量（M8-12）─────────────────────────────────────────────────
+
+
+class TestStepUsage:
+    """每次模型调用一条 ``usage`` 事件：Step / 收尾 / 摘要各归各。
+
+    ``usage`` 是**观测面**，不参与配额——轮合计仍以 ``quota`` 为准，因此本组
+    用例同时钉住「分步之和 == 轮合计」这条不变量。
+    """
+
+    async def test_each_step_writes_its_own_usage_event(self, stream_env: StreamEnv):
+        stream_env.provider.reset([
+            _tool_turn(_call("budget_list", _budget_args(), id="call_budget")),
+            _text("这个月还没有设置预算。", prompt=9, completion=3),
+        ])
+        _, body = await stream_env.turn("看看预算")
+        conversation_id = uuid.UUID(payload_of(body, "done")["conversation_id"])
+        events = await _rows(stream_env, AIConversationEvent,
+                             conversation_id=conversation_id)
+
+        usage = [e for e in events if e.type == "usage"]
+        assert len(usage) == 2
+        first, second = usage
+        assert first.data["kind"] == "step"
+        assert first.data["step"] == 1
+        assert first.data["prompt_tokens"] == 5
+        assert first.data["completion_tokens"] == 7
+        assert first.data["tokens"] == 12
+        # 该步产出的工具调用：id 与随后落库的 assistant 消息**同源**。
+        assert first.data["tool_calls"] == [
+            {"id": "call_budget", "name": "budget_list"},
+        ]
+        assistant = next(
+            e for e in events if e.type == "assistant" and e.data.get("tool_calls")
+        )
+        assert assistant.data["tool_calls"][0]["id"] == "call_budget"
+
+        assert second.data["kind"] == "step"
+        assert second.data["step"] == 2
+        # 第 2 步起恒为深档（入口判浅、多步升深）。
+        assert second.data["level"] == "deep"
+        assert second.data["tool_calls"] == []
+        assert {e.turn for e in usage} == {1}
+
+        quota = next(e for e in events if e.type == "quota")
+        assert quota.data["tokens"] == sum(e.data["tokens"] for e in usage)
+
+    async def test_wrap_up_call_is_recorded_with_its_own_kind(
+        self, stream_env: StreamEnv,
+    ):
+        """撞硬边界后的收尾请求也花钱——它必须有自己的 ``usage`` 与归属。"""
+        stream_env.provider.reset([
+            _tool_turn(_call("no_such_tool")),   # 未知工具 → 错误结果
+            _tool_turn(_call("no_such_tool")),   # 连续无进展 → 边界
+            _text("已完成部分，未完成其余。", prompt=20, completion=4),
+        ])
+        _, body = await stream_env.turn("随便干点什么")
+        conversation_id = uuid.UUID(payload_of(body, "done")["conversation_id"])
+        events = await _rows(stream_env, AIConversationEvent,
+                             conversation_id=conversation_id)
+
+        usage = [e for e in events if e.type == "usage"]
+        assert [e.data["kind"] for e in usage] == ["step", "step", "wrap_up"]
+        assert usage[-1].data["level"] == "deep"
+        assert usage[-1].data["tool_calls"] == []
+        assert usage[-1].data["tokens"] == 24
+
+        quota = next(e for e in events if e.type == "quota")
+        assert quota.data["tokens"] == sum(e.data["tokens"] for e in usage)
+
+    async def test_failed_turn_keeps_the_completed_steps_usage(
+        self, stream_env: StreamEnv,
+    ):
+        """失败轮：已完成的步骤照常留痕，轮合计与已写分步之和相等。"""
+        stream_env.provider.reset([
+            _tool_turn(_call("budget_list", _budget_args())),
+            ProviderError(status=503, retryable=False, reason="transport"),
+        ])
+        response, body = await stream_env.turn("看看预算")
+        assert response.status_code == 200          # 轮内失败以 error 帧收尾
+        conversation_id = uuid.UUID(payload_of(body, "error")["conversation_id"])
+        events = await _rows(stream_env, AIConversationEvent,
+                             conversation_id=conversation_id)
+
+        usage = [e for e in events if e.type == "usage"]
+        assert len(usage) == 1
+        assert usage[0].data["step"] == 1
+        quota = next(e for e in events if e.type == "quota")
+        assert quota.data["tokens"] == usage[0].data["tokens"]
+        assert any(e.type == "error" for e in events)
+
+    async def test_summary_compression_usage_is_separate_from_turn_total(
+        self, stream_env: StreamEnv,
+    ):
+        """摘要压缩的用量单独一条，**不计入**轮合计，也不新增配额行。"""
+        stream_env.provider.reset([_text("你好呀！")])
+        # 3 轮 > 默认窗口 4？不——默认窗口 4 轮，先跑 5 轮把第 1 轮挤出去。
+        conversation_id = None
+        for index in range(5):
+            stream_env.provider.reset([_text(f"第{index}轮回答")])
+            _, body = await stream_env.turn(
+                "你好", conversation_id=conversation_id,
+            )
+            conversation_id = payload_of(body, "done")["conversation_id"]
+
+        events = await _rows(stream_env, AIConversationEvent,
+                             conversation_id=uuid.UUID(conversation_id))
+        summary_usage = [
+            e for e in events if e.type == "usage" and e.data["kind"] == "summary"
+        ]
+        assert len(summary_usage) == 1
+        assert summary_usage[0].data["tokens"] == 8   # 摘要 provider：3 + 5
+        assert summary_usage[0].data["step"] is None
+
+        quota = [e for e in events if e.type == "quota"]
+        assert summary_usage[0].turn == quota[-1].turn
+        # 分步之和（不含 summary）== 每轮 quota 之和
+        step_total = sum(
+            e.data["tokens"] for e in events
+            if e.type == "usage" and e.data["kind"] in {"step", "wrap_up"}
+        )
+        assert step_total == sum(row.data["tokens"] for row in quota)
+        # 压缩不新增 ai_usage 行：5 轮 5 行，第 6 行不存在。
+        usage_rows = await _rows(
+            stream_env, AIUsage, conversation_id=uuid.UUID(conversation_id),
+        )
+        assert len(usage_rows) == 5
+
+
 
 
 class TestWritePath:
@@ -1582,8 +1711,9 @@ class TestCompression:
         assert replaces[0].data["upto_turn"] == 1
         assert replaces[0].data["summary"] == "用户此前问过几笔账。"
         assert replaces[0].ignorable is True
-        # 原文仍在日志里（压缩是新增一条事件，不是覆写）
-        assert [e.type for e in events][:2] == ["user", "assistant"]
+        # 原文仍在日志里（压缩是新增一条事件，不是覆写）；M8-12 后每条消息前
+        # 还有该步的 ``usage``。
+        assert [e.type for e in events][:3] == ["user", "usage", "assistant"]
 
         conversation = (await _rows(stream_env, AIConversation,
                                     id=uuid.UUID(conversation_id)))[0]

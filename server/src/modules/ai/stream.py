@@ -855,7 +855,9 @@ async def _execute_turn(
     # 本轮用的是**上一版**摘要（``run`` 那次读的 ``conversation.summary``）；
     # 新摘要从下一轮开始生效。这是必然的：本轮的历史窗口在读历史那一刻就定了。
     try:
-        await conversations.summarize_overflow(conversation, provider)
+        await conversations.summarize_overflow(
+            conversation, provider, request_id=request_id,
+        )
         await session.commit()
     except Exception as exc:  # noqa: BLE001 — 见上：压缩失败不改变已交付的这一轮
         logger.warning(
