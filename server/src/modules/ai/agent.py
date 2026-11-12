@@ -180,6 +180,7 @@ from .service import AIService
 from .skills import render_skill_section, skills_for_domains
 from .tools import (
     DEVICE_EXECUTED_OPS,
+    DOMAIN_TRANSACTION,
     DOMAINS,
     ERR_INVALID_ARGUMENTS,
     ERR_UNKNOWN_TOOL,
@@ -628,6 +629,40 @@ def _normalize_history(message: Mapping[str, Any]) -> dict[str, Any]:
     if normalized.get("role") == "assistant" and "reasoning_content" not in normalized:
         normalized["reasoning_content"] = ""
     return normalized
+
+
+#: M8-16：sticky 兜底最多回看几条工具调用。
+_STICKY_TOOL_LOOKBACK = 4
+
+
+def _recent_tool_domains(history: Sequence[Mapping[str, Any]]) -> set[str]:
+    """历史里**最近调用过**的工具所属的域（M8-16 的 sticky 兜底）。
+
+    指代性追问（「那改成 6000 吧」）一条词表信号都没有，但它的指代对象就在
+    上一轮的工具调用里。读的是 assistant 消息上的 ``tool_calls[].function.name``
+    ——工具结果消息只有 ``tool_call_id``，名字在这半边。只回看最近
+    ``_STICKY_TOOL_LOOKBACK`` 个调用，未知名字忽略（设备能力不属域）。
+    """
+    names: list[str] = []
+    for message in reversed(history):
+        calls = message.get("tool_calls")
+        if not isinstance(calls, list):
+            continue
+        for call in calls:
+            function = call.get("function") if isinstance(call, dict) else None
+            name = function.get("name") if isinstance(function, dict) else None
+            if isinstance(name, str) and name:
+                names.append(name)
+            if len(names) >= _STICKY_TOOL_LOOKBACK:
+                break
+        if len(names) >= _STICKY_TOOL_LOOKBACK:
+            break
+    domains: set[str] = set()
+    for name in names:
+        tool = get_tool(name)
+        if tool is not None:
+            domains.add(tool.domain)
+    return domains
 
 
 # ---------------------------------------------------------------------------
@@ -1305,9 +1340,16 @@ class AgentLoop:
             self._route = route_domains(user_input)
             # M8-成本：未命中信号时注入**核心四域**（不再全量）——见 routing 模块头。
             # 事件仍报原始路由决策（``domains``/``matched``），注入面用兜底面。
-            injected_domains = (
-                self._route.domains if self._route.matched else FALLBACK_DOMAINS
-            )
+            if self._route.matched:
+                injected_domains = self._route.domains
+            else:
+                # M8-16（sticky 兜底）：指代性追问不含任何域信号——从最近调用过
+                # 的工具反查域。命中则注入「最近域 ∪ transaction」（记账是核心
+                # 能力，指代多为改账）；查不到才用四域兜底。
+                recent = _recent_tool_domains(history)
+                injected_domains = (
+                    recent | {DOMAIN_TRANSACTION} if recent else FALLBACK_DOMAINS
+                )
             self._inject(
                 self._default_tools(injected_domains),
                 compact=True,

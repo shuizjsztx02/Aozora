@@ -51,6 +51,7 @@ M8 成本决策）：实测「吃饭78」这类短句未命中时，全量 56 �
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass
 
 from .tools import (
@@ -234,6 +235,8 @@ _SIGNALS: tuple[tuple[str, tuple[str, ...]], ...] = (
     ("删号", (DOMAIN_SECURITY,)),
     ("昵称", (DOMAIN_SECURITY,)),
     ("叫我", (DOMAIN_SECURITY,)),
+    # M8-16：语料 SEC-NEG-01「帮我把密码改一下」原先一条信号都不命中。
+    ("密码", (DOMAIN_SECURITY,)),
     # ── 同步（sync）──
     ("同步", (DOMAIN_SYNC,)),
     ("云端", (DOMAIN_SYNC,)),
@@ -288,6 +291,22 @@ FALLBACK_DOMAINS: frozenset[str] = frozenset({
     DOMAIN_TRANSACTION, DOMAIN_ACCOUNT, DOMAIN_CATEGORY, DOMAIN_BOOK,
 })
 
+#: M8-16：词表之外的**第一级**补充——「名词 + 金额」短句（「喜茶24」「瑞幸9.9」
+#: 「24」）。商品名是开放集合：词表没有、工具描述里也没有（文本检索同样够不着），
+#: 能识别的只有**形态**。命中即收窄到 transaction 单域（7 个工具）。
+AMOUNT_FORM_SIGNAL = "<金额短句>"
+_AMOUNT_FORM_RE = re.compile(r"^.{0,12}?\d+(?:\.\d+)?(?:元|块|块钱)?$")
+#: 问句/指代不收：这些输入要的是答案或改上一笔，不是新记一笔。
+_AMOUNT_FORM_EXCLUDE = re.compile(r"[?？]|多少|几个|怎么|哪")
+
+
+def _matches_amount_form(text: str) -> bool:
+    """整句形如「≤12 个字符的前缀 + 金额」且不含疑问词（M8-16）。"""
+    compact = re.sub(r"\s+", "", text)
+    if not compact or _AMOUNT_FORM_EXCLUDE.search(compact):
+        return False
+    return _AMOUNT_FORM_RE.match(compact) is not None
+
 
 def unrouteable_domains() -> frozenset[str]:
     """**没有任何信号**的域（正常应为空）。
@@ -299,7 +318,8 @@ def unrouteable_domains() -> frozenset[str]:
     **不在导入期报错**是刻意的：一个模块级的 ``raise`` 会让整个服务端起不来
     （爆炸半径远大于「新域暂时路由不到」），而它要防的只是配置疏漏——那是用例
     该回答的问题，不是运行期该拒绝的请求。漏配的真实后果只是该域**只能靠兜底
-    注入**（``matched=False`` 时全量），功能不消失、只是选择面变宽。
+    注入**（``matched=False`` 时的四域兜底面或 sticky 兜底），功能不消失、只是
+    选择面变宽。
     """
     return frozenset(DOMAINS) - {d for _, targets in _ALL_SIGNALS for d in targets}
 
@@ -308,7 +328,8 @@ def unrouteable_domains() -> frozenset[str]:
 class RoutingDecision:
     """一次域选择的结果。
 
-    ``matched=False`` 表示**没有命中任何信号**、退回全量注入（见模块头「兜底」）。
+    ``matched=False`` 表示**没有命中任何信号**（形态规则也未命中）、退回兜底面
+    （``FALLBACK_DOMAINS``，2026-11-11 起是记账核心四域；见模块头「兜底」）。
     它与「命中了但恰好命中全部域」是两件事：前者说明词表没覆盖这句输入
     （生产上值得观察的比例），后者说明这句话真的横跨很多东西。
     """
@@ -345,6 +366,14 @@ def route_domains(text: str) -> RoutingDecision:
             matched.update(targets)
 
     if not matched:
+        # M8-16：词表没覆盖时先看形态——「喜茶24」这类纯商品名 + 金额的短句，
+        # 用户的意图几乎必然是记一笔，收窄到 transaction 单域。
+        if _matches_amount_form(raw):
+            return RoutingDecision(
+                domains=(DOMAIN_TRANSACTION,),
+                matched=True,
+                signals=(AMOUNT_FORM_SIGNAL,),
+            )
         return RoutingDecision(domains=DOMAINS, matched=False, signals=())
 
     return RoutingDecision(

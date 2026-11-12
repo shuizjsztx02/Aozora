@@ -220,6 +220,40 @@
       "note": "点名不存在的分类。**判据是「不得静默记到别的分类上」**"
     },
     {
+      "id": "TX-ADD-06",
+      "domain": "transaction",
+      "layer": "core",
+      "text": "喜茶24",
+      "expect": [
+        "transaction_add"
+      ],
+      "kind": "write",
+      "landing": "produced",
+      "note": "M8-16 形态规则：纯「商品名 + 金额」，没有动词也没有词表信号，靠形态收窄到 transaction。"
+    },
+    {
+      "id": "TX-ADD-07",
+      "domain": "transaction",
+      "layer": "core",
+      "text": "瑞幸 9.9",
+      "expect": [
+        "transaction_add"
+      ],
+      "kind": "write",
+      "landing": "produced",
+      "note": "M8-16 形态规则：小数金额 + 空格。"
+    },
+    {
+      "id": "NEG-04",
+      "domain": "none",
+      "layer": "boundary",
+      "text": "那改成 6000 吧",
+      "expect": [],
+      "kind": "boundary",
+      "landing": "forbidden",
+      "note": "指代性追问（无历史）：不得凭空写库。M8-16 sticky 兜底在有历史时注入最近调用域。"
+    },
+    {
       "id": "TX-BATCH-01",
       "domain": "transaction",
       "layer": "core",

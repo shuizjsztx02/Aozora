@@ -366,6 +366,35 @@ class TestFallback:
     def test_blank_input_falls_back(self, text: str):
         assert routing.route_domains(text).domains == T.DOMAINS
 
+    @pytest.mark.parametrize("text", ["喜茶24", "瑞幸 9.9", "24", "星巴克32块"])
+    def test_a_bare_item_plus_amount_narrows_to_transaction(self, text: str):
+        """M8-16：词表与文本检索都够不着「商品名 + 金额」（工具描述里没有
+        「喜茶」），能识别的只有形态——收窄到 transaction 单域。"""
+        decision = routing.route_domains(text)
+
+        assert decision.matched is True
+        assert decision.domains == (T.DOMAIN_TRANSACTION,)
+        assert decision.signals == (routing.AMOUNT_FORM_SIGNAL,)
+
+    @pytest.mark.parametrize("text", ["这个月24号", "花了多少", "24 元吗？"])
+    def test_amount_like_questions_do_not_use_the_form_rule(self, text: str):
+        """问句/非金额结尾不收——形态规则只认「整句就是一个金额短句」。"""
+        decision = routing.route_domains(text)
+
+        # 「花了多少」由词表命中（``花了`` → transaction × analysis），其余兜底。
+        if text == "花了多少":
+            assert decision.matched is True
+            assert routing.AMOUNT_FORM_SIGNAL not in decision.signals
+        else:
+            assert decision.matched is False
+
+    def test_the_password_phrase_routes_to_security(self):
+        """M8-16 补词：语料 SEC-NEG-01「帮我把密码改一下」原先一条信号都不命中。"""
+        decision = routing.route_domains("帮我把密码改一下")
+
+        assert decision.matched is True
+        assert T.DOMAIN_SECURITY in decision.domains
+
     def test_the_fallback_flag_separates_miss_from_wide_hit(self):
         """``matched=False`` 与「命中了全部域」是两件事：前者说明词表没覆盖这句
         输入（生产上值得观察的比例），后者说明这句话真的横跨很多东西。"""
@@ -403,6 +432,43 @@ class TestInjection:
         loop, _ = _loop(provider)
 
         await loop.run(_NO_SIGNAL)
+
+        assert set(_injected(loop)) == set(_lane_names(routing.FALLBACK_DOMAINS))
+
+    async def test_a_pronoun_follow_up_reuses_the_recent_tool_domain(self):
+        """M8-16（sticky 兜底）：「那改成 6000 吧」词表一条信号都没有，但它的
+        指代对象就在上一轮的工具调用里——兜底时注入「最近域 ∪ transaction」。"""
+        provider = _Provider([_text("改成 6000 了。")])
+        loop, _ = _loop(provider)
+        history = [
+            {"role": "user", "content": "记一笔吃饭 36"},
+            {"role": "assistant", "content": "", "reasoning_content": "",
+             "tool_calls": [{
+                 "id": "c1", "type": "function",
+                 "function": {"name": "transaction_add", "arguments": "{}"},
+             }]},
+            {"role": "tool", "tool_call_id": "c1",
+             "content": "{\"status\": \"executed\"}"},
+            {"role": "assistant", "content": "记好了。"},
+        ]
+
+        await loop.run("那改成 6000 吧", history=history)
+
+        assert set(_injected(loop)) == set(
+            _lane_names({T.DOMAIN_TRANSACTION})
+        )
+        # ``routed`` 帧仍报词表的原始判定（没命中）——注入面才用 sticky 结果。
+        assert loop._route.matched is False  # noqa: SLF001
+
+    async def test_sticky_falls_back_without_recent_tools(self):
+        """没有可参考的工具调用时维持四域兜底——sticky 只收窄，不放大。"""
+        provider = _Provider([_text()])
+        loop, _ = _loop(provider)
+
+        await loop.run(_NO_SIGNAL, history=[
+            {"role": "user", "content": "你好"},
+            {"role": "assistant", "content": "你好呀！", "reasoning_content": ""},
+        ])
 
         assert set(_injected(loop)) == set(_lane_names(routing.FALLBACK_DOMAINS))
 
