@@ -1457,6 +1457,11 @@ class TestStepUsage:
         usage = next(e for e in events if e.type == "usage")
         assert usage.data["prompt_tokens"] == 100
         assert usage.data["cache_hit_tokens"] == 72
+        # M8-18：三档计价进载荷。72 命中 + 28 未命中 + 2 输出 = 5 micro-USD
+        # （off-peak）/ 11（峰时 ×2）——测试运行的时刻决定是哪一档。
+        assert usage.data["cost_micro_usd"] == (
+            11 if usage.data["price_peak"] else 5
+        )
         quota = next(e for e in events if e.type == "quota")
         assert quota.data["tokens"] == usage.data["tokens"] == 102
 

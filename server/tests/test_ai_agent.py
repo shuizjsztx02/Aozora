@@ -19,12 +19,13 @@ import json
 import uuid
 from collections.abc import AsyncIterator
 from copy import deepcopy
-from datetime import date
+from datetime import UTC, date, datetime
 from typing import Any, Callable
 
 import httpx
 import pytest
 
+from src.common.config import Settings
 from src.modules.ai import tools as T
 from src.modules.ai.agent import (
     DEFAULT_MAX_TOKENS,
@@ -35,6 +36,8 @@ from src.modules.ai.agent import (
     AgentLimits,
     AgentLoop,
     StopReason,
+    _is_peak_hours,
+    _usage_cost_micro_usd,
     classify_reasoning,
 )
 from src.modules.ai.provider import (
@@ -1494,3 +1497,73 @@ class TestStreamingIncrements:
 
         assert exc_info.value.reason == "bad_response"
         assert exc_info.value.retryable is False
+
+
+# ── M8-18：每次模型调用的三档计价 ────────────────────────────────────────
+
+
+def _price_settings(**overrides: Any) -> Settings:
+    base: dict[str, Any] = {
+        "database_url": "sqlite+aiosqlite:///:memory:",
+        "secret_key": "test-secret",
+        "env": "test",
+        "api_prefix": "",
+        "ai_provider_api_key": None,
+        "ai_agent_provider_api_key": None,
+    }
+    base.update(overrides)
+    return Settings(**base)
+
+
+class TestUsageCost:
+    """DeepSeek 官方三档价（off-peak：命中 3000 / 未命中 150000 / 输出 600000
+    micro-USD per 1M），峰时为 ``ai_price_peak_multiplier`` 倍。"""
+
+    def test_off_peak_three_tier_cost(self):
+        # 2026-11-11 周三 00:30 UTC —— off-peak。
+        now = datetime(2026, 11, 11, 0, 30, tzinfo=UTC)
+        micro, peak = _usage_cost_micro_usd(
+            prompt_tokens=3668,
+            cached_prompt_tokens=1408,
+            completion_tokens=113,
+            settings=_price_settings(),
+            now=now,
+        )
+        assert peak is False
+        # 1408*3000 + 2260*150000 + 113*600000 = 411,024,000 → 411 micro-USD
+        assert micro == 411
+
+    def test_peak_hours_double_the_cost(self):
+        # 2026-11-11 周三 02:00 UTC —— 峰时。
+        now = datetime(2026, 11, 11, 2, 30, tzinfo=UTC)
+        micro, peak = _usage_cost_micro_usd(
+            prompt_tokens=3668,
+            cached_prompt_tokens=1408,
+            completion_tokens=113,
+            settings=_price_settings(),
+            now=now,
+        )
+        assert peak is True
+        assert micro == 822
+
+    @pytest.mark.parametrize(("hour", "expected"), [
+        (0, False), (1, True), (3, True), (4, False), (5, False),
+        (6, True), (9, True), (10, False), (23, False),
+    ])
+    def test_peak_window_boundaries(self, hour: int, expected: bool):
+        now = datetime(2026, 11, 11, hour, 0, tzinfo=UTC)   # 周三
+        assert _is_peak_hours(now) is expected
+
+    def test_weekend_is_never_peak(self):
+        # 2026-11-14 周六 02:00 UTC。
+        assert _is_peak_hours(datetime(2026, 11, 14, 2, 0, tzinfo=UTC)) is False
+
+    def test_dirty_cache_counters_are_clamped(self):
+        micro, _ = _usage_cost_micro_usd(
+            prompt_tokens=100,
+            cached_prompt_tokens=500,          # 脏值：命中数不能超过输入
+            completion_tokens=-5,              # 脏值：负数按 0
+            settings=_price_settings(),
+            now=datetime(2026, 11, 11, 0, 0, tzinfo=UTC),
+        )
+        assert micro == 100 * 3000 // 1_000_000 + 0   # 全部按命中价

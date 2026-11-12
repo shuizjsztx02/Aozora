@@ -215,6 +215,40 @@ class Settings(BaseSettings):
         validation_alias=AliasChoices("AI_PRICE_PER_1M_TOKENS", "ai_price_per_1m_tokens"),
     )
 
+    # --- M8-18: agent 路径的三档计价（deepseek-flash 官方价，2026-11-12 定价页）---
+    # 单位 micro-USD per 1M tokens（1e-6 美元）。默认值是 **off-peak** 价：
+    # 缓存命中 $0.003 / 未命中 $0.15 / 输出 $0.6。峰时（周一至周五 UTC
+    # 01:00–04:00 与 06:00–10:00）按 ``ai_price_peak_multiplier`` 倍计价
+    # （官方峰价是 off-peak 的两倍）。换模型/调价只改环境变量，不改代码。
+    ai_price_cache_hit_per_1m: int = Field(
+        default=3_000,
+        ge=0,
+        validation_alias=AliasChoices(
+            "AI_PRICE_CACHE_HIT_PER_1M", "ai_price_cache_hit_per_1m",
+        ),
+    )
+    ai_price_cache_miss_per_1m: int = Field(
+        default=150_000,
+        ge=0,
+        validation_alias=AliasChoices(
+            "AI_PRICE_CACHE_MISS_PER_1M", "ai_price_cache_miss_per_1m",
+        ),
+    )
+    ai_price_output_per_1m: int = Field(
+        default=600_000,
+        ge=0,
+        validation_alias=AliasChoices(
+            "AI_PRICE_OUTPUT_PER_1M", "ai_price_output_per_1m",
+        ),
+    )
+    ai_price_peak_multiplier: int = Field(
+        default=2,
+        ge=1,
+        validation_alias=AliasChoices(
+            "AI_PRICE_PEAK_MULTIPLIER", "ai_price_peak_multiplier",
+        ),
+    )
+
     # --- AI agent 路径 provider (T-M7-02b, ADR-007) ---
     # The agent path (multi-step loop) runs on DeepSeek; the ``ai_provider_*``
     # block above keeps serving the fast path (DashScope). Both coexist and

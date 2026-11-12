@@ -148,6 +148,8 @@ from datetime import UTC, date, datetime
 from enum import StrEnum
 from typing import TYPE_CHECKING, Any, Protocol
 
+from src.common.config import Settings, get_config
+
 from .authorization import authorize_payload
 from .context import ProposalValidationContext
 from .conversation import EVENT_USAGE, USAGE_KIND_STEP, USAGE_KIND_WRAP_UP
@@ -629,6 +631,48 @@ def _normalize_history(message: Mapping[str, Any]) -> dict[str, Any]:
     if normalized.get("role") == "assistant" and "reasoning_content" not in normalized:
         normalized["reasoning_content"] = ""
     return normalized
+
+
+# ---------------------------------------------------------------------------
+# M8-18：每次模型调用的成本（DeepSeek 官方三档价）
+# ---------------------------------------------------------------------------
+
+
+def _is_peak_hours(now: datetime) -> bool:
+    """DeepSeek 峰时：周一至周五 UTC 01:00–04:00 与 06:00–10:00。
+
+    中国法定节假日官方按 off-peak 计价——判断它需要假日历，本模块不引入；
+    把节假日当峰时是**高估**（多算一倍），节假日请求占比很小，宁可高估。
+    """
+    if now.weekday() >= 5:
+        return False
+    return 1 <= now.hour < 4 or 6 <= now.hour < 10
+
+
+def _usage_cost_micro_usd(
+    *,
+    prompt_tokens: int,
+    cached_prompt_tokens: int,
+    completion_tokens: int,
+    settings: Settings,
+    now: datetime,
+) -> tuple[int, bool]:
+    """一次调用的成本（micro-USD，1e-6 美元）与是否按峰时计价。
+
+    三档价：缓存命中部分的输入、未命中的输入、输出。``cached_prompt_tokens``
+    是 ``prompt_tokens`` 的子集；脏值按 0 处理——观测路径不因 provider 偶发
+    异常数据抛错。
+    """
+    hit = max(0, min(cached_prompt_tokens, prompt_tokens))
+    miss = max(0, prompt_tokens - hit)
+    peak = _is_peak_hours(now)
+    multiplier = settings.ai_price_peak_multiplier if peak else 1
+    micro = (
+        hit * settings.ai_price_cache_hit_per_1m
+        + miss * settings.ai_price_cache_miss_per_1m
+        + max(0, completion_tokens) * settings.ai_price_output_per_1m
+    ) * multiplier // 1_000_000
+    return micro, peak
 
 
 #: M8-16：sticky 兜底最多回看几条工具调用。
@@ -1672,6 +1716,13 @@ class AgentLoop:
         ``request`` 由 :meth:`_request_payload` 在**发请求之前**采下——两者一起
         让管理端链式重建「这一次模型到底看到了什么」。
         """
+        cost_micro_usd, price_peak = _usage_cost_micro_usd(
+            prompt_tokens=result.prompt_tokens,
+            cached_prompt_tokens=result.cached_prompt_tokens,
+            completion_tokens=result.completion_tokens,
+            settings=get_config(),
+            now=datetime.now(UTC),
+        )
         payload = {
             "kind": kind,
             "step": step,
@@ -1685,6 +1736,9 @@ class AgentLoop:
             # M8-14：命中 prompt cache 的输入 token（是 prompt_tokens 的子集）。
             # 只做观测，不参与 quota / ai_usage 口径。
             "cache_hit_tokens": result.cached_prompt_tokens,
+            # M8-18：这次调用的成本（micro-USD，1e-6 美元）与是否按峰时计价。
+            "cost_micro_usd": cost_micro_usd,
+            "price_peak": price_peak,
             "tool_calls": [
                 {"id": call_id, "name": call.name}
                 for call_id, call in calls

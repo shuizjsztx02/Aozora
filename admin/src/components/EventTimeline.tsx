@@ -123,6 +123,11 @@ const REASONING_LABELS: Record<string, string> = {
   deep: '深档',
 }
 
+/** M8-18：micro-USD（1e-6 美元）→ ``$0.000411``。 */
+function formatMicroUsd(micro: number): string {
+  return `$${(micro / 1_000_000).toFixed(6)}`
+}
+
 export function EventTimeline({
   events,
   turn,
@@ -165,6 +170,11 @@ export function EventTimeline({
   const usageByCall = collectUsageByCall(events)
   // M8-13：轮内调用序号 → `usage` 事件（输入快照链式重建的索引）。
   const usageByCallIndex = collectUsageByCallIndex(events)
+  // M8-18：本轮成本（micro-USD）= 该轮所有模型调用之和。
+  const turnCostMicroUsd = events.reduce(
+    (sum, e) => (e.type === 'usage' ? sum + (asNumber(e.data.cost_micro_usd) ?? 0) : sum),
+    0,
+  )
 
   return (
     <div className={cn('space-y-2', isLoading && 'opacity-60')}>
@@ -188,6 +198,7 @@ export function EventTimeline({
               event={entry.event}
               approvalResults={approvalResults}
               usageByCallIndex={usageByCallIndex}
+              turnCostMicroUsd={turnCostMicroUsd}
               hasMore={hasMore}
             />
           ),
@@ -339,11 +350,13 @@ function EventItemCard({
   event,
   approvalResults,
   usageByCallIndex,
+  turnCostMicroUsd,
   hasMore,
 }: {
   event: EventItem
   approvalResults: Map<string, EventItem>
   usageByCallIndex: Map<number, EventItem>
+  turnCostMicroUsd: number
   hasMore: boolean
 }) {
   const meta = TYPE_META[event.type] ?? FALLBACK_META
@@ -359,6 +372,7 @@ function EventItemCard({
           event={event}
           approvalResults={approvalResults}
           usageByCallIndex={usageByCallIndex}
+          turnCostMicroUsd={turnCostMicroUsd}
           hasMore={hasMore}
         />
       </div>
@@ -396,11 +410,13 @@ function EventBody({
   event,
   approvalResults,
   usageByCallIndex,
+  turnCostMicroUsd,
   hasMore,
 }: {
   event: EventItem
   approvalResults: Map<string, EventItem>
   usageByCallIndex: Map<number, EventItem>
+  turnCostMicroUsd: number
   hasMore: boolean
 }) {
   switch (event.type) {
@@ -411,7 +427,7 @@ function EventBody({
     case 'tool':
       return <StandaloneToolBody event={event} />
     case 'quota':
-      return <QuotaBody event={event} />
+      return <QuotaBody event={event} turnCostMicroUsd={turnCostMicroUsd} />
     case 'usage':
       return <UsageBody event={event} usageByCallIndex={usageByCallIndex} />
     case 'error':
@@ -480,7 +496,13 @@ function StandaloneToolBody({ event }: { event: EventItem }) {
   )
 }
 
-function QuotaBody({ event }: { event: EventItem }) {
+function QuotaBody({
+  event,
+  turnCostMicroUsd,
+}: {
+  event: EventItem
+  turnCostMicroUsd: number
+}) {
   const provider = asString(event.data.provider) ?? '—'
   const model = asString(event.data.model) ?? '—'
   const tokens = asNumber(event.data.tokens)
@@ -500,6 +522,11 @@ function QuotaBody({ event }: { event: EventItem }) {
       {promptTokens !== null || completionTokens !== null ? (
         <span className="text-gray-400">
           prompt {promptTokens ?? '—'} / completion {completionTokens ?? '—'}
+        </span>
+      ) : null}
+      {turnCostMicroUsd > 0 ? (
+        <span className="rounded bg-sky-50 px-1.5 py-0.5 font-mono text-sky-700 ring-1 ring-inset ring-sky-200">
+          本轮合计 {formatMicroUsd(turnCostMicroUsd)}
         </span>
       ) : null}
     </div>
@@ -525,6 +552,9 @@ function UsageBody({
   const completionTokens = asNumber(event.data.completion_tokens)
   // M8-14：prompt cache 命中量（prompt_tokens 的子集）。旧事件没有这个字段。
   const cacheHitTokens = asNumber(event.data.cache_hit_tokens)
+  // M8-18：本次调用的成本（micro-USD）与是否按峰时计价。
+  const costMicroUsd = asNumber(event.data.cost_micro_usd)
+  const pricePeak = event.data.price_peak === true
   const tools = usageToolNames(event.data)
   const toolsChars = asNumber(event.data.tools_chars)
   const prompt = reconstructPrompt(event, usageByCallIndex)
@@ -550,6 +580,12 @@ function UsageBody({
         {promptTokens !== null || completionTokens !== null ? (
           <span className="text-gray-400">
             输入 {promptTokens ?? '—'} / 输出 {completionTokens ?? '—'}
+          </span>
+        ) : null}
+        {costMicroUsd !== null ? (
+          <span className="rounded bg-sky-50 px-1.5 py-0.5 font-mono text-sky-700 ring-1 ring-inset ring-sky-200">
+            {formatMicroUsd(costMicroUsd)}
+            {pricePeak ? '（峰时）' : ''}
           </span>
         ) : null}
         {cacheHitTokens !== null && cacheHitTokens > 0 ? (
