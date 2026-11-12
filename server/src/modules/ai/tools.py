@@ -4880,7 +4880,11 @@ def to_openai_tools(
     for tool in tools:
         description = tool.description
         parameters = tool.parameters
-        if compact or bare:
+        # **写工具的完整描述不压缩**：它承载安全语义（「一次只删一条」「必须先读
+        # 再写」），截断会让模型误用——语料实测 TX-NEG-01 在截断后对「把所有的
+        # 交易记录都删掉」循环调用了 14 次 delete、产出 5 个提案。读工具描述与
+        # 所有参数描述照常压缩。
+        if (compact or bare) and tool.kind != "write":
             description = _compact_text(description, _TOOL_DESC_LIMIT)
         if bare:
             parameters = _compact_parameters(parameters, drop_descriptions=True)
