@@ -92,6 +92,15 @@ class ProviderResult:
     # conversation to keep the reasoning chain continuous (ADR-007), so the
     # agent loop must be able to persist it — hence a field, not a discard.
     reasoning_content: str = ""
+    # M8-14: input tokens served from the provider's prompt cache. A subset of
+    # ``prompt_tokens`` — it never affects quota or billing here, only the
+    # observation of how much of the re-sent prefix (system + tools + history)
+    # actually hit cache. DeepSeek reports it as
+    # ``usage.prompt_cache_hit_tokens``; providers without prefix caching
+    # (DashScope) leave it 0. **Last position on purpose**: existing callers
+    # build this result positionally (``ProviderResult(content, p, c, (), "")``),
+    # so a new field must not shift those slots.
+    cached_prompt_tokens: int = 0
 
 
 @dataclass(frozen=True, slots=True)
@@ -447,6 +456,7 @@ def _parse_message(message: Any, usage: Any) -> ProviderResult:
         content=content,
         prompt_tokens=int(tokens.get("prompt_tokens", 0)),
         completion_tokens=int(tokens.get("completion_tokens", 0)),
+        cached_prompt_tokens=int(tokens.get("prompt_cache_hit_tokens", 0)),
         tool_calls=tool_calls,
         reasoning_content=reasoning if isinstance(reasoning, str) else "",
     )
@@ -466,6 +476,7 @@ class _StreamAccumulator:
         self._tool_calls: dict[int, dict[str, str]] = {}
         self._prompt_tokens = 0
         self._completion_tokens = 0
+        self._cached_prompt_tokens = 0
 
     def feed(self, chunk: Any) -> tuple[str, str]:
         """Merge one SSE payload; return its ``(text, reasoning)`` increments.
@@ -481,6 +492,7 @@ class _StreamAccumulator:
         if isinstance(usage, dict):
             self._prompt_tokens = int(usage.get("prompt_tokens", 0))
             self._completion_tokens = int(usage.get("completion_tokens", 0))
+            self._cached_prompt_tokens = int(usage.get("prompt_cache_hit_tokens", 0))
 
         choices = chunk.get("choices")
         if not choices:
@@ -541,6 +553,7 @@ class _StreamAccumulator:
             content="".join(self._text),
             prompt_tokens=self._prompt_tokens,
             completion_tokens=self._completion_tokens,
+            cached_prompt_tokens=self._cached_prompt_tokens,
             tool_calls=tuple(calls),
             reasoning_content="".join(self._reasoning),
         )

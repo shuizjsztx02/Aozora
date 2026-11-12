@@ -1603,6 +1603,9 @@ class AgentLoop:
             "prompt_tokens": result.prompt_tokens,
             "completion_tokens": result.completion_tokens,
             "tokens": result.prompt_tokens + result.completion_tokens,
+            # M8-14：命中 prompt cache 的输入 token（是 prompt_tokens 的子集）。
+            # 只做观测，不参与 quota / ai_usage 口径。
+            "cache_hit_tokens": result.cached_prompt_tokens,
             "tool_calls": [
                 {"id": call_id, "name": call.name}
                 for call_id, call in calls

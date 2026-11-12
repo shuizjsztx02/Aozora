@@ -523,6 +523,8 @@ function UsageBody({
   const tokens = asNumber(event.data.tokens)
   const promptTokens = asNumber(event.data.prompt_tokens)
   const completionTokens = asNumber(event.data.completion_tokens)
+  // M8-14：prompt cache 命中量（prompt_tokens 的子集）。旧事件没有这个字段。
+  const cacheHitTokens = asNumber(event.data.cache_hit_tokens)
   const tools = usageToolNames(event.data)
   const toolsChars = asNumber(event.data.tools_chars)
   const prompt = reconstructPrompt(event, usageByCallIndex)
@@ -548,6 +550,12 @@ function UsageBody({
         {promptTokens !== null || completionTokens !== null ? (
           <span className="text-gray-400">
             输入 {promptTokens ?? '—'} / 输出 {completionTokens ?? '—'}
+          </span>
+        ) : null}
+        {cacheHitTokens !== null && cacheHitTokens > 0 ? (
+          <span className="rounded bg-amber-50 px-1.5 py-0.5 text-amber-700 ring-1 ring-inset ring-amber-200">
+            缓存命中 {cacheHitTokens.toLocaleString()}
+            {promptTokens ? `（${Math.round((cacheHitTokens / promptTokens) * 100)}%）` : ''}
           </span>
         ) : null}
         {tools.length > 0 ? (

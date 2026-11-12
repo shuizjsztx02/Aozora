@@ -71,12 +71,14 @@ CATEGORY = "餐饮"
 
 def _text(
     content: str, *, prompt: int = 5, completion: int = 7, reasoning: str = "",
+    cached: int = 0,
 ) -> ProviderResult:
     return ProviderResult(
         content=content,
         prompt_tokens=prompt,
         completion_tokens=completion,
         reasoning_content=reasoning,
+        cached_prompt_tokens=cached,
     )
 
 
@@ -1435,6 +1437,25 @@ class TestStepUsage:
 
         quota = next(e for e in events if e.type == "quota")
         assert quota.data["tokens"] == sum(e.data["tokens"] for e in usage)
+
+    async def test_usage_event_carries_cache_hit_tokens(
+        self, stream_env: StreamEnv,
+    ):
+        """M8-14：``usage`` 带上命中的 prompt cache token（``prompt_tokens``
+        的子集）；它只做观测，不改变 ``quota`` 的轮合计。"""
+        stream_env.provider.reset([
+            _text("记好了。", prompt=100, completion=2, cached=72),
+        ])
+        _, body = await stream_env.turn("喜茶24")
+        conversation_id = uuid.UUID(payload_of(body, "done")["conversation_id"])
+        events = await _rows(stream_env, AIConversationEvent,
+                             conversation_id=conversation_id)
+
+        usage = next(e for e in events if e.type == "usage")
+        assert usage.data["prompt_tokens"] == 100
+        assert usage.data["cache_hit_tokens"] == 72
+        quota = next(e for e in events if e.type == "quota")
+        assert quota.data["tokens"] == usage.data["tokens"] == 102
 
     async def test_wrap_up_call_is_recorded_with_its_own_kind(
         self, stream_env: StreamEnv,

@@ -469,6 +469,25 @@ class TestToolCallParsing:
             model=MODEL, max_tokens=64, timeout=5.0, tools=TOOLS,
         )
         assert (result.prompt_tokens, result.completion_tokens) == (0, 0)
+        assert result.cached_prompt_tokens == 0
+
+    async def test_cache_hit_tokens_parsed_from_usage(self, provider_factory):
+        """M8-14：DeepSeek 在 ``usage`` 里报 ``prompt_cache_hit_tokens``——它是
+        ``prompt_tokens`` 的子集，只进观测，不进配额/计费。"""
+        def handler(request: httpx.Request) -> httpx.Response:
+            return httpx.Response(200, json=_body({
+                "role": "assistant", "content": "ok",
+            }, usage={
+                "prompt_tokens": 100, "completion_tokens": 5,
+                "prompt_cache_hit_tokens": 72, "prompt_cache_miss_tokens": 28,
+            }))
+
+        result = await provider_factory(handler).complete_with_tools(
+            [{"role": "user", "content": "hi"}],
+            model=MODEL, max_tokens=64, timeout=5.0, tools=TOOLS,
+        )
+        assert result.prompt_tokens == 100
+        assert result.cached_prompt_tokens == 72
 
     async def test_default_result_shape_is_backward_compatible(self):
         """The fast path constructs ProviderResult positionally; the agent
@@ -645,6 +664,23 @@ class TestStreaming:
         chunks = await self._collect(provider_factory(handler))
         result = chunks[-1].result
         assert (result.prompt_tokens, result.completion_tokens) == (30, 12)
+        assert result.cached_prompt_tokens == 0
+
+    async def test_cache_hit_tokens_collected_from_stream_trailer(self, provider_factory):
+        """M8-14：流式路径的用量在尾块，缓存命中同样从那里取。"""
+        def handler(request: httpx.Request) -> httpx.Response:
+            return httpx.Response(200, text=_sse(
+                _delta(content="ok"),
+                json.dumps({"choices": [], "usage": {
+                    "prompt_tokens": 40, "completion_tokens": 3,
+                    "prompt_cache_hit_tokens": 24,
+                }}),
+            ))
+
+        chunks = await self._collect(provider_factory(handler))
+        result = chunks[-1].result
+        assert result.cached_prompt_tokens == 24
+        assert result.prompt_tokens == 40
 
     async def test_reasoning_deltas_forwarded_on_their_own_channel(self, provider_factory):
         """推理与正文**分通道**送出（T-M7-02g-2），且推理仍被累加进 ``result``
