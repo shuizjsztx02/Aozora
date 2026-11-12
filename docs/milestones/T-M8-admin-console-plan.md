@@ -26,6 +26,10 @@
 | **8-12** | 分步 token 用量观测（REQ-85 追加） | ✅ 完成 | 2026-11-12 | `c815ac8` |
 | **8-13** | 模型输入快照（REQ-86，用户反馈追加） | ✅ 完成 | 2026-11-12 | `fe8cfc6` | `usage` 事件补 `call` + `request`：system（逐调用）/ 增量 `append` / 工具名与 `tools_def`（工具集变化才存），回放页「模型输入」面板可展开逐步查看。验证：服务端 **1891 passed / 37 skipped**、ruff 全绿；admin tsc/build 通过；**已部署测试实例**（A 机 `fe8cfc6`），真实会话 PG 取证：call1 system 969 字符 / 8 工具 / 含 tools_def，call2 base_call=1 / append 2 条 / 无重复 schema。残余 R-PROD-73 | 新结构性事件 `usage`：**每次模型调用一条**（Step / 收尾 / 摘要压缩），随步写入（断连也留档）；回放台显示每步输入/输出 token、档位与该步发起的工具调用，工具卡按 `tool_call_id` 标注「本步用量」。轮合计仍以 `quota` 为准；不新增 `ai_usage` 行、无迁移、无桥变更。验证：新增 6 条专项用例（分步 / 收尾 / 失败轮 / 摘要用量 ×2）+ 结构性事件参数化用例随白名单扩面；服务端 **1888 passed / 37 skipped**、ruff 全绿；vitest **1509 passed**；admin tsc/build 通过。残余 R-PROD-72 |
 
+| **8-14** | prompt cache 命中观测（REQ-87，成本分析追加） | ⏳ 未开始 | — | — | provider 解析 `prompt_cache_hit_tokens` → `usage` 事件 `cache_hit_tokens` → 回放台展示；先看清「账面 token」与「实际计费」的差 |
+| **8-15** | 收尾步不带工具（REQ-88，成本分析追加） | ⏳ 未开始 | — | — | 工具调用全部终态后，下一步只剩复述结果：请求 `tools=[]` + 收尾指令 + 降档，省整套工具 schema（实测 ~4.1k tokens/步） |
+| **8-16** | 路由增强：金额形态 + sticky 兜底 + 补词（REQ-89，成本分析追加） | ⏳ 未开始 | — | — | 词表未命中时先判「商品名+金额」形态（→ transaction 单域），再考虑最近调用域；补「密码」等缺口词；不引入检索/embedding |
+
 **状态取值：** ⏳ 未开始 / 🔄 进行中 / ✅ 完成 / ⛔ 阻塞
 
 ---
@@ -52,6 +56,12 @@
 批次9  8-12（独立跟进，无前置）
           ↓
 批次10 8-13（依赖 8-12 的 usage 事件与回放页）
+          ↓
+批次11 8-14（依赖 8-12/8-13 的 usage 事件与回放页；只加观测字段）
+          ↓
+批次12 8-15（依赖 8-12；改 agent loop 每步请求形态）
+          ↓
+批次13 8-16（依赖 8-14 的观测；改 routing + agent 注入面）
 ```
 
 | 批次 | 卡 | 可并行 | 说明 |
@@ -66,6 +76,9 @@
 | 8 | 8-11 | — | 收口 |
 | 9 | 8-12 | — | 2026-11-12 追加（REQ-85）；独立跟进卡，无前置，可与其它线并行 |
 | 10 | 8-13 | — | 2026-11-12 用户反馈追加（REQ-86）；依赖 8-12 的 `usage` 事件；交付即部署测试实例 |
+| 11 | 8-14 | ✅ | 2026-11-12 成本分析追加（REQ-87）；依赖 8-12/8-13 的事件与回放页 |
+| 12 | 8-15 | ✅ | 2026-11-12 成本分析追加（REQ-88）；依赖 8-12；与 8-14/8-16 文件面无冲突 |
+| 13 | 8-16 | — | 2026-11-12 成本分析追加（REQ-89）；依赖 8-14 的观测数据 |
 
 **为什么把迁移集中到 8-03：** Alembic 是单链（`down_revision`），四个卡各带迁移必然分叉。把「schema 先行」统一到一张卡，后续卡只写代码，并行度最高，且迁移失败只影响一处。
 
@@ -235,6 +248,71 @@
 - **存储口径：** 每轮新增 ≈ 首次调用的完整 prompt + 各步增量（O(轮内消息) 而非 O(步数 × 历史)）；事件随保留期（30 天）整轮清理。风险册登记 **R-PROD-73**（事件体积/导出体积放大，尤其 `tools_def` 与长 system）。
 - **依赖：** 8-12（已收口）。**交付即部署**：A 机 `git pull` → admin 构建产物同步 → `a-deploy.sh test` → 线上真实会话走查。
 - **交付（2026-11-12）：** 已部署 A 机测试实例（`fe8cfc6`；admin 产物 `index-CrhTa_07.js`）。真实会话取证：两次模型调用的 `usage` 分别为 `call=1/base=null/append=1/tools_def=是` 与 `call=2/base=1/append=2/tools_def=否`，system 969 字符与代码量级一致。**反向验证已做**：`append` 置空后 3 条快照用例全红。
+
+### 8-14 prompt cache 命中观测（REQ-87，2026-11-12 成本分析追加）
+
+- **背景：** 用户对「喜茶24」一轮（12,389 tokens）做成本归因，发现 69% 花在工具 schema 上。但架构 §成本影响记录：`deepseek-flash` 输入 cache hit 单价 $0.003/1M、miss $0.15/1M（差 50 倍），agent loop 每轮重发历史与工具定义**正是 Design for cache**。然而 `provider.py` 只解析 `prompt_tokens` / `completion_tokens`，把 DeepSeek 返回的 `prompt_cache_hit_tokens` 丢弃——账面 token 与实际计费的差无法被观测，成本决策全凭猜测。8-12 曾明确将此项列为职责边界外（「不采集 prompt cache hit/miss（provider 未解析）」），本卡补上。
+- **内容：**
+  1. `ProviderResult` 增加 `cached_prompt_tokens: int = 0`（默认 0，快路径与非 DeepSeek provider 的构造不受影响）。
+  2. `DeepSeekProvider` 两处解析读取 `usage.prompt_cache_hit_tokens`（非流式 `_result_from_body` 与流式 `_StreamAccumulator.feed`）；字段缺失/非整数按 0。**只认 hit，不存 miss**（miss = prompt − hit，可推导）。
+  3. `agent._usage_payload` 增加 `cache_hit_tokens`（取 `result.cached_prompt_tokens`）。`quota` 事件与 `ai_usage` **一字不改**（配额与混合价成本聚合口径不变）。
+  4. 管理端回放页 `UsageBody`：`cache_hit_tokens > 0` 时在输入 token 旁显示「缓存命中 N（M%）」；旧事件无字段不显示。
+  5. **观测记录**：在同轮两步之间（`_load_skills` 改写 system）与跨轮之间（`compact`/`bare` 档跳变、system 内日期变化）比较命中率，把结论写进交付记录——本卡只观测，**不据此改压缩档或 system 结构**。
+- **职责边界：**
+  - 不改前缀结构（system 顺序、工具集、large payload 形态）——观测先行。
+  - 不改 `quota` / `ai_usage` / 成本聚合（`AI_PRICE_PER_1M_TOKENS` 仍是混合价）。
+  - 不覆盖快路径与非会话车道。
+- **验收：**
+  - provider 用例：usage 带 `prompt_cache_hit_tokens` → `cached_prompt_tokens` 正确；缺失 → 0；非整数 → 0；流式与非流式两条路径都覆盖。
+  - `usage` 事件载荷含 `cache_hit_tokens`，且**现有 8-12/8-13 用例不回归**（字段为新增，旧断言不受影响；参数化断言若枚举键需同步）。
+  - 回放台展示正确、旧会话不回归；admin tsc/build 通过。
+  - 真实链路上跑一轮两步会话，PG 里 `usage` 事件能看到 `cache_hit_tokens`（部署测试实例后取证；本机无法直连 DeepSeek 时以脚本化 provider 用例为准并注明）。
+- **依赖：** 8-12 / 8-13（已收口）。
+
+### 8-15 收尾步不带工具（REQ-88，2026-11-12 成本分析追加）
+
+- **背景：** 「喜茶24」一轮的**第二次模型调用**（`deepseek-flash`，2 Step）只为说一句「记好了」，却完整重发了 24 个工具的 schema（11,710 字符 / ≈4,100 tokens），且因为 `_level_for_step`（`agent.py:1359`）在 `steps >= 1` 时强制 `DEEP` 档而启用 thinking。工具执行完、下一步只需复述结果时，工具定义是纯浪费。
+- **内容：**
+  1. `AgentLoop` 记录上一步工具结果；`step()` 在**发请求前**判定「收尾步」（`_should_finalize`）：
+     - `self._steps >= 1`（不是第一步）；
+     - 上一步**有**工具调用，且**全部**结果为终态（`executed` / `proposal_pending` / 只读成功；**不含** `error`）；
+     - `self._queued` 为空（没有中途输入——用户又说话时必须保留工具）。
+  2. 收尾步请求形态：
+     - `tools=[]`（provider 不下发 `tools` 字段）；`_advertised` 同步为空集（模型若仍返回工具名会被隔离边界拒绝，不执行）；
+     - 追加一条**收尾指令**（`_FINALIZE_INSTRUCTION`，语义：「工具调用已完成，用一句话告诉用户结果，不要再调工具」）。指令**只进本次请求的 messages**，不落库（同 `_wrap_up` 的既有做法）；
+     - 推理档用 `FAST`（只复述结果，不需要 thinking）。
+  3. `usage` 事件的 `request.tools` 自然为 `[]`，回放台可据此显示「收尾（不带工具）」；`kind` 仍为 `step`（不新增枚举，避免事件白名单/前端映射扩散）。
+  4. 客户端零改动、无迁移、无桥变更。
+- **职责边界：**
+  - 不改 `_wrap_up`（撞硬边界路径）与其 `DEEP` 档。
+  - 不改 `run()` 的注入面（`_inject`）——只影响每步请求传给 provider 的 `tools` 参数。
+  - 不改变「模型自主决定不再调工具」的既有收尾路径（那是 `if not calls` 分支，保持原样）。
+- **验收：**
+  - 用例：单工具 `executed` → 第二次请求 `tools == []`、档位 `fast`；`usage` 快照 `tools == []`。
+  - 用例：上一步含 `error` → 第二步仍带工具；上一步 `proposal_pending` → 收尾（说「等你确认」）。
+  - 用例：`submit()` 中途输入后 → 下一步仍带工具（输入不能被丢掉）。
+  - **反向验证**：把 `_should_finalize` 改为恒 `False`，上述用例变红。
+  - 服务端全量 pytest + ruff 通过。
+
+### 8-16 路由增强：金额形态 + sticky 兜底 + 补词（REQ-89，2026-11-12 成本分析追加）
+
+- **背景：** 「喜茶24」未命中任何词表信号 → 兜底四域 21 工具（≈4,100 tokens/步）。对 96 条语料的实测：词表覆盖 89/96，剩余缺口分三类——①**纯名词+金额**短句（「喜茶24」，词表无商品名、检索同样救不了）；②**指代性追问**（「那改成 6000 吧」）；③纯补词缺口（「密码」不在 security 信号里）。三项都是确定性问题，**不引入 embedding / 工具检索**（结论与依据见本轮分析，替代方案在本卡「非目标」）。
+- **内容：**
+  1. **金额形态规则**（`routing.py`）：词表未命中时，若输入匹配「≤12 个非数字字符 + 金额数字 +（元/块/块钱）?」且**不含**疑问词/问号，返回 `domains=(transaction,)`、`signals=("<金额短句>",)`、`matched=True`。用于把「喜茶24」「瑞幸9.9」「24」这类极简记账收窄到 transaction 单域（7 个工具）。
+  2. **sticky 兜底**（`agent.run()`）：`matched=False` 且形态规则也未命中时，从 `history` 最近 **4 条**工具结果消息的 `name` 反查注册表域；非空则注入 `recent_domains ∪ {transaction}`（记账是核心能力，指代追问多为改账），否则维持 `FALLBACK_DOMAINS`。路由决策的 `routed` 帧仍上报**词表原始判定**（`domains`/`matched`），注入面用 sticky 结果——与现有「事件报原始决策、注入用兜底面」的结构一致。
+  3. **补词**：`密码` → `security`（「帮我把密码改一下」当前 matched=False）。
+  4. **语料**：`scripts/ai_tool_matrix/corpus.json` 增加「喜茶24」「瑞幸9.9」「那改成 6000 吧」三条；`report.json` 重跑。
+- **非目标：** 不做工具检索（BM25/向量）、不做 embedding 分类器、不做渐进式披露——依据：工具描述不含商品名，文本检索对「喜茶24」同样无效；56 工具 / 16 域规模下域先验已足够，检索的复杂度不划算（触发条件见交付记录）。
+- **职责边界：**
+  - 不改 `FALLBACK_DOMAINS` 常量本身；不改域注册表与工具定义。
+  - 形态规则只做**收窄**（matched=False → transaction），不改变已命中输入的域选择；sticky 只在兜底时生效。
+  - sticky 只读「最近工具结果」，不读用户输入文本，保持确定性、可离线测。
+- **验收：**
+  - 离线用例：「喜茶24」「瑞幸9.9」「24」→ transaction 单域；「你好呀」「帮我订机票」→ 兜底；「预算里包含房租吗」→ 词表命中不变；含问号/疑问词的金额句不命中形态。
+  - sticky 用例：history 含 `transaction_add` 工具结果 + 本轮「那改成 6000 吧」→ 注入 transaction（而非四域）；history 为空 → 兜底页不变。
+  - 「帮我把密码改一下」→ security 域。
+  - `probe_tool_selection.py --routing` 全量语料回归：fallback 数下降且**无新增漏注入**（`test_every_domain_has_a_signal` 仍绿）。
+  - 服务端全量 pytest + ruff 通过；语料报告同步。
 
 ---
 

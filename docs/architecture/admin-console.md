@@ -89,6 +89,7 @@ APP-CONTEXT §4.6 已按此口径修订。
 | `level` | 该次调用的推理档 `fast` / `medium` / `deep`（`wrap_up` 恒 `deep`；`summary` 为 `null`——单发补全不带推理档）——同一轮内各步档位可以不同（入口判浅、第 2 步起升深） |
 | `provider` / `model` | 该次调用的服务商与模型 |
 | `prompt_tokens` / `completion_tokens` / `tokens` | 该次调用的用量 |
+| `cache_hit_tokens` | 该次调用**命中 prompt cache** 的输入 token（M8-14，2026-11-12）：取 DeepSeek `usage.prompt_cache_hit_tokens`，缺失为 0。它是 `prompt_tokens` 的**子集**，不改变计费与配额口径——只让「账面 token」与「缓存命中部分」可比，用于评估重复前缀（system + 工具定义 + 历史）的缓存收益 |
 | `tool_calls` | `[{id, name}]`：该次调用产出的工具调用；`id` 与 assistant 事件 `data.tool_calls[].id` 同源；`wrap_up` / `summary` 为空数组 |
 | `call` | 轮内第几次模型调用（1 起）——`request` 链式重建的引用键（M8-13） |
 | `request` | 该次调用的**模型输入快照**（M8-13）：`base_call / system / append / tools / tools_chars / tools_def?`，见下 |
