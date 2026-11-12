@@ -430,6 +430,29 @@ class TestBookkeepingForm:
         assert decision.signals == (routing.BOOKKEEPING_FORM_SIGNAL,)
 
     @pytest.mark.parametrize("text", [
+        "支付宝到账500", "信用卡还款 2000", "微信支付 30", "房租3000",
+    ])
+    def test_bookkeeping_intent_is_unioned_with_data_domains(self, text: str):
+        """M8-17b 真机缺陷回归：支付方式词把域收窄到 account 后，记账域必须
+        **并入**而不是被收走——否则模型只能幻觉调用未注入的 ``transaction_add``，
+        被隔离边界以 ``tool_unavailable`` 拒绝（用户看到「这个工具本轮不可用」）。"""
+        decision = routing.route_domains(text)
+
+        assert decision.matched is True
+        assert T.DOMAIN_TRANSACTION in decision.domains
+        assert routing.BOOKKEEPING_FORM_SIGNAL in decision.signals
+
+    @pytest.mark.parametrize("text", [
+        "支付宝里还有多少钱", "支付宝余额还有多少", "我的支付宝账户",
+    ])
+    def test_payment_method_queries_do_not_pull_in_transaction(self, text: str):
+        """纯账户查询不并入记账域——「支付」是「支付宝」的子串，动作词刻意不收。"""
+        decision = routing.route_domains(text)
+
+        assert decision.matched is True
+        assert T.DOMAIN_TRANSACTION not in decision.domains
+
+    @pytest.mark.parametrize("text", [
         "帮我订一张明天去北京的机票",   # 数词是量词短语，不是金额
         "今天天气不错",
         "我习惯月底结账",              # 说的是定时记账习惯，不是记一笔

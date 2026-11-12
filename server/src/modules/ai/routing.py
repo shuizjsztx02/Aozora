@@ -304,10 +304,12 @@ FALLBACK_DOMAINS: frozenset[str] = frozenset({
 BOOKKEEPING_FORM_SIGNAL = "<记账形态>"
 
 #: L1：动作 / 祈使。口语里「发生了什么」的动词与记账命令。
-#: 「结账」刻意不收：它在「我习惯月底结账」里指的是定时记账（scheduled 域），
-#: 收窄到 transaction 会丢掉用户真正要的域。
+#: 两个刻意不收的：
+#: - 「结账」在「我习惯月底结账」里指的是定时记账（scheduled 域）；
+#: - 「支付」是「支付宝」的子串——「支付宝里还有多少钱」是纯查询，收窄/并入
+#:   transaction 会把域带偏。纯「支付 88 元」靠 L2 金额形态兜住。
 _BOOKKEEPING_ACTIONS: tuple[str, ...] = (
-    "付了", "付掉", "支付", "消费", "下单", "点了", "买了", "充了", "交了",
+    "付了", "付掉", "消费", "下单", "点了", "买了", "充了", "交了",
     "续费", "请客", "AA", "团购", "到账", "退款", "报销", "入账",
     "帮我记", "记一下", "记个账",
 )
@@ -333,9 +335,11 @@ _CN_DIGITS = {
 }
 _CN_UNITS = {"十": 10, "百": 100, "千": 1000, "万": 10000}
 _CN_NUM_CLASS = "零一二两三四五六七八九十百千万"
-#: 整句形态：前缀 + 金额（阿拉伯数字或中文数字），可带「元/块」。
+#: 整句形态：**短前缀** + 金额（阿拉伯数字或中文数字），可带「元/块」。
+#: 前缀限 6 字符：记账短句（「喜茶24」「外卖 25」「帮我记一下 早餐 8 块」）都在
+#: 内，而「给餐饮设个月度预算 1500」这类长句是别的域的操作，不该并进记账域。
 _AMOUNT_FORM_RE = re.compile(
-    rf"^.{{0,12}}?(\d+(?:\.\d+)?|[{_CN_NUM_CLASS}]{{1,8}})(?:元|块|块钱)?$",
+    rf"^.{{0,6}}?(\d+(?:\.\d+)?|[{_CN_NUM_CLASS}]{{1,8}})(?:元|块|块钱)?$",
 )
 
 
@@ -404,7 +408,11 @@ def _matches_amount_form(text: str) -> bool:
 
 
 def _looks_like_bookkeeping(text: str) -> bool:
-    """M8-17：记账意图判定器——三层任一命中即为记账（词表未命中时才调用）。
+    """M8-17：记账意图判定器——三层任一命中即为记账。
+
+    两处调用：① 词表**完全未命中**时，命中即收窄到 transaction 单域；② 词表
+    **已命中**时（M8-17b），命中则把 transaction **并进**已选域（支付方式词
+    「支付宝/信用卡」会把域收窄到 account，记账工具不能被一并收走）。
 
     L1 动作/祈使 → L2 整句金额形态 → L3 品类名词 + 金额。动作词分支已在 L1
     返回，L3 的「品类 + 动作」重叠因此不需要重复判断。
@@ -487,6 +495,14 @@ def route_domains(text: str) -> RoutingDecision:
                 signals=(BOOKKEEPING_FORM_SIGNAL,),
             )
         return RoutingDecision(domains=DOMAINS, matched=False, signals=())
+
+    # M8-17b（2026-11-12 真机缺陷）：命中词表后**再跑一次记账判定**。支付方式词
+    # 会先把域收窄到 account——「支付宝到账500」「信用卡还款 2000」「微信支付
+    # 30」——记账域被一并收走，模型只能幻觉调用未注入的 transaction_add，被隔离
+    # 边界以 tool_unavailable 拒绝（真机实测）。记账意图与数据域是**并集**。
+    if _looks_like_bookkeeping(raw):
+        matched.add(DOMAIN_TRANSACTION)
+        hits.append(BOOKKEEPING_FORM_SIGNAL)
 
     return RoutingDecision(
         # 按 DOMAINS 归一化顺序：同一组域在帧载荷、日志与用例里逐字可比。
