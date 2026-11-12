@@ -279,6 +279,15 @@ _WRAP_UP_INSTRUCTION = (
     "不要编造没做过的事，不要输出 JSON。"
 )
 
+#: M8-15：工具调用全部终态后，「收尾步」的指令——本次请求不再下发工具，
+#: 模型只需要把结果说给用户。与 ``_WRAP_UP_INSTRUCTION`` 的区别：那条是撞硬
+#: 边界后的「已完成 / 未完成」交代，这条是正常完成后的收口。
+_FINALIZE_INSTRUCTION = (
+    "【系统提示】本轮需要的工具调用已经全部完成，这次请求不再提供任何工具。"
+    "请直接用中文回复用户：一句话说明结果（已执行就说做成了什么，"
+    "待用户确认就说在弹窗里点一下确认），不要输出 JSON，不要提到工具或系统。"
+)
+
 #: 终止原因 → 收尾文案里对用户可见的说法。
 _STOP_REASON_TEXT: dict[str, str] = {
     "step_limit": "本轮步骤数已达上限",
@@ -1354,20 +1363,40 @@ class AgentLoop:
             self._notify(
                 "routed", domains=self._route.domains, matched=self._route.matched,
             )
+        # M8-15：上一步工具结果全部终态时，这一 Step 只剩「把结果说给用户」——
+        # 请求不再下发工具（省掉整套 schema），也不升深档。误判方向：模型若还想
+        # 补一步（查一下、再写一笔），动作推迟到下一轮，由用户输入触发。
+        finalize = self._should_finalize()
         # 入口判浅、实际多步时在此升级：走到第 2 个 Step 就说明任务比入口判断的
-        # 复杂（架构 §4.6），后续步骤一律「深」档，入口误判不再致命。
-        level = ReasoningLevel.DEEP if self._steps >= 1 else self._entry_level
+        # 复杂（架构 §4.6），后续步骤一律「深」档，入口误判不再致命。收尾步例外：
+        # 复述结果不需要推理预算。
+        level = (
+            ReasoningLevel.FAST
+            if finalize
+            else ReasoningLevel.DEEP
+            if self._steps >= 1
+            else self._entry_level
+        )
         self._steps += 1
         self._notify("step_started", step=self._steps, level=level)
 
         # 域知识与**即将发出的这次请求**同步（T-M7-05h）：幂等，没有新的域命中就
         # 不改动系统提示。
         self._load_skills()
+        # M8-15：收尾指令只进本次请求，不进 ``self._messages``（同 ``_wrap_up``）。
+        # 快照用 ``transient`` 传递，游标只按真实消息推进——万一模型仍返回工具
+        # 调用，下一次快照的 ``append`` 不会漏消息。
+        tools = [] if finalize else self._openai_tools
+        transient: list[dict[str, Any]] = (
+            [{"role": "user", "content": _FINALIZE_INSTRUCTION}] if finalize else []
+        )
         # M8-13：在发请求之前采下输入快照——此刻的 system 已含本步域知识，
         # 消息数组也就是这次实际发出去的那一份。
-        request = self._request_payload(list(self._messages), self._openai_tools)
+        request = self._request_payload(
+            list(self._messages), tools, transient=transient,
+        )
         result = await self._stream_step(
-            list(self._messages), tools=self._openai_tools, reasoning=level,
+            [*self._messages, *transient], tools=tools, reasoning=level,
         )
         self._prompt_tokens += result.prompt_tokens
         self._completion_tokens += result.completion_tokens
@@ -1402,6 +1431,11 @@ class AgentLoop:
             return False
 
         outcomes, tool_stamps = await self._run_tools(calls)
+        # M8-15：全部结果为终态（读/写成功或提案待确认）才允许下一步收尾。
+        # 任何一个 ``error`` 都保留工具——模型可能需要重试或换一种调用。
+        self._last_tools_terminal = (
+            bool(outcomes) and all(outcome.kind != "error" for outcome in outcomes)
+        )
         # **配对组一次落库**（不变式 1）：带 ``tool_calls`` 的 assistant 消息与它的
         # 全部结果同批交出去，中间断连时整批一起回滚——日志里因此不会出现「有调用
         # 没结果」的尾巴，而那正是恢复路径最不能有的形状（模型 API 会 400）。
@@ -1443,6 +1477,9 @@ class AgentLoop:
         self._call_index = 0
         self._messages_snapshot = 0
         self._tools_snapshot = None
+        #: 上一步工具结果**是否全部终态**（M8-15）：决定下一步能否收尾不带工具。
+        #: 空结果、含 ``error`` 都算「不是终态」——模型可能还要重试或换工具。
+        self._last_tools_terminal = False
 
     def _system_message(self) -> dict[str, Any]:
         prompt = (
@@ -1617,6 +1654,7 @@ class AgentLoop:
 
     def _request_payload(
         self, messages: Sequence[dict[str, Any]], tools: Sequence[dict[str, Any]],
+        *, transient: Sequence[dict[str, Any]] = (),
     ) -> dict[str, Any]:
         """一次模型调用的**输入快照**（M8-13）——增量编码，不回放整段历史。
 
@@ -1635,6 +1673,9 @@ class AgentLoop:
             system = str(body[0].get("content", ""))
             body = body[1:]
         append = [copy.deepcopy(message) for message in body[self._messages_snapshot:]]
+        # M8-15：收尾指令这类**只进本次请求**的消息，通过 ``transient`` 进快照
+        # 而不推进游标——游标始终与 ``self._messages`` 对齐。
+        append.extend(copy.deepcopy(message) for message in transient)
         self._messages_snapshot = len(body)
         payload: dict[str, Any] = {
             "base_call": self._call_index or None,
@@ -1666,6 +1707,25 @@ class AgentLoop:
                 "agent observer hook failed",
                 extra={"hook": hook, "error": type(exc).__name__},
             )
+
+    def _should_finalize(self) -> bool:
+        """M8-15：下一个 Step 是否可以「收尾不带工具」。
+
+        判据刻意保守——只有同时满足才收窄：
+
+        - 不是第一个 Step（第一步必须给足工具）；
+        - 上一步**有**工具调用且**全部**终态（无 ``error``）；
+        - 没有排队中的中途输入（用户又说了话，可能带来新的动作）。
+
+        ``proposal_pending`` 也算终态：写工具的提案已经产出，下一步只需告诉用户
+        「去弹窗确认」，不需要再调工具。代价是模型不能在收尾步补调工具——它若
+        确实还需要一步，动作推迟到下一轮，由用户输入触发。
+        """
+        return (
+            self._steps >= 1
+            and self._last_tools_terminal
+            and not self._queued
+        )
 
     async def _stream_step(
         self,

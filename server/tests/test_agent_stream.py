@@ -751,11 +751,12 @@ class TestStreamEvents:
         assert "用户原话" not in body
 
     async def test_phase_reports_reasoning_escalation(self, stream_env: StreamEnv):
-        """入口判浅、实际多步 → 第 2 步升深档（02d 的 Step 升级），
-        ``phase`` 帧如实反映每一档。"""
+        """入口判浅、实际多步 → 出错后的第 2 步升深档（02d 的 Step 升级），
+        ``phase`` 帧如实反映每一档；工具全部终态后的收尾步回到 fast（M8-15）。"""
         stream_env.provider.reset([
+            _tool_turn(_call("no_such_tool")),          # 第一步出错 → 第二步不能收尾
             _tool_turn(_call("budget_list", _budget_args())),
-            _text("没有预算。"),
+            _text("没有预算。"),                          # 第三步：收尾（不带工具）
         ])
         _, body = await stream_env.turn("看看预算")
 
@@ -765,10 +766,10 @@ class TestStreamEvents:
         assert phases[0]["phase"] == "routing" and phases[0]["step"] == 0
         assert "reasoning" not in phases[0]
         assert [p["reasoning"] for p in phases if p["phase"] == "thinking"] == [
-            "fast", "deep",
+            "fast", "deep", "fast",
         ]
         assert [p["phase"] for p in phases] == [
-            "routing", "thinking", "tool_calling", "thinking",
+            "routing", "thinking", "tool_calling", "thinking", "tool_calling", "thinking",
         ]
 
     async def test_done_payload_shape(self, stream_env: StreamEnv):
@@ -1430,9 +1431,11 @@ class TestStepUsage:
 
         assert second.data["kind"] == "step"
         assert second.data["step"] == 2
-        # 第 2 步起恒为深档（入口判浅、多步升深）。
-        assert second.data["level"] == "deep"
+        # M8-15：上一步工具全部终态 → 第 2 步是收尾，回到 fast 且不带工具
+        # （省掉整套工具 schema）。
+        assert second.data["level"] == "fast"
         assert second.data["tool_calls"] == []
+        assert second.data["request"]["tools"] == []
         assert {e.turn for e in usage} == {1}
 
         quota = next(e for e in events if e.type == "quota")
@@ -1593,7 +1596,9 @@ class TestPromptSnapshot:
     async def test_system_is_recorded_per_call_and_tools_def_only_once(
         self, stream_env: StreamEnv,
     ):
+        # 第一步出错（不能收尾）→ 第二步带同一套工具（工具集未变）→ 第三步收尾。
         stream_env.provider.reset([
+            _tool_turn(_call("no_such_tool")),
             _tool_turn(_call("budget_list", _budget_args())),
             _text("这个月还没有设置预算。"),
         ])
@@ -1612,7 +1617,7 @@ class TestPromptSnapshot:
                 ["content"]
             )
         # 完整 schema 只在本轮首次调用出现；后续调用只记名称与字符数。
-        first, second = usage
+        first, second, third = usage
         assert "tools_def" in first.data["request"]
         assert "tools_def" not in second.data["request"]
         sent_tools = stream_env.provider.calls[0]["tools"]
@@ -1624,11 +1629,19 @@ class TestPromptSnapshot:
             second.data["request"]["tools_chars"]
             == first.data["request"]["tools_chars"]
         )
+        # M8-15：收尾步不再下发工具——快照如实记下空清单。
+        assert third.data["request"]["tools"] == []
+        assert third.data["request"]["tools_chars"] == len("[]")
         # 增量语义：第 2 次请求只新增「上一步的 assistant + tool」两条。
         assert [m["role"] for m in second.data["request"]["append"]] == [
             "assistant", "tool",
         ]
         assert second.data["request"]["base_call"] == 1
+        # 收尾指令是只进本次请求的 transient，不进持久化消息流。
+        assert [m["role"] for m in third.data["request"]["append"]] == [
+            "assistant", "tool", "user",
+        ]
+        assert "系统提示" in third.data["request"]["append"][-1]["content"]
 
     async def test_wrap_up_request_carries_the_wrap_up_instruction(
         self, stream_env: StreamEnv,
@@ -1680,6 +1693,9 @@ class TestWritePath:
         assert [p["proposalId"] for p in done["proposals"]] == [proposal["proposalId"]]
         assert done["executions"] == []
         assert done["writes"] == 1
+        # M8-15：``proposal_pending`` 也是终态——收尾步不再下发工具，由模型
+        # 直接告诉用户去弹窗确认。
+        assert stream_env.provider.calls[2]["tools"] == []
         # 挂起 = 一次写库都没发生
         from src.models.ledger import Transaction
 

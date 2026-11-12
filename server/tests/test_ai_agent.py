@@ -458,6 +458,8 @@ class TestMidTurnInput:
         assert second[user_index]["content"] == "改成交通"
         assert roles.count("user") == 2  # 本轮输入 + 中途输入
         assert result.pending_input == ()
+        # M8-15：有中途输入时**不能**收尾——用户可能带来了新的动作需求。
+        assert provider.calls[1]["tools"] != []
 
     async def test_queued_input_never_lands_inside_a_tool_batch(self):
         """输入进的是「下一步」，不是「已完成的 Step」。"""
@@ -499,7 +501,8 @@ class TestMidTurnInput:
 
         assert result.pending_input == ()
         users = [
-            m["content"] for m in provider.calls[1]["messages"] if m["role"] == "user"
+            m["content"] for m in provider.calls[1]["messages"]
+            if m["role"] == "user" and "系统提示" not in m["content"]
         ]
         assert users == ["你好"], "空串不该变成一条空 user 消息混进请求"
 
@@ -537,6 +540,41 @@ class TestMidTurnInput:
         assert all(
             m.get("content") != "顺便看看预算" for m in result.messages
         ), "它没有被处理，也不该伪装成已进历史"
+
+
+# ── M8-15：收尾步不带工具 ───────────────────────────────────────────────
+
+
+class TestFinalizeStep:
+    async def test_successful_tools_are_followed_by_a_tool_less_fast_step(self):
+        """工具全部终态 → 下一步 ``tools=[]``、fast 档；收尾指令只进本次请求，
+        不落进历史。"""
+        provider = ScriptedProvider([
+            _tool_turn(_call("account_list", {}, id="a")),
+            _text("你有一个账户。"),
+        ])
+        loop = _loop(provider)
+        result = await loop.run("看看账户")
+
+        assert provider.calls[0]["tools"] != []
+        assert provider.calls[1]["tools"] == []
+        assert provider.calls[1]["reasoning"] == ReasoningLevel.FAST
+        assert all(
+            "系统提示" not in str(message.get("content") or "")
+            for message in result.messages
+        ), "收尾指令是系统产物，不该进对话历史"
+
+    async def test_tool_error_keeps_the_tools_for_the_next_step(self):
+        """工具报错不是终态——模型可能重试或换一种调用，工具必须还在。"""
+        provider = ScriptedProvider([
+            _tool_turn(_call("no_such_tool")),
+            _text("这个我做不了。"),
+        ])
+        loop = _loop(provider)
+        await loop.run("试试")
+
+        assert provider.calls[1]["tools"] != []
+        assert provider.calls[1]["reasoning"] == ReasoningLevel.DEEP
 
 
 # ── 不变式 3：取消收敛到一致状态 ─────────────────────────────────────────
