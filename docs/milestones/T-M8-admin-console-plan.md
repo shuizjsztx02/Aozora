@@ -23,7 +23,7 @@
 | **8-09** | 导出 | ✅ 完成 | 2026-11-10 | `4086edc` | `POST /admin/export`：3 范围 × 2 内容、流式 NDJSON、keyset 分批（500/批）、上限 100,000 事件 → 422；结束时独立 session 写 `action="export"` 审计（范围/模式/条数/耗时）。前端 `ExportPage` + 会话列表「导出当前筛选」+ 回放页「导出本会话」。验证：新增 21 条（6 组合全绿）、服务端全量 **1876 passed**、ruff 全绿、tsc/build 通过 |
 | **8-10** | 部署、PII 与隐私政策 | ✅ 完成 | 2026-11-10 | 待提交 | **已上线 A 机**：`http://116.62.196.255/aozora-api/aozora-admin/`。**零 nginx 变更**（用户约束）——FastAPI `StaticFiles` 挂载 + 复用 `/aozora-api/` 反代；新增审计查询 `GET /admin/audit` + 前端页；隐私政策 §2.5 + `LegalPage` 同步（R-PROD-63 的「麦克风」一并移除）；`ADMIN_JWT_SECRET` 已在服务器 .env 配置；迁移 0024 已在 aozora_test 执行 |
 | **8-11** | 收口 | ✅ 完成 | 2026-11-10 | 待提交 | 四板：pytest **1878 passed / 37 skipped**、ruff 全绿、vitest **91 files / 1509 passed**、tsc 0 错、JVM **BUILD SUCCESSFUL**；admin build 通过；**线上真实数据走查**（会话「你好」→ 轮次 → 事件，`seq`/`turn` 与 PG 一致）。**M8 首期十一卡全部交付**（8-12 为 2026-11-12 追加跟进卡） |
-| **8-12** | 分步 token 用量观测（REQ-85 追加） | ✅ 完成 | 2026-11-12 | 待填 | 新结构性事件 `usage`：**每次模型调用一条**（Step / 收尾 / 摘要压缩），随步写入（断连也留档）；回放台显示每步输入/输出 token、档位与该步发起的工具调用，工具卡按 `tool_call_id` 标注「本步用量」。轮合计仍以 `quota` 为准；不新增 `ai_usage` 行、无迁移、无桥变更。验证：新增 6 条专项用例（分步 / 收尾 / 失败轮 / 摘要用量 ×2）+ 结构性事件参数化用例随白名单扩面；服务端 **1888 passed / 37 skipped**、ruff 全绿；vitest **1509 passed**；admin tsc/build 通过。残余 R-PROD-72 |
+| **8-12** | 分步 token 用量观测（REQ-85 追加） | ✅ 完成 | 2026-11-12 | `c815ac8` | 新结构性事件 `usage`：**每次模型调用一条**（Step / 收尾 / 摘要压缩），随步写入（断连也留档）；回放台显示每步输入/输出 token、档位与该步发起的工具调用，工具卡按 `tool_call_id` 标注「本步用量」。轮合计仍以 `quota` 为准；不新增 `ai_usage` 行、无迁移、无桥变更。验证：新增 6 条专项用例（分步 / 收尾 / 失败轮 / 摘要用量 ×2）+ 结构性事件参数化用例随白名单扩面；服务端 **1888 passed / 37 skipped**、ruff 全绿；vitest **1509 passed**；admin tsc/build 通过。残余 R-PROD-72 |
 
 **状态取值：** ⏳ 未开始 / 🔄 进行中 / ✅ 完成 / ⛔ 阻塞
 
