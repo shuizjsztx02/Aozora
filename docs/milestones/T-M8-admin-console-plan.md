@@ -26,9 +26,9 @@
 | **8-12** | 分步 token 用量观测（REQ-85 追加） | ✅ 完成 | 2026-11-12 | `c815ac8` |
 | **8-13** | 模型输入快照（REQ-86，用户反馈追加） | ✅ 完成 | 2026-11-12 | `fe8cfc6` | `usage` 事件补 `call` + `request`：system（逐调用）/ 增量 `append` / 工具名与 `tools_def`（工具集变化才存），回放页「模型输入」面板可展开逐步查看。验证：服务端 **1891 passed / 37 skipped**、ruff 全绿；admin tsc/build 通过；**已部署测试实例**（A 机 `fe8cfc6`），真实会话 PG 取证：call1 system 969 字符 / 8 工具 / 含 tools_def，call2 base_call=1 / append 2 条 / 无重复 schema。残余 R-PROD-73 | 新结构性事件 `usage`：**每次模型调用一条**（Step / 收尾 / 摘要压缩），随步写入（断连也留档）；回放台显示每步输入/输出 token、档位与该步发起的工具调用，工具卡按 `tool_call_id` 标注「本步用量」。轮合计仍以 `quota` 为准；不新增 `ai_usage` 行、无迁移、无桥变更。验证：新增 6 条专项用例（分步 / 收尾 / 失败轮 / 摘要用量 ×2）+ 结构性事件参数化用例随白名单扩面；服务端 **1888 passed / 37 skipped**、ruff 全绿；vitest **1509 passed**；admin tsc/build 通过。残余 R-PROD-72 |
 
-| **8-14** | prompt cache 命中观测（REQ-87，成本分析追加） | ⏳ 未开始 | — | — | provider 解析 `prompt_cache_hit_tokens` → `usage` 事件 `cache_hit_tokens` → 回放台展示；先看清「账面 token」与「实际计费」的差 |
-| **8-15** | 收尾步不带工具（REQ-88，成本分析追加） | ⏳ 未开始 | — | — | 工具调用全部终态后，下一步只剩复述结果：请求 `tools=[]` + 收尾指令 + 降档，省整套工具 schema（实测 ~4.1k tokens/步） |
-| **8-16** | 路由增强：金额形态 + sticky 兜底 + 补词（REQ-89，成本分析追加） | ⏳ 未开始 | — | — | 词表未命中时先判「商品名+金额」形态（→ transaction 单域），再考虑最近调用域；补「密码」等缺口词；不引入检索/embedding |
+| **8-14** | prompt cache 命中观测（REQ-87，成本分析追加） | ✅ 完成 | 2026-11-12 | `61eb52b` | provider 解析 `prompt_cache_hit_tokens` → `usage` 事件 `cache_hit_tokens` → 回放台展示；服务端全量 **1906 passed / 37 skipped**、ruff 全绿、admin tsc/build 通过 |
+| **8-15** | 收尾步不带工具（REQ-88，成本分析追加） | ✅ 完成 | 2026-11-12 | `19aff44` | 工具调用全部终态后，下一步只剩复述结果：请求 `tools=[]` + 收尾指令 + FAST 档，省整套工具 schema（实测 ~4.1k tokens/步） |
+| **8-16** | 路由增强：金额形态 + sticky 兜底 + 补词（REQ-89，成本分析追加） | ✅ 完成 | 2026-11-12 | `15153bf` | 词表未命中时先判「商品名+金额」形态（→ transaction 单域），再考虑最近调用域；补「密码」；offline dry-run 99 条：兜底 5 条（SEC-NEG-01 移出、NEG-04 指代追问按预期兜底） |
 
 **状态取值：** ⏳ 未开始 / 🔄 进行中 / ✅ 完成 / ⛔ 阻塞
 
@@ -78,7 +78,7 @@
 | 10 | 8-13 | — | 2026-11-12 用户反馈追加（REQ-86）；依赖 8-12 的 `usage` 事件；交付即部署测试实例 |
 | 11 | 8-14 | ✅ | 2026-11-12 成本分析追加（REQ-87）；依赖 8-12/8-13 的事件与回放页 |
 | 12 | 8-15 | ✅ | 2026-11-12 成本分析追加（REQ-88）；依赖 8-12；与 8-14/8-16 文件面无冲突 |
-| 13 | 8-16 | — | 2026-11-12 成本分析追加（REQ-89）；依赖 8-14 的观测数据 |
+| 13 | 8-16 | ✅ | 2026-11-12 成本分析追加（REQ-89）；依赖 8-14 的观测数据 |
 
 **为什么把迁移集中到 8-03：** Alembic 是单链（`down_revision`），四个卡各带迁移必然分叉。把「schema 先行」统一到一张卡，后续卡只写代码，并行度最高，且迁移失败只影响一处。
 
@@ -268,6 +268,7 @@
   - 回放台展示正确、旧会话不回归；admin tsc/build 通过。
   - 真实链路上跑一轮两步会话，PG 里 `usage` 事件能看到 `cache_hit_tokens`（部署测试实例后取证；本机无法直连 DeepSeek 时以脚本化 provider 用例为准并注明）。
 - **依赖：** 8-12 / 8-13（已收口）。
+- **交付（2026-11-12）：** `provider.py`（三处解析：非流式 `_result_from_body`、流式尾块；字段排末位保持位置参数构造兼容）、`agent.py`（usage 载荷）、`EventTimeline.tsx`（缓存命中徽标）。验证：provider 65 passed、agent_stream 用量用例 13 passed、服务端全量 **1906 passed / 37 skipped**、ruff 全绿、admin tsc/build 通过。**反向验证已做**（载荷值置 0 → 用例红）。**待观测**：真实会话的命中率与「system 步间改写 / compact-bare 档跳变是否打断前缀」——部署测试实例后用 `cache_hit_tokens` 取证，再决定是否调整前缀结构（本卡不做）。
 
 ### 8-15 收尾步不带工具（REQ-88，2026-11-12 成本分析追加）
 
@@ -293,6 +294,7 @@
   - 用例：`submit()` 中途输入后 → 下一步仍带工具（输入不能被丢掉）。
   - **反向验证**：把 `_should_finalize` 改为恒 `False`，上述用例变红。
   - 服务端全量 pytest + ruff 通过。
+- **交付（2026-11-12）：** `agent.py`（`_should_finalize` + `_FINALIZE_INSTRUCTION` + `_request_payload` 的 `transient` 参数——收尾指令只进本次请求、不推进快照游标）。行为变更同步了三处既有断言（第二步从 deep/带工具改为 fast/不带工具；`test_empty_input_is_ignored` 排除收尾指令）。验证：agent+stream 166 passed、AI 子集 1296 passed、服务端全量 **1906 passed / 37 skipped**、ruff 全绿。**反向验证已做**：判据恒 `False` → 成功路径红；终态恒 `True` → error 保留工具用例红。
 
 ### 8-16 路由增强：金额形态 + sticky 兜底 + 补词（REQ-89，2026-11-12 成本分析追加）
 
@@ -313,6 +315,7 @@
   - 「帮我把密码改一下」→ security 域。
   - `probe_tool_selection.py --routing` 全量语料回归：fallback 数下降且**无新增漏注入**（`test_every_domain_has_a_signal` 仍绿）。
   - 服务端全量 pytest + ruff 通过；语料报告同步。
+- **交付（2026-11-12）：** `routing.py`（`AMOUNT_FORM_SIGNAL` + `_matches_amount_form` + 补词「密码」；顺带修正两处「兜底全量」的过期注释）、`agent.py`（`_recent_tool_domains` + `run()` 的 sticky 分支）、语料 `TX-ADD-06/07` + `NEG-04`。**离线 dry-run 实测**：99 条用例，漏注入 2 条（TX-ADD-04 / BUD-NEG-01，既有边界），兜底 5 条（SEC-NEG-01 移出、NEG-04 按预期）；TX-ADD-06/07 均命中 `transaction` 单域（`signals=["<金额短句>"]`）。验证：routing 45 passed、服务端全量 **1906 passed / 37 skipped**、ruff 全绿。**反向验证已做**：形态判定禁用 → 4 条红；sticky 置空 → 指代用例红。**残余**：真实用户商品名的长尾仍靠形态规则兜住（不是语义识别），「中文数字金额」（「喜茶二十四」）不命中形态，退回四域兜底——登记风险册见下。
 
 ---
 
