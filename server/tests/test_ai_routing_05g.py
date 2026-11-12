@@ -478,6 +478,96 @@ class TestBookkeepingForm:
         assert routing.parse_cn_amount(text) is None
 
 
+# ── 2c. transaction 域内的工具级收窄（M8-19）────────────────────────────
+
+
+class TestTransactionToolSubset:
+    """记账/查询形态只注入用得到的工具；编辑与不确定形态保持全量。"""
+
+    @pytest.mark.parametrize("text", ["喜茶二十四", "外卖 25", "记录一下午餐 20"])
+    def test_record_shapes_select_the_record_subset(self, text: str):
+        assert routing.transaction_tool_subset(text) == (
+            routing.TRANSACTION_RECORD_TOOLS
+        )
+
+    @pytest.mark.parametrize("text", ["查一下这个月的餐饮记录", "最近花了多少"])
+    def test_query_shapes_select_the_query_subset(self, text: str):
+        assert routing.transaction_tool_subset(text) == (
+            routing.TRANSACTION_QUERY_TOOLS
+        )
+
+    @pytest.mark.parametrize("text", [
+        "把昨天那笔改成30",   # 编辑：可能要 list → update → add，不能切
+        "我刚才记错了",
+        "你好呀",             # 不确定形态
+        # 多动作 / 记账与查询同时命中：切小会收走记账工具（审批用例实测回归）。
+        "先看看账户，再记一笔午饭 12 块",
+        "查一下这个月的记录然后记一笔 20 块的交通",
+    ])
+    def test_edit_and_unknown_shapes_keep_the_full_domain(self, text: str):
+        assert routing.transaction_tool_subset(text) is None
+
+
+class TestTransactionToolInjection:
+    """loop 层的注入面：子集真的生效，且只作用于 transaction 域。"""
+
+    @staticmethod
+    def _tx_names(loop: AgentLoop) -> set[str]:
+        return {name for name in _injected(loop) if name.startswith("transaction_")}
+
+    async def test_record_turn_injects_only_record_tools(self):
+        provider = _Provider([_text("记好了。")])
+        loop, _ = _loop(provider)
+
+        await loop.run("喜茶二十四")
+
+        assert self._tx_names(loop) == {
+            "transaction_add", "transaction_add_batch", "transaction_recent",
+        }
+        # 域外的工具不受影响（本句只命中 transaction 域）。
+        assert not any(name.startswith("account_") for name in _injected(loop))
+
+    async def test_query_turn_injects_only_query_tools(self):
+        provider = _Provider([_text("这个月还没有餐饮记录。")])
+        loop, _ = _loop(provider)
+
+        await loop.run("查一下这个月的餐饮记录")
+
+        assert self._tx_names(loop) == {
+            "transaction_list", "transaction_recent", "transaction_summary",
+        }
+
+    async def test_edit_turn_keeps_the_full_domain(self):
+        provider = _Provider([_text("改好了。")])
+        loop, _ = _loop(provider)
+
+        await loop.run("把昨天那笔改成30")
+
+        assert self._tx_names(loop) == set(_lane_names([T.DOMAIN_TRANSACTION]))
+
+    async def test_switch_off_keeps_the_full_domain(self, monkeypatch):
+        """灰度开关：关掉后与 M8-18 的注入面逐字相同。"""
+        from src.common.config import Settings
+        from src.modules.ai import agent as agent_module
+
+        settings = Settings(
+            database_url="sqlite+aiosqlite:///:memory:",
+            secret_key="test-secret",
+            env="test",
+            api_prefix="",
+            ai_provider_api_key=None,
+            ai_agent_provider_api_key=None,
+            ai_transaction_tool_narrowing=False,
+        )
+        monkeypatch.setattr(agent_module, "get_config", lambda: settings)
+        provider = _Provider([_text("记好了。")])
+        loop, _ = _loop(provider)
+
+        await loop.run("喜茶二十四")
+
+        assert self._tx_names(loop) == set(_lane_names([T.DOMAIN_TRANSACTION]))
+
+
 # ── 3. loop 接线：注入面 ───────────────────────────────────────────────────
 
 

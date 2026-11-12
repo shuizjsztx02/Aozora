@@ -427,6 +427,70 @@ def _looks_like_bookkeeping(text: str) -> bool:
     return any(noun in compact for noun in _SPENDING_NOUNS) and _has_amount(compact)
 
 
+# ---------------------------------------------------------------------------
+# M8-19：transaction 域内的**工具级收窄**
+# ---------------------------------------------------------------------------
+#
+# 域是注入单位，但在一个域内部仍有高频子集：记账类输入只会用到
+# ``transaction_add`` / ``transaction_add_batch``，却为此付出整个域 7 个工具的
+# schema（实测占单步 prompt 的 70–83%）。这里按输入形态再细分一层；
+# **只在形态明确时收窄**，编辑类输入保持全量（低频且复杂——改金额、改分类、
+# 删除后重记可能连续用多个写工具）。
+
+TRANSACTION_RECORD_TOOLS: frozenset[str] = frozenset({
+    "transaction_add", "transaction_add_batch", "transaction_recent",
+})
+TRANSACTION_QUERY_TOOLS: frozenset[str] = frozenset({
+    "transaction_list", "transaction_recent", "transaction_summary",
+})
+
+#: 编辑形态不收窄（返回 None）：``改成/删除/记错`` 这类输入可能连续用
+#: list → update/delete → add，把工具集切小得不偿失。
+_EDIT_SIGNALS: tuple[str, ...] = (
+    "改成", "改为", "修改", "调整", "删掉", "删除", "删了", "去掉",
+    "取消掉", "重命名", "记错", "记重",
+)
+
+#: 查询形态。**不收「记录」**——「记录一下午餐20」是记账祈使，把它当查询会
+#: 让模型拿不到 ``transaction_add``。
+_QUERY_SIGNALS: tuple[str, ...] = (
+    "查", "看看", "看一下", "多少", "统计", "汇总", "一共", "总共",
+    "有哪些", "哪些",
+)
+
+#: 多动作连接（与 ``agent._DEEP_SIGNALS`` 同一组词；routing 不能 import agent，
+#: 这里独立维护）。一句话里有两个动作时**一律不收窄**——「先看看账户，再记一笔
+#: 午饭 12 块」实测会被单形态规则切成查询子集，记账工具被收走。
+_MULTI_ACTION_RE = re.compile(
+    r"然后|接着|之后|顺便|同时|并且|而且|以及|还有|分别|另外|"
+    r"再帮|再记|再看|先.{0,12}再"
+)
+
+
+def transaction_tool_subset(text: str) -> frozenset[str] | None:
+    """按本轮输入选 transaction 域的工具子集（M8-19）；``None`` = 不收窄。
+
+    判定顺序是**保守优先**：编辑形态、多动作、以及「记账与查询同时命中」都不
+    收窄——这些输入会连续用多个工具，切小只会换来一次 ``tool_unavailable``。
+    """
+    compact = re.sub(r"\s+", "", text)
+    if not compact:
+        return None
+    if any(signal in compact for signal in _EDIT_SIGNALS):
+        return None
+    if _MULTI_ACTION_RE.search(compact):
+        return None
+    query = any(signal in compact for signal in _QUERY_SIGNALS)
+    bookkeeping = _looks_like_bookkeeping(compact)
+    if query and bookkeeping:
+        return None
+    if query:
+        return TRANSACTION_QUERY_TOOLS
+    if bookkeeping:
+        return TRANSACTION_RECORD_TOOLS
+    return None
+
+
 def unrouteable_domains() -> frozenset[str]:
     """**没有任何信号**的域（正常应为空）。
 

@@ -248,6 +248,15 @@ class Settings(BaseSettings):
             "AI_PRICE_PEAK_MULTIPLIER", "ai_price_peak_multiplier",
         ),
     )
+    # M8-19: transaction 域内的工具级收窄（记账 → add/add_batch/recent；
+    # 查询 → list/recent/summary；编辑与未命中形态保持全量）。关闭后行为与
+    # M8-18 逐字相同——它是灰度开关，不是配置项。
+    ai_transaction_tool_narrowing: bool = Field(
+        default=True,
+        validation_alias=AliasChoices(
+            "AI_TRANSACTION_TOOL_NARROWING", "ai_transaction_tool_narrowing",
+        ),
+    )
 
     # --- AI agent 路径 provider (T-M7-02b, ADR-007) ---
     # The agent path (multi-step loop) runs on DeepSeek; the ``ai_provider_*``

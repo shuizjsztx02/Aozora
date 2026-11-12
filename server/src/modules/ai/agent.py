@@ -177,7 +177,12 @@ from .provider import (
     ToolCall,
     ToolCallingProvider,
 )
-from .routing import FALLBACK_DOMAINS, RoutingDecision, route_domains
+from .routing import (
+    FALLBACK_DOMAINS,
+    RoutingDecision,
+    route_domains,
+    transaction_tool_subset,
+)
 from .service import AIService
 from .skills import render_skill_section, skills_for_domains
 from .tools import (
@@ -1288,16 +1293,31 @@ class AgentLoop:
 
     # -- 注入面 ---------------------------------------------------------
 
-    def _default_tools(self, domains: Iterable[str]) -> list[Tool | DeviceTool]:
+    def _default_tools(
+        self,
+        domains: Iterable[str],
+        *,
+        transaction_toolset: frozenset[str] | None = None,
+    ) -> list[Tool | DeviceTool]:
         """给定域上的服务端工具（已按契约车道过滤）+ 通道在位时的设备能力。
 
         M8-成本：``device_haptic`` / ``device_widget_refresh`` **不进模型工具集**
         ——它们不是「用户意图」，由服务端在成功轮确定性下发（``stream``）。留在
         工具集里意味着模型为一次震动/刷新各多花一个完整 Step（实测一轮 29k token
         里约三分之二花在这两个调用上）。
+
+        ``transaction_toolset``（M8-19）：transaction 域内的工具子集；``None``
+        表示不收窄。只筛本域，其他域原样。
         """
+        tools = tools_for_domains(domains, contract_version=self._contract_version)
+        if transaction_toolset is not None:
+            tools = [
+                tool for tool in tools
+                if tool.domain != DOMAIN_TRANSACTION
+                or tool.name in transaction_toolset
+            ]
         return [
-            *tools_for_domains(domains, contract_version=self._contract_version),
+            *tools,
             *(tool for tool in self._device_tools
               if tool.name not in DETERMINISTIC_DEVICE_TOOLS),
         ]
@@ -1394,8 +1414,16 @@ class AgentLoop:
                 injected_domains = (
                     recent | {DOMAIN_TRANSACTION} if recent else FALLBACK_DOMAINS
                 )
+            # M8-19：transaction 域内的工具级收窄（灰度开关默认开）。
+            transaction_toolset = (
+                transaction_tool_subset(user_input)
+                if get_config().ai_transaction_tool_narrowing
+                else None
+            )
             self._inject(
-                self._default_tools(injected_domains),
+                self._default_tools(
+                    injected_domains, transaction_toolset=transaction_toolset,
+                ),
                 compact=True,
                 bare=not self._route.matched,
             )
