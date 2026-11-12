@@ -932,7 +932,7 @@ app/src/
 
 #### T-M8-13 模型输入快照（REQ-86，2026-11-12 用户反馈追加）
 
-- **状态：** ✅ 已交付（2026-11-12）。验证：服务端 1891 passed / 37 skipped、ruff 全绿；admin tsc/build 通过。残余 R-PROD-73（事件体积放大）。
+- **状态：** ✅ 已交付并部署测试实例（2026-11-12，A 机 `fe8cfc6`）。验证：服务端 1891 passed / 37 skipped、ruff 全绿；admin tsc/build 通过；线上真实会话已产出带 `call`/`request` 的 `usage` 事件。残余 R-PROD-73（事件体积放大）。
 - **目标：** `usage` 事件携带**每次进模型的完整输入**——`system`（逐调用，步间可能被域知识改写）、增量消息 `append`、工具名与完整 schema（仅工具集变化时存一次），回放页可展开逐步查看；按 `base_call` 链式重建的 messages 与实际发送逐字节一致。
 - **边界：** 不存 provider 原始 HTTP 请求体；不改配额/成本；客户端零改动；默认脱敏与 reveal 审计对快照同样生效。
 
