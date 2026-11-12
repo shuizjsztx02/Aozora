@@ -868,6 +868,8 @@ app/src/
 >
 > **2026-11-12 成本分析追加（REQ-87 / REQ-88 / REQ-89）：** 对测试实例「喜茶24」一轮（12,389 tokens）做归因——工具 schema 占 69%、历史工具往返占 20%。三张跟进卡**均已交付**：T-M8-14 prompt cache 命中观测（`usage.cache_hit_tokens`，回放台展示）；T-M8-15 收尾步不带工具（工具全终态后下一步 `tools=[]` + FAST 档）；T-M8-16 路由增强（金额形态规则 → transaction 单域、sticky 兜底、补词）。残余见风险册 R-PROD-74。
 >
+> **2026-11-12 transaction 工具级收窄（REQ-92）：** T-M8-19 按输入形态在 transaction 域内精准选工具——记账只注入 `transaction_add/add_batch/recent`、查询只注入 `list/recent/summary`；编辑、多动作与不确定形态保持全量（避免收走后续要用的工具）。只作用于 transaction 域，灰度开关 `AI_TRANSACTION_TOOL_NARROWING` 默认开。
+>
 > **2026-11-12 每次调用成本计价（REQ-91）：** T-M8-18 按 DeepSeek 官方三档价（缓存命中 $0.003 / 未命中 $0.15 / 输出 $0.6 每 1M，off-peak；峰时×2）计算每次模型调用的 `cost_micro_usd`，回放台显示单次成本与本轮合计；价格走 `AI_PRICE_*` 配置，配额与 `ai_usage` 口径不变。
 >
 > **2026-11-12 记账路由全面覆盖（REQ-90）：** T-M8-17 把 8-16 的形态规则升级为**记账意图判定器**——动作/祈使词、金额形态（阿拉伯数字、**中文数字**、货币符号）、品类名词 + 金额三层判定，只在词表未命中时接管、命中收窄 transaction 单域。**已交付并部署 A 机测试实例**；真实会话取证：「瑞幸九块九」两步整轮 **4,582 tokens**（原同形态 12,389，降 63%），`cache_hit_tokens` 首份真实读数 1,408 / 384。
