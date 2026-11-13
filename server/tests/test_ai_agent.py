@@ -553,11 +553,11 @@ class TestFinalizeStep:
         """工具全部终态 → 下一步 ``tools=[]``、fast 档；收尾指令只进本次请求，
         不落进历史。"""
         provider = ScriptedProvider([
-            _tool_turn(_call("account_list", {}, id="a")),
-            _text("你有一个账户。"),
+            _tool_turn(_call("account_balances", {}, id="a")),
+            _text("你的余额是 100 元。"),
         ])
         loop = _loop(provider)
-        result = await loop.run("看看账户")
+        result = await loop.run("看看账户余额")
 
         assert provider.calls[0]["tools"] != []
         assert provider.calls[1]["tools"] == []
@@ -595,9 +595,11 @@ class TestFinalizeStep:
     async def test_finalize_requires_a_write_or_a_query_shape(self):
         """M8-19c 判据直测：读到信息（无写工具）且非查询形态 → 不收尾。"""
         loop = _loop(ScriptedProvider([]))
+        loop._reset()                       # noqa: SLF001 — 初始化每轮状态
         loop._steps = 1                     # noqa: SLF001
         loop._last_tools_terminal = True    # noqa: SLF001
         loop._last_step_had_write = False   # noqa: SLF001
+        loop._last_step_had_nonlist = False # noqa: SLF001
         loop._entry_shape_query = False     # noqa: SLF001
         loop._entry_is_multi = False        # noqa: SLF001
 
@@ -606,6 +608,8 @@ class TestFinalizeStep:
         assert loop._should_finalize() is True           # noqa: SLF001
         loop._last_step_had_write = False                # noqa: SLF001
         loop._entry_shape_query = True                   # noqa: SLF001
+        assert loop._should_finalize() is False,             "查询轮只有列表结果时不收尾（M8-19d）"       # noqa: SLF001
+        loop._last_step_had_nonlist = True               # noqa: SLF001
         assert loop._should_finalize() is True           # noqa: SLF001
         loop._entry_is_multi = True                      # noqa: SLF001
         assert loop._should_finalize() is False          # noqa: SLF001

@@ -1576,6 +1576,13 @@ class AgentLoop:
             (tool := get_tool(call.name)) is not None and tool.kind == "write"
             for _call_id, call in calls
         )
+        # M8-19d：读到「非列表」的信息才算查询有了结果；`*_list` 只是第一步。
+        self._last_step_had_nonlist = any(
+            (tool := get_tool(call.name)) is not None
+            and tool.kind == "read"
+            and not tool.name.endswith("_list")
+            for _call_id, call in calls
+        )
         # **配对组一次落库**（不变式 1）：带 ``tool_calls`` 的 assistant 消息与它的
         # 全部结果同批交出去，中间断连时整批一起回滚——日志里因此不会出现「有调用
         # 没结果」的尾巴，而那正是恢复路径最不能有的形状（模型 API 会 400）。
@@ -1624,6 +1631,9 @@ class AgentLoop:
         #: 再记账」的轮次里，查询成功就收尾会把后续写动作截断（全工具测试集实测：
         #: 新建账户/改账本/改预算等 12 条只查不写）。
         self._last_step_had_write = False
+        #: 上一步是否读到**非列表类**信息（M8-19d）：`*_list` 通常只是「找对象」的
+        #: 第一步（查到后再 detail/update/archive），不能据此收尾。
+        self._last_step_had_nonlist = False
         #: 入口输入是否多动作（M8-19c）：多动作轮永不提前收尾，由模型自己说停。
         self._entry_is_multi = False
         #: 入口输入是否查询形态（M8-19c）：查询轮读到信息即可收尾。
@@ -1894,7 +1904,13 @@ class AgentLoop:
             and not self._entry_is_multi
         ):
             return False
-        return self._last_step_had_write or self._entry_shape_query
+        if self._last_step_had_write:
+            return True
+        if self._entry_shape_query:
+            # M8-19d：查询轮读到「非列表」结果才收尾——先 list 再 detail 的
+            # 两步查询（「这个账本记了多少笔」）不能被第一步的 list 截断。
+            return self._last_step_had_nonlist
+        return False
 
     async def _stream_step(
         self,

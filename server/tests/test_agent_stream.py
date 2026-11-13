@@ -755,7 +755,7 @@ class TestStreamEvents:
         ``phase`` 帧如实反映每一档；工具全部终态后的收尾步回到 fast（M8-15）。"""
         stream_env.provider.reset([
             _tool_turn(_call("no_such_tool")),          # 第一步出错 → 第二步不能收尾
-            _tool_turn(_call("budget_list", _budget_args())),
+            _tool_turn(_call("budget_summary", _budget_args())),
             _text("没有预算。"),                          # 第三步：收尾（不带工具）
         ])
         _, body = await stream_env.turn("看看预算")
@@ -1404,7 +1404,7 @@ class TestStepUsage:
 
     async def test_each_step_writes_its_own_usage_event(self, stream_env: StreamEnv):
         stream_env.provider.reset([
-            _tool_turn(_call("budget_list", _budget_args(), id="call_budget")),
+            _tool_turn(_call("budget_summary", _budget_args(), id="call_budget")),
             _text("这个月还没有设置预算。", prompt=9, completion=3),
         ])
         _, body = await stream_env.turn("看看预算")
@@ -1422,7 +1422,7 @@ class TestStepUsage:
         assert first.data["tokens"] == 12
         # 该步产出的工具调用：id 与随后落库的 assistant 消息**同源**。
         assert first.data["tool_calls"] == [
-            {"id": "call_budget", "name": "budget_list"},
+            {"id": "call_budget", "name": "budget_summary"},
         ]
         assistant = next(
             e for e in events if e.type == "assistant" and e.data.get("tool_calls")
@@ -1583,7 +1583,7 @@ class TestPromptSnapshot:
         self, stream_env: StreamEnv,
     ):
         stream_env.provider.reset([
-            _tool_turn(_call("budget_list", _budget_args(), id="call_budget")),
+            _tool_turn(_call("budget_summary", _budget_args(), id="call_budget")),
             _text("这个月还没有设置预算。", prompt=9, completion=3),
         ])
         _, body = await stream_env.turn("看看预算")
@@ -1604,7 +1604,7 @@ class TestPromptSnapshot:
         # 第一步出错（不能收尾）→ 第二步带同一套工具（工具集未变）→ 第三步收尾。
         stream_env.provider.reset([
             _tool_turn(_call("no_such_tool")),
-            _tool_turn(_call("budget_list", _budget_args())),
+            _tool_turn(_call("budget_summary", _budget_args())),
             _text("这个月还没有设置预算。"),
         ])
         _, body = await stream_env.turn("看看预算")
