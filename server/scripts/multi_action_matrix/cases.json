@@ -1,0 +1,337 @@
+{
+  "version": 1,
+  "title": "多动作/多意图测试集（动作理解 + 工具激活 + token 消耗）",
+  "note": "每条用例使用新 guest 隔离；expect 为「每个动作至少命中其一」的工具组；forbid_write 用于负例。",
+  "cases": [
+    {
+      "id": "MA-01",
+      "text": "早饭8块，午饭22块，晚饭30块",
+      "expect": [
+        [
+          "transaction_add",
+          "transaction_add_batch"
+        ]
+      ],
+      "domains": [
+        "transaction"
+      ],
+      "note": "多笔无连接词"
+    },
+    {
+      "id": "MA-02",
+      "text": "奶茶18、咖啡25",
+      "expect": [
+        [
+          "transaction_add",
+          "transaction_add_batch"
+        ]
+      ],
+      "domains": [
+        "transaction"
+      ],
+      "note": "顿号并列多笔"
+    },
+    {
+      "id": "MA-03",
+      "text": "记一笔午饭30，再查一下余额",
+      "expect": [
+        [
+          "transaction_add"
+        ],
+        [
+          "account_list",
+          "account_balances"
+        ]
+      ],
+      "domains": [
+        "transaction",
+        "account"
+      ],
+      "note": "记账+查账户"
+    },
+    {
+      "id": "MA-04",
+      "text": "记一笔打车20，顺便看看这个月花了多少",
+      "expect": [
+        [
+          "transaction_add"
+        ],
+        [
+          "transaction_summary",
+          "stats_monthly",
+          "transaction_list"
+        ]
+      ],
+      "domains": [
+        "transaction"
+      ],
+      "note": "记账+统计"
+    },
+    {
+      "id": "MA-05",
+      "text": "把昨天的晚饭删了，重新记成25",
+      "expect": [
+        [
+          "transaction_delete",
+          "transaction_update"
+        ],
+        [
+          "transaction_add",
+          "transaction_update"
+        ]
+      ],
+      "domains": [
+        "transaction"
+      ],
+      "note": "删+重记（编辑形态）"
+    },
+    {
+      "id": "MA-06",
+      "text": "把上周那笔45改成50，再查一下最近记录",
+      "expect": [
+        [
+          "transaction_update",
+          "transaction_list"
+        ],
+        [
+          "transaction_recent",
+          "transaction_list"
+        ]
+      ],
+      "domains": [
+        "transaction"
+      ],
+      "note": "改+查"
+    },
+    {
+      "id": "MA-07",
+      "text": "记一笔房租3000，再存500",
+      "expect": [
+        [
+          "transaction_add"
+        ],
+        [
+          "savings_",
+          "budget_",
+          "transaction_add"
+        ]
+      ],
+      "domains": [
+        "transaction"
+      ],
+      "note": "记账+存钱（跨域）"
+    },
+    {
+      "id": "MA-08",
+      "text": "支付宝到账500，再看看余额",
+      "expect": [
+        [
+          "transaction_add"
+        ],
+        [
+          "account_balances",
+          "account_list"
+        ]
+      ],
+      "domains": [
+        "transaction",
+        "account"
+      ],
+      "note": "账户+记账"
+    },
+    {
+      "id": "MA-09",
+      "text": "记早饭8块午饭22块，然后告诉我这个月花了多少",
+      "expect": [
+        [
+          "transaction_add",
+          "transaction_add_batch"
+        ],
+        [
+          "transaction_summary",
+          "stats_monthly",
+          "transaction_list"
+        ]
+      ],
+      "domains": [
+        "transaction"
+      ],
+      "note": "批量+统计"
+    },
+    {
+      "id": "MA-10",
+      "text": "记一笔奶茶18，看看余额，再查一下预算",
+      "expect": [
+        [
+          "transaction_add"
+        ],
+        [
+          "account_balances",
+          "account_list"
+        ],
+        [
+          "budget_get",
+          "budget_list"
+        ]
+      ],
+      "domains": [
+        "transaction",
+        "account",
+        "budget"
+      ],
+      "note": "三动作跨三域"
+    },
+    {
+      "id": "MA-11",
+      "text": "昨天奶茶18，今天咖啡25，都记一下",
+      "expect": [
+        [
+          "transaction_add",
+          "transaction_add_batch"
+        ]
+      ],
+      "domains": [
+        "transaction"
+      ],
+      "note": "时间前缀多笔"
+    },
+    {
+      "id": "MA-12",
+      "text": "¥30的咖啡和30块的奶茶",
+      "expect": [
+        [
+          "transaction_add",
+          "transaction_add_batch"
+        ]
+      ],
+      "domains": [
+        "transaction"
+      ],
+      "note": "货币符号混用"
+    },
+    {
+      "id": "MA-13",
+      "text": "改成30，再记一笔20",
+      "expect": [
+        [
+          "transaction_update",
+          "transaction_list",
+          "transaction_add"
+        ],
+        [
+          "transaction_add"
+        ]
+      ],
+      "domains": [
+        "transaction"
+      ],
+      "note": "指代+新记"
+    },
+    {
+      "id": "MA-14",
+      "text": "看看预算还剩多少，顺便看看这个月花了多少",
+      "expect": [
+        [
+          "budget_get",
+          "budget_list"
+        ],
+        [
+          "transaction_summary",
+          "stats_monthly",
+          "transaction_list"
+        ]
+      ],
+      "domains": [
+        "budget",
+        "transaction"
+      ],
+      "note": "双查询跨域"
+    },
+    {
+      "id": "MA-15",
+      "text": "你好，帮我记一笔外卖25",
+      "expect": [
+        [
+          "transaction_add"
+        ]
+      ],
+      "domains": [
+        "transaction"
+      ],
+      "note": "闲聊+动作"
+    },
+    {
+      "id": "MA-16",
+      "text": "工资到账5000，午饭花了30",
+      "expect": [
+        [
+          "transaction_add",
+          "transaction_add_batch"
+        ]
+      ],
+      "domains": [
+        "transaction"
+      ],
+      "note": "收入+支出"
+    },
+    {
+      "id": "MA-17",
+      "text": "如果这个月超了2000就提醒我",
+      "expect": [],
+      "domains": [],
+      "forbid_write": true,
+      "note": "条件句负例：不得记一笔"
+    },
+    {
+      "id": "MA-18",
+      "text": "把今天的早餐和午餐删掉",
+      "expect": [
+        [
+          "transaction_delete"
+        ]
+      ],
+      "domains": [
+        "transaction"
+      ],
+      "note": "多笔删除"
+    },
+    {
+      "id": "MA-19",
+      "text": "看看余额，再看看这个月花了多少",
+      "expect": [
+        [
+          "account_balances",
+          "account_list"
+        ],
+        [
+          "transaction_summary",
+          "stats_monthly",
+          "transaction_list"
+        ]
+      ],
+      "domains": [
+        "account",
+        "transaction"
+      ],
+      "note": "双查询"
+    },
+    {
+      "id": "MA-20",
+      "text": "记一笔宠物粮80，顺便把分类改成宠物",
+      "expect": [
+        [
+          "transaction_add"
+        ],
+        [
+          "category_update",
+          "category_create",
+          "transaction_update"
+        ]
+      ],
+      "domains": [
+        "transaction"
+      ],
+      "note": "记账+改分类"
+    }
+  ]
+}
