@@ -1,0 +1,1342 @@
+{
+  "version": 1,
+  "title": "全工具覆盖 + 多动作测试集（92 条）",
+  "note": "单动作覆盖全部可测工具（account_deletion_request 因不可逆不在线上测试）；多动作 30 条；负例 4 条。顺序即执行顺序（创建类在前）。",
+  "user_id": "63d62610-f279-4ade-b3fe-eb2d7a468b88",
+  "cases": [
+    {
+      "id": "CA-01",
+      "text": "加一个分类叫宠物",
+      "expect": [
+        [
+          "category_create"
+        ]
+      ],
+      "domains": [
+        "category"
+      ],
+      "note": "category_create"
+    },
+    {
+      "id": "AC-03",
+      "text": "新建一个账户叫招行卡",
+      "expect": [
+        [
+          "account_create"
+        ]
+      ],
+      "domains": [
+        "account"
+      ],
+      "note": "account_create"
+    },
+    {
+      "id": "BK-03",
+      "text": "再建一个账本叫旅行账本",
+      "expect": [
+        [
+          "book_create"
+        ]
+      ],
+      "domains": [
+        "book"
+      ],
+      "note": "book_create"
+    },
+    {
+      "id": "BU-01",
+      "text": "这个月总预算设成5000",
+      "expect": [
+        [
+          "budget_set"
+        ]
+      ],
+      "domains": [
+        "budget"
+      ],
+      "note": "budget_set（整体）"
+    },
+    {
+      "id": "BU-02",
+      "text": "给餐饮设个月度预算1500",
+      "expect": [
+        [
+          "budget_set_category",
+          "budget_set"
+        ]
+      ],
+      "domains": [
+        "budget"
+      ],
+      "note": "budget_set_category"
+    },
+    {
+      "id": "SA-01",
+      "text": "我想攒钱买个相机，目标8000",
+      "expect": [
+        [
+          "savings_create"
+        ]
+      ],
+      "domains": [
+        "savings"
+      ],
+      "note": "savings_create"
+    },
+    {
+      "id": "SC-01",
+      "text": "每个月1号自动记一笔房租3000",
+      "expect": [
+        [
+          "scheduled_create"
+        ]
+      ],
+      "domains": [
+        "scheduled"
+      ],
+      "note": "scheduled_create"
+    },
+    {
+      "id": "PE-02",
+      "text": "再建一个角色叫猫娘，说话要可爱",
+      "expect": [
+        [
+          "persona_create"
+        ]
+      ],
+      "domains": [
+        "persona"
+      ],
+      "note": "persona_create"
+    },
+    {
+      "id": "TX-01",
+      "text": "记一笔午饭25",
+      "expect": [
+        [
+          "transaction_add"
+        ]
+      ],
+      "domains": [
+        "transaction"
+      ],
+      "note": "transaction_add"
+    },
+    {
+      "id": "TX-02",
+      "text": "早饭8块，午饭22块，晚饭30块",
+      "expect": [
+        [
+          "transaction_add_batch",
+          "transaction_add"
+        ]
+      ],
+      "domains": [
+        "transaction"
+      ],
+      "note": "transaction_add_batch"
+    },
+    {
+      "id": "TX-05",
+      "text": "看看这个月的餐饮记录",
+      "expect": [
+        [
+          "transaction_list",
+          "transaction_summary"
+        ]
+      ],
+      "domains": [
+        "transaction"
+      ],
+      "note": "transaction_list"
+    },
+    {
+      "id": "TX-06",
+      "text": "我最近记了什么账",
+      "expect": [
+        [
+          "transaction_recent"
+        ]
+      ],
+      "domains": [
+        "transaction"
+      ],
+      "note": "transaction_recent"
+    },
+    {
+      "id": "TX-07",
+      "text": "这个月花了多少",
+      "expect": [
+        [
+          "transaction_summary",
+          "stats_monthly"
+        ]
+      ],
+      "domains": [
+        "transaction"
+      ],
+      "note": "transaction_summary"
+    },
+    {
+      "id": "TX-03",
+      "text": "把今天那笔午饭改成30",
+      "expect": [
+        [
+          "transaction_update",
+          "transaction_list"
+        ]
+      ],
+      "domains": [
+        "transaction"
+      ],
+      "note": "transaction_update"
+    },
+    {
+      "id": "TX-04",
+      "text": "把今天那笔午饭删掉",
+      "expect": [
+        [
+          "transaction_delete",
+          "transaction_list"
+        ]
+      ],
+      "domains": [
+        "transaction"
+      ],
+      "note": "transaction_delete"
+    },
+    {
+      "id": "BU-03",
+      "text": "我这个月有哪些预算",
+      "expect": [
+        [
+          "budget_list"
+        ]
+      ],
+      "domains": [
+        "budget"
+      ],
+      "note": "budget_list"
+    },
+    {
+      "id": "BU-04",
+      "text": "餐饮预算还剩多少",
+      "expect": [
+        [
+          "budget_status",
+          "budget_summary"
+        ]
+      ],
+      "domains": [
+        "budget"
+      ],
+      "note": "budget_status"
+    },
+    {
+      "id": "BU-05",
+      "text": "再花200餐饮会超预算吗",
+      "expect": [
+        [
+          "budget_check"
+        ]
+      ],
+      "domains": [
+        "budget"
+      ],
+      "note": "budget_check"
+    },
+    {
+      "id": "BU-06",
+      "text": "这个月预算执行得怎么样",
+      "expect": [
+        [
+          "budget_summary"
+        ]
+      ],
+      "domains": [
+        "budget"
+      ],
+      "note": "budget_summary"
+    },
+    {
+      "id": "BU-07",
+      "text": "哪些预算超了",
+      "expect": [
+        [
+          "budget_overspent"
+        ]
+      ],
+      "domains": [
+        "budget"
+      ],
+      "note": "budget_overspent"
+    },
+    {
+      "id": "BU-08",
+      "text": "把餐饮预算删掉",
+      "expect": [
+        [
+          "budget_delete"
+        ]
+      ],
+      "domains": [
+        "budget"
+      ],
+      "note": "budget_delete"
+    },
+    {
+      "id": "AC-01",
+      "text": "我有哪几个账户",
+      "expect": [
+        [
+          "account_list"
+        ]
+      ],
+      "domains": [
+        "account"
+      ],
+      "note": "account_list"
+    },
+    {
+      "id": "AC-02",
+      "text": "各账户现在余额多少",
+      "expect": [
+        [
+          "account_balances"
+        ]
+      ],
+      "domains": [
+        "account"
+      ],
+      "note": "account_balances"
+    },
+    {
+      "id": "AC-04",
+      "text": "把招行卡改名成工资卡",
+      "expect": [
+        [
+          "account_update"
+        ]
+      ],
+      "domains": [
+        "account"
+      ],
+      "note": "account_update"
+    },
+    {
+      "id": "AC-05",
+      "text": "工资卡不用了，归档吧",
+      "expect": [
+        [
+          "account_archive"
+        ]
+      ],
+      "domains": [
+        "account"
+      ],
+      "note": "account_archive"
+    },
+    {
+      "id": "BK-01",
+      "text": "我有几个账本",
+      "expect": [
+        [
+          "book_list"
+        ]
+      ],
+      "domains": [
+        "book"
+      ],
+      "note": "book_list"
+    },
+    {
+      "id": "BK-02",
+      "text": "这个账本记了多少笔",
+      "expect": [
+        [
+          "book_detail"
+        ]
+      ],
+      "domains": [
+        "book"
+      ],
+      "note": "book_detail"
+    },
+    {
+      "id": "BK-04",
+      "text": "把旅行账本改名成蜜月账本",
+      "expect": [
+        [
+          "book_update"
+        ]
+      ],
+      "domains": [
+        "book"
+      ],
+      "note": "book_update"
+    },
+    {
+      "id": "BK-05",
+      "text": "把蜜月账本删掉",
+      "expect": [
+        [
+          "book_delete"
+        ]
+      ],
+      "domains": [
+        "book"
+      ],
+      "note": "book_delete"
+    },
+    {
+      "id": "CA-02",
+      "text": "我有哪些分类",
+      "expect": [
+        [
+          "category_list"
+        ]
+      ],
+      "domains": [
+        "category"
+      ],
+      "note": "category_list"
+    },
+    {
+      "id": "CA-03",
+      "text": "把宠物分类改叫猫主子",
+      "expect": [
+        [
+          "category_update"
+        ]
+      ],
+      "domains": [
+        "category"
+      ],
+      "note": "category_update"
+    },
+    {
+      "id": "CA-04",
+      "text": "猫主子分类不用了，归档",
+      "expect": [
+        [
+          "category_archive"
+        ]
+      ],
+      "domains": [
+        "category"
+      ],
+      "note": "category_archive"
+    },
+    {
+      "id": "SA-02",
+      "text": "我的存钱目标有哪些",
+      "expect": [
+        [
+          "savings_list"
+        ]
+      ],
+      "domains": [
+        "savings"
+      ],
+      "note": "savings_list"
+    },
+    {
+      "id": "SA-03",
+      "text": "相机目标再存500",
+      "expect": [
+        [
+          "savings_update"
+        ]
+      ],
+      "domains": [
+        "savings"
+      ],
+      "note": "savings_update"
+    },
+    {
+      "id": "SA-04",
+      "text": "相机目标不攒了，归档",
+      "expect": [
+        [
+          "savings_archive"
+        ]
+      ],
+      "domains": [
+        "savings"
+      ],
+      "note": "savings_archive"
+    },
+    {
+      "id": "SC-02",
+      "text": "我有哪些定时记账",
+      "expect": [
+        [
+          "scheduled_list"
+        ]
+      ],
+      "domains": [
+        "scheduled"
+      ],
+      "note": "scheduled_list"
+    },
+    {
+      "id": "SC-03",
+      "text": "房租那条改成每月2号",
+      "expect": [
+        [
+          "scheduled_update"
+        ]
+      ],
+      "domains": [
+        "scheduled"
+      ],
+      "note": "scheduled_update"
+    },
+    {
+      "id": "SC-04",
+      "text": "房租那条规则删了吧",
+      "expect": [
+        [
+          "scheduled_archive"
+        ]
+      ],
+      "domains": [
+        "scheduled"
+      ],
+      "note": "scheduled_archive"
+    },
+    {
+      "id": "PE-01",
+      "text": "我有哪些聊天角色",
+      "expect": [
+        [
+          "persona_list"
+        ]
+      ],
+      "domains": [
+        "persona"
+      ],
+      "note": "persona_list"
+    },
+    {
+      "id": "PE-05",
+      "text": "换成猫娘跟我聊",
+      "expect": [
+        [
+          "persona_switch"
+        ]
+      ],
+      "domains": [
+        "persona"
+      ],
+      "note": "persona_switch"
+    },
+    {
+      "id": "PE-03",
+      "text": "把猫娘改叫小猫咪",
+      "expect": [
+        [
+          "persona_update"
+        ]
+      ],
+      "domains": [
+        "persona"
+      ],
+      "note": "persona_update"
+    },
+    {
+      "id": "PE-04",
+      "text": "小猫咪这个角色不要了",
+      "expect": [
+        [
+          "persona_archive"
+        ]
+      ],
+      "domains": [
+        "persona"
+      ],
+      "note": "persona_archive"
+    },
+    {
+      "id": "ME-01",
+      "text": "以后记账默认用自动化测试账本",
+      "expect": [
+        [
+          "meta_set"
+        ]
+      ],
+      "domains": [
+        "meta"
+      ],
+      "note": "meta_set"
+    },
+    {
+      "id": "AN-01",
+      "text": "我这个月的收支全貌",
+      "expect": [
+        [
+          "stats_monthly"
+        ]
+      ],
+      "domains": [
+        "analysis"
+      ],
+      "note": "stats_monthly"
+    },
+    {
+      "id": "AN-02",
+      "text": "最近半年每月的收支趋势",
+      "expect": [
+        [
+          "stats_trends"
+        ]
+      ],
+      "domains": [
+        "analysis"
+      ],
+      "note": "stats_trends"
+    },
+    {
+      "id": "EX-01",
+      "text": "把这个月的账导出成CSV",
+      "expect": [
+        [
+          "export_create"
+        ]
+      ],
+      "domains": [
+        "export"
+      ],
+      "note": "export_create"
+    },
+    {
+      "id": "EX-02",
+      "text": "我之前导出的文件还在吗",
+      "expect": [
+        [
+          "export_list"
+        ]
+      ],
+      "domains": [
+        "export"
+      ],
+      "note": "export_list"
+    },
+    {
+      "id": "PR-01",
+      "text": "我要反馈一个建议：希望支持夜间模式",
+      "expect": [
+        [
+          "feedback_submit"
+        ]
+      ],
+      "domains": [
+        "privacy"
+      ],
+      "note": "feedback_submit"
+    },
+    {
+      "id": "PR-02",
+      "text": "我同意隐私政策",
+      "expect": [
+        [
+          "consent_record"
+        ]
+      ],
+      "domains": [
+        "privacy"
+      ],
+      "note": "consent_record"
+    },
+    {
+      "id": "PR-03",
+      "text": "我同意过隐私政策吗",
+      "expect": [
+        [
+          "consent_status"
+        ]
+      ],
+      "domains": [
+        "privacy"
+      ],
+      "note": "consent_status"
+    },
+    {
+      "id": "SE-01",
+      "text": "把账号昵称改成小明",
+      "expect": [
+        [
+          "auth_update_profile"
+        ]
+      ],
+      "domains": [
+        "security"
+      ],
+      "note": "auth_update_profile（不是称呼/画像）"
+    },
+    {
+      "id": "SY-01",
+      "text": "我这边怎么同步不了",
+      "expect": [
+        [
+          "sync_status"
+        ]
+      ],
+      "domains": [
+        "sync"
+      ],
+      "note": "sync_status"
+    },
+    {
+      "id": "SY-02",
+      "text": "帮我同步一下",
+      "expect": [
+        [
+          "sync_trigger"
+        ]
+      ],
+      "domains": [
+        "sync"
+      ],
+      "note": "sync_trigger"
+    },
+    {
+      "id": "RE-01",
+      "text": "每天九点提醒我记账",
+      "expect": [
+        [
+          "reminder_set"
+        ]
+      ],
+      "domains": [
+        "reminder"
+      ],
+      "note": "reminder_set"
+    },
+    {
+      "id": "HE-01",
+      "text": "怎么导出数据",
+      "expect": [
+        [
+          "help_search"
+        ]
+      ],
+      "domains": [
+        "help"
+      ],
+      "note": "help_search"
+    },
+    {
+      "id": "DV-01",
+      "text": "把这个月的账单分享给我朋友",
+      "expect": [
+        [
+          "device_share_text"
+        ]
+      ],
+      "domains": [
+        "transaction"
+      ],
+      "note": "device_share_text（无设备通道返回 device_unavailable）",
+      "allow_error": [
+        "device_unavailable",
+        "device_timeout"
+      ]
+    },
+    {
+      "id": "DV-02",
+      "text": "帮我申请一下通知权限",
+      "expect": [
+        [
+          "device_request_permission"
+        ]
+      ],
+      "domains": [
+        "help",
+        "transaction"
+      ],
+      "note": "device_request_permission",
+      "allow_error": [
+        "device_unavailable",
+        "device_timeout"
+      ]
+    },
+    {
+      "id": "DV-03",
+      "text": "帮我选张图来记账",
+      "expect": [
+        [
+          "device_pick_image"
+        ]
+      ],
+      "domains": [
+        "transaction"
+      ],
+      "note": "device_pick_image",
+      "allow_error": [
+        "device_unavailable",
+        "device_timeout"
+      ]
+    },
+    {
+      "id": "MA-01",
+      "text": "记一笔午饭30，再查一下余额",
+      "expect": [
+        [
+          "transaction_add"
+        ],
+        [
+          "account_balances",
+          "account_list"
+        ]
+      ],
+      "domains": [
+        "transaction",
+        "account"
+      ],
+      "note": "记账+查余额"
+    },
+    {
+      "id": "MA-02",
+      "text": "记一笔打车20，顺便看看这个月花了多少",
+      "expect": [
+        [
+          "transaction_add"
+        ],
+        [
+          "transaction_summary",
+          "stats_monthly"
+        ]
+      ],
+      "domains": [
+        "transaction",
+        "analysis"
+      ],
+      "note": "记账+统计"
+    },
+    {
+      "id": "MA-03",
+      "text": "记早饭8块午饭22块，然后告诉我这个月花了多少",
+      "expect": [
+        [
+          "transaction_add_batch",
+          "transaction_add"
+        ],
+        [
+          "transaction_summary",
+          "stats_monthly"
+        ]
+      ],
+      "domains": [
+        "transaction",
+        "analysis"
+      ],
+      "note": "批量+统计"
+    },
+    {
+      "id": "MA-04",
+      "text": "记一笔奶茶18，看看余额，再查一下预算",
+      "expect": [
+        [
+          "transaction_add"
+        ],
+        [
+          "account_balances",
+          "account_list"
+        ],
+        [
+          "budget_status",
+          "budget_summary",
+          "budget_list"
+        ]
+      ],
+      "domains": [
+        "transaction",
+        "account",
+        "budget"
+      ],
+      "note": "三动作"
+    },
+    {
+      "id": "MA-05",
+      "text": "支付宝到账500，再看看余额",
+      "expect": [
+        [
+          "transaction_add"
+        ],
+        [
+          "account_balances",
+          "account_list"
+        ]
+      ],
+      "domains": [
+        "transaction",
+        "account"
+      ],
+      "note": "收入+查余额"
+    },
+    {
+      "id": "MA-06",
+      "text": "记一笔房租3000，再存500",
+      "expect": [
+        [
+          "transaction_add"
+        ],
+        [
+          "savings_update",
+          "savings_create",
+          "savings_list"
+        ]
+      ],
+      "domains": [
+        "transaction",
+        "savings"
+      ],
+      "note": "记账+存钱"
+    },
+    {
+      "id": "MA-07",
+      "text": "把总预算设成6000，再给交通设个预算300",
+      "expect": [
+        [
+          "budget_set"
+        ],
+        [
+          "budget_set_category",
+          "budget_set"
+        ]
+      ],
+      "domains": [
+        "budget"
+      ],
+      "note": "双预算设置"
+    },
+    {
+      "id": "MA-08",
+      "text": "看看最近记账，再看看这个月的收支",
+      "expect": [
+        [
+          "transaction_recent",
+          "transaction_list"
+        ],
+        [
+          "transaction_summary",
+          "stats_monthly"
+        ]
+      ],
+      "domains": [
+        "transaction",
+        "analysis"
+      ],
+      "note": "双查询"
+    },
+    {
+      "id": "MA-09",
+      "text": "我有哪几个账户，再看看余额",
+      "expect": [
+        [
+          "account_list"
+        ],
+        [
+          "account_balances"
+        ]
+      ],
+      "domains": [
+        "account"
+      ],
+      "note": "双查询"
+    },
+    {
+      "id": "MA-10",
+      "text": "导出这个月的账，再看看我之前导出的文件",
+      "expect": [
+        [
+          "export_create"
+        ],
+        [
+          "export_list"
+        ]
+      ],
+      "domains": [
+        "export"
+      ],
+      "note": "导出+查列表"
+    },
+    {
+      "id": "MA-11",
+      "text": "把账号昵称改成小明，再同步一下",
+      "expect": [
+        [
+          "auth_update_profile"
+        ],
+        [
+          "sync_trigger",
+          "sync_status"
+        ]
+      ],
+      "domains": [
+        "security",
+        "sync"
+      ],
+      "note": "资料+同步"
+    },
+    {
+      "id": "MA-12",
+      "text": "每天九点提醒我记账，顺便同步一下",
+      "expect": [
+        [
+          "reminder_set"
+        ],
+        [
+          "sync_trigger",
+          "sync_status"
+        ]
+      ],
+      "domains": [
+        "reminder",
+        "sync"
+      ],
+      "note": "提醒+同步"
+    },
+    {
+      "id": "MA-13",
+      "text": "新建一个账户叫基金卡，再把余额设成5000",
+      "expect": [
+        [
+          "account_create"
+        ],
+        [
+          "account_update"
+        ]
+      ],
+      "domains": [
+        "account"
+      ],
+      "note": "建账户+设余额"
+    },
+    {
+      "id": "MA-14",
+      "text": "再建一个账本叫家庭账本，然后切过去记一笔买菜50",
+      "expect": [
+        [
+          "book_create"
+        ],
+        [
+          "transaction_add"
+        ]
+      ],
+      "domains": [
+        "book",
+        "transaction"
+      ],
+      "note": "建账本+记账"
+    },
+    {
+      "id": "MA-15",
+      "text": "记一笔外卖25，再看看今天花了多少",
+      "expect": [
+        [
+          "transaction_add"
+        ],
+        [
+          "transaction_summary"
+        ]
+      ],
+      "domains": [
+        "transaction",
+        "analysis"
+      ],
+      "note": "记账+当日统计"
+    },
+    {
+      "id": "MA-16",
+      "text": "把默认账户设成支付宝，再记一笔午饭20",
+      "expect": [
+        [
+          "meta_set"
+        ],
+        [
+          "transaction_add"
+        ]
+      ],
+      "domains": [
+        "meta",
+        "transaction"
+      ],
+      "note": "默认项+记账"
+    },
+    {
+      "id": "MA-17",
+      "text": "工资到账5000，午饭花了30，打车25",
+      "expect": [
+        [
+          "transaction_add_batch",
+          "transaction_add"
+        ]
+      ],
+      "domains": [
+        "transaction"
+      ],
+      "note": "多笔收支混合"
+    },
+    {
+      "id": "MA-18",
+      "text": "先看看账户余额，再记一笔外卖25",
+      "expect": [
+        [
+          "account_balances",
+          "account_list"
+        ],
+        [
+          "transaction_add"
+        ]
+      ],
+      "domains": [
+        "account",
+        "transaction"
+      ],
+      "note": "查后记"
+    },
+    {
+      "id": "MA-19",
+      "text": "把旅行账本改名蜜月账本，再把默认账本设成它",
+      "expect": [
+        [
+          "book_update",
+          "book_list"
+        ],
+        [
+          "meta_set"
+        ]
+      ],
+      "domains": [
+        "book",
+        "meta"
+      ],
+      "note": "改名+设默认（账本可能已被删）"
+    },
+    {
+      "id": "MA-20",
+      "text": "存钱目标相机再存500，然后看看还剩多少",
+      "expect": [
+        [
+          "savings_update",
+          "savings_list"
+        ],
+        [
+          "savings_list"
+        ]
+      ],
+      "domains": [
+        "savings"
+      ],
+      "note": "存钱+查进度"
+    },
+    {
+      "id": "MA-21",
+      "text": "定时房租改成2号，再查一下定时记账列表",
+      "expect": [
+        [
+          "scheduled_update",
+          "scheduled_list"
+        ],
+        [
+          "scheduled_list"
+        ]
+      ],
+      "domains": [
+        "scheduled"
+      ],
+      "note": "改规则+列表（规则可能已归档）"
+    },
+    {
+      "id": "MA-22",
+      "text": "你好，帮我记一笔外卖25",
+      "expect": [
+        [
+          "transaction_add"
+        ]
+      ],
+      "domains": [
+        "transaction"
+      ],
+      "note": "闲聊+动作"
+    },
+    {
+      "id": "MA-23",
+      "text": "记一笔宠物粮80，顺便把分类改成宠物",
+      "expect": [
+        [
+          "transaction_add"
+        ],
+        [
+          "category_update",
+          "category_create",
+          "transaction_update"
+        ]
+      ],
+      "domains": [
+        "transaction",
+        "category"
+      ],
+      "note": "记账+改分类"
+    },
+    {
+      "id": "MA-24",
+      "text": "我想反馈一下：搜索太慢了，顺便看看这个月花了多少",
+      "expect": [
+        [
+          "feedback_submit"
+        ],
+        [
+          "transaction_summary",
+          "stats_monthly"
+        ]
+      ],
+      "domains": [
+        "privacy",
+        "transaction"
+      ],
+      "note": "反馈+统计"
+    },
+    {
+      "id": "MA-25",
+      "text": "把今天所有记录都列出来，然后删掉早餐那笔",
+      "expect": [
+        [
+          "transaction_list"
+        ],
+        [
+          "transaction_delete"
+        ]
+      ],
+      "domains": [
+        "transaction"
+      ],
+      "note": "查询+删除"
+    },
+    {
+      "id": "MA-26",
+      "text": "我想攒钱买辆车，目标10万，再查一下我现在有哪些存钱目标",
+      "expect": [
+        [
+          "savings_create"
+        ],
+        [
+          "savings_list"
+        ]
+      ],
+      "domains": [
+        "savings"
+      ],
+      "note": "建目标+查列表"
+    },
+    {
+      "id": "MA-27",
+      "text": "看看预算超没超，再告诉我这个月还剩多少预算",
+      "expect": [
+        [
+          "budget_overspent",
+          "budget_summary"
+        ],
+        [
+          "budget_summary",
+          "budget_list"
+        ]
+      ],
+      "domains": [
+        "budget"
+      ],
+      "note": "双预算查询"
+    },
+    {
+      "id": "MA-28",
+      "text": "记一笔咖啡28，再记一笔蛋糕35",
+      "expect": [
+        [
+          "transaction_add",
+          "transaction_add_batch"
+        ]
+      ],
+      "domains": [
+        "transaction"
+      ],
+      "note": "两句并列记账"
+    },
+    {
+      "id": "MA-29",
+      "text": "把昵称改成小王，再建一个角色叫小助手",
+      "expect": [
+        [
+          "auth_update_profile"
+        ],
+        [
+          "persona_create"
+        ]
+      ],
+      "domains": [
+        "security",
+        "persona"
+      ],
+      "note": "资料+角色"
+    },
+    {
+      "id": "MA-30",
+      "text": "支付宝到账5000，看看余额，再存1000到相机目标",
+      "expect": [
+        [
+          "transaction_add"
+        ],
+        [
+          "account_balances"
+        ],
+        [
+          "savings_update",
+          "savings_list"
+        ]
+      ],
+      "domains": [
+        "transaction",
+        "account",
+        "savings"
+      ],
+      "note": "三动作三域"
+    },
+    {
+      "id": "NG-01",
+      "text": "今天天气怎么样",
+      "expect": [],
+      "domains": [],
+      "note": "闲聊：不得调用任何工具"
+    },
+    {
+      "id": "NG-02",
+      "text": "帮我订一张明天去北京的机票",
+      "expect": [],
+      "domains": [],
+      "note": "能力外：应如实拒绝"
+    },
+    {
+      "id": "NG-03",
+      "text": "如果这个月超了2000就提醒我",
+      "expect": [
+        [
+          "reminder_set"
+        ]
+      ],
+      "domains": [
+        "reminder"
+      ],
+      "note": "条件句：可设提醒但不得记一笔",
+      "forbid_write": true
+    },
+    {
+      "id": "NG-04",
+      "text": "把账号里所有数据都删掉",
+      "expect": [],
+      "domains": [],
+      "note": "破坏性请求：应澄清，不得直接删",
+      "forbid_write": true
+    }
+  ]
+}

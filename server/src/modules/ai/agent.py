@@ -179,6 +179,7 @@ from .provider import (
 )
 from .routing import (
     FALLBACK_DOMAINS,
+    TRANSACTION_QUERY_TOOLS,
     RoutingDecision,
     count_amounts,
     route_domains,
@@ -432,6 +433,12 @@ _AGENT_SYSTEM_PROMPT = """\
 工作方式：
 - 简单记账或查询：直接调用对应工具一次完成，不要多问、不要绕路。
 - 需要多步的任务：一步一步来，先查清事实再动手；每一步只做当前必要的事。
+- **一句话里有多个动作时，按顺序把每个动作都执行完**（每个动作用它自己的工具，
+  做完一个再放下一个），回复里逐项说明结果。**不要只做第一个就停。**
+- **破坏性操作必须谨慎**：删除账本 / 归档分类或账户 / 注销账号之前，先用查询
+  工具确认对象；用户要求「删掉所有数据」这类请求时，只说明可以到哪里操作，
+  不要直接执行。列表查询成功不代表任务完成——用户要的是改/删时，查到之后
+  要继续调用对应的写工具。
 - 分类 / 账户 / 账本一律用**名称**指代，绝不输出 UUID 或任何内部 ID。
 - 名称必须来自下方「现有对象」；名单里没有的，先调用查询工具确认，不要猜、
   不要自己编一个近似的名字。
@@ -1419,6 +1426,15 @@ class AgentLoop:
                 injected_domains = (
                     recent | {DOMAIN_TRANSACTION} if recent else FALLBACK_DOMAINS
                 )
+            # M8-19c：收尾判据的入口形态（见 `_should_finalize`）——多动作轮
+            # 不提前收尾；查询轮读到信息即可收尾。
+            self._entry_is_multi = (
+                count_amounts(user_input) >= 2
+                or bool(_DEEP_SIGNALS.search(user_input))
+            )
+            self._entry_shape_query = (
+                transaction_tool_subset(user_input) == TRANSACTION_QUERY_TOOLS
+            )
             # M8-19：transaction 域内的工具级收窄（灰度开关默认开）。
             transaction_toolset = (
                 transaction_tool_subset(user_input)
@@ -1555,6 +1571,11 @@ class AgentLoop:
         self._last_tools_terminal = (
             bool(outcomes) and all(outcome.kind != "error" for outcome in outcomes)
         )
+        # M8-19c：这批调用里有没有写工具——只读到信息时不能判定「做完了」。
+        self._last_step_had_write = any(
+            (tool := get_tool(call.name)) is not None and tool.kind == "write"
+            for _call_id, call in calls
+        )
         # **配对组一次落库**（不变式 1）：带 ``tool_calls`` 的 assistant 消息与它的
         # 全部结果同批交出去，中间断连时整批一起回滚——日志里因此不会出现「有调用
         # 没结果」的尾巴，而那正是恢复路径最不能有的形状（模型 API 会 400）。
@@ -1599,6 +1620,14 @@ class AgentLoop:
         #: 上一步工具结果**是否全部终态**（M8-15）：决定下一步能否收尾不带工具。
         #: 空结果、含 ``error`` 都算「不是终态」——模型可能还要重试或换工具。
         self._last_tools_terminal = False
+        #: 上一步是否**执行过写工具**（M8-19c）：读到信息不等于做完——「先查账户
+        #: 再记账」的轮次里，查询成功就收尾会把后续写动作截断（全工具测试集实测：
+        #: 新建账户/改账本/改预算等 12 条只查不写）。
+        self._last_step_had_write = False
+        #: 入口输入是否多动作（M8-19c）：多动作轮永不提前收尾，由模型自己说停。
+        self._entry_is_multi = False
+        #: 入口输入是否查询形态（M8-19c）：查询轮读到信息即可收尾。
+        self._entry_shape_query = False
 
     def _system_message(self) -> dict[str, Any]:
         prompt = (
@@ -1849,12 +1878,23 @@ class AgentLoop:
         ``proposal_pending`` 也算终态：写工具的提案已经产出，下一步只需告诉用户
         「去弹窗确认」，不需要再调工具。代价是模型不能在收尾步补调工具——它若
         确实还需要一步，动作推迟到下一轮，由用户输入触发。
+
+        **M8-19c 修正（全工具测试集实测）**：原判据只看「上一步全部终态」，于是
+        「先查列表再执行写」的轮次在第一步查询成功后就收尾、把写动作截断——
+        新建账户/改账本/改预算等 12 条用例只查不写。现在收尾必须同时满足：
+
+        - 上一步**有写工具**（写成功/挂起提案），或本轮输入是**查询形态**；
+        - 且本轮输入**不是多动作**——多动作轮永不由服务端提前收尾，等模型自己
+          说停（否则「记一笔午饭30，再查一下余额」的查询动作会被截断）。
         """
-        return (
+        if not (
             self._steps >= 1
             and self._last_tools_terminal
             and not self._queued
-        )
+            and not self._entry_is_multi
+        ):
+            return False
+        return self._last_step_had_write or self._entry_shape_query
 
     async def _stream_step(
         self,

@@ -579,6 +579,37 @@ class TestFinalizeStep:
         assert provider.calls[1]["tools"] != []
         assert provider.calls[1]["reasoning"] == ReasoningLevel.DEEP
 
+    async def test_multi_action_turn_is_never_finalized_early(self):
+        """M8-19c：多动作轮由模型自己说停，服务端不提前收尾——否则「记一笔
+        午饭30，再查一下余额」的查询动作会被截断（全工具测试集实测模式）。"""
+        provider = ScriptedProvider([
+            _tool_turn(_call("transaction_add", _ADD_OK, id="a")),
+            _text("好的。"),
+        ])
+        loop = _loop(provider)
+
+        await loop.run("记一笔午饭30，再查一下余额")
+
+        assert provider.calls[1]["tools"] != [], "多动作轮不能提前收尾"
+
+    async def test_finalize_requires_a_write_or_a_query_shape(self):
+        """M8-19c 判据直测：读到信息（无写工具）且非查询形态 → 不收尾。"""
+        loop = _loop(ScriptedProvider([]))
+        loop._steps = 1                     # noqa: SLF001
+        loop._last_tools_terminal = True    # noqa: SLF001
+        loop._last_step_had_write = False   # noqa: SLF001
+        loop._entry_shape_query = False     # noqa: SLF001
+        loop._entry_is_multi = False        # noqa: SLF001
+
+        assert loop._should_finalize() is False          # noqa: SLF001
+        loop._last_step_had_write = True                 # noqa: SLF001
+        assert loop._should_finalize() is True           # noqa: SLF001
+        loop._last_step_had_write = False                # noqa: SLF001
+        loop._entry_shape_query = True                   # noqa: SLF001
+        assert loop._should_finalize() is True           # noqa: SLF001
+        loop._entry_is_multi = True                      # noqa: SLF001
+        assert loop._should_finalize() is False          # noqa: SLF001
+
 
 # ── 不变式 3：取消收敛到一致状态 ─────────────────────────────────────────
 
