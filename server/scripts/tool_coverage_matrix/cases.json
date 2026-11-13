@@ -6,7 +6,7 @@
   "cases": [
     {
       "id": "CA-01",
-      "text": "加一个分类叫宠物",
+      "text": "加一个分类叫宠物食品",
       "expect": [
         [
           "category_create"
@@ -403,7 +403,7 @@
     },
     {
       "id": "CA-03",
-      "text": "把宠物分类改叫猫主子",
+      "text": "把宠物食品分类改叫宠物口粮",
       "expect": [
         [
           "category_update"
@@ -416,7 +416,7 @@
     },
     {
       "id": "CA-04",
-      "text": "猫主子分类不用了，归档",
+      "text": "宠物口粮分类不用了，归档",
       "expect": [
         [
           "category_archive"
