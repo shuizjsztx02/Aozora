@@ -484,6 +484,43 @@ class TestBookkeepingForm:
 class TestTransactionToolSubset:
     """记账/查询形态只注入用得到的工具；编辑与不确定形态保持全量。"""
 
+    @pytest.mark.parametrize(("text", "count"), [
+        ("早饭8块，午饭22块，晚饭30块", 3),
+        ("午饭30，打车20", 2),
+        ("喜茶24", 1),
+        ("今天9:30吃了早饭，花了15", 1),     # 时间不算金额
+        ("3月5日买了奶茶32", 1),             # 日期不算金额
+        ("八十八的奶茶", 1),
+        ("你好呀", 0),
+    ])
+    def test_count_amounts(self, text: str, count: int):
+        """多笔并置没有任何连接词——金额个数本身是「多笔」的直接证据。"""
+        assert routing.count_amounts(text) == count
+
+    @pytest.mark.parametrize("text", [
+        "早饭8块，午饭22块，晚饭30块",       # 多笔无连接词 → 深档
+        "午饭30，打车20",
+        "记一下午饭30和打车20",
+    ])
+    def test_multi_item_inputs_are_deep_and_keep_batch_tools(self, text: str):
+        """多笔并置：入口判深档；注入面保留 record 子集（含 add_batch 就够，
+        纯记账不需要 update/delete/list/summary）。"""
+        assert classify_reasoning(text) is ReasoningLevel.DEEP
+        assert routing.transaction_tool_subset(text) == (
+            routing.TRANSACTION_RECORD_TOOLS
+        )
+
+    @pytest.mark.parametrize("text", [
+        "记一笔，再查一下余额",               # 连接词表扩充
+        "也帮我记一笔奶茶18",
+        "顺带记一下咖啡25",
+    ])
+    def test_multi_action_inputs_are_deep_and_un_narrowed(self, text: str):
+        """多动作：入口判深档且注入面不收窄——两处判据必须同步
+        （``agent._DEEP_SIGNALS`` 与 ``routing._MULTI_ACTION_RE`` 独立维护）。"""
+        assert classify_reasoning(text) is ReasoningLevel.DEEP
+        assert routing.transaction_tool_subset(text) is None
+
     @pytest.mark.parametrize("text", ["喜茶二十四", "外卖 25", "记录一下午餐 20"])
     def test_record_shapes_select_the_record_subset(self, text: str):
         assert routing.transaction_tool_subset(text) == (

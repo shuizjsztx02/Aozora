@@ -180,6 +180,7 @@ from .provider import (
 from .routing import (
     FALLBACK_DOMAINS,
     RoutingDecision,
+    count_amounts,
     route_domains,
     transaction_tool_subset,
 )
@@ -371,9 +372,10 @@ class AgentResult:
 
 #: 「深」档信号：一句话里出现多个动作 / 递进连接。步数是复杂度的直接证据，
 #: 但入口就判深可以省掉一次「先跑浅档再升级」的往返。
+#: 与 ``routing._MULTI_ACTION_RE`` 同一组词（两处独立维护，都有用例钉住）。
 _DEEP_SIGNALS = re.compile(
-    r"然后|接着|之后|顺便|同时|并且|而且|以及|还有|分别|另外|"
-    r"再帮|再记|再看|先.{0,12}再|都改成|全改成|一起改"
+    r"然后|接着|之后|顺便|顺带|同时|并且|而且|以及|还有|分别|另外|"
+    r"再帮|再记|再看|再查|也帮|也记|先.{0,12}再|都改成|全改成|一起改"
 )
 
 #: 「中」档信号：单步但要理解——编辑 / 删除 / 配置（架构 §4.6 的档位表）。
@@ -389,8 +391,11 @@ def classify_reasoning(text: str) -> ReasoningLevel:
     只做一次正则扫描，判定顺序即优先级：多动作 > 需理解的单步 > 简单意图。
     判错不致命——进入第 2 个 Step 会自动升到「深」档（见
     :meth:`AgentLoop._level_for_step`）。
+
+    **多笔金额也是多动作**：多笔并置（「早饭8块，午饭22块，晚饭30块」）没有
+    任何连接词，连接词表够不着，但金额个数 ≥2 本身就是证据。
     """
-    if _DEEP_SIGNALS.search(text):
+    if count_amounts(text) >= 2 or _DEEP_SIGNALS.search(text):
         return ReasoningLevel.DEEP
     if _MEDIUM_SIGNALS.search(text):
         return ReasoningLevel.MEDIUM
