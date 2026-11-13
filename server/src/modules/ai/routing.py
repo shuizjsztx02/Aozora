@@ -130,6 +130,11 @@ _SIGNALS: tuple[tuple[str, tuple[str, ...]], ...] = (
     ("分类", (DOMAIN_CATEGORY,)),
     ("类别", (DOMAIN_CATEGORY,)),
     ("类目", (DOMAIN_CATEGORY,)),
+    # 「改叫 / 改名成」的对象类型不明（账户 / 分类 / 账本 / 角色都说得通）——
+    # 并集注入由模型按语义选。实测「把猫娘改叫小猫咪」原先无信号 → 兜底四域
+    # 不含 persona，模型只能去查账户和分类并反问。
+    ("改叫", (DOMAIN_CATEGORY, DOMAIN_ACCOUNT, DOMAIN_BOOK, DOMAIN_PERSONA)),
+    ("改名成", (DOMAIN_CATEGORY, DOMAIN_ACCOUNT, DOMAIN_BOOK, DOMAIN_PERSONA)),
     # ── 账户（account）──
     ("账户", (DOMAIN_ACCOUNT,)),
     ("账号", (DOMAIN_ACCOUNT,)),

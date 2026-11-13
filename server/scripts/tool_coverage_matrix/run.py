@@ -78,6 +78,7 @@ async def setup(c: httpx.AsyncClient, h: dict) -> dict:
     now = datetime.now(timezone.utc)
     for amount, note, biz in (
         (3000, "午饭", today),
+        (800, "早餐", today),
         (1800, "奶茶", today - timedelta(days=1)),
     ):
         cat = state["categories"].get("餐饮")

@@ -254,6 +254,17 @@ class TestLexicon:
         assert T.DOMAIN_TRANSACTION in decision.domains
         assert T.DOMAIN_ANALYSIS in decision.domains
 
+    def test_rename_phrases_include_persona(self):
+        """M8-19e：对象类型不明的「改叫」并集注入（含 persona）——全工具测试
+        实测「把猫娘改叫小猫咪」原先兜底四域不含 persona，模型只能反问。"""
+        decision = routing.route_domains("把猫娘改叫小猫咪")
+
+        assert decision.matched is True
+        for domain in (
+            T.DOMAIN_CATEGORY, T.DOMAIN_ACCOUNT, T.DOMAIN_BOOK, T.DOMAIN_PERSONA,
+        ):
+            assert domain in decision.domains
+
     def test_a_bare_verb_does_not_route(self):
         """「删」跨七个域（删交易 / 删预算 / 归档账户…）——单字动词不许猜，
         猜错的方向正是漏注入。没有名词时按兜底处理。"""
