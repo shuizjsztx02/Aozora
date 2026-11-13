@@ -388,6 +388,24 @@ class TestFallback:
         else:
             assert decision.matched is False
 
+    @pytest.mark.parametrize("text", [
+        "把今天的早餐和午餐删掉", "删掉昨天的奶茶",
+    ])
+    def test_delete_with_a_spending_noun_routes_to_transaction(self, text: str):
+        """M8-19b：多动作测试集实测「把今天的早餐和午餐删掉」原先一条信号都不
+        命中 → 兜底 16 域（24 个工具）。删除 + 品类 = 删交易，收窄单域。"""
+        decision = routing.route_domains(text)
+
+        assert decision.matched is True
+        assert decision.domains == (T.DOMAIN_TRANSACTION,)
+        assert decision.signals == (routing.DELETE_FORM_SIGNAL,)
+
+    def test_delete_without_a_spending_noun_does_not_narrow(self):
+        """「删除所有账本」删的是账本（book 域），不能被删交易规则抢走。"""
+        decision = routing.route_domains("删除所有账本")
+
+        assert decision.domains == (T.DOMAIN_BOOK,)
+
     def test_the_password_phrase_routes_to_security(self):
         """M8-16 补词：语料 SEC-NEG-01「帮我把密码改一下」原先一条信号都不命中。"""
         decision = routing.route_domains("帮我把密码改一下")

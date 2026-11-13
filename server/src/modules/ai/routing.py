@@ -302,6 +302,8 @@ FALLBACK_DOMAINS: frozenset[str] = frozenset({
 
 #: 命中判定器时的观测信号名（进 ``RoutingDecision.signals``，不进模型上下文）。
 BOOKKEEPING_FORM_SIGNAL = "<记账形态>"
+#: 删除 + 品类形态（「把今天的早餐和午餐删掉」）的观测信号名。
+DELETE_FORM_SIGNAL = "<删除交易>"
 
 #: L1：动作 / 祈使。口语里「发生了什么」的动词与记账命令。
 #: 两个刻意不收的：
@@ -484,6 +486,18 @@ def count_amounts(text: str) -> int:
     return count
 
 
+#: 删除类动作（M8-19b 真机/多动作用例实测：「把今天的早餐和午餐删掉」原先
+#: 一条信号都不命中 → 退回四域兜底）。删除 + 消费品类名词 = 删一笔交易的
+#: 明确证据；单字「删」不收——删账本/分类/预算都合法。
+_DELETE_SIGNALS: tuple[str, ...] = ("删掉", "删除", "删了", "去掉")
+
+
+def _looks_like_transaction_delete(text: str) -> bool:
+    return any(signal in text for signal in _DELETE_SIGNALS) and any(
+        noun in text for noun in _SPENDING_NOUNS
+    )
+
+
 def transaction_tool_subset(text: str) -> frozenset[str] | None:
     """按本轮输入选 transaction 域的工具子集（M8-19）；``None`` = 不收窄。
 
@@ -566,6 +580,14 @@ def route_domains(text: str) -> RoutingDecision:
             matched.update(targets)
 
     if not matched:
+        # M8-19b：删除 + 品类（「把今天的早餐和午餐删掉」）——删的是交易，
+        # 直接收窄到 transaction 单域（38 域兜底会把 24 个工具全注入）。
+        if _looks_like_transaction_delete(raw):
+            return RoutingDecision(
+                domains=(DOMAIN_TRANSACTION,),
+                matched=True,
+                signals=(DELETE_FORM_SIGNAL,),
+            )
         # M8-16 / M8-17：词表没覆盖时交给记账意图判定器——「喜茶二十四」「AA 了
         # 50」「外卖 25」这类口语记账，用户的意图几乎必然是记一笔，收窄到
         # transaction 单域。
