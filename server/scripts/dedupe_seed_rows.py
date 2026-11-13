@@ -38,6 +38,24 @@ from src.models.budget import Budget
 from src.models.ledger import Book, Category, Transaction
 from src.models.persona import ChatPersona
 from src.models.scheduled import ScheduledRule
+from src.models.sync import SyncChange, SyncOperation
+
+
+def _record_delete(db, user_id, entity_type: str, entity) -> None:
+    """归档/软删必须同时写 sync_changes —— 客户端 pull 只读增量事件。
+
+    漏写这一步时，设备上的行会永远停在活跃态（2026-11-13 的二次事故：
+    11-11 跑完本脚本后，53 条分类与 2 个账本在真机上仍显示重复）。客户端
+    `toCategory` / `toBook` 把 archivedAt 硬编码为 null，只认 delete 事件
+    （映射为本地归档），故这里写 delete 而不是 update。
+    """
+    db.add(SyncChange(
+        user_id=user_id,
+        entity_type=entity_type,
+        entity_id=entity.id,
+        operation=SyncOperation.DELETE,
+        version=entity.version,
+    ))
 
 
 async def _dedupe_books(db, user_id, apply, plan, backup):
@@ -63,6 +81,7 @@ async def _dedupe_books(db, user_id, apply, plan, backup):
         backup.append({"table": "books", "id": str(book.id), "op": "deleted_at"})
         if apply:
             book.deleted_at = datetime.now(UTC)
+            _record_delete(db, user_id, "book", book)
 
 
 async def _dedupe_personas(db, user_id, apply, plan, backup):
@@ -81,6 +100,7 @@ async def _dedupe_personas(db, user_id, apply, plan, backup):
         backup.append({"table": "chat_personas", "id": str(persona.id), "op": "archived_at"})
         if apply:
             persona.archived_at = datetime.now(UTC)
+            _record_delete(db, user_id, "chat_persona", persona)
 
 
 async def _dedupe_categories(db, user_id, apply, plan, backup):
@@ -107,6 +127,7 @@ async def _dedupe_categories(db, user_id, apply, plan, backup):
         mapping[cat.id] = first.id
         if apply:
             cat.archived_at = datetime.now(UTC)
+            _record_delete(db, user_id, "category", cat)
 
     # 二级：先把 parent_id 重写到保留父，再按 (kind, parent, name) 去重
     for cat in rows:
@@ -138,6 +159,7 @@ async def _dedupe_categories(db, user_id, apply, plan, backup):
         mapping[cat.id] = first.id
         if apply:
             cat.archived_at = datetime.now(UTC)
+            _record_delete(db, user_id, "category", cat)
 
     # 引用重写：交易 / 预算 / 定时规则都指向 categories.id。
     for old_id, new_id in mapping.items():

@@ -916,6 +916,21 @@ async def _execute_persona_create(
     text = payload.get("persona", "")
     _checked(_validate_note, text, "persona")
 
+    # R-PROD-52（2026-11-13 二次实例）：AI 路径此前绕过 Service 直接建行，没有
+    # 同名幂等——11-11 的兜底只加在 sync push 的 ``_apply_insert`` 上。实测中
+    # 同一账号重播角色会产出两对同名活跃行（「小助手」「猫娘」各两条），且与
+    # push 路径的口径不一致。这里对齐 ``_apply_insert``：同 owner 下同名活跃
+    # 角色已存在时复用，不新建、不登记 change（本次没有发生变化）。
+    existing = await db.scalar(
+        select(ChatPersona).where(
+            ChatPersona.owner_id == user_id,
+            ChatPersona.name == name,
+            ChatPersona.archived_at.is_(None),
+        )
+    )
+    if existing is not None:
+        return OpReceipt(entity_type="chat_persona", entity_ids=[existing.id])
+
     persona = ChatPersona(owner_id=user_id, name=name, avatar=avatar, persona=text)
     db.add(persona)
     await db.flush()

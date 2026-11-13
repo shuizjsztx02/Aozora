@@ -652,6 +652,39 @@ class TestV2PersonaOps:
             ("insert", 1), ("update", 2), ("delete", 3),
         ]
 
+    def test_creating_a_same_name_persona_reuses_the_existing_row(self, v2_env):
+        """R-PROD-52 二次实例：AI 路径与 sync push 同一口径（同 owner 同名幂等）。
+
+        2026-11-13 实测：测试脚本经 AI 反复建内置角色，产出两对同名活跃行
+        （「小助手」「猫娘」各两条）——11-11 的兜底只加在 ``_apply_insert`` 上。
+        反向验证：删掉 ``_execute_persona_create`` 里的查重，本用例必须变红。
+        """
+        from src.models.persona import ChatPersona
+
+        c, factory = v2_env
+        user = _guest(v2_env)
+        book_id = _mk_book(c, user)
+
+        first = _execute(v2_env, user, book_id, _v2("persona_create", {
+            "name": "猫娘", "avatar": "🐱", "persona": "说话带喵",
+        }))
+        assert first.status_code == 200, first.text
+        first_id = uuid.UUID(first.json()["transaction_ids"][0])
+
+        second = _execute(v2_env, user, book_id, _v2("persona_create", {
+            "name": "猫娘", "avatar": "🐱", "persona": "第二次创建",
+        }))
+        assert second.status_code == 200, second.text
+        assert second.json()["transaction_ids"] == [str(first_id)]
+
+        active = [
+            p for p in _rows(factory, ChatPersona, owner_id=uuid.UUID(user["id"]))
+            if p.archived_at is None
+        ]
+        assert len(active) == 1, "同名角色不应产生第二行"
+        assert active[0].persona == "说话带喵", "复用既有行，不被第二次的 payload 覆盖"
+        assert _changes(factory, first_id) == [("insert", 1)], "幂等命中不登记新变更"
+
     def test_an_overlong_persona_text_is_a_400(self, v2_env):
         c, _ = v2_env
         user = _guest(v2_env)
